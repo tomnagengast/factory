@@ -25,6 +25,24 @@ type ActivitySnapshot = {
   total: number;
   lastReceivedAt: string | null;
   events: ActivityEvent[];
+  agentRuns: AgentRunSnapshot;
+};
+
+type AgentRun = {
+  id: string;
+  state: string;
+  attempts: number;
+  duplicateTriggers: number;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+};
+
+type AgentRunSnapshot = {
+  total: number;
+  active: number;
+  runs: AgentRun[];
 };
 
 const timeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -141,8 +159,8 @@ function ActivityPage(): JSX.Element {
             </h1>
           </div>
           <p class="activity-intro">
-            Verified delivery metadata from Linear. Payload content stays
-            private.
+            Signed Linear events enter here. An exact <code>/do ISSUE-NNN</code>
+            comment starts one durable agent loop per issue.
           </p>
         </div>
 
@@ -159,7 +177,48 @@ function ActivityPage(): JSX.Element {
             <dt>Last received</dt>
             <dd>{formatTime(activity()?.lastReceivedAt)}</dd>
           </div>
+          <div>
+            <dt>Agent runs</dt>
+            <dd>{activity()?.agentRuns.total ?? 0}</dd>
+          </div>
+          <div>
+            <dt>Active loops</dt>
+            <dd>{activity()?.agentRuns.active ?? 0}</dd>
+          </div>
         </dl>
+
+        <section class="run-feed" aria-labelledby="run-feed-title">
+          <div class="feed-heading">
+            <h2 id="run-feed-title">Agent loops</h2>
+            <span>Issue context and output remain private</span>
+          </div>
+
+          <Show
+            when={(activity()?.agentRuns.runs.length ?? 0) > 0}
+            fallback={
+              <div class="empty-state compact">
+                <strong>No agent run has been claimed.</strong>
+                <span>Comment with an exact command to start one.</span>
+                <code>/do ISSUE-NNN</code>
+              </div>
+            }
+          >
+            <ol class="run-list">
+              <For each={activity()?.agentRuns.runs ?? []}>
+                {(run) => (
+                  <li class="run-row">
+                    <code>{shortRunID(run.id)}</code>
+                    <strong class={`run-state ${run.state}`}>
+                      {runStateLabel(run.state)}
+                    </strong>
+                    <span>{run.attempts || "Queued"}</span>
+                    <time datetime={run.updatedAt}>{formatTime(run.updatedAt)}</time>
+                  </li>
+                )}
+              </For>
+            </ol>
+          </Show>
+        </section>
 
         <section class="event-feed" aria-labelledby="event-feed-title">
           <div class="feed-heading">
@@ -194,13 +253,23 @@ function ActivityPage(): JSX.Element {
         </section>
 
         <footer class="activity-footer">
-          <span>Only type, action, and receipt time are retained.</span>
+          <span>Public data is limited to delivery and run-state metadata.</span>
           <a class="text-link" href="/">
             Back to Factory
           </a>
         </footer>
       </section>
     </main>
+  );
+}
+
+function shortRunID(value: string): string {
+  return value.slice(0, 12);
+}
+
+function runStateLabel(value: string): string {
+  return value.replace(/(^|[-_])([a-z])/g, (_, prefix, letter: string) =>
+    `${prefix ? " " : ""}${letter.toUpperCase()}`,
   );
 }
 
