@@ -409,10 +409,19 @@ func safeNext(value string) string {
 	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.Fragment != "" {
 		return "/activity"
 	}
-	if parsed.Path != "/agents" && !strings.HasPrefix(parsed.Path, "/agents/") {
+	if !protectedPagePath(parsed.Path) {
 		return "/activity"
 	}
 	return parsed.RequestURI()
+}
+
+func protectedPagePath(value string) bool {
+	return value == "/agents" ||
+		strings.HasPrefix(value, "/agents/") ||
+		value == "/activity/linear" ||
+		strings.HasPrefix(value, "/activity/linear/") ||
+		value == "/activity/agents" ||
+		strings.HasPrefix(value, "/activity/agents/")
 }
 
 func setCookie(w http.ResponseWriter, name, value string, lifetime time.Duration, now time.Time) {

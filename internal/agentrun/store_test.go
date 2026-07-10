@@ -142,6 +142,56 @@ func TestStorePersistsPrivateAndPublicState(t *testing.T) {
 	}
 }
 
+func TestStoreFindsNewestRunByIssueAndStartedMillisecond(t *testing.T) {
+	t.Parallel()
+
+	store := openTestStore(t, 10)
+	now := time.Date(2026, time.July, 10, 9, 0, 0, 123456789, time.UTC)
+	first, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, now)
+	if err != nil {
+		t.Fatalf("claim first run: %v", err)
+	}
+	if err := store.MarkStarting(first.ID, "factory-eng-123", t.TempDir(), now); err != nil {
+		t.Fatalf("mark first run starting: %v", err)
+	}
+	if err := store.MarkRunning(first.ID, 1, now); err != nil {
+		t.Fatalf("mark first run running: %v", err)
+	}
+	if err := store.Finish(first.ID, StateSucceeded, 1, "done", now.Add(time.Second)); err != nil {
+		t.Fatalf("finish first run: %v", err)
+	}
+
+	second, _, err := store.Claim(Trigger{DeliveryID: "delivery-2", IssueIdentifier: "ENG-123", Kind: "test"}, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("claim second run: %v", err)
+	}
+	if err := store.MarkStarting(second.ID, "factory-eng-123", t.TempDir(), now.Add(2*time.Second)); err != nil {
+		t.Fatalf("mark second run starting: %v", err)
+	}
+	if err := store.MarkRunning(second.ID, 1, now); err != nil {
+		t.Fatalf("mark second run running: %v", err)
+	}
+
+	found, ok := store.FindStarted("ENG-123", now.UnixMilli())
+	if !ok || found.ID != second.ID {
+		t.Fatalf("found = %#v, ok = %t, want newest run %s", found, ok, second.ID)
+	}
+	if _, ok := store.FindStarted("ENG-999", now.UnixMilli()); ok {
+		t.Fatal("found run for wrong issue")
+	}
+	if !ValidIssueIdentifier("ENG-123") || ValidIssueIdentifier("eng-123") {
+		t.Fatal("issue identifier validation mismatch")
+	}
+
+	activity := store.ActivitySnapshot()
+	if activity.Total != 2 || activity.Active != 1 || len(activity.Runs) != 2 || activity.Runs[0].IssueIdentifier != "ENG-123" {
+		t.Fatalf("activity snapshot = %#v", activity)
+	}
+	if activity.Runs[0].StartedAt == nil || activity.Runs[0].StartedAt.UnixMilli() != now.UnixMilli() {
+		t.Fatalf("activity run = %#v", activity.Runs[0])
+	}
+}
+
 func openTestStore(t *testing.T, limit int) *Store {
 	t.Helper()
 

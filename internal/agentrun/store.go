@@ -79,6 +79,24 @@ type PublicSnapshot struct {
 	Runs   []PublicRun `json:"runs"`
 }
 
+type ActivityRun struct {
+	ID                string     `json:"id"`
+	IssueIdentifier   string     `json:"issueIdentifier"`
+	State             State      `json:"state"`
+	Attempts          int        `json:"attempts"`
+	DuplicateTriggers uint64     `json:"duplicateTriggers"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
+	StartedAt         *time.Time `json:"startedAt,omitempty"`
+	FinishedAt        *time.Time `json:"finishedAt,omitempty"`
+}
+
+type ActivitySnapshot struct {
+	Total  uint64        `json:"total"`
+	Active int           `json:"active"`
+	Runs   []ActivityRun `json:"runs"`
+}
+
 type diskState struct {
 	Version int    `json:"version"`
 	Total   uint64 `json:"total"`
@@ -258,6 +276,31 @@ func (s *Store) Find(id string) (Run, bool) {
 	return Run{}, false
 }
 
+func ValidIssueIdentifier(value string) bool {
+	return issueIdentifierPattern.MatchString(value)
+}
+
+func (s *Store) FindStarted(issueIdentifier string, startedUnixMilli int64) (Run, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var matched Run
+	found := false
+	for _, run := range s.state.Runs {
+		if run.IssueIdentifier != issueIdentifier || run.StartedAt == nil || run.StartedAt.UnixMilli() != startedUnixMilli {
+			continue
+		}
+		if !found || run.CreatedAt.After(matched.CreatedAt) {
+			matched = run
+			found = true
+		}
+	}
+	if found {
+		matched.DeliveryIDs = slices.Clone(matched.DeliveryIDs)
+	}
+	return matched, found
+}
+
 func (s *Store) PublicSnapshot() PublicSnapshot {
 	snapshot := s.Snapshot()
 	runs := make([]PublicRun, len(snapshot.Runs))
@@ -274,6 +317,25 @@ func (s *Store) PublicSnapshot() PublicSnapshot {
 		}
 	}
 	return PublicSnapshot{Total: snapshot.Total, Active: snapshot.Active, Runs: runs}
+}
+
+func (s *Store) ActivitySnapshot() ActivitySnapshot {
+	snapshot := s.Snapshot()
+	runs := make([]ActivityRun, len(snapshot.Runs))
+	for i, run := range snapshot.Runs {
+		runs[i] = ActivityRun{
+			ID:                run.ID,
+			IssueIdentifier:   run.IssueIdentifier,
+			State:             run.State,
+			Attempts:          run.Attempts,
+			DuplicateTriggers: run.DuplicateTriggers,
+			CreatedAt:         run.CreatedAt,
+			UpdatedAt:         run.UpdatedAt,
+			StartedAt:         run.StartedAt,
+			FinishedAt:        run.FinishedAt,
+		}
+	}
+	return ActivitySnapshot{Total: snapshot.Total, Active: snapshot.Active, Runs: runs}
 }
 
 func (s *Store) update(id string, now time.Time, mutate func(*Run) error) error {

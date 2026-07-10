@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,16 +28,25 @@ const (
 	maxGitHubWebhookBody = 25 << 20
 	replayWindow         = time.Minute
 	triggerLabel         = "Factory"
+	defaultActivityPage  = 1
+	defaultActivityLimit = 25
+	maxActivityPage      = 1_000_000
+	maxActivityLimit     = 100
 )
 
 type EventStore interface {
 	Add(deliveryID string, event activity.Event) (bool, error)
+	AddWithPayload(deliveryID string, event activity.Event, payload []byte) (bool, error)
 	Snapshot() activity.Snapshot
+	LinearPage(page, pageSize int) (activity.LinearPage, error)
+	LinearEvent(id string) (activity.EventDetail, bool, error)
 }
 
 type RunStore interface {
 	Claim(trigger agentrun.Trigger, now time.Time) (agentrun.Run, bool, error)
 	PublicSnapshot() agentrun.PublicSnapshot
+	ActivitySnapshot() agentrun.ActivitySnapshot
+	FindStarted(issueIdentifier string, startedUnixMilli int64) (agentrun.Run, bool)
 }
 
 type RunNotifier interface {
@@ -158,6 +168,10 @@ func New(config Config) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", healthz)
 	mux.HandleFunc("GET /api/activity", app.activity)
+	mux.Handle("GET /api/activity/linear", app.viewerAuth.API(http.HandlerFunc(app.linearActivity)))
+	mux.Handle("GET /api/activity/linear/{id}", app.viewerAuth.API(http.HandlerFunc(app.linearEvent)))
+	mux.Handle("GET /api/activity/agents", app.viewerAuth.API(http.HandlerFunc(app.agentActivity)))
+	mux.Handle("GET /api/activity/agents/{issue}/{started}/run", app.viewerAuth.API(http.HandlerFunc(app.agentByReference)))
 	mux.Handle("GET /api/agents/{id}", app.viewerAuth.API(http.HandlerFunc(app.agent)))
 	mux.HandleFunc("POST /api/webhooks/linear", app.linearWebhook)
 	mux.HandleFunc("POST /api/webhooks/github", app.githubWebhook)
@@ -165,6 +179,10 @@ func New(config Config) (http.Handler, error) {
 	mux.HandleFunc("GET /auth/google/login", app.viewerAuth.Login)
 	mux.HandleFunc("GET /auth/google/callback", app.viewerAuth.Callback)
 	mux.HandleFunc("GET /auth/logout", app.viewerAuth.Logout)
+	mux.Handle("GET /activity/linear", app.viewerAuth.Page(frontend(config.Web)))
+	mux.Handle("GET /activity/linear/", app.viewerAuth.Page(frontend(config.Web)))
+	mux.Handle("GET /activity/agents", app.viewerAuth.Page(frontend(config.Web)))
+	mux.Handle("GET /activity/agents/", app.viewerAuth.Page(frontend(config.Web)))
 	mux.Handle("GET /agents", app.viewerAuth.Page(frontend(config.Web)))
 	mux.Handle("GET /agents/", app.viewerAuth.Page(frontend(config.Web)))
 	mux.Handle("/", frontend(config.Web))
@@ -196,8 +214,72 @@ func (s *appServer) activity(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
+func (s *appServer) linearActivity(w http.ResponseWriter, r *http.Request) {
+	page, err := queryInt(r, "page", defaultActivityPage, 1, maxActivityPage)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	pageSize, err := queryInt(r, "pageSize", defaultActivityLimit, 1, maxActivityLimit)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	snapshot, err := s.activityStore.LinearPage(page, pageSize)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot)
+}
+
+func (s *appServer) linearEvent(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !validEventID(id) {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	event, found, err := s.activityStore.LinearEvent(id)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, event)
+}
+
+func (s *appServer) agentActivity(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.runStore.ActivitySnapshot())
+}
+
+func (s *appServer) agentByReference(w http.ResponseWriter, r *http.Request) {
+	issueIdentifier := strings.ToUpper(r.PathValue("issue"))
+	if !agentrun.ValidIssueIdentifier(issueIdentifier) {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	started, err := strconv.ParseInt(r.PathValue("started"), 10, 64)
+	if err != nil || started < 1 {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	run, found := s.runStore.FindStarted(issueIdentifier, started)
+	if !found {
+		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	}
+	s.writeAgent(w, r, run.ID)
+}
+
 func (s *appServer) agent(w http.ResponseWriter, r *http.Request) {
-	view, err := s.agentObserver.Observe(r.Context(), r.PathValue("id"))
+	s.writeAgent(w, r, r.PathValue("id"))
+}
+
+func (s *appServer) writeAgent(w http.ResponseWriter, r *http.Request, id string) {
+	view, err := s.agentObserver.Observe(r.Context(), id)
 	if errors.Is(err, agentrun.ErrRunNotFound) {
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		return
@@ -242,11 +324,11 @@ func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
-	_, err = s.activityStore.Add(deliveryID, activity.Event{
+	_, err = s.activityStore.AddWithPayload(deliveryID, activity.Event{
 		Type:       payload.Type,
 		Action:     payload.Action,
 		ReceivedAt: now,
-	})
+	}, body)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
@@ -356,6 +438,26 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func queryInt(r *http.Request, name string, fallback, minimum, maximum int) (int, error) {
+	value := r.URL.Query().Get(name)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < minimum || parsed > maximum {
+		return 0, errors.New("invalid query parameter")
+	}
+	return parsed, nil
+}
+
+func validEventID(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size
 }
 
 func frontend(web fs.FS) http.Handler {

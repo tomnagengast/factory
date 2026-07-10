@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -77,11 +78,17 @@ func TestUnknownAPIIsNotFound(t *testing.T) {
 	}
 }
 
-func TestAgentRoutesRequireViewerAuthentication(t *testing.T) {
+func TestPrivateActivityAndAgentRoutesRequireViewerAuthentication(t *testing.T) {
 	t.Parallel()
 
 	handler := testHandler(t)
-	for _, target := range []string{"/agents/run-123", "/agents/run-123/"} {
+	for _, target := range []string{
+		"/agents/run-123",
+		"/agents/run-123/",
+		"/activity/linear",
+		"/activity/agents",
+		"/activity/agents/ENG-23/1783714439062/run",
+	} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
 		if recorder.Code != http.StatusFound {
@@ -92,10 +99,18 @@ func TestAgentRoutesRequireViewerAuthentication(t *testing.T) {
 		}
 	}
 
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/agents/run-123", nil))
-	if recorder.Code != http.StatusUnauthorized || recorder.Header().Get("WWW-Authenticate") == "" {
-		t.Fatalf("API response = %d, challenge %q", recorder.Code, recorder.Header().Get("WWW-Authenticate"))
+	for _, target := range []string{
+		"/api/agents/run-123",
+		"/api/activity/linear",
+		"/api/activity/linear/" + strings.Repeat("a", 64),
+		"/api/activity/agents",
+		"/api/activity/agents/ENG-23/1783714439062/run",
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+		if recorder.Code != http.StatusUnauthorized || recorder.Header().Get("WWW-Authenticate") == "" {
+			t.Fatalf("%s API response = %d, challenge %q", target, recorder.Code, recorder.Header().Get("WWW-Authenticate"))
+		}
 	}
 }
 
@@ -201,6 +216,117 @@ func TestLinearWebhookAcceptsAndDeduplicatesSignedDelivery(t *testing.T) {
 	want := activity.Event{Type: "Issue", Action: "update", ReceivedAt: testNow}
 	if got.Events[0] != want {
 		t.Fatalf("event = %#v, want %#v", got.Events[0], want)
+	}
+}
+
+func TestAuthenticatedLinearActivityPagesRawPayload(t *testing.T) {
+	t.Parallel()
+
+	handler := testHandler(t)
+	body := fmt.Sprintf(
+		`{"type":"Issue","action":"update","webhookTimestamp":%d,"data":{"identifier":"ENG-23","private":"winery roadmap"}}`,
+		testNow.UnixMilli(),
+	)
+	webhook := httptest.NewRecorder()
+	handler.ServeHTTP(webhook, signedWebhookRequest(body, "delivery-private", testSecret))
+	if webhook.Code != http.StatusOK {
+		t.Fatalf("webhook status = %d, want %d", webhook.Code, http.StatusOK)
+	}
+
+	pageRecorder := authenticatedRequest(t, handler, "/api/activity/linear?page=1&pageSize=25")
+	var page activity.LinearPage
+	if err := json.NewDecoder(pageRecorder.Body).Decode(&page); err != nil {
+		t.Fatalf("decode page: %v", err)
+	}
+	if pageRecorder.Code != http.StatusOK || page.Total != 1 || len(page.Events) != 1 || !page.Events[0].PayloadAvailable {
+		t.Fatalf("page response = %d %#v", pageRecorder.Code, page)
+	}
+	if len(page.TypeCounts) != 1 || page.TypeCounts[0] != (activity.Count{Label: "Issue", Count: 1}) {
+		t.Fatalf("type counts = %#v", page.TypeCounts)
+	}
+
+	detailRecorder := authenticatedRequest(t, handler, "/api/activity/linear/"+page.Events[0].ID)
+	var detail activity.EventDetail
+	if err := json.NewDecoder(detailRecorder.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if detailRecorder.Code != http.StatusOK || !strings.Contains(string(detail.Payload), "winery roadmap") {
+		t.Fatalf("detail response = %d %#v", detailRecorder.Code, detail)
+	}
+
+	publicRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(publicRecorder, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
+	if publicBody := publicRecorder.Body.String(); strings.Contains(publicBody, "winery roadmap") || strings.Contains(publicBody, "ENG-23") {
+		t.Fatalf("public activity leaked raw payload: %s", publicBody)
+	}
+}
+
+func TestLinearActivityAPIRejectsInvalidPaginationAndEventIDs(t *testing.T) {
+	t.Parallel()
+
+	handler := testHandler(t)
+	for _, target := range []string{
+		"/api/activity/linear?page=0",
+		"/api/activity/linear?pageSize=101",
+		"/api/activity/linear/not-a-hash",
+	} {
+		recorder := authenticatedRequest(t, handler, target)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want %d", target, recorder.Code, http.StatusBadRequest)
+		}
+	}
+	recorder := authenticatedRequest(t, handler, "/api/activity/linear/"+strings.Repeat("a", 64))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("missing event status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+}
+
+func TestAuthenticatedAgentActivityAndReference(t *testing.T) {
+	t.Parallel()
+
+	observer := &testObserver{}
+	handler, store := testHandlerWithObserverAndStore(t, observer)
+	run, _, err := store.Claim(agentrun.Trigger{DeliveryID: "delivery-agent", IssueIdentifier: "ENG-23", Kind: "test"}, testNow)
+	if err != nil {
+		t.Fatalf("claim run: %v", err)
+	}
+	if err := store.MarkStarting(run.ID, "factory-eng-23", t.TempDir(), testNow); err != nil {
+		t.Fatalf("mark starting: %v", err)
+	}
+	if err := store.MarkRunning(run.ID, 1, testNow); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	observer.view = agentrun.AgentView{ID: run.ID, IssueIdentifier: "ENG-23", State: agentrun.StateRunning, Live: true}
+
+	summaryRecorder := authenticatedRequest(t, handler, "/api/activity/agents")
+	var summary agentrun.ActivitySnapshot
+	if err := json.NewDecoder(summaryRecorder.Body).Decode(&summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summaryRecorder.Code != http.StatusOK || summary.Total != 1 || summary.Active != 1 || summary.Runs[0].IssueIdentifier != "ENG-23" {
+		t.Fatalf("summary response = %d %#v", summaryRecorder.Code, summary)
+	}
+
+	target := fmt.Sprintf("/api/activity/agents/eng-23/%d/run", testNow.UnixMilli())
+	detailRecorder := authenticatedRequest(t, handler, target)
+	var detail agentrun.AgentView
+	if err := json.NewDecoder(detailRecorder.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if detailRecorder.Code != http.StatusOK || detail.ID != run.ID || observer.lastID != run.ID {
+		t.Fatalf("detail response = %d %#v, observer ID %q", detailRecorder.Code, detail, observer.lastID)
+	}
+
+	for _, invalidTarget := range []string{
+		"/api/activity/agents/not-an-issue/123/run",
+		"/api/activity/agents/ENG-23/not-a-time/run",
+	} {
+		if recorder := authenticatedRequest(t, handler, invalidTarget); recorder.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want %d", invalidTarget, recorder.Code, http.StatusBadRequest)
+		}
+	}
+	if recorder := authenticatedRequest(t, handler, "/api/activity/agents/ENG-24/"+strconv.FormatInt(testNow.UnixMilli(), 10)+"/run"); recorder.Code != http.StatusNotFound {
+		t.Fatalf("missing run status = %d, want %d", recorder.Code, http.StatusNotFound)
 	}
 }
 
@@ -450,6 +576,12 @@ func testHandlerWithRuns(t *testing.T) (http.Handler, *agentrun.Store, *testNoti
 
 func testHandlerWithObserver(t *testing.T, observer AgentObserver) http.Handler {
 	t.Helper()
+	handler, _ := testHandlerWithObserverAndStore(t, observer)
+	return handler
+}
+
+func testHandlerWithObserverAndStore(t *testing.T, observer AgentObserver) (http.Handler, *agentrun.Store) {
+	t.Helper()
 	store, err := activity.Open(filepath.Join(t.TempDir(), "activity.json"), 10)
 	if err != nil {
 		t.Fatalf("open activity store: %v", err)
@@ -478,7 +610,7 @@ func testHandlerWithObserver(t *testing.T, observer AgentObserver) http.Handler 
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
-	return handler
+	return handler, runStore
 }
 
 func testHandlerWithGitHub(t *testing.T) (http.Handler, string) {
@@ -532,6 +664,15 @@ func testViewerAuth(t *testing.T) *viewerauth.Authenticator {
 		t.Fatalf("new viewer auth: %v", err)
 	}
 	return auth
+}
+
+func authenticatedRequest(t *testing.T, handler http.Handler, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, target, nil)
+	request.SetBasicAuth("factory", testViewerPassword)
+	handler.ServeHTTP(recorder, request)
+	return recorder
 }
 
 func signedWebhookRequest(body, deliveryID string, secret []byte) *http.Request {

@@ -160,6 +160,35 @@ func TestLoginRejectsExternalReturnURL(t *testing.T) {
 	}
 }
 
+func TestLoginAllowsProtectedActivityReturnURLsOnly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		next string
+		want string
+	}{
+		{name: "Linear activity", next: "/activity/linear?page=2", want: "/activity/linear?page=2"},
+		{name: "agent activity", next: "/activity/agents", want: "/activity/agents"},
+		{name: "agent run", next: "/activity/agents/ENG-23/1783714439062/run", want: "/activity/agents/ENG-23/1783714439062/run"},
+		{name: "lookalike", next: "/activity/linear-public", want: "/activity"},
+		{name: "public summary", next: "/activity", want: "/activity"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			auth := testAuthenticator(t, nil)
+			cookie, _ := beginLogin(t, auth, test.next)
+			var claims stateClaims
+			if err := auth.verify(cookie.Value, &claims); err != nil {
+				t.Fatalf("verify state: %v", err)
+			}
+			if claims.Next != test.want {
+				t.Fatalf("next = %q, want %q", claims.Next, test.want)
+			}
+		})
+	}
+}
+
 func beginLogin(t *testing.T, auth *Authenticator, next string) (*http.Cookie, string) {
 	t.Helper()
 	recorder := httptest.NewRecorder()
