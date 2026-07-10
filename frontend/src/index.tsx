@@ -64,10 +64,13 @@ type AgentView = {
   updatedAt: string;
   startedAt?: string;
   finishedAt?: string;
+  observedAt: string;
   live: boolean;
   attachCommand?: string;
   windows: AgentWindow[];
 };
+
+const refreshIntervalMs = 2000;
 
 const timeFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -154,7 +157,7 @@ function ActivityPage(): JSX.Element {
 
   onMount(() => {
     document.title = "Activity | Factory";
-    const timer = window.setInterval(() => void refetch(), 5000);
+    const timer = window.setInterval(() => void refetch(), refreshIntervalMs);
     onCleanup(() => window.clearInterval(timer));
   });
 
@@ -260,7 +263,7 @@ function ActivityPage(): JSX.Element {
         <section class="event-feed" aria-labelledby="event-feed-title">
           <div class="feed-heading">
             <h2 id="event-feed-title">Recent deliveries</h2>
-            <span>Refreshes every 5 seconds</span>
+            <span>Refreshes every 2 seconds</span>
           </div>
 
           <Show
@@ -315,7 +318,7 @@ function AgentPage(props: { runID: string }): JSX.Element {
 
   onMount(() => {
     document.title = "Agent | Factory";
-    const timer = window.setInterval(() => void refetch(), 2000);
+    const timer = window.setInterval(() => void refetch(), refreshIntervalMs);
     onCleanup(() => window.clearInterval(timer));
   });
 
@@ -386,8 +389,8 @@ function AgentPage(props: { runID: string }): JSX.Element {
                   <dd>{snapshot().windows.length}</dd>
                 </div>
                 <div>
-                  <dt>Updated</dt>
-                  <dd>{formatTime(snapshot().updatedAt)}</dd>
+                  <dt>Observed</dt>
+                  <dd>{formatTime(snapshot().observedAt)}</dd>
                 </div>
               </dl>
 

@@ -132,7 +132,7 @@ func serve(ctx context.Context) error {
 		launcher,
 		stateRoot,
 		envInt("FACTORY_MAX_AGENTS", defaultMaxConcurrentRuns),
-		5*time.Second,
+		2*time.Second,
 		slog.Default(),
 		time.Now,
 	)
@@ -152,6 +152,7 @@ func serve(ctx context.Context) error {
 			sessionKey,
 			os.Getenv("GITHUB_TOKEN"),
 		},
+		time.Now,
 	)
 	if err != nil {
 		return err

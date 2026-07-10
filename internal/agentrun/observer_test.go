@@ -25,11 +25,15 @@ func TestObserverCapturesAndRedactsLiveWindows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
-	if err := store.MarkStarting(run.ID, "factory-eng-123", "/tmp/run", observerTestNow); err != nil {
+	runDirectory := t.TempDir()
+	if err := store.MarkStarting(run.ID, "factory-eng-123", runDirectory, observerTestNow); err != nil {
 		t.Fatalf("mark starting: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(runDirectory, "attempt-2-events.jsonl"), nil, 0o600); err != nil {
+		t.Fatalf("write attempt file: %v", err)
+	}
 
-	observer, err := NewObserver(store, "tmux", "factory-agents", []string{"linear-secret"})
+	observer, err := NewObserver(store, "tmux", "factory-agents", []string{"linear-secret"}, func() time.Time { return observerTestNow })
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
@@ -39,7 +43,7 @@ func TestObserverCapturesAndRedactsLiveWindows(t *testing.T) {
 		case strings.Contains(command, "has-session"):
 			return nil, nil
 		case strings.Contains(command, "list-windows"):
-			return []byte("@1\tprincipal\tcodex\n@2\tplan-review\tclaude\n"), nil
+			return []byte("@1\\tprincipal\\tcodex\n@2\\tplan-review\\tclaude\n"), nil
 		case strings.Contains(command, "-t @1"):
 			return []byte("\x1b[32m{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"command\":\"printf working\",\"aggregated_output\":\"linear-secret\"}}\x1b[0m\n"), nil
 		case strings.Contains(command, "-t @2"):
@@ -55,6 +59,9 @@ func TestObserverCapturesAndRedactsLiveWindows(t *testing.T) {
 	}
 	if !view.Live || view.AttachCommand != "tmux -L factory-agents attach -t factory-eng-123" {
 		t.Fatalf("live view = %#v", view)
+	}
+	if view.ObservedAt != observerTestNow || view.Attempts != 2 {
+		t.Fatalf("snapshot metadata = %#v", view)
 	}
 	if len(view.Windows) != 2 {
 		t.Fatalf("windows = %#v", view.Windows)
@@ -82,7 +89,7 @@ func TestObserverReturnsTerminalRunWithoutCallingTmux(t *testing.T) {
 		t.Fatalf("finish run: %v", err)
 	}
 
-	observer, err := NewObserver(store, "tmux", "factory-agents", nil)
+	observer, err := NewObserver(store, "tmux", "factory-agents", nil, func() time.Time { return observerTestNow })
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
@@ -106,7 +113,7 @@ func TestObserverRejectsUnknownRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	observer, err := NewObserver(store, "tmux", "factory-agents", nil)
+	observer, err := NewObserver(store, "tmux", "factory-agents", nil, func() time.Time { return observerTestNow })
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
@@ -130,7 +137,7 @@ func TestObserverTreatsMissingTmuxSessionAsNotLive(t *testing.T) {
 		t.Fatalf("mark starting: %v", err)
 	}
 
-	observer, err := NewObserver(store, "tmux", "factory-agents", nil)
+	observer, err := NewObserver(store, "tmux", "factory-agents", nil, func() time.Time { return observerTestNow })
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
@@ -143,6 +150,37 @@ func TestObserverTreatsMissingTmuxSessionAsNotLive(t *testing.T) {
 	}
 	if view.Live {
 		t.Fatalf("view = %#v, want not live", view)
+	}
+}
+
+func TestObserverRejectsUnparseableLiveWindows(t *testing.T) {
+	t.Parallel()
+
+	store, err := Open(filepath.Join(t.TempDir(), "runs.json"), 10)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	run, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, observerTestNow)
+	if err != nil {
+		t.Fatalf("claim run: %v", err)
+	}
+	if err := store.MarkStarting(run.ID, "factory-eng-123", t.TempDir(), observerTestNow); err != nil {
+		t.Fatalf("mark starting: %v", err)
+	}
+
+	observer, err := NewObserver(store, "tmux", "factory-agents", nil, func() time.Time { return observerTestNow })
+	if err != nil {
+		t.Fatalf("new observer: %v", err)
+	}
+	observer.run = func(_ context.Context, args ...string) ([]byte, error) {
+		if strings.Contains(strings.Join(args, " "), "has-session") {
+			return nil, nil
+		}
+		return []byte("unparseable-window-row\n"), nil
+	}
+
+	if _, err := observer.Observe(context.Background(), run.ID); err == nil {
+		t.Fatal("observe run succeeded, want an observer error")
 	}
 }
 
@@ -181,7 +219,7 @@ func TestObserverReadsRealTmuxSession(t *testing.T) {
 	if err := store.MarkStarting(run.ID, session, "/tmp/run", observerTestNow); err != nil {
 		t.Fatalf("mark starting: %v", err)
 	}
-	observer, err := NewObserver(store, tmuxPath, socket, nil)
+	observer, err := NewObserver(store, tmuxPath, socket, nil, func() time.Time { return observerTestNow })
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}

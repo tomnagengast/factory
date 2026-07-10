@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -17,6 +19,8 @@ const (
 	maxObservedWindows = 16
 	maxPaneBytes       = 128 << 10
 	paneHistoryLines   = "-300"
+	tmuxFieldSeparator = "\x1f"
+	tmuxWindowFormat   = "#{window_id}" + tmuxFieldSeparator + "#{window_name}" + tmuxFieldSeparator + "#{pane_current_command}"
 )
 
 var (
@@ -35,6 +39,7 @@ type AgentView struct {
 	UpdatedAt         time.Time    `json:"updatedAt"`
 	StartedAt         *time.Time   `json:"startedAt,omitempty"`
 	FinishedAt        *time.Time   `json:"finishedAt,omitempty"`
+	ObservedAt        time.Time    `json:"observedAt"`
 	Live              bool         `json:"live"`
 	AttachCommand     string       `json:"attachCommand,omitempty"`
 	Windows           []WindowView `json:"windows"`
@@ -52,15 +57,19 @@ type Observer struct {
 	tmuxPath   string
 	tmuxSocket string
 	redactions []string
+	now        func() time.Time
 	run        func(context.Context, ...string) ([]byte, error)
 }
 
-func NewObserver(store *Store, tmuxPath, tmuxSocket string, redactions []string) (*Observer, error) {
+func NewObserver(store *Store, tmuxPath, tmuxSocket string, redactions []string, now func() time.Time) (*Observer, error) {
 	if store == nil {
 		return nil, errors.New("agent observer: run store is required")
 	}
 	if tmuxPath == "" || tmuxSocket == "" {
 		return nil, errors.New("agent observer: tmux path and socket are required")
+	}
+	if now == nil {
+		return nil, errors.New("agent observer: clock is required")
 	}
 	filtered := make([]string, 0, len(redactions))
 	for _, value := range redactions {
@@ -75,6 +84,7 @@ func NewObserver(store *Store, tmuxPath, tmuxSocket string, redactions []string)
 		tmuxPath:   tmuxPath,
 		tmuxSocket: tmuxSocket,
 		redactions: filtered,
+		now:        now,
 	}
 	observer.run = func(ctx context.Context, args ...string) ([]byte, error) {
 		return exec.CommandContext(ctx, observer.tmuxPath, args...).CombinedOutput()
@@ -98,8 +108,10 @@ func (o *Observer) Observe(ctx context.Context, id string) (AgentView, error) {
 		UpdatedAt:         run.UpdatedAt,
 		StartedAt:         run.StartedAt,
 		FinishedAt:        run.FinishedAt,
+		ObservedAt:        o.now().UTC(),
 		Windows:           []WindowView{},
 	}
+	view.Attempts = max(view.Attempts, currentAttempt(run.RunDirectory))
 	if run.SessionName == "" {
 		return view, nil
 	}
@@ -139,19 +151,23 @@ func (o *Observer) windows(ctx context.Context, sessionName string) ([]WindowVie
 		ctx,
 		"-L", o.tmuxSocket,
 		"list-windows", "-t", sessionName,
-		"-F", "#{window_id}\t#{window_name}\t#{pane_current_command}",
+		"-F", tmuxWindowFormat,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("agent observer: list windows: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	trimmed := strings.TrimRight(string(output), "\r\n")
+	if trimmed == "" {
+		return nil, errors.New("agent observer: live session returned no windows")
+	}
+	lines := strings.Split(trimmed, "\n")
 	windows := make([]WindowView, 0, min(len(lines), maxObservedWindows))
 	for _, line := range lines {
 		if len(windows) >= maxObservedWindows || line == "" {
 			break
 		}
-		fields := strings.SplitN(line, "\t", 3)
+		fields := splitWindowFields(line)
 		if len(fields) != 3 {
 			continue
 		}
@@ -171,7 +187,45 @@ func (o *Observer) windows(ctx context.Context, sessionName string) ([]WindowVie
 			Output:  o.cleanPane(pane),
 		})
 	}
+	if len(windows) == 0 {
+		return nil, errors.New("agent observer: tmux returned no parseable windows")
+	}
 	return windows, nil
+}
+
+func splitWindowFields(line string) []string {
+	for _, separator := range []string{tmuxFieldSeparator, "\t", `\t`} {
+		if fields := strings.SplitN(line, separator, 3); len(fields) == 3 {
+			return fields
+		}
+	}
+	return nil
+}
+
+func currentAttempt(runDirectory string) int {
+	if runDirectory == "" {
+		return 0
+	}
+	entries, err := os.ReadDir(runDirectory)
+	if err != nil {
+		return 0
+	}
+	attempts := 0
+	for _, entry := range entries {
+		name, found := strings.CutPrefix(entry.Name(), "attempt-")
+		if !found {
+			continue
+		}
+		value, found := strings.CutSuffix(name, "-events.jsonl")
+		if !found {
+			continue
+		}
+		attempt, err := strconv.Atoi(value)
+		if err == nil {
+			attempts = max(attempts, attempt)
+		}
+	}
+	return attempts
 }
 
 func (o *Observer) cleanPane(output []byte) string {

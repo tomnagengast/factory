@@ -85,7 +85,7 @@ tmux -L factory-agents capture-pane -pt factory-team-123:principal
 
 Detach with the configured tmux prefix followed by `d`. Kill only a specific session or window when intervention is necessary. Never use `tmux kill-server`, because it terminates every Factory issue run.
 
-Each activity run links to `https://factory.nags.cloud/agents/<run-id>`. This authenticated, read-only view polls the run every two seconds and shows the current tmux windows, commands, and recent pane output. It never accepts terminal input. Use the attach command shown on the page when interactive local control is required.
+The activity and authenticated agent views poll their APIs every two seconds. Each activity run links to `https://factory.nags.cloud/agents/<run-id>`, where every response includes its observation time, current retry attempt, tmux windows, commands, and recent pane output. A live session that cannot be observed is reported as an observer error instead of an empty session. The view never accepts terminal input. Use the attach command shown on the page when interactive local control is required.
 
 Browser navigation uses Google OAuth over HTTPS. Factory accepts only verified Google identities in `FACTORY_GOOGLE_ALLOWED_EMAILS`, keeps the OAuth tokens server-side for the duration of the callback, and issues a signed, secure, host-only session cookie for 24 hours. Visit `/auth/logout` to clear the Factory session.
 
