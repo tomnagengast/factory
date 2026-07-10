@@ -12,6 +12,7 @@
   --quiet: #566259;
   --border: rgba(31, 43, 34, 0.2);
   --accent: #68982e;
+  --accent-textual: #466d1c;
   --accent-text: #17200f;
   --pending: #9b7a34;
   --failed: #b34032;
@@ -29,6 +30,7 @@
     --quiet: #939f96;
     --border: rgba(205, 220, 208, 0.2);
     --accent: #b7ee6a;
+    --accent-textual: #b7ee6a;
     --accent-text: #101512;
     --pending: #a9925d;
     --failed: #f06d5e;
@@ -265,7 +267,7 @@ select {
 
 .section-label {
   margin: 0 0 18px;
-  color: var(--accent);
+  color: var(--accent-textual);
   font: 500 0.68rem/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -387,7 +389,7 @@ select {
 .empty-state code {
   width: fit-content;
   margin-top: 16px;
-  color: var(--accent);
+  color: var(--accent-textual);
   font: 400 0.72rem/1.4 ui-monospace, "SFMono-Regular", Menlo, monospace;
 }
 

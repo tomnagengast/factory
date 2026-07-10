@@ -29,7 +29,7 @@ type ActivitySnapshot = {
 
 const timeFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
-  timeStyle: "medium",
+  timeStyle: "short",
 });
 
 async function getHealth(): Promise<Health> {
@@ -109,7 +109,7 @@ function ActivityPage(): JSX.Element {
     <main class="activity-page">
       <section class="activity-shell" aria-labelledby="activity-title">
         <header class="activity-header">
-          <a class="brand-link" href="/" aria-label="Factory home">
+          <a class="brand-link" href="/">
             <span class="mark" aria-hidden="true">
               F
             </span>
