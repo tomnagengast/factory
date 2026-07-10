@@ -70,12 +70,14 @@ Detach with the configured tmux prefix followed by `d`. Kill only a specific ses
 
 Each activity run links to `https://factory.nags.cloud/agents/<run-id>`. This authenticated, read-only view polls the run every two seconds and shows the current tmux windows, commands, and recent pane output. It never accepts terminal input. Use the attach command shown on the page when interactive local control is required.
 
-The browser uses HTTP Basic authentication over HTTPS:
+Browser navigation uses Google OAuth over HTTPS. Factory accepts only verified Google identities in `FACTORY_GOOGLE_ALLOWED_EMAILS`, keeps the OAuth tokens server-side for the duration of the callback, and issues a signed, secure, host-only session cookie for 24 hours. Visit `/auth/logout` to clear the Factory session.
+
+HTTP Basic authentication remains available as break-glass access for the protected page and API:
 
 - Username: `factory`
 - Password: `~/.config/network-app/factory-viewer-password.txt`
 
-`bin/network-app refresh-env` preserves or creates the 48-character random password, writes it to the private service environment, and maintains the separate `0600` password file for operator use. Agent pane output is redacted against credentials available to the agent before it is returned by the API.
+`bin/network-app refresh-env` reads the Factory-specific OAuth client from `op://Code/GCP the-nags/factory oauth credentials`, preserves or creates the session signing key and 48-character break-glass password, and writes them to the private service environment. It maintains the password in a separate `0600` file for operator use. Agent pane output is redacted against credentials available to the agent before it is returned by the API.
 
 ## Configuration
 
@@ -84,7 +86,10 @@ The launchd wrapper sources `~/.config/network-app/env`. Factory requires:
 - `LINEAR_WEBHOOK_SECRET` for webhook authentication.
 - `LINEAR_API_KEY` for the principal and child agents' Linear access.
 - `LINEAR_TRIGGER_ACTOR_ID` for the only Linear user allowed to start runs.
-- `FACTORY_VIEWER_PASSWORD` for authenticated agent inspection.
+- `FACTORY_GOOGLE_CLIENT_ID` and `FACTORY_GOOGLE_CLIENT_SECRET` for Google sign-in.
+- `FACTORY_GOOGLE_ALLOWED_EMAILS`, a comma-separated allowlist of verified Google emails.
+- `FACTORY_SESSION_KEY` for signed browser sessions.
+- `FACTORY_VIEWER_PASSWORD` for break-glass agent inspection.
 
 `bin/network-app refresh-env` reads the API key from `op://Code/Linear API key/credential`, validates it against Linear, derives the trigger actor ID from the authenticated viewer, and writes both values to the private launchd environment. Codex uses `.agents/skills/do/scripts/linear_graphql.py` to call Linear's GraphQL API directly, so the headless workflow does not depend on MCP tool discovery.
 
