@@ -1,16 +1,16 @@
 # Factory agent runner
 
-Factory turns an explicit Linear comment into a durable Codex SDLC run.
+Factory turns an explicit Linear label application into a durable Codex SDLC run.
 
 ## Trigger
 
-Create a Linear comment whose entire body is:
+Apply the workspace label:
 
 ```text
-/do TEAM-123
+Factory
 ```
 
-Factory launches only for a signed `Comment` `create` webhook with that exact command shape from the configured Linear actor. Ordinary issue updates, other users, and comments containing additional prose are recorded in the activity feed but do not start agents.
+Factory launches only for a signed `Issue` `update` webhook where the configured Linear actor newly added that label. It compares the current label IDs with `updatedFrom.labelIds`, so unrelated issue updates, label removal, and updates where `Factory` was already present do not start agents.
 
 ## Run lifecycle
 
@@ -32,7 +32,7 @@ Redundant work is prevented at three layers:
 - The persistent run store allows only one pending, starting, or running record for an issue.
 - The deterministic tmux session name is a final process-level lock.
 
-Additional `/do TEAM-123` comments are coalesced while the issue has an active run. A new comment may create a new run only after the earlier run is terminal. The `$do` skill then resumes any existing branch, worktree, or pull request instead of duplicating them.
+Additional `Factory` label applications are coalesced while the issue has an active run. After a run becomes terminal, remove and reapply the label to start another run. The `$do` skill then resumes any existing branch, worktree, or pull request instead of duplicating them.
 
 ## Child agents
 

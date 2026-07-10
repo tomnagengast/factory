@@ -194,8 +194,8 @@ function ActivityPage(): JSX.Element {
             </h1>
           </div>
           <p class="activity-intro">
-            Signed Linear events enter here. An exact <code>/do ISSUE-NNN</code>
-            comment starts one durable agent loop per issue.
+            Signed Linear events enter here. Applying the <code>Factory</code>
+            label starts one durable agent loop per issue.
           </p>
         </div>
 
@@ -233,8 +233,8 @@ function ActivityPage(): JSX.Element {
             fallback={
               <div class="empty-state compact">
                 <strong>No agent run has been claimed.</strong>
-                <span>Comment with an exact command to start one.</span>
-                <code>/do ISSUE-NNN</code>
+                <span>Apply the trigger label to a Linear issue.</span>
+                <code>Factory</code>
               </div>
             }
           >

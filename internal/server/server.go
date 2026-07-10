@@ -11,7 +11,7 @@ import (
 	"io/fs"
 	"net/http"
 	"path"
-	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,9 +23,8 @@ import (
 const (
 	maxWebhookBody = 1 << 20
 	replayWindow   = time.Minute
+	triggerLabel   = "Factory"
 )
-
-var doCommandPattern = regexp.MustCompile(`(?i)^/do[[:space:]]+([A-Z][A-Z0-9]*-[1-9][0-9]*)[[:space:]]*$`)
 
 type EventStore interface {
 	Add(deliveryID string, event activity.Event) (bool, error)
@@ -81,8 +80,16 @@ type linearPayload struct {
 		ID string `json:"id"`
 	} `json:"actor"`
 	Data struct {
-		Body string `json:"body"`
+		Identifier string   `json:"identifier"`
+		LabelIDs   []string `json:"labelIds"`
+		Labels     []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"labels"`
 	} `json:"data"`
+	UpdatedFrom struct {
+		LabelIDs json.RawMessage `json:"labelIds"`
+	} `json:"updatedFrom"`
 }
 
 type activityResponse struct {
@@ -237,17 +244,27 @@ func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func agentTrigger(payload linearPayload, deliveryID, allowedActorID string) (agentrun.Trigger, bool) {
-	if payload.Type != "Comment" || payload.Action != "create" || payload.Actor.ID != allowedActorID {
+	if payload.Type != "Issue" || payload.Action != "update" || payload.Actor.ID != allowedActorID {
 		return agentrun.Trigger{}, false
 	}
-	match := doCommandPattern.FindStringSubmatch(payload.Data.Body)
-	if len(match) != 2 {
+	factoryLabelID := ""
+	for _, label := range payload.Data.Labels {
+		if strings.EqualFold(strings.TrimSpace(label.Name), triggerLabel) {
+			factoryLabelID = label.ID
+			break
+		}
+	}
+	if factoryLabelID == "" || !slices.Contains(payload.Data.LabelIDs, factoryLabelID) || len(payload.UpdatedFrom.LabelIDs) == 0 {
+		return agentrun.Trigger{}, false
+	}
+	var previousLabelIDs []string
+	if err := json.Unmarshal(payload.UpdatedFrom.LabelIDs, &previousLabelIDs); err != nil || slices.Contains(previousLabelIDs, factoryLabelID) {
 		return agentrun.Trigger{}, false
 	}
 	return agentrun.Trigger{
 		DeliveryID:      deliveryID,
-		IssueIdentifier: strings.ToUpper(match[1]),
-		Kind:            "linear-comment",
+		IssueIdentifier: strings.ToUpper(payload.Data.Identifier),
+		Kind:            "linear-label",
 	}, true
 }
 

@@ -236,13 +236,13 @@ func TestLinearWebhookRejectsStalePayload(t *testing.T) {
 	}
 }
 
-func TestLinearDoCommentStartsOneRunPerActiveIssue(t *testing.T) {
+func TestLinearFactoryLabelStartsOneRunPerActiveIssue(t *testing.T) {
 	t.Parallel()
 
 	handler, runStore, notifier := testHandlerWithRuns(t)
 	for i, deliveryID := range []string{"delivery-1", "delivery-2"} {
 		body := fmt.Sprintf(
-			`{"type":"Comment","action":"create","webhookTimestamp":%d,"actor":{"id":"%s"},"data":{"body":"/do eng-123"}}`,
+			`{"type":"Issue","action":"update","webhookTimestamp":%d,"actor":{"id":"%s"},"data":{"identifier":"ENG-123","labelIds":["label-other","label-factory"],"labels":[{"id":"label-other","name":"other"},{"id":"label-factory","name":"Factory"}]},"updatedFrom":{"labelIds":["label-other"]}}`,
 			testNow.Add(time.Duration(i)*time.Millisecond).UnixMilli(),
 			testActorID,
 		)
@@ -257,7 +257,7 @@ func TestLinearDoCommentStartsOneRunPerActiveIssue(t *testing.T) {
 	if snapshot.Total != 1 || snapshot.Active != 1 || len(snapshot.Runs) != 1 {
 		t.Fatalf("run snapshot = %#v", snapshot)
 	}
-	if got := snapshot.Runs[0]; got.IssueIdentifier != "ENG-123" || got.DuplicateTriggers != 1 {
+	if got := snapshot.Runs[0]; got.IssueIdentifier != "ENG-123" || got.TriggerKind != "linear-label" || got.DuplicateTriggers != 1 {
 		t.Fatalf("run = %#v", got)
 	}
 	if got := notifier.count.Load(); got != 1 {
@@ -270,34 +270,56 @@ func TestLinearDoCommentStartsOneRunPerActiveIssue(t *testing.T) {
 	}
 }
 
-func TestLinearOrdinaryCommentDoesNotStartRun(t *testing.T) {
+func TestLinearNonTriggerEventsDoNotStartRun(t *testing.T) {
 	t.Parallel()
 
-	handler, runStore, notifier := testHandlerWithRuns(t)
-	body := fmt.Sprintf(
-		`{"type":"Comment","action":"create","webhookTimestamp":%d,"actor":{"id":"%s"},"data":{"body":"please /do ENG-123 when ready"}}`,
-		testNow.UnixMilli(),
-		testActorID,
-	)
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, signedWebhookRequest(body, "delivery-1", testSecret))
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "old comment command",
+			body: `{"type":"Comment","action":"create","actor":{"id":"actor-tom"},"data":{"body":"/do ENG-123"}}`,
+		},
+		{
+			name: "Factory label already present",
+			body: `{"type":"Issue","action":"update","actor":{"id":"actor-tom"},"data":{"identifier":"ENG-123","labelIds":["label-factory","label-other"],"labels":[{"id":"label-factory","name":"Factory"},{"id":"label-other","name":"other"}]},"updatedFrom":{"labelIds":["label-factory"]}}`,
+		},
+		{
+			name: "Factory label removed",
+			body: `{"type":"Issue","action":"update","actor":{"id":"actor-tom"},"data":{"identifier":"ENG-123","labelIds":["label-other"],"labels":[{"id":"label-other","name":"other"}]},"updatedFrom":{"labelIds":["label-other","label-factory"]}}`,
+		},
+		{
+			name: "unrelated issue update",
+			body: `{"type":"Issue","action":"update","actor":{"id":"actor-tom"},"data":{"identifier":"ENG-123","labelIds":["label-other"],"labels":[{"id":"label-other","name":"other"}]},"updatedFrom":{"title":"Old title"}}`,
+		},
 	}
-	if snapshot := runStore.Snapshot(); snapshot.Total != 0 {
-		t.Fatalf("run snapshot = %#v", snapshot)
-	}
-	if got := notifier.count.Load(); got != 0 {
-		t.Fatalf("notifications = %d, want 0", got)
+	for i, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			handler, runStore, notifier := testHandlerWithRuns(t)
+			body := fmt.Sprintf(`{"webhookTimestamp":%d,%s`, testNow.UnixMilli(), strings.TrimPrefix(test.body, "{"))
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, signedWebhookRequest(body, fmt.Sprintf("delivery-%d", i), testSecret))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+			}
+			if snapshot := runStore.Snapshot(); snapshot.Total != 0 {
+				t.Fatalf("run snapshot = %#v", snapshot)
+			}
+			if got := notifier.count.Load(); got != 0 {
+				t.Fatalf("notifications = %d, want 0", got)
+			}
+		})
 	}
 }
 
-func TestLinearDoCommentFromAnotherActorDoesNotStartRun(t *testing.T) {
+func TestLinearFactoryLabelFromAnotherActorDoesNotStartRun(t *testing.T) {
 	t.Parallel()
 
 	handler, runStore, notifier := testHandlerWithRuns(t)
 	body := fmt.Sprintf(
-		`{"type":"Comment","action":"create","webhookTimestamp":%d,"actor":{"id":"someone-else"},"data":{"body":"/do ENG-123"}}`,
+		`{"type":"Issue","action":"update","webhookTimestamp":%d,"actor":{"id":"someone-else"},"data":{"identifier":"ENG-123","labelIds":["label-factory"],"labels":[{"id":"label-factory","name":"Factory"}]},"updatedFrom":{"labelIds":[]}}`,
 		testNow.UnixMilli(),
 	)
 	recorder := httptest.NewRecorder()
