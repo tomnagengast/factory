@@ -77,6 +77,11 @@ const timeFormatter = new Intl.DateTimeFormat(undefined, {
   timeStyle: "short",
 });
 
+const observationTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "medium",
+});
+
 async function getHealth(): Promise<Health> {
   const response = await fetch("/api/healthz");
   if (!response.ok) {
@@ -390,7 +395,7 @@ function AgentPage(props: { runID: string }): JSX.Element {
                 </div>
                 <div>
                   <dt>Observed</dt>
-                  <dd>{formatTime(snapshot().observedAt)}</dd>
+                  <dd>{formatObservationTime(snapshot().observedAt)}</dd>
                 </div>
               </dl>
 
@@ -486,6 +491,10 @@ function formatTime(value: string | null | undefined): string {
     return "No deliveries yet";
   }
   return timeFormatter.format(new Date(value));
+}
+
+function formatObservationTime(value: string): string {
+  return observationTimeFormatter.format(new Date(value));
 }
 
 function listenerLabel(
