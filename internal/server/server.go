@@ -16,6 +16,7 @@ type healthResponse struct {
 func New(web fs.FS) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", healthz)
+	mux.HandleFunc("POST /cdn-cgi/rum", cloudflareBeacon)
 	mux.Handle("/", frontend(web))
 	return mux
 }
@@ -25,6 +26,10 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_ = json.NewEncoder(w).Encode(healthResponse{Status: "ok", App: "factory"})
+}
+
+func cloudflareBeacon(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func frontend(web fs.FS) http.Handler {

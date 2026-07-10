@@ -56,6 +56,18 @@ func TestUnknownAPIIsNotFound(t *testing.T) {
 	}
 }
 
+func TestCloudflareBeacon(t *testing.T) {
+	t.Parallel()
+
+	handler := New(testWeb())
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/cdn-cgi/rum", nil))
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+}
+
 func testWeb() fstest.MapFS {
 	return fstest.MapFS{
 		"index.html": &fstest.MapFile{Data: []byte("<h1>Factory</h1>")},

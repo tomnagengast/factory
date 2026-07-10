@@ -9,7 +9,7 @@
   --surface: rgba(237, 240, 237, 0.9);
   --text: #1b211d;
   --muted: #5f6b62;
-  --quiet: #78827a;
+  --quiet: #566259;
   --border: rgba(31, 43, 34, 0.2);
   --accent: #68982e;
   --accent-text: #17200f;
@@ -26,7 +26,7 @@
     --surface: rgba(16, 21, 18, 0.9);
     --text: #e6ebe7;
     --muted: #a9b4ac;
-    --quiet: #758077;
+    --quiet: #939f96;
     --border: rgba(205, 220, 208, 0.2);
     --accent: #b7ee6a;
     --accent-text: #101512;
@@ -43,7 +43,7 @@
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 button,
