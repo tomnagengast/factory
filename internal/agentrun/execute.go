@@ -253,6 +253,8 @@ PROMPT
 
 The helper returns the tmux window and durable output paths. Child windows inherit the same helper and may spawn their own bounded children. Keep all work for this issue inside this session. Wait for every child window and consume its result before you finish. If a child must be stopped, kill only that window. Never use tmux kill-server.
 
+During the pull request green loop, use "$FACTORY_AGENT_HELPER" agent github-events as documented by the /do skill. GitHub webhook events are durable wake signals; refresh authoritative state with gh after each event.
+
 If the /do workflow succeeds, end the final response with exactly FACTORY_RESULT: SUCCEEDED. If it is genuinely blocked, end with exactly FACTORY_RESULT: BLOCKED.`, issueIdentifier)
 }
 

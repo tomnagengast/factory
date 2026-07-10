@@ -34,6 +34,23 @@ Redundant work is prevented at three layers:
 
 Additional `Factory` label applications are coalesced while the issue has an active run. After a run becomes terminal, remove and reapply the label to start another run. The `$do` skill then resumes any existing branch, worktree, or pull request instead of duplicating them.
 
+## GitHub event sink
+
+Factory accepts signed repository webhooks at `https://factory.nags.cloud/api/webhooks/github`. It verifies `X-Hub-Signature-256`, deduplicates `X-GitHub-Delivery`, and stores a bounded journal of compact PR, review, check, status, and workflow metadata. Raw webhook payloads and comment bodies are not retained.
+
+During the PR green loop, a Factory agent waits on the local journal instead of polling GitHub:
+
+```bash
+"$FACTORY_AGENT_HELPER" agent github-events \
+  --repo owner/repository \
+  --pr 123 \
+  --branch issue-123-branch \
+  --after 0 \
+  --wait 60s
+```
+
+The JSON response contains a monotonic cursor and matching events ordered by Factory receipt sequence. The journal retains the latest 1,000 deliveries globally and deduplicates retained GitHub delivery IDs. Events are wake signals only; the agent always refreshes authoritative PR, review, and check state with `gh` before acting. Register or refresh a repository webhook with `bin/network-app github-hook owner/repository` after `refresh-env` and deployment.
+
 ## Child agents
 
 Every principal and child receives these environment variables:
@@ -86,6 +103,7 @@ The launchd wrapper sources `~/.config/network-app/env`. Factory requires:
 - `LINEAR_WEBHOOK_SECRET` for webhook authentication.
 - `LINEAR_API_KEY` for the principal and child agents' Linear access.
 - `LINEAR_TRIGGER_ACTOR_ID` for the only Linear user allowed to start runs.
+- `GITHUB_WEBHOOK_SECRET` for GitHub repository webhook authentication.
 - `FACTORY_GOOGLE_CLIENT_ID` and `FACTORY_GOOGLE_CLIENT_SECRET` for Google sign-in.
 - `FACTORY_GOOGLE_ALLOWED_EMAILS`, a comma-separated allowlist of verified Google emails.
 - `FACTORY_SESSION_KEY` for signed browser sessions.
@@ -109,6 +127,7 @@ Factory also starts its tmux server with a restricted environment. Agent process
 ```bash
 bin/network-app refresh-env
 bin/network-app deploy factory
+bin/network-app github-hook tomnagengast/network
 curl -fsS https://factory.nags.cloud/api/healthz
 curl -fsS https://factory.nags.cloud/api/activity | jq .agentRuns
 ```

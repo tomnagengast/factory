@@ -188,14 +188,14 @@ function ActivityPage(): JSX.Element {
 
         <div class="activity-hero">
           <div>
-            <p class="section-label">Linear webhook</p>
+            <p class="section-label">Webhook fabric</p>
             <h1 class="activity-title" id="activity-title">
               Activity
             </h1>
           </div>
           <p class="activity-intro">
-            Signed Linear events enter here. Applying the <code>Factory</code>
-            label starts one durable agent loop per issue.
+            Signed Linear events start durable issue loops. Signed GitHub PR and
+            CI events wake those agents without polling.
           </p>
         </div>
 
@@ -268,8 +268,8 @@ function ActivityPage(): JSX.Element {
             fallback={
               <div class="empty-state">
                 <strong>Waiting for the first signed delivery.</strong>
-                <span>Events will appear here as Linear sends them.</span>
-                <code>/api/webhooks/linear</code>
+                <span>Linear and GitHub deliveries will appear here.</span>
+                <code>/api/webhooks/*</code>
               </div>
             }
           >

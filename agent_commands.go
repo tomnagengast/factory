@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
+	"github.com/tomnagengast/network/apps/factory/internal/githubhook"
 )
 
 func runAgentCommand(ctx context.Context, args []string) (int, bool) {
@@ -69,14 +74,26 @@ func runChild(ctx context.Context, args []string) int {
 }
 
 func runAgentHelper(ctx context.Context, args []string) int {
-	if len(args) == 0 || args[0] != "spawn" {
-		fmt.Fprintln(os.Stderr, "usage: factory agent spawn --provider codex|claude --name <slug> < prompt.txt")
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: factory agent spawn|github-events")
 		return 2
 	}
+	switch args[0] {
+	case "spawn":
+		return runSpawnHelper(ctx, args[1:])
+	case "github-events":
+		return runGitHubEventsHelper(ctx, args[1:], os.Stdout)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown Factory agent command %q\n", args[0])
+		return 2
+	}
+}
+
+func runSpawnHelper(ctx context.Context, args []string) int {
 	flags := flag.NewFlagSet("agent spawn", flag.ContinueOnError)
 	provider := flags.String("provider", "", "codex or claude")
 	name := flags.String("name", "", "child window slug")
-	if flags.Parse(args[1:]) != nil {
+	if flags.Parse(args) != nil {
 		return 2
 	}
 	binaryPath, err := os.Executable()
@@ -101,6 +118,53 @@ func runAgentHelper(ctx context.Context, args []string) int {
 	}
 	if err := agentrun.WriteChildLaunch(os.Stdout, launch); err != nil {
 		fmt.Fprintf(os.Stderr, "write child launch: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runGitHubEventsHelper(ctx context.Context, args []string, output io.Writer) int {
+	flags := flag.NewFlagSet("agent github-events", flag.ContinueOnError)
+	repository := flags.String("repo", "", "GitHub repository in owner/name form")
+	pullRequest := flags.Int("pr", 0, "pull request number")
+	headBranch := flags.String("branch", "", "pull request head branch")
+	after := flags.Uint64("after", 0, "event cursor")
+	wait := flags.Duration("wait", time.Minute, "maximum time to wait")
+	if flags.Parse(args) != nil || *wait < 0 || *wait > 5*time.Minute {
+		return 2
+	}
+	filter := githubhook.Filter{Repository: *repository, PullRequest: *pullRequest, HeadBranch: *headBranch}
+	if err := filter.Validate(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	runID := os.Getenv("FACTORY_RUN_ID")
+	runDirectory := filepath.Clean(os.Getenv("FACTORY_RUN_DIR"))
+	if runID == "" || runDirectory == "." || filepath.Base(runDirectory) != runID || filepath.Base(filepath.Dir(runDirectory)) != "runs" {
+		fmt.Fprintln(os.Stderr, "agent GitHub events: Factory run environment is invalid")
+		return 2
+	}
+	stateRoot := filepath.Dir(filepath.Dir(runDirectory))
+	journalPath := filepath.Join(stateRoot, "data", "github-events.json")
+
+	var batch githubhook.Batch
+	var err error
+	if *wait == 0 {
+		batch, err = githubhook.Read(journalPath, filter, *after)
+	} else {
+		waitCtx, cancel := context.WithTimeout(ctx, *wait)
+		defer cancel()
+		batch, err = githubhook.Wait(waitCtx, journalPath, filter, *after, 250*time.Millisecond)
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = nil
+		}
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := json.NewEncoder(output).Encode(batch); err != nil {
+		fmt.Fprintf(os.Stderr, "agent GitHub events: encode response: %v\n", err)
 		return 1
 	}
 	return 0

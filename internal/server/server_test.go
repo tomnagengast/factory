@@ -19,6 +19,7 @@ import (
 
 	"github.com/tomnagengast/network/apps/factory/internal/activity"
 	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
+	"github.com/tomnagengast/network/apps/factory/internal/githubhook"
 	"github.com/tomnagengast/network/apps/factory/internal/viewerauth"
 )
 
@@ -335,7 +336,57 @@ func TestLinearFactoryLabelFromAnotherActorDoesNotStartRun(t *testing.T) {
 	}
 }
 
+func TestGitHubWebhookPersistsAndDeduplicatesSignedDelivery(t *testing.T) {
+	t.Parallel()
+
+	handler, journalPath := testHandlerWithGitHub(t)
+	body := `{"action":"completed","repository":{"full_name":"tomnagengast/network"},"check_run":{"status":"completed","conclusion":"success","head_sha":"abc","pull_requests":[{"number":42}],"check_suite":{"head_branch":"eng-42-fix"}}}`
+	for range 2 {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, signedGitHubWebhookRequest(body, "github-delivery-1", "check_run", testGitHubSecret))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+		}
+	}
+
+	batch, err := githubhook.Read(journalPath, githubhook.Filter{Repository: "tomnagengast/network", PullRequest: 42}, 0)
+	if err != nil {
+		t.Fatalf("read GitHub journal: %v", err)
+	}
+	if batch.Cursor != 1 || len(batch.Events) != 1 || batch.Events[0].Conclusion != "success" {
+		t.Fatalf("batch = %#v", batch)
+	}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
+	if !strings.Contains(recorder.Body.String(), `"type":"github/check_run"`) {
+		t.Fatalf("activity missing GitHub event: %s", recorder.Body.String())
+	}
+}
+
+func TestGitHubWebhookRejectsInvalidSignature(t *testing.T) {
+	t.Parallel()
+
+	handler := testHandler(t)
+	body := `{"repository":{"full_name":"tomnagengast/network"}}`
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, signedGitHubWebhookRequest(body, "github-delivery-1", "ping", []byte("wrong")))
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestGitHubSignatureMatchesPublishedVector(t *testing.T) {
+	t.Parallel()
+	secret := []byte("It's a Secret to Everybody")
+	signature := "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17"
+	if !validGitHubSignature(secret, []byte("Hello, World!"), signature) {
+		t.Fatal("published GitHub signature did not validate")
+	}
+}
+
 var testSecret = []byte("linear-test-secret")
+var testGitHubSecret = []byte("github-test-secret")
 
 func testHandler(t *testing.T) http.Handler {
 	t.Helper()
@@ -374,6 +425,10 @@ func testHandlerWithRuns(t *testing.T) (http.Handler, *agentrun.Store, *testNoti
 		t.Fatalf("open agent run store: %v", err)
 	}
 	notifier := &testNotifier{}
+	githubEvents, err := githubhook.Open(filepath.Join(t.TempDir(), "github-events.json"), 10)
+	if err != nil {
+		t.Fatalf("open GitHub journal: %v", err)
+	}
 	handler, err := New(Config{
 		Web:           testWeb(),
 		ActivityStore: store,
@@ -382,6 +437,8 @@ func testHandlerWithRuns(t *testing.T) (http.Handler, *agentrun.Store, *testNoti
 		AgentObserver: &testObserver{err: agentrun.ErrRunNotFound},
 		ViewerAuth:    testViewerAuth(t),
 		LinearSecret:  testSecret,
+		GitHubSecret:  testGitHubSecret,
+		GitHubEvents:  githubEvents,
 		TriggerActor:  testActorID,
 		Now:           func() time.Time { return testNow },
 	})
@@ -401,6 +458,10 @@ func testHandlerWithObserver(t *testing.T, observer AgentObserver) http.Handler 
 	if err != nil {
 		t.Fatalf("open run store: %v", err)
 	}
+	githubEvents, err := githubhook.Open(filepath.Join(t.TempDir(), "github-events.json"), 10)
+	if err != nil {
+		t.Fatalf("open GitHub journal: %v", err)
+	}
 	handler, err := New(Config{
 		Web:           testWeb(),
 		ActivityStore: store,
@@ -409,6 +470,8 @@ func testHandlerWithObserver(t *testing.T, observer AgentObserver) http.Handler 
 		AgentObserver: observer,
 		ViewerAuth:    testViewerAuth(t),
 		LinearSecret:  testSecret,
+		GitHubSecret:  testGitHubSecret,
+		GitHubEvents:  githubEvents,
 		TriggerActor:  testActorID,
 		Now:           func() time.Time { return testNow },
 	})
@@ -416,6 +479,41 @@ func testHandlerWithObserver(t *testing.T, observer AgentObserver) http.Handler 
 		t.Fatalf("new server: %v", err)
 	}
 	return handler
+}
+
+func testHandlerWithGitHub(t *testing.T) (http.Handler, string) {
+	t.Helper()
+	directory := t.TempDir()
+	activityStore, err := activity.Open(filepath.Join(directory, "activity.json"), 10)
+	if err != nil {
+		t.Fatalf("open activity store: %v", err)
+	}
+	runStore, err := agentrun.Open(filepath.Join(directory, "agent-runs.json"), 10)
+	if err != nil {
+		t.Fatalf("open run store: %v", err)
+	}
+	journalPath := filepath.Join(directory, "github-events.json")
+	journal, err := githubhook.Open(journalPath, 10)
+	if err != nil {
+		t.Fatalf("open GitHub journal: %v", err)
+	}
+	handler, err := New(Config{
+		Web:           testWeb(),
+		ActivityStore: activityStore,
+		RunStore:      runStore,
+		RunNotifier:   &testNotifier{},
+		AgentObserver: &testObserver{err: agentrun.ErrRunNotFound},
+		ViewerAuth:    testViewerAuth(t),
+		LinearSecret:  testSecret,
+		GitHubSecret:  testGitHubSecret,
+		GitHubEvents:  journal,
+		TriggerActor:  testActorID,
+		Now:           func() time.Time { return testNow },
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	return handler, journalPath
 }
 
 func testViewerAuth(t *testing.T) *viewerauth.Authenticator {
@@ -442,6 +540,17 @@ func signedWebhookRequest(body, deliveryID string, secret []byte) *http.Request 
 	request := httptest.NewRequest(http.MethodPost, "/api/webhooks/linear", strings.NewReader(body))
 	request.Header.Set("Linear-Delivery", deliveryID)
 	request.Header.Set("Linear-Signature", hex.EncodeToString(mac.Sum(nil)))
+	request.Header.Set("Content-Type", "application/json")
+	return request
+}
+
+func signedGitHubWebhookRequest(body, deliveryID, eventType string, secret []byte) *http.Request {
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte(body))
+	request := httptest.NewRequest(http.MethodPost, "/api/webhooks/github", strings.NewReader(body))
+	request.Header.Set("X-GitHub-Delivery", deliveryID)
+	request.Header.Set("X-GitHub-Event", eventType)
+	request.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	request.Header.Set("Content-Type", "application/json")
 	return request
 }

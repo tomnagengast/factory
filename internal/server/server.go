@@ -17,13 +17,15 @@ import (
 
 	"github.com/tomnagengast/network/apps/factory/internal/activity"
 	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
+	"github.com/tomnagengast/network/apps/factory/internal/githubhook"
 	"github.com/tomnagengast/network/apps/factory/internal/viewerauth"
 )
 
 const (
-	maxWebhookBody = 1 << 20
-	replayWindow   = time.Minute
-	triggerLabel   = "Factory"
+	maxLinearWebhookBody = 1 << 20
+	maxGitHubWebhookBody = 25 << 20
+	replayWindow         = time.Minute
+	triggerLabel         = "Factory"
 )
 
 type EventStore interface {
@@ -40,6 +42,10 @@ type RunNotifier interface {
 	Notify()
 }
 
+type GitHubEventStore interface {
+	Add(githubhook.Event) (bool, error)
+}
+
 type AgentObserver interface {
 	Observe(context.Context, string) (agentrun.AgentView, error)
 }
@@ -52,6 +58,8 @@ type Config struct {
 	AgentObserver AgentObserver
 	ViewerAuth    *viewerauth.Authenticator
 	LinearSecret  []byte
+	GitHubSecret  []byte
+	GitHubEvents  GitHubEventStore
 	TriggerActor  string
 	Now           func() time.Time
 }
@@ -63,6 +71,8 @@ type appServer struct {
 	agentObserver AgentObserver
 	viewerAuth    *viewerauth.Authenticator
 	linearSecret  []byte
+	githubSecret  []byte
+	githubEvents  GitHubEventStore
 	triggerActor  string
 	now           func() time.Time
 }
@@ -107,6 +117,12 @@ func New(config Config) (http.Handler, error) {
 	if len(config.LinearSecret) == 0 {
 		return nil, errors.New("server: Linear webhook secret is required")
 	}
+	if len(config.GitHubSecret) == 0 {
+		return nil, errors.New("server: GitHub webhook secret is required")
+	}
+	if config.GitHubEvents == nil {
+		return nil, errors.New("server: GitHub event store is required")
+	}
 	if config.RunStore == nil {
 		return nil, errors.New("server: agent run store is required")
 	}
@@ -133,6 +149,8 @@ func New(config Config) (http.Handler, error) {
 		agentObserver: config.AgentObserver,
 		viewerAuth:    config.ViewerAuth,
 		linearSecret:  config.LinearSecret,
+		githubSecret:  config.GitHubSecret,
+		githubEvents:  config.GitHubEvents,
 		triggerActor:  config.TriggerActor,
 		now:           config.Now,
 	}
@@ -141,6 +159,7 @@ func New(config Config) (http.Handler, error) {
 	mux.HandleFunc("GET /api/activity", app.activity)
 	mux.Handle("GET /api/agents/{id}", app.viewerAuth.API(http.HandlerFunc(app.agent)))
 	mux.HandleFunc("POST /api/webhooks/linear", app.linearWebhook)
+	mux.HandleFunc("POST /api/webhooks/github", app.githubWebhook)
 	mux.HandleFunc("POST /cdn-cgi/rum", cloudflareBeacon)
 	mux.HandleFunc("GET /auth/google/login", app.viewerAuth.Login)
 	mux.HandleFunc("GET /auth/google/callback", app.viewerAuth.Callback)
@@ -190,7 +209,7 @@ func (s *appServer) agent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxLinearWebhookBody))
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
 		return
@@ -243,6 +262,43 @@ func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func (s *appServer) githubWebhook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxGitHubWebhookBody))
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
+		return
+	}
+	if !validGitHubSignature(s.githubSecret, body, r.Header.Get("X-Hub-Signature-256")) {
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+		return
+	}
+	deliveryID := strings.TrimSpace(r.Header.Get("X-GitHub-Delivery"))
+	eventType := strings.TrimSpace(r.Header.Get("X-GitHub-Event"))
+	if deliveryID == "" || len(deliveryID) > 128 || eventType == "" || len(eventType) > 64 {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	now := s.now().UTC()
+	event, err := githubhook.Parse(deliveryID, eventType, body, now)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	if _, err := s.githubEvents.Add(event); err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	if _, err := s.activityStore.Add("github:"+deliveryID, activity.Event{
+		Type:       "github/" + event.Type,
+		Action:     event.Action,
+		ReceivedAt: now,
+	}); err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 func agentTrigger(payload linearPayload, deliveryID, allowedActorID string) (agentrun.Trigger, bool) {
 	if payload.Type != "Issue" || payload.Action != "update" || payload.Actor.ID != allowedActorID {
 		return agentrun.Trigger{}, false
@@ -270,6 +326,20 @@ func agentTrigger(payload linearPayload, deliveryID, allowedActorID string) (age
 
 func validSignature(secret, body []byte, signature string) bool {
 	provided, err := hex.DecodeString(signature)
+	if err != nil || len(provided) != sha256.Size {
+		return false
+	}
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write(body)
+	return hmac.Equal(mac.Sum(nil), provided)
+}
+
+func validGitHubSignature(secret, body []byte, signature string) bool {
+	encoded, found := strings.CutPrefix(signature, "sha256=")
+	if !found {
+		return false
+	}
+	provided, err := hex.DecodeString(encoded)
 	if err != nil || len(provided) != sha256.Size {
 		return false
 	}
