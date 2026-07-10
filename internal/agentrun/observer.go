@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -126,12 +127,25 @@ func (o *Observer) Observe(ctx context.Context, id string) (AgentView, error) {
 	if run.SessionName == "" {
 		return view, nil
 	}
+	if !run.State.Active() {
+		windows, err := o.historyWindows(run.RunDirectory)
+		if err != nil {
+			return AgentView{}, err
+		}
+		view.Windows = windows
+		return view, nil
+	}
 
 	exists, err := o.sessionExists(ctx, run.SessionName)
 	if err != nil {
 		return AgentView{}, err
 	}
 	if !exists {
+		windows, historyErr := o.historyWindows(run.RunDirectory)
+		if historyErr != nil {
+			return AgentView{}, historyErr
+		}
+		view.Windows = windows
 		return view, nil
 	}
 
@@ -215,6 +229,102 @@ func splitWindowFields(line string) []string {
 	return nil
 }
 
+type eventFile struct {
+	name    string
+	path    string
+	command string
+}
+
+func (o *Observer) historyWindows(runDirectory string) ([]WindowView, error) {
+	files, err := historyEventFiles(runDirectory)
+	if err != nil {
+		return nil, err
+	}
+	windows := make([]WindowView, 0, len(files))
+	for _, file := range files {
+		data, err := os.ReadFile(file.path)
+		if err != nil {
+			return nil, fmt.Errorf("agent observer: read retained history %s: %w", file.name, err)
+		}
+		command := file.command
+		if command == "" {
+			command = retainedAgentCommand(data)
+		}
+		history := o.cleanOutput(data, false)
+		windows = append(windows, WindowView{
+			ID:      "history:" + file.name,
+			Name:    file.name,
+			Command: command,
+			Output:  history.output,
+			Steps:   history.steps,
+		})
+	}
+	return windows, nil
+}
+
+func historyEventFiles(runDirectory string) ([]eventFile, error) {
+	if runDirectory == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(runDirectory)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("agent observer: read run directory: %w", err)
+	}
+	var attempts []int
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if attempt, ok := attemptFromEventFile(entry.Name()); ok {
+			attempts = append(attempts, attempt)
+		}
+	}
+	slices.Sort(attempts)
+	files := make([]eventFile, 0, len(attempts))
+	for _, attempt := range attempts {
+		name := "principal"
+		if len(attempts) > 1 {
+			name = fmt.Sprintf("principal-attempt-%d", attempt)
+		}
+		files = append(files, eventFile{
+			name:    name,
+			path:    filepath.Join(runDirectory, fmt.Sprintf("attempt-%d-events.jsonl", attempt)),
+			command: "codex",
+		})
+	}
+	children, err := os.ReadDir(filepath.Join(runDirectory, "children"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("agent observer: read retained children: %w", err)
+	}
+	for _, child := range children {
+		if !child.IsDir() {
+			continue
+		}
+		path := filepath.Join(runDirectory, "children", child.Name(), "events.jsonl")
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return nil, fmt.Errorf("agent observer: inspect retained child %s: %w", child.Name(), err)
+		}
+		files = append(files, eventFile{name: child.Name(), path: path})
+	}
+	return files, nil
+}
+
+func retainedAgentCommand(events []byte) string {
+	prefix := string(events[:min(len(events), 4096)])
+	if strings.Contains(prefix, `"type":"thread.started"`) {
+		return "codex"
+	}
+	if strings.Contains(prefix, `"type":"system"`) || strings.Contains(prefix, `"type":"assistant"`) {
+		return "claude"
+	}
+	return "agent"
+}
+
 func currentAttempt(runDirectory string) int {
 	if runDirectory == "" {
 		return 0
@@ -225,20 +335,24 @@ func currentAttempt(runDirectory string) int {
 	}
 	attempts := 0
 	for _, entry := range entries {
-		name, found := strings.CutPrefix(entry.Name(), "attempt-")
-		if !found {
-			continue
-		}
-		value, found := strings.CutSuffix(name, "-events.jsonl")
-		if !found {
-			continue
-		}
-		attempt, err := strconv.Atoi(value)
-		if err == nil {
+		if attempt, ok := attemptFromEventFile(entry.Name()); ok {
 			attempts = max(attempts, attempt)
 		}
 	}
 	return attempts
+}
+
+func attemptFromEventFile(name string) (int, bool) {
+	name, found := strings.CutPrefix(name, "attempt-")
+	if !found {
+		return 0, false
+	}
+	value, found := strings.CutSuffix(name, "-events.jsonl")
+	if !found {
+		return 0, false
+	}
+	attempt, err := strconv.Atoi(value)
+	return attempt, err == nil && attempt > 0
 }
 
 type paneView struct {
@@ -247,7 +361,11 @@ type paneView struct {
 }
 
 func (o *Observer) cleanPane(output []byte) paneView {
-	omitted := len(output) > maxPaneBytes
+	return o.cleanOutput(output, true)
+}
+
+func (o *Observer) cleanOutput(output []byte, truncate bool) paneView {
+	omitted := truncate && len(output) > maxPaneBytes
 	if omitted {
 		output = output[len(output)-maxPaneBytes:]
 	}

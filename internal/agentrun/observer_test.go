@@ -110,7 +110,8 @@ func TestAgentStepsSkipLifecycleEventsAndKeepStableIDs(t *testing.T) {
 func TestObserverReturnsTerminalRunWithoutCallingTmux(t *testing.T) {
 	t.Parallel()
 
-	store, err := Open(filepath.Join(t.TempDir(), "runs.json"), 10)
+	root := t.TempDir()
+	store, err := Open(filepath.Join(root, "runs.json"), 10)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -118,11 +119,29 @@ func TestObserverReturnsTerminalRunWithoutCallingTmux(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
+	runDirectory := filepath.Join(root, "run")
+	if err := os.MkdirAll(filepath.Join(runDirectory, "children", "review-agent"), 0o700); err != nil {
+		t.Fatalf("create history directories: %v", err)
+	}
+	principalEvent := `{"type":"item.completed","item":{"id":"item-1","type":"agent_message","text":"principal retained"}}` + "\n"
+	childEvent := `{"type":"assistant","message":{"content":[{"type":"text","text":"child retained secret-value"}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(runDirectory, "attempt-1-events.jsonl"), []byte(principalEvent), 0o600); err != nil {
+		t.Fatalf("write principal history: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runDirectory, "children", "review-agent", "events.jsonl"), []byte(childEvent), 0o600); err != nil {
+		t.Fatalf("write child history: %v", err)
+	}
+	if err := store.MarkStarting(run.ID, "factory-eng-123", runDirectory, observerTestNow); err != nil {
+		t.Fatalf("mark starting: %v", err)
+	}
+	if err := store.MarkRunning(run.ID, 1, observerTestNow); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
 	if err := store.Finish(run.ID, StateFailed, 1, "failed safely", observerTestNow); err != nil {
 		t.Fatalf("finish run: %v", err)
 	}
 
-	observer, err := NewObserver(store, "tmux", "factory-agents", nil, func() time.Time { return observerTestNow })
+	observer, err := NewObserver(store, "tmux", "factory-agents", []string{"secret-value"}, func() time.Time { return observerTestNow })
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
@@ -134,8 +153,14 @@ func TestObserverReturnsTerminalRunWithoutCallingTmux(t *testing.T) {
 	if err != nil {
 		t.Fatalf("observe run: %v", err)
 	}
-	if view.Live || len(view.Windows) != 0 || view.State != StateFailed {
+	if view.Live || len(view.Windows) != 2 || view.State != StateFailed {
 		t.Fatalf("terminal view = %#v", view)
+	}
+	if got := view.Windows[0]; got.Name != "principal" || got.Command != "codex" || len(got.Steps) != 1 || got.Steps[0].Summary != "principal retained" {
+		t.Fatalf("principal history = %#v", got)
+	}
+	if got := view.Windows[1]; got.Name != "review-agent" || got.Command != "claude" || len(got.Steps) != 1 || !strings.Contains(got.Steps[0].Payload, "[REDACTED]") {
+		t.Fatalf("child history = %#v", got)
 	}
 }
 

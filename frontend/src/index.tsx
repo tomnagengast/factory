@@ -333,18 +333,28 @@ function AgentPage(props: { runID: string }): JSX.Element {
     );
   };
   const setStepExpanded = (stepID: string, expanded: boolean): void => {
+    const windowID = selectedWindow()?.id ?? "";
+    const key = `${windowID}:${stepID}`;
     const next = new Set(expandedStepIDs());
     if (expanded) {
-      next.add(stepID);
+      next.add(key);
     } else {
-      next.delete(stepID);
+      next.delete(key);
     }
     setExpandedStepIDs(next);
+  };
+  const stepExpanded = (stepID: string): boolean => {
+    const windowID = selectedWindow()?.id ?? "";
+    return expandedStepIDs().has(`${windowID}:${stepID}`);
   };
 
   onMount(() => {
     document.title = "Agent | Factory";
-    const timer = window.setInterval(() => void refetch(), refreshIntervalMs);
+    const timer = window.setInterval(() => {
+      if (shouldRefreshAgent(agent())) {
+        void refetch();
+      }
+    }, refreshIntervalMs);
     onCleanup(() => window.clearInterval(timer));
   });
 
@@ -424,11 +434,7 @@ function AgentPage(props: { runID: string }): JSX.Element {
                 <div class="console-heading">
                   <div>
                     <h2 id="agent-console-title">Session windows</h2>
-                    <span>
-                      {snapshot().live
-                        ? "Live steps · expand for raw payload"
-                        : "This tmux session is not running"}
-                    </span>
+                    <span>{agentConsoleLabel(snapshot())}</span>
                   </div>
                   <Show when={snapshot().attachCommand}>
                     {(command) => <code class="attach-command">{command()}</code>}
@@ -445,8 +451,8 @@ function AgentPage(props: { runID: string }): JSX.Element {
                           : "No live windows are available."}
                       </strong>
                       <span>
-                        Pending runs appear here after tmux starts. Finished runs
-                        keep their durable output on the host.
+                        Pending runs appear here after tmux starts. Completed runs
+                        show their retained principal and child-agent histories.
                       </span>
                     </div>
                   }
@@ -481,7 +487,7 @@ function AgentPage(props: { runID: string }): JSX.Element {
                         {(step) => (
                           <details
                             class="log-step"
-                            open={expandedStepIDs().has(step.id)}
+                            open={stepExpanded(step.id)}
                             onToggle={(event) =>
                               setStepExpanded(
                                 step.id,
@@ -519,7 +525,7 @@ function AgentPage(props: { runID: string }): JSX.Element {
               </Show>
 
               <footer class="activity-footer">
-                <span>Live output is authenticated and read-only.</span>
+                <span>Live and retained output is authenticated and read-only.</span>
                 <a class="text-link" href="/activity">
                   Back to activity
                 </a>
@@ -578,7 +584,34 @@ function agentStatusLabel(
   if (loading && !agent) {
     return "Connecting";
   }
-  return agent?.live ? "Session live" : "Session offline";
+  if (agent?.live) {
+    return "Session live";
+  }
+  if (agent && !runStateIsActive(agent.state) && agent.windows.length > 0) {
+    return "History retained";
+  }
+  return "Session offline";
+}
+
+function shouldRefreshAgent(agent: AgentView | undefined): boolean {
+  if (!agent) {
+    return true;
+  }
+  return agent.live || runStateIsActive(agent.state);
+}
+
+function runStateIsActive(state: string): boolean {
+  return ["pending", "starting", "running"].includes(state);
+}
+
+function agentConsoleLabel(agent: AgentView): string {
+  if (agent.live) {
+    return "Live steps · expand for raw payload";
+  }
+  if (agent.windows.length > 0) {
+    return "Retained run history · expand for raw payload";
+  }
+  return "This run has no retained output";
 }
 
 const root = document.getElementById("root");
