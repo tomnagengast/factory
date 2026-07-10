@@ -188,7 +188,7 @@ func (o *Observer) windows(ctx context.Context, sessionName string) ([]WindowVie
 		})
 	}
 	if len(windows) == 0 {
-		return nil, errors.New("agent observer: tmux returned no parseable windows")
+		return nil, fmt.Errorf("agent observer: tmux returned no parseable windows: %q", trimmed)
 	}
 	return windows, nil
 }
