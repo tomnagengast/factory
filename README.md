@@ -76,7 +76,7 @@ The launchd wrapper sources `~/.config/network-app/env`. Factory requires:
 - `LINEAR_API_KEY` for the principal and child agents' Linear access.
 - `LINEAR_TRIGGER_ACTOR_ID` for the only Linear user allowed to start runs.
 
-`bin/network-app refresh-env` reads the API key from `op://Code/Linear API key/credential`, validates it against Linear, derives the trigger actor ID from the authenticated viewer, and writes both values to the private launchd environment. Codex uses that key with the official `https://mcp.linear.app/mcp` server through its `LINEAR_API_KEY` bearer-token environment setting.
+`bin/network-app refresh-env` reads the API key from `op://Code/Linear API key/credential`, validates it against Linear, derives the trigger actor ID from the authenticated viewer, and writes both values to the private launchd environment. Codex uses `.agents/skills/do/scripts/linear_graphql.py` to call Linear's GraphQL API directly, so the headless workflow does not depend on MCP tool discovery.
 
 Optional variables:
 

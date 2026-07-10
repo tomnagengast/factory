@@ -243,6 +243,8 @@ func principalPrompt(issueIdentifier string) string {
 
 You are the principal agent in a Factory-managed tmux session. The /do skill owns the SDLC and terminal conditions. Continue until it succeeds or reaches a genuine blocker.
 
+LINEAR_API_KEY is available in your environment. Use .agents/skills/do/scripts/linear_graphql.py for Linear reads and writes. Do not depend on Linear MCP discovery, pass the key in command arguments, or print it.
+
 When another agent can independently research, review, or verify a bounded subtask, launch it as a window in this same tmux session instead of using an invisible in-process subagent. Pass its prompt as data with a quoted heredoc:
 
 "$FACTORY_AGENT_HELPER" agent spawn --provider claude --name short-name <<'PROMPT'
