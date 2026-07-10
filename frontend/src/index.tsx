@@ -51,6 +51,15 @@ type AgentWindow = {
   name: string;
   command: string;
   output: string;
+  steps: AgentStep[];
+};
+
+type AgentStep = {
+  id: string;
+  type: string;
+  status?: string;
+  summary: string;
+  payload: string;
 };
 
 type AgentView = {
@@ -314,11 +323,23 @@ function AgentPage(props: { runID: string }): JSX.Element {
     getAgent,
   );
   const [selectedWindowID, setSelectedWindowID] = createSignal("");
+  const [expandedStepIDs, setExpandedStepIDs] = createSignal<Set<string>>(
+    new Set(),
+  );
   const selectedWindow = (): AgentWindow | undefined => {
     const windows = agent()?.windows ?? [];
     return (
       windows.find((window) => window.id === selectedWindowID()) ?? windows[0]
     );
+  };
+  const setStepExpanded = (stepID: string, expanded: boolean): void => {
+    const next = new Set(expandedStepIDs());
+    if (expanded) {
+      next.add(stepID);
+    } else {
+      next.delete(stepID);
+    }
+    setExpandedStepIDs(next);
   };
 
   onMount(() => {
@@ -405,7 +426,7 @@ function AgentPage(props: { runID: string }): JSX.Element {
                     <h2 id="agent-console-title">Session windows</h2>
                     <span>
                       {snapshot().live
-                        ? "Live tmux pane output"
+                        ? "Live steps · expand for raw payload"
                         : "This tmux session is not running"}
                     </span>
                   </div>
@@ -444,12 +465,47 @@ function AgentPage(props: { runID: string }): JSX.Element {
                       )}
                     </For>
                   </div>
-                  <pre class="terminal-output" tabIndex={0}>
-                    <code>
-                      {selectedWindow()?.output ||
-                        "The window is active. Waiting for output."}
-                    </code>
-                  </pre>
+                  <Show
+                    when={(selectedWindow()?.steps?.length ?? 0) > 0}
+                    fallback={
+                      <pre class="terminal-output" tabIndex={0}>
+                        <code>
+                          {selectedWindow()?.output ||
+                            "The window is active. Waiting for output."}
+                        </code>
+                      </pre>
+                    }
+                  >
+                    <div class="step-list">
+                      <For each={selectedWindow()?.steps ?? []}>
+                        {(step) => (
+                          <details
+                            class="log-step"
+                            open={expandedStepIDs().has(step.id)}
+                            onToggle={(event) =>
+                              setStepExpanded(
+                                step.id,
+                                event.currentTarget.open,
+                              )
+                            }
+                          >
+                            <summary>
+                              <span class={`step-status ${step.status ?? ""}`}>
+                                {step.status
+                                  ? runStateLabel(step.status)
+                                  : "Event"}
+                              </span>
+                              <strong>{step.summary}</strong>
+                              <code>{runStateLabel(step.type)}</code>
+                            </summary>
+                            <pre class="step-payload" tabIndex={0}>
+                              <code>{step.payload}</code>
+                            </pre>
+                          </details>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
                 </Show>
               </section>
 

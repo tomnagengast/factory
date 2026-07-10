@@ -69,8 +69,41 @@ func TestObserverCapturesAndRedactsLiveWindows(t *testing.T) {
 	if got := view.Windows[0].Output; got != "$ printf working\n[REDACTED]" {
 		t.Fatalf("principal output = %q", got)
 	}
+	if got := view.Windows[0].Steps; len(got) != 1 || got[0].Type != "command_execution" || got[0].Summary != "printf working" || !strings.Contains(got[0].Payload, "[REDACTED]") {
+		t.Fatalf("principal steps = %#v", got)
+	}
 	if got := view.Windows[1].Output; got != "reviewing plan" {
 		t.Fatalf("review output = %q", got)
+	}
+	if got := view.Windows[1].Steps; len(got) != 0 {
+		t.Fatalf("plain output steps = %#v", got)
+	}
+}
+
+func TestAgentStepsSkipLifecycleEventsAndKeepStableIDs(t *testing.T) {
+	t.Parallel()
+
+	stream := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-1"}`,
+		`{"type":"item.started","item":{"id":"item-1","type":"file_change","status":"in_progress","changes":[{"path":"apps/factory/main.go"}]}}`,
+		`{"type":"item.completed","item":{"id":"item-1","type":"file_change","status":"completed","changes":[{"path":"apps/factory/main.go"}]}}`,
+		`{"type":"item.completed","item":{"id":"item-2","type":"agent_message","text":"A concise update for the operator."}}`,
+	}, "\n")
+	redact := func(value string) string { return value }
+	first := agentSteps(stream, redact)
+	second := agentSteps(stream, redact)
+
+	if len(first) != 2 {
+		t.Fatalf("steps = %#v", first)
+	}
+	if first[0].Summary != "apps/factory/main.go" || first[0].Status != "completed" || !strings.Contains(first[0].Payload, `"type": "item.completed"`) {
+		t.Fatalf("file step = %#v", first[0])
+	}
+	if first[1].Summary != "A concise update for the operator." || first[1].Type != "agent_message" {
+		t.Fatalf("message step = %#v", first[1])
+	}
+	if first[0].ID == "" || first[0].ID != second[0].ID {
+		t.Fatalf("step IDs are not stable: %#v %#v", first, second)
 	}
 }
 

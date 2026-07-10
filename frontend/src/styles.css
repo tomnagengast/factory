@@ -150,7 +150,8 @@ select {
 .text-link:focus-visible,
 .brand-link:focus-visible,
 .run-link:focus-visible,
-.window-tabs button:focus-visible {
+.window-tabs button:focus-visible,
+.log-step summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 6px;
 }
@@ -637,6 +638,107 @@ select {
   white-space: pre-wrap;
 }
 
+.step-list {
+  max-height: 62dvh;
+  overflow: auto;
+  border: 1px solid #354039;
+  background: #0e1410;
+}
+
+.log-step + .log-step {
+  border-top: 1px solid #2b352f;
+}
+
+.log-step summary {
+  min-height: 64px;
+  padding: 14px 18px;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  color: #dce5de;
+  cursor: pointer;
+  list-style: none;
+}
+
+.log-step summary::-webkit-details-marker {
+  display: none;
+}
+
+.log-step summary::before {
+  content: "+";
+  grid-column: 1;
+  grid-row: 1;
+  width: 18px;
+  color: #91a097;
+  font: 500 0.82rem/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+.log-step[open] summary::before {
+  content: "−";
+}
+
+.log-step summary:hover,
+.log-step[open] summary {
+  background: #18211b;
+}
+
+.log-step summary > * {
+  min-width: 0;
+}
+
+.log-step .step-status {
+  grid-column: 2;
+  grid-row: 1;
+  color: #9eaaa1;
+  font: 500 0.62rem/1.4 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.log-step .step-status.completed,
+.log-step .step-status.in-progress,
+.log-step .step-status.in_progress {
+  color: #b7ee6a;
+}
+
+.log-step strong {
+  grid-column: 3;
+  overflow: hidden;
+  font-size: 0.82rem;
+  font-weight: 500;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-step summary code {
+  grid-column: 4;
+  color: #91a097;
+  font: 400 0.62rem/1.4 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.step-payload {
+  max-height: 48dvh;
+  margin: 0;
+  padding: 22px 24px 26px;
+  overflow: auto;
+  border-top: 1px solid #2b352f;
+  color: #c7d1ca;
+  background: #0a0f0c;
+  font: 400 0.72rem/1.65 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+  white-space: pre-wrap;
+}
+
+.step-payload:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+
 .terminal-output:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
@@ -753,6 +855,34 @@ select {
   .terminal-output {
     min-height: 300px;
     max-height: 56dvh;
+  }
+
+  .step-list {
+    max-height: 56dvh;
+  }
+
+  .log-step summary {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px 12px;
+  }
+
+  .log-step summary::before {
+    display: none;
+  }
+
+  .log-step .step-status {
+    grid-column: 1;
+    margin-left: 0;
+  }
+
+  .log-step strong {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .log-step summary code {
+    grid-column: 2;
+    grid-row: 1;
   }
 
   .event-row {

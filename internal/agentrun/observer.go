@@ -1,7 +1,9 @@
 package agentrun
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,10 +48,19 @@ type AgentView struct {
 }
 
 type WindowView struct {
+	ID      string     `json:"id"`
+	Name    string     `json:"name"`
+	Command string     `json:"command"`
+	Output  string     `json:"output"`
+	Steps   []StepView `json:"steps"`
+}
+
+type StepView struct {
 	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Command string `json:"command"`
-	Output  string `json:"output"`
+	Type    string `json:"type"`
+	Status  string `json:"status,omitempty"`
+	Summary string `json:"summary"`
+	Payload string `json:"payload"`
 }
 
 type Observer struct {
@@ -180,11 +191,13 @@ func (o *Observer) windows(ctx context.Context, sessionName string) ([]WindowVie
 		if captureErr != nil {
 			pane = []byte(fmt.Sprintf("Unable to capture this window: %v", captureErr))
 		}
+		observedPane := o.cleanPane(pane)
 		windows = append(windows, WindowView{
 			ID:      fields[0],
 			Name:    fields[1],
 			Command: fields[2],
-			Output:  o.cleanPane(pane),
+			Output:  observedPane.output,
+			Steps:   observedPane.steps,
 		})
 	}
 	if len(windows) == 0 {
@@ -228,7 +241,12 @@ func currentAttempt(runDirectory string) int {
 	return attempts
 }
 
-func (o *Observer) cleanPane(output []byte) string {
+type paneView struct {
+	output string
+	steps  []StepView
+}
+
+func (o *Observer) cleanPane(output []byte) paneView {
 	omitted := len(output) > maxPaneBytes
 	if omitted {
 		output = output[len(output)-maxPaneBytes:]
@@ -241,12 +259,146 @@ func (o *Observer) cleanPane(output []byte) string {
 		}
 		return -1
 	}, cleaned)
-	cleaned = formatAgentStream(strings.TrimSpace(cleaned))
-	cleaned = o.redact(cleaned)
+	cleaned = strings.TrimSpace(cleaned)
+	steps := agentSteps(cleaned, o.redact)
+	formatted := o.redact(formatAgentStream(cleaned))
 	if omitted {
-		return "[older output omitted]\n" + cleaned
+		formatted = "[older output omitted]\n" + formatted
 	}
-	return cleaned
+	return paneView{output: formatted, steps: steps}
+}
+
+func agentSteps(value string, redact func(string) string) []StepView {
+	steps := make([]StepView, 0)
+	stepIndexes := make(map[string]int)
+	for _, line := range strings.Split(value, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		step, ok := agentStep(line, redact)
+		if !ok {
+			continue
+		}
+		if index, found := stepIndexes[step.ID]; found {
+			steps[index] = step
+			continue
+		}
+		stepIndexes[step.ID] = len(steps)
+		steps = append(steps, step)
+	}
+	return steps
+}
+
+func agentStep(line string, redact func(string) string) (StepView, bool) {
+	var event agentEvent
+	if json.Unmarshal([]byte(line), &event) != nil || lifecycleEvent(event.Type) {
+		return StepView{}, false
+	}
+	var payload bytes.Buffer
+	if json.Indent(&payload, []byte(line), "", "  ") != nil {
+		return StepView{}, false
+	}
+	redacted := redact(payload.String())
+	return StepView{
+		ID:      stepID(event, redacted),
+		Type:    stepType(event),
+		Status:  event.Item.Status,
+		Summary: stepSummary(event),
+		Payload: redacted,
+	}, true
+}
+
+func stepID(event agentEvent, payload string) string {
+	if event.Item.ID != "" {
+		return "item:" + event.Item.ID
+	}
+	digest := sha256.Sum256([]byte(payload))
+	return fmt.Sprintf("event:%x", digest[:8])
+}
+
+type agentEvent struct {
+	Type string `json:"type"`
+	Item struct {
+		ID               string `json:"id"`
+		Type             string `json:"type"`
+		Status           string `json:"status"`
+		Text             string `json:"text"`
+		Command          string `json:"command"`
+		AggregatedOutput string `json:"aggregated_output"`
+		Changes          []struct {
+			Path string `json:"path"`
+		} `json:"changes"`
+	} `json:"item"`
+	Message struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+			Name string `json:"name"`
+		} `json:"content"`
+	} `json:"message"`
+	Result string `json:"result"`
+}
+
+func lifecycleEvent(eventType string) bool {
+	switch eventType {
+	case "thread.started", "turn.started", "turn.completed", "system":
+		return true
+	default:
+		return false
+	}
+}
+
+func stepType(event agentEvent) string {
+	if event.Item.Type != "" {
+		return event.Item.Type
+	}
+	return event.Type
+}
+
+func stepSummary(event agentEvent) string {
+	switch event.Type {
+	case "item.started", "item.completed":
+		if event.Item.Command != "" {
+			return summarizeStep(event.Item.Command)
+		}
+		if event.Item.Text != "" {
+			return summarizeStep(event.Item.Text)
+		}
+		if len(event.Item.Changes) > 0 {
+			return summarizeStep(event.Item.Changes[0].Path)
+		}
+		return strings.ReplaceAll(event.Item.Type, "_", " ")
+	case "assistant":
+		for _, content := range event.Message.Content {
+			if content.Text != "" {
+				return summarizeStep(content.Text)
+			}
+			if content.Name != "" {
+				return "Tool: " + content.Name
+			}
+		}
+		return "Assistant response"
+	case "user":
+		return "Tool result"
+	case "result":
+		if event.Result != "" {
+			return summarizeStep(event.Result)
+		}
+		return "Agent result"
+	default:
+		return strings.ReplaceAll(event.Type, "_", " ")
+	}
+}
+
+func summarizeStep(value string) string {
+	const limit = 160
+	summary := strings.Join(strings.Fields(value), " ")
+	runes := []rune(summary)
+	if len(runes) <= limit {
+		return summary
+	}
+	return string(runes[:limit-1]) + "…"
 }
 
 func formatAgentStream(value string) string {
@@ -256,23 +408,7 @@ func formatAgentStream(value string) string {
 		if line == "" {
 			continue
 		}
-		var event struct {
-			Type string `json:"type"`
-			Item struct {
-				Type             string `json:"type"`
-				Text             string `json:"text"`
-				Command          string `json:"command"`
-				AggregatedOutput string `json:"aggregated_output"`
-			} `json:"item"`
-			Message struct {
-				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-					Name string `json:"name"`
-				} `json:"content"`
-			} `json:"message"`
-			Result string `json:"result"`
-		}
+		var event agentEvent
 		if json.Unmarshal([]byte(line), &event) != nil {
 			rendered = append(rendered, line)
 			continue
