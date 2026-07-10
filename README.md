@@ -68,6 +68,15 @@ tmux -L factory-agents capture-pane -pt factory-team-123:principal
 
 Detach with the configured tmux prefix followed by `d`. Kill only a specific session or window when intervention is necessary. Never use `tmux kill-server`, because it terminates every Factory issue run.
 
+Each activity run links to `https://factory.nags.cloud/agents/<run-id>`. This authenticated, read-only view polls the run every two seconds and shows the current tmux windows, commands, and recent pane output. It never accepts terminal input. Use the attach command shown on the page when interactive local control is required.
+
+The browser uses HTTP Basic authentication over HTTPS:
+
+- Username: `factory`
+- Password: `~/.config/network-app/factory-viewer-password.txt`
+
+`bin/network-app refresh-env` preserves or creates the 48-character random password, writes it to the private service environment, and maintains the separate `0600` password file for operator use. Agent pane output is redacted against credentials available to the agent before it is returned by the API.
+
 ## Configuration
 
 The launchd wrapper sources `~/.config/network-app/env`. Factory requires:
@@ -75,6 +84,7 @@ The launchd wrapper sources `~/.config/network-app/env`. Factory requires:
 - `LINEAR_WEBHOOK_SECRET` for webhook authentication.
 - `LINEAR_API_KEY` for the principal and child agents' Linear access.
 - `LINEAR_TRIGGER_ACTOR_ID` for the only Linear user allowed to start runs.
+- `FACTORY_VIEWER_PASSWORD` for authenticated agent inspection.
 
 `bin/network-app refresh-env` reads the API key from `op://Code/Linear API key/credential`, validates it against Linear, derives the trigger actor ID from the authenticated viewer, and writes both values to the private launchd environment. Codex uses `.agents/skills/do/scripts/linear_graphql.py` to call Linear's GraphQL API directly, so the headless workflow does not depend on MCP tool discovery.
 
@@ -85,7 +95,7 @@ Optional variables:
 - `FACTORY_REPO_PATH`, default `~/.local/share/factory/workspace/network`.
 - `FACTORY_TMUX_SOCKET`, default `factory-agents`.
 
-The public activity API exposes only delivery metadata and opaque run state. Linear issue identifiers, prompts, logs, errors, repository paths, and session names remain private on disk.
+The public activity API exposes only delivery metadata and opaque run state. Linear issue identifiers, prompts, logs, errors, repository paths, and session names remain private unless the operator authenticates to an `/agents/<run-id>` route.
 
 Factory also starts its tmux server with a restricted environment. Agent processes receive normal shell/GitHub runtime variables and the dedicated Linear API key, but not the webhook signing secret, Cloudflare token, UniFi key, tunnel token, or 1Password service-account token sourced by the parent service.
 

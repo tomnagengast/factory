@@ -1,5 +1,6 @@
 import {
   createResource,
+  createSignal,
   For,
   onCleanup,
   onMount,
@@ -45,6 +46,29 @@ type AgentRunSnapshot = {
   runs: AgentRun[];
 };
 
+type AgentWindow = {
+  id: string;
+  name: string;
+  command: string;
+  output: string;
+};
+
+type AgentView = {
+  id: string;
+  issueIdentifier: string;
+  state: string;
+  attempts: number;
+  duplicateTriggers: number;
+  detail?: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  live: boolean;
+  attachCommand?: string;
+  windows: AgentWindow[];
+};
+
 const timeFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
   timeStyle: "short",
@@ -64,6 +88,17 @@ async function getActivity(): Promise<ActivitySnapshot> {
     throw new Error(`Activity request failed with ${response.status}`);
   }
   return response.json() as Promise<ActivitySnapshot>;
+}
+
+async function getAgent(runID: string): Promise<AgentView> {
+  const response = await fetch(`/api/agents/${encodeURIComponent(runID)}`, {
+    cache: "no-store",
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    throw new Error(`Agent request failed with ${response.status}`);
+  }
+  return response.json() as Promise<AgentView>;
 }
 
 function HomePage(): JSX.Element {
@@ -207,7 +242,9 @@ function ActivityPage(): JSX.Element {
               <For each={activity()?.agentRuns.runs ?? []}>
                 {(run) => (
                   <li class="run-row">
-                    <code>{shortRunID(run.id)}</code>
+                    <a class="run-link" href={`/agents/${run.id}`}>
+                      <code>{shortRunID(run.id)}</code>
+                    </a>
                     <strong class={`run-state ${run.state}`}>
                       {runStateLabel(run.state)}
                     </strong>
@@ -253,11 +290,179 @@ function ActivityPage(): JSX.Element {
         </section>
 
         <footer class="activity-footer">
-          <span>Public data is limited to delivery and run-state metadata.</span>
+          <span>Agent details require operator authentication.</span>
           <a class="text-link" href="/">
             Back to Factory
           </a>
         </footer>
+      </section>
+    </main>
+  );
+}
+
+function AgentPage(props: { runID: string }): JSX.Element {
+  const [agent, { refetch }] = createResource(
+    () => props.runID,
+    getAgent,
+  );
+  const [selectedWindowID, setSelectedWindowID] = createSignal("");
+  const selectedWindow = (): AgentWindow | undefined => {
+    const windows = agent()?.windows ?? [];
+    return (
+      windows.find((window) => window.id === selectedWindowID()) ?? windows[0]
+    );
+  };
+
+  onMount(() => {
+    document.title = "Agent | Factory";
+    const timer = window.setInterval(() => void refetch(), 2000);
+    onCleanup(() => window.clearInterval(timer));
+  });
+
+  return (
+    <main class="agent-page">
+      <section class="agent-shell" aria-labelledby="agent-title">
+        <header class="activity-header">
+          <a class="brand-link" href="/">
+            <span class="mark" aria-hidden="true">
+              F
+            </span>
+            <span>Factory</span>
+          </a>
+          <div class="listener" aria-live="polite">
+            <span
+              classList={{
+                dot: true,
+                ready: agent()?.live,
+                failed: Boolean(agent.error),
+              }}
+            />
+            <span>{agentStatusLabel(agent.loading, agent.error, agent())}</span>
+          </div>
+        </header>
+
+        <Show
+          when={agent()}
+          fallback={
+            <div class="agent-loading">
+              <p class="section-label">Agent observer</p>
+              <h1 class="agent-title" id="agent-title">
+                {agent.error ? "Run unavailable" : "Connecting"}
+              </h1>
+              <p>
+                {agent.error
+                  ? "This run could not be loaded. Check the run ID and try again."
+                  : "Opening the authenticated tmux view."}
+              </p>
+            </div>
+          }
+        >
+          {(snapshot) => (
+            <>
+              <div class="agent-hero">
+                <div>
+                  <p class="section-label">Live agent</p>
+                  <h1 class="agent-title" id="agent-title">
+                    {snapshot().issueIdentifier}
+                  </h1>
+                </div>
+                <div class="agent-identity">
+                  <code>{snapshot().id}</code>
+                  <span>Read-only view, refreshes every 2 seconds</span>
+                </div>
+              </div>
+
+              <dl class="agent-summary">
+                <div>
+                  <dt>State</dt>
+                  <dd>{runStateLabel(snapshot().state)}</dd>
+                </div>
+                <div>
+                  <dt>Attempt</dt>
+                  <dd>{snapshot().attempts || "Queued"}</dd>
+                </div>
+                <div>
+                  <dt>Windows</dt>
+                  <dd>{snapshot().windows.length}</dd>
+                </div>
+                <div>
+                  <dt>Updated</dt>
+                  <dd>{formatTime(snapshot().updatedAt)}</dd>
+                </div>
+              </dl>
+
+              <section class="agent-console" aria-labelledby="agent-console-title">
+                <div class="console-heading">
+                  <div>
+                    <h2 id="agent-console-title">Session windows</h2>
+                    <span>
+                      {snapshot().live
+                        ? "Live tmux pane output"
+                        : "This tmux session is not running"}
+                    </span>
+                  </div>
+                  <Show when={snapshot().attachCommand}>
+                    {(command) => <code class="attach-command">{command()}</code>}
+                  </Show>
+                </div>
+
+                <Show
+                  when={snapshot().windows.length > 0}
+                  fallback={
+                    <div class="empty-state compact">
+                      <strong>
+                        {snapshot().state === "pending"
+                          ? "Waiting for a session window."
+                          : "No live windows are available."}
+                      </strong>
+                      <span>
+                        Pending runs appear here after tmux starts. Finished runs
+                        keep their durable output on the host.
+                      </span>
+                    </div>
+                  }
+                >
+                  <div class="window-tabs" aria-label="Agent windows">
+                    <For each={snapshot().windows}>
+                      {(window) => (
+                        <button
+                          type="button"
+                          aria-pressed={selectedWindow()?.id === window.id}
+                          onClick={() => setSelectedWindowID(window.id)}
+                        >
+                          <strong>{window.name}</strong>
+                          <span>{window.command}</span>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                  <pre class="terminal-output" tabIndex={0}>
+                    <code>
+                      {selectedWindow()?.output ||
+                        "The window is active. Waiting for output."}
+                    </code>
+                  </pre>
+                </Show>
+              </section>
+
+              <Show when={snapshot().detail}>
+                {(detail) => (
+                  <section class="run-detail" aria-labelledby="run-detail-title">
+                    <h2 id="run-detail-title">Run detail</h2>
+                    <p>{detail()}</p>
+                  </section>
+                )}
+              </Show>
+
+              <footer class="activity-footer">
+                <span>Live output is authenticated and read-only.</span>
+                <a class="text-link" href="/activity">
+                  Back to activity
+                </a>
+              </footer>
+            </>
+          )}
+        </Show>
       </section>
     </main>
   );
@@ -294,17 +499,34 @@ function listenerLabel(
   return "Listener online";
 }
 
+function agentStatusLabel(
+  loading: boolean,
+  error: unknown,
+  agent: AgentView | undefined,
+): string {
+  if (error) {
+    return "Observer error";
+  }
+  if (loading && !agent) {
+    return "Connecting";
+  }
+  return agent?.live ? "Session live" : "Session offline";
+}
+
 const root = document.getElementById("root");
 if (!root) {
   throw new Error("Root element not found");
 }
 
-render(
-  () =>
-    window.location.pathname.replace(/\/+$/, "") === "/activity" ? (
-      <ActivityPage />
-    ) : (
-      <HomePage />
-    ),
-  root,
-);
+const currentPath = window.location.pathname.replace(/\/+$/, "") || "/";
+const agentRoute = /^\/agents\/([^/]+)$/.exec(currentPath);
+
+render(() => {
+  if (currentPath === "/activity") {
+    return <ActivityPage />;
+  }
+  if (agentRoute) {
+    return <AgentPage runID={agentRoute[1]} />;
+  }
+  return <HomePage />;
+}, root);

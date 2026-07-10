@@ -148,7 +148,9 @@ select {
 }
 
 .text-link:focus-visible,
-.brand-link:focus-visible {
+.brand-link:focus-visible,
+.run-link:focus-visible,
+.window-tabs button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 6px;
 }
@@ -206,14 +208,16 @@ select {
   }
 }
 
-.activity-page {
+.activity-page,
+.agent-page {
   min-height: 100dvh;
   padding: 24px;
   color: var(--text);
   background: var(--page);
 }
 
-.activity-shell {
+.activity-shell,
+.agent-shell {
   width: min(1120px, 100%);
   min-height: calc(100dvh - 48px);
   margin: 0 auto;
@@ -377,6 +381,17 @@ select {
   text-transform: uppercase;
 }
 
+.run-link {
+  width: fit-content;
+  color: var(--text);
+  text-decoration-color: var(--border);
+  text-underline-offset: 5px;
+}
+
+.run-link:hover {
+  text-decoration-color: var(--accent);
+}
+
 .run-row time {
   text-align: right;
 }
@@ -456,12 +471,219 @@ select {
   border-top: 1px solid var(--border);
 }
 
+.agent-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+  align-items: end;
+  gap: 64px;
+  padding: clamp(64px, 9vw, 104px) 0 48px;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-title {
+  margin: 0;
+  font-size: clamp(3rem, 8vw, 6.5rem);
+  font-weight: 500;
+  line-height: 0.9;
+  letter-spacing: -0.065em;
+}
+
+.agent-identity {
+  display: grid;
+  gap: 12px;
+  color: var(--quiet);
+  font: 400 0.68rem/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  letter-spacing: 0.06em;
+}
+
+.agent-identity code {
+  color: var(--accent-textual);
+}
+
+.agent-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-summary > div {
+  min-width: 0;
+  padding: 28px 24px 28px 0;
+}
+
+.agent-summary > div + div {
+  padding-left: 24px;
+  border-left: 1px solid var(--border);
+}
+
+.agent-summary dt,
+.console-heading span {
+  color: var(--quiet);
+  font: 400 0.66rem/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.agent-summary dd {
+  margin: 10px 0 0;
+  overflow: hidden;
+  font-size: clamp(1.05rem, 2vw, 1.5rem);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-summary > div:last-child dd {
+  font-size: clamp(0.9rem, 1.5vw, 1.2rem);
+}
+
+.agent-console {
+  padding-top: 64px;
+}
+
+.console-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 32px;
+  padding-bottom: 20px;
+}
+
+.console-heading > div {
+  display: grid;
+  gap: 8px;
+}
+
+.console-heading h2,
+.run-detail h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.attach-command {
+  max-width: 60%;
+  overflow: hidden;
+  color: var(--accent-textual);
+  font: 400 0.68rem/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-tabs {
+  display: flex;
+  gap: 0;
+  overflow-x: auto;
+  border: 1px solid #354039;
+  border-bottom: 0;
+  background: #111713;
+}
+
+.window-tabs button {
+  min-width: 160px;
+  padding: 16px 18px;
+  display: grid;
+  gap: 5px;
+  border: 0;
+  border-right: 1px solid #354039;
+  color: #9eaaa1;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.window-tabs button:hover,
+.window-tabs button[aria-pressed="true"] {
+  color: #edf2ee;
+  background: #1b241e;
+}
+
+.window-tabs span {
+  color: #9eaaa1;
+  font: 400 0.66rem/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.window-tabs button:hover span,
+.window-tabs button[aria-pressed="true"] span {
+  color: #c7d1ca;
+}
+
+.window-tabs button:focus-visible {
+  outline-offset: -3px;
+}
+
+.window-tabs strong {
+  overflow: hidden;
+  font: 500 0.72rem/1.4 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-output {
+  min-height: 360px;
+  max-height: 62dvh;
+  margin: 0;
+  padding: clamp(20px, 4vw, 36px);
+  overflow: auto;
+  border: 1px solid #354039;
+  color: #dce5de;
+  background: #0e1410;
+  font: 400 0.76rem/1.65 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+  white-space: pre-wrap;
+}
+
+.terminal-output:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.agent-loading {
+  min-height: 60dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.agent-loading p:last-child {
+  max-width: 44ch;
+  margin: 28px 0 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.run-detail {
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.run-detail p {
+  max-width: 70ch;
+  margin: 16px 0 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
 @media (max-width: 720px) {
   .activity-page {
     padding: 12px;
   }
 
+  .agent-page {
+    padding: 12px;
+  }
+
   .activity-shell {
+    min-height: calc(100dvh - 24px);
+    padding: 24px;
+  }
+
+  .agent-shell {
     min-height: calc(100dvh - 24px);
     padding: 24px;
   }
@@ -478,7 +700,17 @@ select {
     padding: 72px 0 40px;
   }
 
+  .agent-hero {
+    grid-template-columns: 1fr;
+    gap: 28px;
+    padding: 64px 0 40px;
+  }
+
   .activity-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-summary {
     grid-template-columns: 1fr;
   }
 
@@ -486,6 +718,16 @@ select {
   .activity-summary > div + div {
     padding: 22px 0;
     border-left: 0;
+  }
+
+  .agent-summary > div,
+  .agent-summary > div + div {
+    padding: 20px 0;
+    border-left: 0;
+  }
+
+  .agent-summary > div + div {
+    border-top: 1px solid var(--border);
   }
 
   .activity-summary > div + div {
@@ -496,6 +738,21 @@ select {
     align-items: flex-start;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .console-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .attach-command {
+    max-width: 100%;
+  }
+
+  .terminal-output {
+    min-height: 300px;
+    max-height: 56dvh;
   }
 
   .event-row {
