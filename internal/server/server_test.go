@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/tomnagengast/network/apps/factory/internal/activity"
 	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
+	"github.com/tomnagengast/network/apps/factory/internal/viewerauth"
 )
 
 var testNow = time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC)
@@ -78,15 +80,21 @@ func TestAgentRoutesRequireViewerAuthentication(t *testing.T) {
 	t.Parallel()
 
 	handler := testHandler(t)
-	for _, target := range []string{"/agents/run-123", "/agents/run-123/", "/api/agents/run-123"} {
+	for _, target := range []string{"/agents/run-123", "/agents/run-123/"} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
-		if recorder.Code != http.StatusUnauthorized {
-			t.Fatalf("%s status = %d, want %d", target, recorder.Code, http.StatusUnauthorized)
+		if recorder.Code != http.StatusFound {
+			t.Fatalf("%s status = %d, want %d", target, recorder.Code, http.StatusFound)
 		}
-		if got := recorder.Header().Get("WWW-Authenticate"); got != viewerRealm {
-			t.Fatalf("%s challenge = %q, want %q", target, got, viewerRealm)
+		if got := recorder.Header().Get("Location"); !strings.HasPrefix(got, "/auth/google/login?next=") {
+			t.Fatalf("%s redirect = %q", target, got)
 		}
+	}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/agents/run-123", nil))
+	if recorder.Code != http.StatusUnauthorized || recorder.Header().Get("WWW-Authenticate") == "" {
+		t.Fatalf("API response = %d, challenge %q", recorder.Code, recorder.Header().Get("WWW-Authenticate"))
 	}
 }
 
@@ -96,7 +104,7 @@ func TestAuthenticatedAgentPageServesFrontend(t *testing.T) {
 	handler := testHandler(t)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/agents/run-123", nil)
-	request.SetBasicAuth(viewerUsername, testViewerPassword)
+	request.SetBasicAuth("factory", testViewerPassword)
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
@@ -119,7 +127,7 @@ func TestAuthenticatedAgentAPIReturnsObservedRun(t *testing.T) {
 	handler := testHandlerWithObserver(t, observer)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/agents/run-123", nil)
-	request.SetBasicAuth(viewerUsername, testViewerPassword)
+	request.SetBasicAuth("factory", testViewerPassword)
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
@@ -142,7 +150,7 @@ func TestAuthenticatedAgentAPINotFound(t *testing.T) {
 	handler := testHandlerWithObserver(t, &testObserver{err: agentrun.ErrRunNotFound})
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/agents/run-missing", nil)
-	request.SetBasicAuth(viewerUsername, testViewerPassword)
+	request.SetBasicAuth("factory", testViewerPassword)
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
@@ -345,15 +353,15 @@ func testHandlerWithRuns(t *testing.T) (http.Handler, *agentrun.Store, *testNoti
 	}
 	notifier := &testNotifier{}
 	handler, err := New(Config{
-		Web:            testWeb(),
-		ActivityStore:  store,
-		RunStore:       runStore,
-		RunNotifier:    notifier,
-		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
-		LinearSecret:   testSecret,
-		TriggerActor:   testActorID,
-		ViewerPassword: testViewerPassword,
-		Now:            func() time.Time { return testNow },
+		Web:           testWeb(),
+		ActivityStore: store,
+		RunStore:      runStore,
+		RunNotifier:   notifier,
+		AgentObserver: &testObserver{err: agentrun.ErrRunNotFound},
+		ViewerAuth:    testViewerAuth(t),
+		LinearSecret:  testSecret,
+		TriggerActor:  testActorID,
+		Now:           func() time.Time { return testNow },
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -372,20 +380,38 @@ func testHandlerWithObserver(t *testing.T, observer AgentObserver) http.Handler 
 		t.Fatalf("open run store: %v", err)
 	}
 	handler, err := New(Config{
-		Web:            testWeb(),
-		ActivityStore:  store,
-		RunStore:       runStore,
-		RunNotifier:    &testNotifier{},
-		AgentObserver:  observer,
-		LinearSecret:   testSecret,
-		TriggerActor:   testActorID,
-		ViewerPassword: testViewerPassword,
-		Now:            func() time.Time { return testNow },
+		Web:           testWeb(),
+		ActivityStore: store,
+		RunStore:      runStore,
+		RunNotifier:   &testNotifier{},
+		AgentObserver: observer,
+		ViewerAuth:    testViewerAuth(t),
+		LinearSecret:  testSecret,
+		TriggerActor:  testActorID,
+		Now:           func() time.Time { return testNow },
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
 	return handler
+}
+
+func testViewerAuth(t *testing.T) *viewerauth.Authenticator {
+	t.Helper()
+	auth, err := viewerauth.New(viewerauth.Config{
+		ClientID:      "google-client",
+		ClientSecret:  "google-secret",
+		RedirectURL:   "https://factory.example/auth/google/callback",
+		AllowedEmails: []string{"tom@example.com"},
+		SessionKey:    bytes.Repeat([]byte("s"), 32),
+		BasicUsername: "factory",
+		BasicPassword: testViewerPassword,
+		Now:           func() time.Time { return testNow },
+	})
+	if err != nil {
+		t.Fatalf("new viewer auth: %v", err)
+	}
+	return auth
 }
 
 func signedWebhookRequest(body, deliveryID string, secret []byte) *http.Request {

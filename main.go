@@ -11,12 +11,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/tomnagengast/network/apps/factory/internal/activity"
 	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
 	"github.com/tomnagengast/network/apps/factory/internal/server"
+	"github.com/tomnagengast/network/apps/factory/internal/viewerauth"
 )
 
 const (
@@ -26,6 +28,8 @@ const (
 	defaultMaxConcurrentRuns = 3
 	defaultRepoURL           = "git@github.com:tomnagengast/network.git"
 	defaultTmuxSocket        = "factory-agents"
+	googleRedirectURL        = "https://factory.nags.cloud/auth/google/callback"
+	viewerUsername           = "factory"
 )
 
 func main() {
@@ -62,6 +66,23 @@ func serve(ctx context.Context) error {
 	viewerPassword := os.Getenv("FACTORY_VIEWER_PASSWORD")
 	if viewerPassword == "" {
 		return errors.New("FACTORY_VIEWER_PASSWORD is required for agent inspection")
+	}
+	googleClientID := os.Getenv("FACTORY_GOOGLE_CLIENT_ID")
+	googleClientSecret := os.Getenv("FACTORY_GOOGLE_CLIENT_SECRET")
+	allowedEmails := splitList(os.Getenv("FACTORY_GOOGLE_ALLOWED_EMAILS"))
+	sessionKey := os.Getenv("FACTORY_SESSION_KEY")
+	viewerAuth, err := viewerauth.New(viewerauth.Config{
+		ClientID:      googleClientID,
+		ClientSecret:  googleClientSecret,
+		RedirectURL:   googleRedirectURL,
+		AllowedEmails: allowedEmails,
+		SessionKey:    []byte(sessionKey),
+		BasicUsername: viewerUsername,
+		BasicPassword: viewerPassword,
+		Now:           time.Now,
+	})
+	if err != nil {
+		return err
 	}
 
 	home, err := os.UserHomeDir()
@@ -113,22 +134,28 @@ func serve(ctx context.Context) error {
 		runStore,
 		tmuxPath,
 		tmuxSocket,
-		[]string{linearAPIKey, viewerPassword, os.Getenv("GITHUB_TOKEN")},
+		[]string{
+			linearAPIKey,
+			viewerPassword,
+			googleClientSecret,
+			sessionKey,
+			os.Getenv("GITHUB_TOKEN"),
+		},
 	)
 	if err != nil {
 		return err
 	}
 
 	handler, err := server.New(server.Config{
-		Web:            web,
-		ActivityStore:  activityStore,
-		RunStore:       runStore,
-		RunNotifier:    manager,
-		AgentObserver:  observer,
-		LinearSecret:   []byte(secret),
-		TriggerActor:   triggerActorID,
-		ViewerPassword: viewerPassword,
-		Now:            time.Now,
+		Web:           web,
+		ActivityStore: activityStore,
+		RunStore:      runStore,
+		RunNotifier:   manager,
+		AgentObserver: observer,
+		ViewerAuth:    viewerAuth,
+		LinearSecret:  []byte(secret),
+		TriggerActor:  triggerActorID,
+		Now:           time.Now,
 	})
 	if err != nil {
 		return err
@@ -178,4 +205,14 @@ func envInt(name string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func splitList(value string) []string {
+	var values []string
+	for item := range strings.SplitSeq(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			values = append(values, item)
+		}
+	}
+	return values
 }
