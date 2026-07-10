@@ -1,4 +1,5 @@
 import {
+  createMemo,
   createResource,
   createSignal,
   For,
@@ -21,14 +22,6 @@ type ActivityEvent = {
   receivedAt: string;
 };
 
-type ActivitySnapshot = {
-  status: string;
-  total: number;
-  lastReceivedAt: string | null;
-  events: ActivityEvent[];
-  agentRuns: AgentRunSnapshot;
-};
-
 type AgentRun = {
   id: string;
   state: string;
@@ -44,6 +37,51 @@ type AgentRunSnapshot = {
   total: number;
   active: number;
   runs: AgentRun[];
+};
+
+type ActivitySnapshot = {
+  status: string;
+  total: number;
+  lastReceivedAt: string | null;
+  events: ActivityEvent[];
+  agentRuns: AgentRunSnapshot;
+};
+
+type ActivityCount = {
+  label: string;
+  count: number;
+};
+
+type LinearEvent = {
+  id: string;
+  type: string;
+  action: string;
+  receivedAt: string;
+  payloadAvailable: boolean;
+};
+
+type LinearActivitySnapshot = {
+  total: number;
+  page: number;
+  pageSize: number;
+  pageCount: number;
+  events: LinearEvent[];
+  typeCounts: ActivityCount[];
+  hourCounts: ActivityCount[];
+};
+
+type LinearEventDetail = LinearEvent & {
+  payload?: unknown;
+};
+
+type AgentActivityRun = AgentRun & {
+  issueIdentifier: string;
+};
+
+type AgentActivitySnapshot = {
+  total: number;
+  active: number;
+  runs: AgentActivityRun[];
 };
 
 type AgentWindow = {
@@ -80,7 +118,9 @@ type AgentView = {
 };
 
 const refreshIntervalMs = 2000;
+type ActivitySection = "overview" | "linear" | "agents";
 
+const activityPageSize = 25;
 const timeFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
   timeStyle: "short",
@@ -92,30 +132,60 @@ const observationTimeFormatter = new Intl.DateTimeFormat(undefined, {
 });
 
 async function getHealth(): Promise<Health> {
-  const response = await fetch("/api/healthz");
-  if (!response.ok) {
-    throw new Error(`Health check failed with ${response.status}`);
-  }
-  return response.json() as Promise<Health>;
+  return getJSON<Health>("/api/healthz", "Health check");
 }
 
 async function getActivity(): Promise<ActivitySnapshot> {
-  const response = await fetch("/api/activity", { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`Activity request failed with ${response.status}`);
-  }
-  return response.json() as Promise<ActivitySnapshot>;
+  return getJSON<ActivitySnapshot>("/api/activity", "Activity request");
+}
+
+async function getLinearActivity(page: number): Promise<LinearActivitySnapshot> {
+  return getJSON<LinearActivitySnapshot>(
+    `/api/activity/linear?page=${page}&pageSize=${activityPageSize}`,
+    "Linear activity request",
+  );
+}
+
+async function getLinearEvent(id: string): Promise<LinearEventDetail> {
+  return getJSON<LinearEventDetail>(
+    `/api/activity/linear/${encodeURIComponent(id)}`,
+    "Linear event request",
+  );
+}
+
+async function getAgentActivity(): Promise<AgentActivitySnapshot> {
+  return getJSON<AgentActivitySnapshot>(
+    "/api/activity/agents",
+    "Agent activity request",
+  );
 }
 
 async function getAgent(runID: string): Promise<AgentView> {
-  const response = await fetch(`/api/agents/${encodeURIComponent(runID)}`, {
+  return getJSON<AgentView>(
+    `/api/agents/${encodeURIComponent(runID)}`,
+    "Agent request",
+  );
+}
+
+async function getAgentByReference(
+  issueIdentifier: string,
+  startedAt: string,
+): Promise<AgentView> {
+  return getJSON<AgentView>(
+    `/api/activity/agents/${encodeURIComponent(issueIdentifier)}/${encodeURIComponent(startedAt)}/run`,
+    "Agent request",
+  );
+}
+
+async function getJSON<T>(url: string, label: string): Promise<T> {
+  const response = await fetch(url, {
     cache: "no-store",
     credentials: "same-origin",
   });
   if (!response.ok) {
-    throw new Error(`Agent request failed with ${response.status}`);
+    throw new Error(`${label} failed with ${response.status}`);
   }
-  return response.json() as Promise<AgentView>;
+  return response.json() as Promise<T>;
 }
 
 function HomePage(): JSX.Element {
@@ -150,10 +220,7 @@ function HomePage(): JSX.Element {
                 failed: Boolean(health.error),
               }}
             />
-            <Show
-              when={!health.loading}
-              fallback={<span>Connecting</span>}
-            >
+            <Show when={!health.loading} fallback={<span>Connecting</span>}>
               <span>{health.error ? "Offline" : "Systems online"}</span>
             </Show>
           </div>
@@ -163,6 +230,56 @@ function HomePage(): JSX.Element {
         </footer>
       </section>
     </main>
+  );
+}
+
+function ActivityHeader(props: {
+  section: ActivitySection;
+  state: "loading" | "ready" | "failed";
+  label: string;
+}): JSX.Element {
+  return (
+    <header class="activity-header">
+      <a class="brand-link" href="/">
+        <span class="mark" aria-hidden="true">
+          F
+        </span>
+        <span>Factory</span>
+      </a>
+      <nav class="activity-nav" aria-label="Activity sections">
+        <a
+          classList={{ active: props.section === "overview" }}
+          aria-current={props.section === "overview" ? "page" : undefined}
+          href="/activity"
+        >
+          Overview
+        </a>
+        <a
+          classList={{ active: props.section === "linear" }}
+          aria-current={props.section === "linear" ? "page" : undefined}
+          href="/activity/linear"
+        >
+          Linear
+        </a>
+        <a
+          classList={{ active: props.section === "agents" }}
+          aria-current={props.section === "agents" ? "page" : undefined}
+          href="/activity/agents"
+        >
+          Agents
+        </a>
+      </nav>
+      <div class="listener" aria-live="polite">
+        <span
+          classList={{
+            dot: true,
+            ready: props.state === "ready",
+            failed: props.state === "failed",
+          }}
+        />
+        <span>{props.label}</span>
+      </div>
+    </header>
   );
 }
 
@@ -176,47 +293,28 @@ function ActivityPage(): JSX.Element {
   });
 
   return (
-    <main class="activity-page">
+    <main class="activity-page" id="main-content">
       <section class="activity-shell" aria-labelledby="activity-title">
-        <header class="activity-header">
-          <a class="brand-link" href="/">
-            <span class="mark" aria-hidden="true">
-              F
-            </span>
-            <span>Factory</span>
-          </a>
-          <div class="listener" aria-live="polite">
-            <span
-              classList={{
-                dot: true,
-                ready: activity()?.status === "listening",
-                failed: Boolean(activity.error),
-              }}
-            />
-            <span>
-              {listenerLabel(
-                activity.loading,
-                activity.error,
-                Boolean(activity()),
-              )}
-            </span>
-          </div>
-        </header>
+        <ActivityHeader
+          section="overview"
+          state={resourceState(activity.loading, activity.error)}
+          label={listenerLabel(activity.loading, activity.error, Boolean(activity()))}
+        />
 
-        <div class="activity-hero">
+        <div class="activity-hero overview-hero">
           <div>
-            <p class="section-label">Webhook fabric</p>
+            <p class="section-label">Factory telemetry</p>
             <h1 class="activity-title" id="activity-title">
               Activity
             </h1>
           </div>
           <p class="activity-intro">
-            Signed Linear events start durable issue loops. Signed GitHub PR and
-            CI events wake those agents without polling.
+            A quiet overview of webhook traffic and autonomous issue loops. Open
+            a dedicated workspace when you need the underlying detail.
           </p>
         </div>
 
-        <dl class="activity-summary">
+        <dl class="activity-summary overview-summary">
           <div>
             <dt>Status</dt>
             <dd>{activity.error ? "Unavailable" : "Listening"}</dd>
@@ -239,75 +337,34 @@ function ActivityPage(): JSX.Element {
           </div>
         </dl>
 
-        <section class="run-feed" aria-labelledby="run-feed-title">
-          <div class="feed-heading">
-            <h2 id="run-feed-title">Agent loops</h2>
-            <span>Issue context and output remain private</span>
-          </div>
-
-          <Show
-            when={(activity()?.agentRuns.runs.length ?? 0) > 0}
-            fallback={
-              <div class="empty-state compact">
-                <strong>No agent run has been claimed.</strong>
-                <span>Apply the trigger label to a Linear issue.</span>
-                <code>Factory</code>
-              </div>
-            }
-          >
-            <ol class="run-list">
-              <For each={activity()?.agentRuns.runs ?? []}>
-                {(run) => (
-                  <li class="run-row">
-                    <a class="run-link" href={`/agents/${run.id}`}>
-                      <code>{shortRunID(run.id)}</code>
-                    </a>
-                    <strong class={`run-state ${run.state}`}>
-                      {runStateLabel(run.state)}
-                    </strong>
-                    <span>{run.attempts || "Queued"}</span>
-                    <time datetime={run.updatedAt}>{formatTime(run.updatedAt)}</time>
-                  </li>
-                )}
-              </For>
-            </ol>
-          </Show>
-        </section>
-
-        <section class="event-feed" aria-labelledby="event-feed-title">
-          <div class="feed-heading">
-            <h2 id="event-feed-title">Recent deliveries</h2>
-            <span>Refreshes every 2 seconds</span>
-          </div>
-
-          <Show
-            when={(activity()?.events.length ?? 0) > 0}
-            fallback={
-              <div class="empty-state">
-                <strong>Waiting for the first signed delivery.</strong>
-                <span>Linear and GitHub deliveries will appear here.</span>
-                <code>/api/webhooks/*</code>
-              </div>
-            }
-          >
-            <ol class="event-list">
-              <For each={activity()?.events ?? []}>
-                {(event) => (
-                  <li class="event-row">
-                    <time datetime={event.receivedAt}>
-                      {formatTime(event.receivedAt)}
-                    </time>
-                    <strong>{event.type}</strong>
-                    <span>{event.action}</span>
-                  </li>
-                )}
-              </For>
-            </ol>
-          </Show>
+        <section class="activity-destinations" aria-label="Detailed activity">
+          <a class="destination destination-linear" href="/activity/linear">
+            <span class="destination-index">01 / Linear</span>
+            <strong>Inspect the event stream</strong>
+            <p>
+              Chart retained Linear deliveries, page through receipt history,
+              and open authenticated raw payloads.
+            </p>
+            <span class="destination-meta">
+              {activity()?.events.filter((event) => !event.type.startsWith("github/"))
+                .length ?? 0} recent events
+            </span>
+          </a>
+          <a class="destination destination-agents" href="/activity/agents">
+            <span class="destination-index">02 / Agents</span>
+            <strong>Follow autonomous work</strong>
+            <p>
+              Review loop state by issue, then enter the authenticated live tmux
+              observer for a specific run.
+            </p>
+            <span class="destination-meta">
+              {activity()?.agentRuns.active ?? 0} active now
+            </span>
+          </a>
         </section>
 
         <footer class="activity-footer">
-          <span>Agent details require operator authentication.</span>
+          <span>Detailed activity requires operator authentication.</span>
           <a class="text-link" href="/">
             Back to Factory
           </a>
@@ -317,20 +374,407 @@ function ActivityPage(): JSX.Element {
   );
 }
 
-function AgentPage(props: { runID: string }): JSX.Element {
-  const [agent, { refetch }] = createResource(
-    () => props.runID,
-    getAgent,
+function LinearActivityPage(): JSX.Element {
+  const [page, setPage] = createSignal(1);
+  const [selectedEventID, setSelectedEventID] = createSignal("");
+  const [activity, { refetch }] = createResource(page, getLinearActivity);
+  const [eventDetail] = createResource(selectedEventID, getLinearEvent);
+
+  onMount(() => {
+    document.title = "Linear activity | Factory";
+    const timer = window.setInterval(() => void refetch(), 5000);
+    onCleanup(() => window.clearInterval(timer));
+  });
+
+  function changePage(nextPage: number): void {
+    setSelectedEventID("");
+    setPage(nextPage);
+  }
+
+  return (
+    <main class="activity-page" id="main-content">
+      <section class="activity-shell" aria-labelledby="linear-title">
+        <ActivityHeader
+          section="linear"
+          state={resourceState(activity.loading, activity.error)}
+          label={activity.error ? "Event feed unavailable" : "Private event feed"}
+        />
+
+        <div class="activity-hero detail-hero">
+          <div>
+            <p class="section-label">Authenticated telemetry</p>
+            <h1 class="activity-title compact-title" id="linear-title">
+              Linear
+            </h1>
+          </div>
+          <p class="activity-intro">
+            Retained delivery metadata and raw payloads. Historical events from
+            before payload retention remain visible without body content.
+          </p>
+        </div>
+
+        <dl class="activity-summary detail-summary">
+          <div>
+            <dt>Retained events</dt>
+            <dd>{activity()?.total ?? 0}</dd>
+          </div>
+          <div>
+            <dt>Event types</dt>
+            <dd>{activity()?.typeCounts.length ?? 0}</dd>
+          </div>
+          <div>
+            <dt>Payload retention</dt>
+            <dd>Private</dd>
+          </div>
+        </dl>
+
+        <Show
+          when={!activity.error}
+          fallback={<InlineError message="Linear activity could not be loaded." />}
+        >
+          <section class="chart-grid" aria-label="Linear delivery charts">
+            <ActivityChart
+              title="Events by type"
+              subtitle="Current retained window"
+              items={activity()?.typeCounts ?? []}
+            />
+            <ActivityChart
+              title="Recent hourly volume"
+              subtitle="Up to twelve active UTC hours"
+              items={activity()?.hourCounts ?? []}
+            />
+          </section>
+
+          <section class="linear-browser" aria-labelledby="event-browser-title">
+            <div class="feed-heading browser-heading">
+              <div>
+                <h2 id="event-browser-title">Delivery ledger</h2>
+                <span>Select an event to inspect its raw body</span>
+              </div>
+              <Pagination
+                page={page()}
+                pageCount={activity()?.pageCount ?? 0}
+                onChange={changePage}
+              />
+            </div>
+
+            <div class="event-workspace">
+              <div class="event-scroll" tabIndex={0} aria-label="Linear events">
+                <Show
+                  when={!activity.loading || Boolean(activity())}
+                  fallback={<LoadingRows />}
+                >
+                  <Show
+                    when={(activity()?.events.length ?? 0) > 0}
+                    fallback={
+                      <div class="empty-state compact">
+                        <strong>No Linear events are retained.</strong>
+                        <span>New verified deliveries will appear here.</span>
+                      </div>
+                    }
+                  >
+                    <ol class="event-list selectable-events">
+                      <For each={activity()?.events ?? []}>
+                        {(event) => (
+                          <li>
+                            <button
+                              class="event-row event-button"
+                              classList={{ selected: selectedEventID() === event.id }}
+                              type="button"
+                              aria-pressed={selectedEventID() === event.id}
+                              onClick={() => setSelectedEventID(event.id)}
+                            >
+                              <time datetime={event.receivedAt}>
+                                {formatTime(event.receivedAt)}
+                              </time>
+                              <strong>{event.type}</strong>
+                              <span>{event.action}</span>
+                              <i aria-label={event.payloadAvailable ? "Payload retained" : "Payload unavailable"}>
+                                {event.payloadAvailable ? "raw" : "historic"}
+                              </i>
+                            </button>
+                          </li>
+                        )}
+                      </For>
+                    </ol>
+                  </Show>
+                </Show>
+              </div>
+
+              <aside class="payload-panel" aria-live="polite" aria-labelledby="payload-title">
+                <Show
+                  when={selectedEventID()}
+                  fallback={
+                    <div class="payload-placeholder">
+                      <span class="section-label">Raw payload</span>
+                      <strong>Choose a delivery</strong>
+                      <p>The signed request body will open here without leaving the ledger.</p>
+                    </div>
+                  }
+                >
+                  <Show
+                    when={!eventDetail.loading}
+                    fallback={<div class="payload-placeholder"><strong>Loading payload</strong></div>}
+                  >
+                    <Show
+                      when={!eventDetail.error && eventDetail()}
+                      fallback={<InlineError message="This event could not be loaded." />}
+                    >
+                      {(detail) => (
+                        <>
+                          <div class="payload-heading">
+                            <div>
+                              <span class="section-label">Raw payload</span>
+                              <h2 id="payload-title">{detail().type}</h2>
+                            </div>
+                            <time datetime={detail().receivedAt}>
+                              {formatTime(detail().receivedAt)}
+                            </time>
+                          </div>
+                          <Show
+                            when={detail().payloadAvailable}
+                            fallback={
+                              <div class="payload-unavailable">
+                                <strong>Payload not retained</strong>
+                                <p>This delivery predates raw-body retention.</p>
+                              </div>
+                            }
+                          >
+                            <pre class="payload-code" tabIndex={0}>
+                              <code>{formatPayload(detail().payload)}</code>
+                            </pre>
+                          </Show>
+                        </>
+                      )}
+                    </Show>
+                  </Show>
+                </Show>
+              </aside>
+            </div>
+          </section>
+        </Show>
+
+        <footer class="activity-footer">
+          <span>Raw bodies are bounded with the retained event window.</span>
+          <a class="text-link" href="/activity">
+            Back to overview
+          </a>
+        </footer>
+      </section>
+    </main>
   );
+}
+
+function AgentActivityPage(): JSX.Element {
+  const [activity, { refetch }] = createResource(getAgentActivity);
+  const stateCounts = createMemo(() => countRunStates(activity()?.runs ?? []));
+
+  onMount(() => {
+    document.title = "Agent activity | Factory";
+    const timer = window.setInterval(() => void refetch(), 5000);
+    onCleanup(() => window.clearInterval(timer));
+  });
+
+  return (
+    <main class="activity-page" id="main-content">
+      <section class="activity-shell" aria-labelledby="agents-title">
+        <ActivityHeader
+          section="agents"
+          state={resourceState(activity.loading, activity.error)}
+          label={activity.error ? "Run store unavailable" : "Private run index"}
+        />
+
+        <div class="activity-hero detail-hero">
+          <div>
+            <p class="section-label">Autonomous delivery</p>
+            <h1 class="activity-title compact-title" id="agents-title">
+              Agents
+            </h1>
+          </div>
+          <p class="activity-intro">
+            Every retained Factory loop, addressed by its Linear issue and start
+            time. Enter a run to observe the live session or durable result.
+          </p>
+        </div>
+
+        <dl class="activity-summary detail-summary">
+          <div>
+            <dt>Total runs</dt>
+            <dd>{activity()?.total ?? 0}</dd>
+          </div>
+          <div>
+            <dt>Active loops</dt>
+            <dd>{activity()?.active ?? 0}</dd>
+          </div>
+          <div>
+            <dt>Terminal runs</dt>
+            <dd>{Math.max(0, (activity()?.runs.length ?? 0) - (activity()?.active ?? 0))}</dd>
+          </div>
+        </dl>
+
+        <Show
+          when={!activity.error}
+          fallback={<InlineError message="Agent activity could not be loaded." />}
+        >
+          <section class="agent-overview-grid">
+            <ActivityChart
+              title="Runs by state"
+              subtitle="Current retained window"
+              items={stateCounts()}
+            />
+            <div class="run-pulse" aria-label="Current run status">
+              <span class="section-label">Live capacity</span>
+              <strong>{activity()?.active ?? 0}</strong>
+              <p>
+                {(activity()?.active ?? 0) === 1 ? "loop is" : "loops are"} active across the
+                Factory runner.
+              </p>
+            </div>
+          </section>
+
+          <section class="run-feed dedicated-run-feed" aria-labelledby="run-feed-title">
+            <div class="feed-heading">
+              <h2 id="run-feed-title">Run ledger</h2>
+              <span>Issue context is authenticated</span>
+            </div>
+
+            <Show
+              when={!activity.loading || Boolean(activity())}
+              fallback={<LoadingRows />}
+            >
+              <Show
+                when={(activity()?.runs.length ?? 0) > 0}
+                fallback={
+                  <div class="empty-state compact">
+                    <strong>No agent run has been claimed.</strong>
+                    <span>Apply the Factory label to a Linear issue.</span>
+                  </div>
+                }
+              >
+                <ol class="run-list private-run-list">
+                  <For each={activity()?.runs ?? []}>
+                    {(run) => (
+                      <li class="run-row private-run-row">
+                        <a class="run-link issue-link" href={agentRunHref(run)}>
+                          {run.issueIdentifier}
+                        </a>
+                        <strong class={`run-state ${run.state}`}>
+                          {runStateLabel(run.state)}
+                        </strong>
+                        <span>{run.attempts ? `Attempt ${run.attempts}` : "Queued"}</span>
+                        <time datetime={run.startedAt ?? run.createdAt}>
+                          {formatTime(run.startedAt ?? run.createdAt)}
+                        </time>
+                      </li>
+                    )}
+                  </For>
+                </ol>
+              </Show>
+            </Show>
+          </section>
+        </Show>
+
+        <footer class="activity-footer">
+          <span>Live pane output is authenticated, redacted, and read-only.</span>
+          <a class="text-link" href="/activity">
+            Back to overview
+          </a>
+        </footer>
+      </section>
+    </main>
+  );
+}
+
+function ActivityChart(props: {
+  title: string;
+  subtitle: string;
+  items: ActivityCount[];
+}): JSX.Element {
+  const maximum = (): number => Math.max(1, ...props.items.map((item) => item.count));
+
+  return (
+    <article class="activity-chart">
+      <header>
+        <h2>{props.title}</h2>
+        <span>{props.subtitle}</span>
+      </header>
+      <Show
+        when={props.items.length > 0}
+        fallback={<p class="chart-empty">Waiting for retained activity.</p>}
+      >
+        <ol>
+          <For each={props.items}>
+            {(item) => (
+              <li>
+                <span>{item.label}</span>
+                <progress max={maximum()} value={item.count} aria-label={`${item.label}: ${item.count}`} />
+                <strong>{item.count}</strong>
+              </li>
+            )}
+          </For>
+        </ol>
+      </Show>
+    </article>
+  );
+}
+
+function Pagination(props: {
+  page: number;
+  pageCount: number;
+  onChange: (page: number) => void;
+}): JSX.Element {
+  const lastPage = (): number => Math.max(1, props.pageCount);
+  return (
+    <nav class="pagination" aria-label="Event pages">
+      <button
+        type="button"
+        disabled={props.page <= 1}
+        onClick={() => props.onChange(props.page - 1)}
+      >
+        Previous
+      </button>
+      <span>
+        {props.page} / {lastPage()}
+      </span>
+      <button
+        type="button"
+        disabled={props.page >= lastPage()}
+        onClick={() => props.onChange(props.page + 1)}
+      >
+        Next
+      </button>
+    </nav>
+  );
+}
+
+function InlineError(props: { message: string }): JSX.Element {
+  return (
+    <div class="inline-error" role="alert">
+      <strong>Connection failed</strong>
+      <span>{props.message}</span>
+    </div>
+  );
+}
+
+function LoadingRows(): JSX.Element {
+  return (
+    <div class="loading-rows" aria-label="Loading activity">
+      <span />
+      <span />
+      <span />
+    </div>
+  );
+}
+
+function AgentPage(props: { load: () => Promise<AgentView> }): JSX.Element {
+  const [agent, { refetch }] = createResource(props.load);
   const [selectedWindowID, setSelectedWindowID] = createSignal("");
   const [expandedStepIDs, setExpandedStepIDs] = createSignal<Set<string>>(
     new Set(),
   );
   const selectedWindow = (): AgentWindow | undefined => {
     const windows = agent()?.windows ?? [];
-    return (
-      windows.find((window) => window.id === selectedWindowID()) ?? windows[0]
-    );
+    return windows.find((window) => window.id === selectedWindowID()) ?? windows[0];
   };
   const setStepExpanded = (stepID: string, expanded: boolean): void => {
     const windowID = selectedWindow()?.id ?? "";
@@ -349,7 +793,7 @@ function AgentPage(props: { runID: string }): JSX.Element {
   };
 
   onMount(() => {
-    document.title = "Agent | Factory";
+    document.title = "Agent run | Factory";
     const timer = window.setInterval(() => {
       if (shouldRefreshAgent(agent())) {
         void refetch();
@@ -359,26 +803,13 @@ function AgentPage(props: { runID: string }): JSX.Element {
   });
 
   return (
-    <main class="agent-page">
+    <main class="agent-page" id="main-content">
       <section class="agent-shell" aria-labelledby="agent-title">
-        <header class="activity-header">
-          <a class="brand-link" href="/">
-            <span class="mark" aria-hidden="true">
-              F
-            </span>
-            <span>Factory</span>
-          </a>
-          <div class="listener" aria-live="polite">
-            <span
-              classList={{
-                dot: true,
-                ready: agent()?.live,
-                failed: Boolean(agent.error),
-              }}
-            />
-            <span>{agentStatusLabel(agent.loading, agent.error, agent())}</span>
-          </div>
-        </header>
+        <ActivityHeader
+          section="agents"
+          state={resourceState(agent.loading, agent.error, agent()?.live)}
+          label={agentStatusLabel(agent.loading, agent.error, agent())}
+        />
 
         <Show
           when={agent()}
@@ -390,7 +821,7 @@ function AgentPage(props: { runID: string }): JSX.Element {
               </h1>
               <p>
                 {agent.error
-                  ? "This run could not be loaded. Check the run ID and try again."
+                  ? "This run could not be loaded. Check the route and try again."
                   : "Opening the authenticated tmux view."}
               </p>
             </div>
@@ -400,7 +831,7 @@ function AgentPage(props: { runID: string }): JSX.Element {
             <>
               <div class="agent-hero">
                 <div>
-                  <p class="section-label">Live agent</p>
+                  <p class="section-label">Agent run</p>
                   <h1 class="agent-title" id="agent-title">
                     {snapshot().issueIdentifier}
                   </h1>
@@ -526,8 +957,8 @@ function AgentPage(props: { runID: string }): JSX.Element {
 
               <footer class="activity-footer">
                 <span>Live and retained output is authenticated and read-only.</span>
-                <a class="text-link" href="/activity">
-                  Back to activity
+                <a class="text-link" href="/activity/agents">
+                  Back to agents
                 </a>
               </footer>
             </>
@@ -538,8 +969,22 @@ function AgentPage(props: { runID: string }): JSX.Element {
   );
 }
 
-function shortRunID(value: string): string {
-  return value.slice(0, 12);
+function agentRunHref(run: AgentActivityRun): string {
+  if (!run.startedAt) {
+    return `/agents/${encodeURIComponent(run.id)}`;
+  }
+  return `/activity/agents/${encodeURIComponent(run.issueIdentifier)}/${new Date(run.startedAt).getTime()}/run`;
+}
+
+function countRunStates(runs: AgentActivityRun[]): ActivityCount[] {
+  const counts = new Map<string, number>();
+  for (const run of runs) {
+    const label = runStateLabel(run.state);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([label, count]) => ({ label, count }))
+    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
 }
 
 function runStateLabel(value: string): string {
@@ -550,13 +995,17 @@ function runStateLabel(value: string): string {
 
 function formatTime(value: string | null | undefined): string {
   if (!value) {
-    return "No deliveries yet";
+    return "No activity yet";
   }
   return timeFormatter.format(new Date(value));
 }
 
 function formatObservationTime(value: string): string {
   return observationTimeFormatter.format(new Date(value));
+}
+
+function formatPayload(value: unknown): string {
+  return JSON.stringify(value, null, 2) ?? "null";
 }
 
 function listenerLabel(
@@ -614,20 +1063,48 @@ function agentConsoleLabel(agent: AgentView): string {
   return "This run has no retained output";
 }
 
+function resourceState(
+  loading: boolean,
+  error: unknown,
+  ready = true,
+): "loading" | "ready" | "failed" {
+  if (error) {
+    return "failed";
+  }
+  if (loading || !ready) {
+    return "loading";
+  }
+  return "ready";
+}
+
 const root = document.getElementById("root");
 if (!root) {
   throw new Error("Root element not found");
 }
 
 const currentPath = window.location.pathname.replace(/\/+$/, "") || "/";
-const agentRoute = /^\/agents\/([^/]+)$/.exec(currentPath);
+const legacyAgentRoute = /^\/agents\/([^/]+)$/.exec(currentPath);
+const agentActivityRoute = /^\/activity\/agents\/([^/]+)\/(\d+)\/run$/.exec(currentPath);
 
 render(() => {
   if (currentPath === "/activity") {
     return <ActivityPage />;
   }
-  if (agentRoute) {
-    return <AgentPage runID={agentRoute[1]} />;
+  if (currentPath === "/activity/linear") {
+    return <LinearActivityPage />;
+  }
+  if (currentPath === "/activity/agents") {
+    return <AgentActivityPage />;
+  }
+  if (agentActivityRoute) {
+    return (
+      <AgentPage
+        load={() => getAgentByReference(agentActivityRoute[1], agentActivityRoute[2])}
+      />
+    );
+  }
+  if (legacyAgentRoute) {
+    return <AgentPage load={() => getAgent(legacyAgentRoute[1])} />;
   }
   return <HomePage />;
 }, root);

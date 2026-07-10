@@ -285,7 +285,7 @@ func (s *appServer) writeAgent(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 	if err != nil {
-		slog.Error("observe agent run", "run_id", r.PathValue("id"), "error", err)
+		slog.Error("observe agent run", "run_id", id, "error", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
