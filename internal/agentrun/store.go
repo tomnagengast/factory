@@ -245,6 +245,19 @@ func (s *Store) Snapshot() Snapshot {
 	return Snapshot{Total: s.state.Total, Active: active, Runs: runs}
 }
 
+func (s *Store) Find(id string) (Run, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, run := range s.state.Runs {
+		if run.ID == id {
+			run.DeliveryIDs = slices.Clone(run.DeliveryIDs)
+			return run, true
+		}
+	}
+	return Run{}, false
+}
+
 func (s *Store) PublicSnapshot() PublicSnapshot {
 	snapshot := s.Snapshot()
 	runs := make([]PublicRun, len(snapshot.Runs))

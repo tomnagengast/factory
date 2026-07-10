@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,6 +23,8 @@ import (
 const (
 	maxWebhookBody = 1 << 20
 	replayWindow   = time.Minute
+	viewerUsername = "factory"
+	viewerRealm    = `Basic realm="Factory agents", charset="UTF-8"`
 )
 
 var doCommandPattern = regexp.MustCompile(`(?i)^/do[[:space:]]+([A-Z][A-Z0-9]*-[1-9][0-9]*)[[:space:]]*$`)
@@ -39,13 +43,31 @@ type RunNotifier interface {
 	Notify()
 }
 
+type AgentObserver interface {
+	Observe(context.Context, string) (agentrun.AgentView, error)
+}
+
+type Config struct {
+	Web            fs.FS
+	ActivityStore  EventStore
+	RunStore       RunStore
+	RunNotifier    RunNotifier
+	AgentObserver  AgentObserver
+	LinearSecret   []byte
+	TriggerActor   string
+	ViewerPassword string
+	Now            func() time.Time
+}
+
 type appServer struct {
-	activityStore EventStore
-	runStore      RunStore
-	runNotifier   RunNotifier
-	linearSecret  []byte
-	triggerActor  string
-	now           func() time.Time
+	activityStore  EventStore
+	runStore       RunStore
+	runNotifier    RunNotifier
+	agentObserver  AgentObserver
+	linearSecret   []byte
+	triggerActor   string
+	viewerPassword []byte
+	now            func() time.Time
 }
 
 type healthResponse struct {
@@ -73,48 +95,51 @@ type activityResponse struct {
 	AgentRuns      agentrun.PublicSnapshot `json:"agentRuns"`
 }
 
-func New(
-	web fs.FS,
-	store EventStore,
-	runStore RunStore,
-	runNotifier RunNotifier,
-	linearSecret []byte,
-	triggerActor string,
-	now func() time.Time,
-) (http.Handler, error) {
-	if store == nil {
+func New(config Config) (http.Handler, error) {
+	if config.ActivityStore == nil {
 		return nil, errors.New("server: activity store is required")
 	}
-	if len(linearSecret) == 0 {
+	if len(config.LinearSecret) == 0 {
 		return nil, errors.New("server: Linear webhook secret is required")
 	}
-	if runStore == nil {
+	if config.RunStore == nil {
 		return nil, errors.New("server: agent run store is required")
 	}
-	if runNotifier == nil {
+	if config.RunNotifier == nil {
 		return nil, errors.New("server: agent run notifier is required")
 	}
-	if triggerActor == "" {
+	if config.AgentObserver == nil {
+		return nil, errors.New("server: agent observer is required")
+	}
+	if config.TriggerActor == "" {
 		return nil, errors.New("server: Linear trigger actor is required")
 	}
-	if now == nil {
+	if config.ViewerPassword == "" {
+		return nil, errors.New("server: viewer password is required")
+	}
+	if config.Now == nil {
 		return nil, errors.New("server: clock is required")
 	}
 
 	app := &appServer{
-		activityStore: store,
-		runStore:      runStore,
-		runNotifier:   runNotifier,
-		linearSecret:  linearSecret,
-		triggerActor:  triggerActor,
-		now:           now,
+		activityStore:  config.ActivityStore,
+		runStore:       config.RunStore,
+		runNotifier:    config.RunNotifier,
+		agentObserver:  config.AgentObserver,
+		linearSecret:   config.LinearSecret,
+		triggerActor:   config.TriggerActor,
+		viewerPassword: []byte(config.ViewerPassword),
+		now:            config.Now,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", healthz)
 	mux.HandleFunc("GET /api/activity", app.activity)
+	mux.Handle("GET /api/agents/{id}", app.requireViewer(http.HandlerFunc(app.agent)))
 	mux.HandleFunc("POST /api/webhooks/linear", app.linearWebhook)
 	mux.HandleFunc("POST /cdn-cgi/rum", cloudflareBeacon)
-	mux.Handle("/", frontend(web))
+	mux.Handle("GET /agents", app.requireViewer(frontend(config.Web)))
+	mux.Handle("GET /agents/", app.requireViewer(frontend(config.Web)))
+	mux.Handle("/", frontend(config.Web))
 	return mux, nil
 }
 
@@ -141,6 +166,38 @@ func (s *appServer) activity(w http.ResponseWriter, _ *http.Request) {
 		response.LastReceivedAt = &snapshot.Events[0].ReceivedAt
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *appServer) agent(w http.ResponseWriter, r *http.Request) {
+	view, err := s.agentObserver.Observe(r.Context(), r.PathValue("id"))
+	if errors.Is(err, agentrun.ErrRunNotFound) {
+		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *appServer) requireViewer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		username, password, ok := r.BasicAuth()
+		usernameMatch := subtle.ConstantTimeCompare([]byte(username), []byte(viewerUsername)) == 1
+		passwordMatch := subtle.ConstantTimeCompare([]byte(password), s.viewerPassword) == 1
+		if !ok || !usernameMatch || !passwordMatch {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("WWW-Authenticate", viewerRealm)
+			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {

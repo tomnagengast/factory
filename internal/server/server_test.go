@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,6 +23,8 @@ import (
 var testNow = time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC)
 
 const testActorID = "actor-tom"
+
+const testViewerPassword = "viewer-test-password"
 
 func TestHealthz(t *testing.T) {
 	t.Parallel()
@@ -66,6 +69,81 @@ func TestUnknownAPIIsNotFound(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/missing", nil))
 
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+}
+
+func TestAgentRoutesRequireViewerAuthentication(t *testing.T) {
+	t.Parallel()
+
+	handler := testHandler(t)
+	for _, target := range []string{"/agents/run-123", "/agents/run-123/", "/api/agents/run-123"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("%s status = %d, want %d", target, recorder.Code, http.StatusUnauthorized)
+		}
+		if got := recorder.Header().Get("WWW-Authenticate"); got != viewerRealm {
+			t.Fatalf("%s challenge = %q, want %q", target, got, viewerRealm)
+		}
+	}
+}
+
+func TestAuthenticatedAgentPageServesFrontend(t *testing.T) {
+	t.Parallel()
+
+	handler := testHandler(t)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/agents/run-123", nil)
+	request.SetBasicAuth(viewerUsername, testViewerPassword)
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if got, want := recorder.Body.String(), "<h1>Factory</h1>"; got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+func TestAuthenticatedAgentAPIReturnsObservedRun(t *testing.T) {
+	t.Parallel()
+
+	observer := &testObserver{view: agentrun.AgentView{
+		ID:              "run-123",
+		IssueIdentifier: "ENG-123",
+		State:           agentrun.StateRunning,
+		Live:            true,
+		Windows:         []agentrun.WindowView{{ID: "@1", Name: "principal", Output: "working"}},
+	}}
+	handler := testHandlerWithObserver(t, observer)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/agents/run-123", nil)
+	request.SetBasicAuth(viewerUsername, testViewerPassword)
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var got agentrun.AgentView
+	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil {
+		t.Fatalf("decode view: %v", err)
+	}
+	if got.ID != "run-123" || got.IssueIdentifier != "ENG-123" || len(got.Windows) != 1 {
+		t.Fatalf("view = %#v", got)
+	}
+	if observer.lastID != "run-123" {
+		t.Fatalf("observer ID = %q, want run-123", observer.lastID)
+	}
+}
+
+func TestAuthenticatedAgentAPINotFound(t *testing.T) {
+	t.Parallel()
+
+	handler := testHandlerWithObserver(t, &testObserver{err: agentrun.ErrRunNotFound})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/agents/run-missing", nil)
+	request.SetBasicAuth(viewerUsername, testViewerPassword)
+	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
 	}
@@ -239,6 +317,17 @@ type testNotifier struct {
 	count atomic.Int32
 }
 
+type testObserver struct {
+	view   agentrun.AgentView
+	err    error
+	lastID string
+}
+
+func (o *testObserver) Observe(_ context.Context, id string) (agentrun.AgentView, error) {
+	o.lastID = id
+	return o.view, o.err
+}
+
 func (n *testNotifier) Notify() {
 	n.count.Add(1)
 }
@@ -255,19 +344,48 @@ func testHandlerWithRuns(t *testing.T) (http.Handler, *agentrun.Store, *testNoti
 		t.Fatalf("open agent run store: %v", err)
 	}
 	notifier := &testNotifier{}
-	handler, err := New(
-		testWeb(),
-		store,
-		runStore,
-		notifier,
-		testSecret,
-		testActorID,
-		func() time.Time { return testNow },
-	)
+	handler, err := New(Config{
+		Web:            testWeb(),
+		ActivityStore:  store,
+		RunStore:       runStore,
+		RunNotifier:    notifier,
+		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
+		LinearSecret:   testSecret,
+		TriggerActor:   testActorID,
+		ViewerPassword: testViewerPassword,
+		Now:            func() time.Time { return testNow },
+	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
 	return handler, runStore, notifier
+}
+
+func testHandlerWithObserver(t *testing.T, observer AgentObserver) http.Handler {
+	t.Helper()
+	store, err := activity.Open(filepath.Join(t.TempDir(), "activity.json"), 10)
+	if err != nil {
+		t.Fatalf("open activity store: %v", err)
+	}
+	runStore, err := agentrun.Open(filepath.Join(t.TempDir(), "agent-runs.json"), 10)
+	if err != nil {
+		t.Fatalf("open run store: %v", err)
+	}
+	handler, err := New(Config{
+		Web:            testWeb(),
+		ActivityStore:  store,
+		RunStore:       runStore,
+		RunNotifier:    &testNotifier{},
+		AgentObserver:  observer,
+		LinearSecret:   testSecret,
+		TriggerActor:   testActorID,
+		ViewerPassword: testViewerPassword,
+		Now:            func() time.Time { return testNow },
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	return handler
 }
 
 func signedWebhookRequest(body, deliveryID string, secret []byte) *http.Request {

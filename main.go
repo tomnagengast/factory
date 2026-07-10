@@ -51,12 +51,17 @@ func serve(ctx context.Context) error {
 	if secret == "" {
 		return errors.New("LINEAR_WEBHOOK_SECRET is required")
 	}
-	if os.Getenv("LINEAR_API_KEY") == "" {
+	linearAPIKey := os.Getenv("LINEAR_API_KEY")
+	if linearAPIKey == "" {
 		return errors.New("LINEAR_API_KEY is required for agent runs")
 	}
 	triggerActorID := os.Getenv("LINEAR_TRIGGER_ACTOR_ID")
 	if triggerActorID == "" {
 		return errors.New("LINEAR_TRIGGER_ACTOR_ID is required for agent runs")
+	}
+	viewerPassword := os.Getenv("FACTORY_VIEWER_PASSWORD")
+	if viewerPassword == "" {
+		return errors.New("FACTORY_VIEWER_PASSWORD is required for agent inspection")
 	}
 
 	home, err := os.UserHomeDir()
@@ -77,14 +82,16 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("resolve Factory binary: %w", err)
 	}
+	tmuxPath := requiredCommand("tmux")
+	tmuxSocket := envOr("FACTORY_TMUX_SOCKET", defaultTmuxSocket)
 	launcher, err := agentrun.NewTmuxLauncher(agentrun.LauncherConfig{
 		RepoURL:    envOr("FACTORY_REPO_URL", defaultRepoURL),
 		RepoPath:   envOr("FACTORY_REPO_PATH", filepath.Join(stateRoot, "workspace", "network")),
 		StateRoot:  stateRoot,
 		BinaryPath: binaryPath,
 		GitPath:    requiredCommand("git"),
-		TmuxPath:   requiredCommand("tmux"),
-		TmuxSocket: envOr("FACTORY_TMUX_SOCKET", defaultTmuxSocket),
+		TmuxPath:   tmuxPath,
+		TmuxSocket: tmuxSocket,
 	})
 	if err != nil {
 		return err
@@ -102,8 +109,27 @@ func serve(ctx context.Context) error {
 		return err
 	}
 	go manager.Run(ctx)
+	observer, err := agentrun.NewObserver(
+		runStore,
+		tmuxPath,
+		tmuxSocket,
+		[]string{linearAPIKey, viewerPassword, os.Getenv("GITHUB_TOKEN")},
+	)
+	if err != nil {
+		return err
+	}
 
-	handler, err := server.New(web, activityStore, runStore, manager, []byte(secret), triggerActorID, time.Now)
+	handler, err := server.New(server.Config{
+		Web:            web,
+		ActivityStore:  activityStore,
+		RunStore:       runStore,
+		RunNotifier:    manager,
+		AgentObserver:  observer,
+		LinearSecret:   []byte(secret),
+		TriggerActor:   triggerActorID,
+		ViewerPassword: viewerPassword,
+		Now:            time.Now,
+	})
 	if err != nil {
 		return err
 	}
