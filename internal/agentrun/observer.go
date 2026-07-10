@@ -19,7 +19,7 @@ const (
 	maxObservedWindows = 16
 	maxPaneBytes       = 128 << 10
 	paneHistoryLines   = "-300"
-	tmuxFieldSeparator = "\x1f"
+	tmuxFieldSeparator = "|||FACTORY|||"
 	tmuxWindowFormat   = "#{window_id}" + tmuxFieldSeparator + "#{window_name}" + tmuxFieldSeparator + "#{pane_current_command}"
 )
 
