@@ -10,10 +10,12 @@ import (
 	"io/fs"
 	"net/http"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/tomnagengast/network/apps/factory/internal/activity"
+	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
 )
 
 const (
@@ -21,14 +23,28 @@ const (
 	replayWindow   = time.Minute
 )
 
+var doCommandPattern = regexp.MustCompile(`(?i)^/do[[:space:]]+([A-Z][A-Z0-9]*-[1-9][0-9]*)[[:space:]]*$`)
+
 type EventStore interface {
 	Add(deliveryID string, event activity.Event) (bool, error)
 	Snapshot() activity.Snapshot
 }
 
+type RunStore interface {
+	Claim(trigger agentrun.Trigger, now time.Time) (agentrun.Run, bool, error)
+	PublicSnapshot() agentrun.PublicSnapshot
+}
+
+type RunNotifier interface {
+	Notify()
+}
+
 type appServer struct {
 	activityStore EventStore
+	runStore      RunStore
+	runNotifier   RunNotifier
 	linearSecret  []byte
+	triggerActor  string
 	now           func() time.Time
 }
 
@@ -41,27 +57,58 @@ type linearPayload struct {
 	Type             string `json:"type"`
 	Action           string `json:"action"`
 	WebhookTimestamp int64  `json:"webhookTimestamp"`
+	Actor            struct {
+		ID string `json:"id"`
+	} `json:"actor"`
+	Data struct {
+		Body string `json:"body"`
+	} `json:"data"`
 }
 
 type activityResponse struct {
-	Status         string           `json:"status"`
-	Total          uint64           `json:"total"`
-	LastReceivedAt *time.Time       `json:"lastReceivedAt"`
-	Events         []activity.Event `json:"events"`
+	Status         string                  `json:"status"`
+	Total          uint64                  `json:"total"`
+	LastReceivedAt *time.Time              `json:"lastReceivedAt"`
+	Events         []activity.Event        `json:"events"`
+	AgentRuns      agentrun.PublicSnapshot `json:"agentRuns"`
 }
 
-func New(web fs.FS, store EventStore, linearSecret []byte, now func() time.Time) (http.Handler, error) {
+func New(
+	web fs.FS,
+	store EventStore,
+	runStore RunStore,
+	runNotifier RunNotifier,
+	linearSecret []byte,
+	triggerActor string,
+	now func() time.Time,
+) (http.Handler, error) {
 	if store == nil {
 		return nil, errors.New("server: activity store is required")
 	}
 	if len(linearSecret) == 0 {
 		return nil, errors.New("server: Linear webhook secret is required")
 	}
+	if runStore == nil {
+		return nil, errors.New("server: agent run store is required")
+	}
+	if runNotifier == nil {
+		return nil, errors.New("server: agent run notifier is required")
+	}
+	if triggerActor == "" {
+		return nil, errors.New("server: Linear trigger actor is required")
+	}
 	if now == nil {
 		return nil, errors.New("server: clock is required")
 	}
 
-	app := &appServer{activityStore: store, linearSecret: linearSecret, now: now}
+	app := &appServer{
+		activityStore: store,
+		runStore:      runStore,
+		runNotifier:   runNotifier,
+		linearSecret:  linearSecret,
+		triggerActor:  triggerActor,
+		now:           now,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", healthz)
 	mux.HandleFunc("GET /api/activity", app.activity)
@@ -85,9 +132,10 @@ func cloudflareBeacon(w http.ResponseWriter, _ *http.Request) {
 func (s *appServer) activity(w http.ResponseWriter, _ *http.Request) {
 	snapshot := s.activityStore.Snapshot()
 	response := activityResponse{
-		Status: "listening",
-		Total:  snapshot.Total,
-		Events: snapshot.Events,
+		Status:    "listening",
+		Total:     snapshot.Total,
+		Events:    snapshot.Events,
+		AgentRuns: s.runStore.PublicSnapshot(),
 	}
 	if len(snapshot.Events) > 0 {
 		response.LastReceivedAt = &snapshot.Events[0].ReceivedAt
@@ -136,7 +184,32 @@ func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
+	if trigger, ok := agentTrigger(payload, deliveryID, s.triggerActor); ok {
+		_, created, claimErr := s.runStore.Claim(trigger, now)
+		if claimErr != nil {
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		if created {
+			s.runNotifier.Notify()
+		}
+	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func agentTrigger(payload linearPayload, deliveryID, allowedActorID string) (agentrun.Trigger, bool) {
+	if payload.Type != "Comment" || payload.Action != "create" || payload.Actor.ID != allowedActorID {
+		return agentrun.Trigger{}, false
+	}
+	match := doCommandPattern.FindStringSubmatch(payload.Data.Body)
+	if len(match) != 2 {
+		return agentrun.Trigger{}, false
+	}
+	return agentrun.Trigger{
+		DeliveryID:      deliveryID,
+		IssueIdentifier: strings.ToUpper(match[1]),
+		Kind:            "linear-comment",
+	}, true
 }
 
 func validSignature(secret, body []byte, signature string) bool {

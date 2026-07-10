@@ -1,0 +1,347 @@
+package agentrun
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+const (
+	defaultCodexModel    = "gpt-5.6-sol"
+	defaultClaudeModel   = "fable"
+	defaultAgentEffort   = "high"
+	principalMaxAttempts = 3
+	claudeChildSettings  = `{"permissions":{"deny":["EnterPlanMode","ExitPlanMode","DesignSync","NotebookEdit","SendMessage","PushNotification","RemoteTrigger","ReportFindings","ScheduleWakeup","AskUserQuestion","CronCreate","CronDelete","CronList"]},"disableBundledSkills":true,"disableWorkflows":true,"disableRemoteControl":true,"disableClaudeAiConnectors":true,"disableArtifact":true}`
+)
+
+type PrincipalConfig struct {
+	IssueIdentifier string
+	RepoPath        string
+	RunDirectory    string
+	CodexPath       string
+	Now             func() time.Time
+	Sleep           func(context.Context, time.Duration) error
+}
+
+type ChildConfig struct {
+	Provider        string
+	RepoPath        string
+	PromptPath      string
+	OutputDirectory string
+	CodexPath       string
+	ClaudePath      string
+	Now             func() time.Time
+}
+
+func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
+	if err := os.MkdirAll(config.RunDirectory, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "create run directory: %v\n", err)
+		return 1
+	}
+	prompt := principalPrompt(config.IssueIdentifier)
+	if err := os.WriteFile(filepath.Join(config.RunDirectory, "prompt.txt"), []byte(prompt), 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "write principal prompt: %v\n", err)
+		return 1
+	}
+
+	var lastExit int
+	var lastDetail string
+	attemptsUsed := 0
+	threadID := ""
+	for attempt := 1; attempt <= principalMaxAttempts; attempt++ {
+		attemptsUsed = attempt
+		finalPath := filepath.Join(config.RunDirectory, fmt.Sprintf("attempt-%d-final.txt", attempt))
+		eventsPath := filepath.Join(config.RunDirectory, fmt.Sprintf("attempt-%d-events.jsonl", attempt))
+		errPath := filepath.Join(config.RunDirectory, fmt.Sprintf("attempt-%d-stderr.log", attempt))
+		continuation := prompt
+		if attempt > 1 {
+			continuation = "Resume the Factory /do run. Continue from durable repository, Linear, PR, and run state. Do not duplicate work."
+		}
+		exitCode, err := runCodex(ctx, config, threadID, continuation, finalPath, eventsPath, errPath)
+		lastExit = exitCode
+		if err == nil {
+			finalMessage, readErr := os.ReadFile(finalPath)
+			if readErr != nil {
+				lastDetail = fmt.Sprintf("read final message: %v", readErr)
+				break
+			}
+			status, detail := resultFromFinalMessage(string(finalMessage))
+			result := ProcessResult{
+				Status:     string(status),
+				Attempts:   attempt,
+				ExitCode:   0,
+				Detail:     detail,
+				FinishedAt: config.Now().UTC(),
+			}
+			if writeErr := writeProcessResult(config.RunDirectory, result); writeErr != nil {
+				fmt.Fprintf(os.Stderr, "write process result: %v\n", writeErr)
+				return 1
+			}
+			if status == StateFailed {
+				return 1
+			}
+			return 0
+		}
+
+		lastDetail = err.Error()
+		if found := readThreadID(eventsPath); found != "" {
+			threadID = found
+		}
+		if attempt < principalMaxAttempts {
+			if sleepErr := config.Sleep(ctx, time.Duration(attempt*5)*time.Second); sleepErr != nil {
+				lastDetail = sleepErr.Error()
+				break
+			}
+		}
+	}
+
+	result := ProcessResult{
+		Status:     string(StateFailed),
+		Attempts:   attemptsUsed,
+		ExitCode:   lastExit,
+		Detail:     lastDetail,
+		FinishedAt: config.Now().UTC(),
+	}
+	if err := writeProcessResult(config.RunDirectory, result); err != nil {
+		fmt.Fprintf(os.Stderr, "write process result: %v\n", err)
+	}
+	return 1
+}
+
+func ExecuteChild(ctx context.Context, config ChildConfig) int {
+	if err := os.MkdirAll(config.OutputDirectory, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "create child output directory: %v\n", err)
+		return 1
+	}
+	prompt, err := os.Open(config.PromptPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open child prompt: %v\n", err)
+		return 1
+	}
+	defer prompt.Close()
+
+	eventsPath := filepath.Join(config.OutputDirectory, "events.jsonl")
+	errPath := filepath.Join(config.OutputDirectory, "stderr.log")
+	finalPath := filepath.Join(config.OutputDirectory, "final.txt")
+	stdout, stderr, closeFiles, err := outputWriters(eventsPath, errPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open child output: %v\n", err)
+		return 1
+	}
+	defer closeFiles()
+
+	var cmd *exec.Cmd
+	switch config.Provider {
+	case "codex":
+		cmd = exec.CommandContext(ctx, config.CodexPath,
+			"exec",
+			"--dangerously-bypass-approvals-and-sandbox",
+			"--json",
+			"--color", "never",
+			"--config", "model_reasoning_effort="+defaultAgentEffort,
+			"--model", defaultCodexModel,
+			"--output-last-message", finalPath,
+			"-",
+		)
+	case "claude":
+		cmd = exec.CommandContext(ctx, config.ClaudePath,
+			"--model", defaultClaudeModel,
+			"--effort", defaultAgentEffort,
+			"--dangerously-skip-permissions",
+			"--output-format", "stream-json",
+			"--verbose",
+			"--settings", claudeChildSettings,
+			"--print",
+		)
+	default:
+		fmt.Fprintf(os.Stderr, "unsupported child provider %q\n", config.Provider)
+		return 2
+	}
+	cmd.Dir = config.RepoPath
+	cmd.Stdin = prompt
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err = cmd.Run()
+	exitCode := exitCode(err)
+	result := ProcessResult{
+		Status:     string(StateSucceeded),
+		Attempts:   1,
+		ExitCode:   exitCode,
+		FinishedAt: config.Now().UTC(),
+	}
+	if err != nil {
+		result.Status = string(StateFailed)
+		result.Detail = err.Error()
+	}
+	if writeErr := writeJSONFile(filepath.Join(config.OutputDirectory, resultFileName), result); writeErr != nil {
+		fmt.Fprintf(os.Stderr, "write child result: %v\n", writeErr)
+		return 1
+	}
+	return exitCode
+}
+
+func runCodex(
+	ctx context.Context,
+	config PrincipalConfig,
+	threadID,
+	prompt,
+	finalPath,
+	eventsPath,
+	errPath string,
+) (int, error) {
+	stdout, stderr, closeFiles, err := outputWriters(eventsPath, errPath)
+	if err != nil {
+		return 1, err
+	}
+	defer closeFiles()
+
+	args := []string{"exec"}
+	if threadID == "" {
+		args = append(args,
+			"--dangerously-bypass-approvals-and-sandbox",
+			"--json",
+			"--color", "never",
+			"--config", "model_reasoning_effort="+defaultAgentEffort,
+			"--model", defaultCodexModel,
+			"--output-last-message", finalPath,
+			"-",
+		)
+	} else {
+		args = append(args,
+			"resume",
+			"--dangerously-bypass-approvals-and-sandbox",
+			"--json",
+			"--config", "model_reasoning_effort="+defaultAgentEffort,
+			"--model", defaultCodexModel,
+			"--output-last-message", finalPath,
+			threadID,
+			"-",
+		)
+	}
+	cmd := exec.CommandContext(ctx, config.CodexPath, args...)
+	cmd.Dir = config.RepoPath
+	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err = cmd.Run()
+	if err != nil {
+		return exitCode(err), fmt.Errorf("codex attempt: %w", err)
+	}
+	return 0, nil
+}
+
+func principalPrompt(issueIdentifier string) string {
+	return fmt.Sprintf(`Use $do to complete %s through a green, mergeable pull request.
+
+You are the principal agent in a Factory-managed tmux session. The /do skill owns the SDLC and terminal conditions. Continue until it succeeds or reaches a genuine blocker.
+
+When another agent can independently research, review, or verify a bounded subtask, launch it as a window in this same tmux session instead of using an invisible in-process subagent. Pass its prompt as data with a quoted heredoc:
+
+"$FACTORY_AGENT_HELPER" agent spawn --provider claude --name short-name <<'PROMPT'
+Put the complete child prompt here.
+PROMPT
+
+The helper returns the tmux window and durable output paths. Child windows inherit the same helper and may spawn their own bounded children. Keep all work for this issue inside this session. Wait for every child window and consume its result before you finish. If a child must be stopped, kill only that window. Never use tmux kill-server.
+
+If the /do workflow succeeds, end the final response with exactly FACTORY_RESULT: SUCCEEDED. If it is genuinely blocked, end with exactly FACTORY_RESULT: BLOCKED.`, issueIdentifier)
+}
+
+func resultFromFinalMessage(message string) (State, string) {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		return StateFailed, "principal returned an empty final message"
+	}
+	lines := strings.Split(trimmed, "\n")
+	switch strings.TrimSpace(lines[len(lines)-1]) {
+	case "FACTORY_RESULT: SUCCEEDED":
+		return StateSucceeded, ""
+	case "FACTORY_RESULT: BLOCKED":
+		return StateBlocked, "principal reported a blocker"
+	default:
+		return StateFailed, "principal final message is missing a Factory result marker"
+	}
+}
+
+func readThreadID(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var event struct {
+			Type     string `json:"type"`
+			ThreadID string `json:"thread_id"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "thread.started" {
+			return event.ThreadID
+		}
+	}
+	return ""
+}
+
+func outputWriters(eventsPath, errPath string) (io.Writer, io.Writer, func(), error) {
+	events, err := os.OpenFile(eventsPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, nil, func() {}, fmt.Errorf("open events output: %w", err)
+	}
+	diagnostics, err := os.OpenFile(errPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		events.Close()
+		return nil, nil, func() {}, fmt.Errorf("open diagnostics output: %w", err)
+	}
+	closeFiles := func() {
+		events.Close()
+		diagnostics.Close()
+	}
+	return io.MultiWriter(os.Stdout, events), io.MultiWriter(os.Stderr, diagnostics), closeFiles, nil
+}
+
+func writeProcessResult(runDirectory string, result ProcessResult) error {
+	return writeJSONFile(filepath.Join(runDirectory, resultFileName), result)
+}
+
+func writeJSONFile(path string, value any) error {
+	temp, err := os.CreateTemp(filepath.Dir(path), ".result-*")
+	if err != nil {
+		return fmt.Errorf("create result file: %w", err)
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		temp.Close()
+		return fmt.Errorf("set result permissions: %w", err)
+	}
+	if err := json.NewEncoder(temp).Encode(value); err != nil {
+		temp.Close()
+		return fmt.Errorf("encode result: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close result: %w", err)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("replace result: %w", err)
+	}
+	return nil
+}
+
+func exitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return 1
+}
