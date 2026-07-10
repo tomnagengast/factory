@@ -34,9 +34,20 @@ Redundant work is prevented at three layers:
 
 Additional `Factory` label applications are coalesced while the issue has an active run. After a run becomes terminal, remove and reapply the label to start another run. The `$do` skill then resumes any existing branch, worktree, or pull request instead of duplicating them.
 
+## Activity views
+
+Factory separates public health from authenticated operational detail:
+
+- `/activity` is a public, privacy-safe summary of verified deliveries and agent-run totals.
+- `/activity/linear` is an authenticated Linear delivery workspace with retained-window charts, 25-event pages, a scrollable ledger, and raw-payload inspection.
+- `/activity/agents` is an authenticated run dashboard with issue context and state totals.
+- `/activity/agents/<issue-id>/<started-unix-ms>/run` is the authenticated, read-only loop observer for one started run.
+
+Validated Linear request bodies are retained prospectively as private `0600` sidecar files beside the bounded activity index. Sidecars age out with their metadata records. Historical records from before payload retention remain listable without a body, and GitHub request bodies are never retained. `/agents/<run-id>` remains available for existing links and for pending runs that do not have a start timestamp yet.
+
 ## GitHub event sink
 
-Factory accepts signed repository webhooks at `https://factory.nags.cloud/api/webhooks/github`. It verifies `X-Hub-Signature-256`, deduplicates `X-GitHub-Delivery`, and stores a bounded journal of compact PR, review, check, status, and workflow metadata. Raw webhook payloads and comment bodies are not retained.
+Factory accepts signed repository webhooks at `https://factory.nags.cloud/api/webhooks/github`. It verifies `X-Hub-Signature-256`, deduplicates `X-GitHub-Delivery`, and stores a bounded journal of compact PR, review, check, status, and workflow metadata. Raw GitHub webhook payloads and comment bodies are not retained.
 
 During the PR green loop, a Factory agent waits on the local journal instead of polling GitHub:
 
@@ -85,7 +96,7 @@ tmux -L factory-agents capture-pane -pt factory-team-123:principal
 
 Detach with the configured tmux prefix followed by `d`. Kill only a specific session or window when intervention is necessary. Never use `tmux kill-server`, because it terminates every Factory issue run.
 
-The activity and active agent views poll their APIs every two seconds. Each activity run links to `https://factory.nags.cloud/agents/<run-id>`, where every response includes its observation time, current retry attempt, tmux windows, commands, and recent pane output. Agent events appear as collapsed steps; expanding one reveals its redacted raw JSON payload. When tmux exits, the observer reconstructs the complete principal-attempt and child-agent histories from their retained JSONL event files without the live pane limit. Terminal views stop polling after loading this immutable history. Plain terminal output remains available when a pane does not contain structured events. A live session that cannot be observed is reported as an observer error instead of an empty session. The view never accepts terminal input. Use the attach command shown on the page when interactive local control is required.
+The activity and active agent views poll their APIs every two seconds. Each started activity run links to `https://factory.nags.cloud/activity/agents/<issue-id>/<started-unix-ms>/run`; pending runs and existing bookmarks continue to use `/agents/<run-id>`. Every observer response includes its observation time, current retry attempt, tmux windows, commands, and recent pane output. Agent events appear as collapsed steps; expanding one reveals its redacted raw JSON payload. When tmux exits, the observer reconstructs the complete principal-attempt and child-agent histories from their retained JSONL event files without the live pane limit. Terminal views stop polling after loading this immutable history. Plain terminal output remains available when a pane does not contain structured events. A live session that cannot be observed is reported as an observer error instead of an empty session. The view never accepts terminal input. Use the attach command shown on the page when interactive local control is required.
 
 Browser navigation uses Google OAuth over HTTPS. Factory accepts only verified Google identities in `FACTORY_GOOGLE_ALLOWED_EMAILS`, keeps the OAuth tokens server-side for the duration of the callback, and issues a signed, secure, host-only session cookie for 24 hours. Visit `/auth/logout` to clear the Factory session.
 
@@ -118,7 +129,7 @@ Optional variables:
 - `FACTORY_REPO_PATH`, default `~/.local/share/factory/workspace/network`.
 - `FACTORY_TMUX_SOCKET`, default `factory-agents`.
 
-The public activity API exposes only delivery metadata and opaque run state. Linear issue identifiers, prompts, logs, errors, repository paths, and session names remain private unless the operator authenticates to an `/agents/<run-id>` route.
+The public activity API exposes only delivery metadata and opaque run state. Linear issue identifiers, raw request bodies, prompts, logs, errors, repository paths, and session names remain private unless the operator authenticates to the dedicated Linear or agent activity routes.
 
 Factory also starts its tmux server with a restricted environment. Agent processes receive normal shell/GitHub runtime variables and the dedicated Linear API key, but not the webhook signing secret, Cloudflare token, UniFi key, tunnel token, or 1Password service-account token sourced by the parent service.
 
