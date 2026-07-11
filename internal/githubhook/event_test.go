@@ -15,8 +15,10 @@ func TestParseExtractsPullRequestAndCIMetadata(t *testing.T) {
 		wantAction string
 		wantPR     int
 		wantBranch string
+		wantSHA    string
 		wantStatus string
 		wantResult string
+		wantURL    string
 	}{
 		{
 			name:       "pull request",
@@ -25,6 +27,19 @@ func TestParseExtractsPullRequestAndCIMetadata(t *testing.T) {
 			wantAction: "synchronize",
 			wantPR:     42,
 			wantBranch: "eng-42-fix",
+			wantSHA:    "abc",
+			wantURL:    "https://github.com/tom/repo/pull/42",
+		},
+		{
+			name:       "approved pull request review",
+			eventType:  "pull_request_review",
+			body:       `{"action":"submitted","repository":{"full_name":"tom/repo"},"pull_request":{"number":42,"html_url":"https://github.com/tom/repo/pull/42","head":{"ref":"eng-42-fix","sha":"abc"}},"review":{"html_url":"https://github.com/tom/repo/pull/42#pullrequestreview-1","state":"approved"}}`,
+			wantAction: "submitted",
+			wantPR:     42,
+			wantBranch: "eng-42-fix",
+			wantSHA:    "abc",
+			wantStatus: "approved",
+			wantURL:    "https://github.com/tom/repo/pull/42#pullrequestreview-1",
 		},
 		{
 			name:       "check run",
@@ -35,6 +50,8 @@ func TestParseExtractsPullRequestAndCIMetadata(t *testing.T) {
 			wantBranch: "eng-42-fix",
 			wantStatus: "completed",
 			wantResult: "failure",
+			wantSHA:    "abc",
+			wantURL:    "https://github.com/check/1",
 		},
 		{
 			name:       "issue comment on pull request",
@@ -42,6 +59,7 @@ func TestParseExtractsPullRequestAndCIMetadata(t *testing.T) {
 			body:       `{"action":"created","repository":{"full_name":"tom/repo"},"issue":{"number":42,"html_url":"https://github.com/tom/repo/pull/42","pull_request":{"url":"https://api.github.com/pulls/42"}},"comment":{"html_url":"https://github.com/comment/1"}}`,
 			wantAction: "created",
 			wantPR:     42,
+			wantURL:    "https://github.com/comment/1",
 		},
 	}
 
@@ -52,7 +70,7 @@ func TestParseExtractsPullRequestAndCIMetadata(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			if event.Action != test.wantAction || event.HeadBranch != test.wantBranch || event.Status != test.wantStatus || event.Conclusion != test.wantResult {
+			if event.Action != test.wantAction || event.HeadBranch != test.wantBranch || event.HeadSHA != test.wantSHA || event.Status != test.wantStatus || event.Conclusion != test.wantResult || event.URL != test.wantURL {
 				t.Fatalf("event = %#v", event)
 			}
 			if test.wantPR > 0 && (len(event.PullRequests) != 1 || event.PullRequests[0] != test.wantPR) {
