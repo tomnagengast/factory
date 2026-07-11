@@ -48,7 +48,7 @@ func TestPrincipalPromptGroupsChildAgentsInTmux(t *testing.T) {
 	t.Parallel()
 
 	prompt := principalPrompt("ENG-123")
-	for _, expected := range []string{"Use $do", "ENG-123", "linear_graphql.py", "FACTORY_AGENT_HELPER", "FACTORY_RESULT: SUCCEEDED"} {
+	for _, expected := range []string{"Use $do", "ENG-123", "linear_graphql.py", "FACTORY_AGENT_HELPER", "linear-comments", "FACTORY_RESULT: SUCCEEDED"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("prompt missing %q: %s", expected, prompt)
 		}

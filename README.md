@@ -62,6 +62,21 @@ During the PR green loop, a Factory agent waits on the local journal instead of 
 
 The JSON response contains a monotonic cursor and matching events ordered by Factory receipt sequence. The journal retains the latest 1,000 deliveries globally and deduplicates retained GitHub delivery IDs. Events are wake signals only; the agent always refreshes authoritative PR, review, and check state with `gh` before acting. Register or refresh a repository webhook with `bin/network-app github-hook owner/repository` after `refresh-env` and deployment.
 
+## Linear comment wake
+
+Factory also records eligible signed `Comment/create` deliveries in a body-free wake journal. A running issue agent waits for top-level comments and replies with:
+
+```bash
+"$FACTORY_AGENT_HELPER" agent linear-comments \
+  --issue TEAM-123 \
+  --after 0 \
+  --wait 60s
+```
+
+The journal retains the latest 500 eligible deliveries, deduplicates Linear delivery IDs, and returns matching events in Factory receipt order with a monotonic cursor. Events contain comment and issue identifiers, reply parent ID, private Linear URL, and receipt time, but never the comment body. The agent refreshes the authoritative conversation through Linear GraphQL after every wake or timeout.
+
+Only comments created by the configured trigger actor enter this journal. Factory-authored comments are excluded by the reserved final-line `🐘` signature or `🐘` plus `codex-do` marker, because Factory and the human can share the same Linear identity. Comment events never create or resume runs. A comment on a terminal issue remains visible in Linear but requires removing and reapplying the `Factory` label before an agent can resume the retry-safe workflow.
+
 ## Child agents
 
 Every principal and child receives these environment variables:

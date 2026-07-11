@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
 	"github.com/tomnagengast/network/apps/factory/internal/githubhook"
+	"github.com/tomnagengast/network/apps/factory/internal/linearhook"
 )
 
 func runAgentCommand(ctx context.Context, args []string) (int, bool) {
@@ -75,7 +77,7 @@ func runChild(ctx context.Context, args []string) int {
 
 func runAgentHelper(ctx context.Context, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: factory agent spawn|github-events")
+		fmt.Fprintln(os.Stderr, "usage: factory agent spawn|github-events|linear-comments")
 		return 2
 	}
 	switch args[0] {
@@ -83,10 +85,63 @@ func runAgentHelper(ctx context.Context, args []string) int {
 		return runSpawnHelper(ctx, args[1:])
 	case "github-events":
 		return runGitHubEventsHelper(ctx, args[1:], os.Stdout)
+	case "linear-comments":
+		return runLinearCommentsHelper(ctx, args[1:], os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown Factory agent command %q\n", args[0])
 		return 2
 	}
+}
+
+func runLinearCommentsHelper(ctx context.Context, args []string, output io.Writer) int {
+	flags := flag.NewFlagSet("agent linear-comments", flag.ContinueOnError)
+	issue := flags.String("issue", "", "Linear issue identifier")
+	issueID := flags.String("issue-id", "", "Linear issue UUID")
+	after := flags.Uint64("after", 0, "event cursor")
+	wait := flags.Duration("wait", time.Minute, "maximum time to wait")
+	if flags.Parse(args) != nil || *wait < 0 || *wait > 5*time.Minute {
+		return 2
+	}
+	identifier := strings.ToUpper(strings.TrimSpace(*issue))
+	if identifier != "" && !agentrun.ValidIssueIdentifier(identifier) {
+		fmt.Fprintln(os.Stderr, "Linear comment journal: invalid issue identifier")
+		return 2
+	}
+	filter := linearhook.Filter{IssueIdentifier: identifier, IssueID: strings.TrimSpace(*issueID)}
+	if err := filter.Validate(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	runID := os.Getenv("FACTORY_RUN_ID")
+	runDirectory := filepath.Clean(os.Getenv("FACTORY_RUN_DIR"))
+	if runID == "" || runDirectory == "." || filepath.Base(runDirectory) != runID || filepath.Base(filepath.Dir(runDirectory)) != "runs" {
+		fmt.Fprintln(os.Stderr, "agent Linear comments: Factory run environment is invalid")
+		return 2
+	}
+	stateRoot := filepath.Dir(filepath.Dir(runDirectory))
+	journalPath := filepath.Join(stateRoot, "data", "linear-comments.json")
+
+	var batch linearhook.Batch
+	var err error
+	if *wait == 0 {
+		batch, err = linearhook.Read(journalPath, filter, *after)
+	} else {
+		waitCtx, cancel := context.WithTimeout(ctx, *wait)
+		defer cancel()
+		batch, err = linearhook.Wait(waitCtx, journalPath, filter, *after, 250*time.Millisecond)
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = nil
+		}
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := json.NewEncoder(output).Encode(batch); err != nil {
+		fmt.Fprintf(os.Stderr, "agent Linear comments: encode response: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func runSpawnHelper(ctx context.Context, args []string) int {

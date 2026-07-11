@@ -255,6 +255,8 @@ The helper returns the tmux window and durable output paths. Child windows inher
 
 During the pull request green loop, use "$FACTORY_AGENT_HELPER" agent github-events as documented by the /do skill. GitHub webhook events are durable wake signals; refresh authoritative state with gh after each event.
 
+While waiting for Linear feedback, use "$FACTORY_AGENT_HELPER" agent linear-comments as documented by the /do skill. Linear comment events are durable wake signals; refresh the authoritative issue conversation with linear_graphql.py after every event or timeout.
+
 If the /do workflow succeeds, end the final response with exactly FACTORY_RESULT: SUCCEEDED. If it is genuinely blocked, end with exactly FACTORY_RESULT: BLOCKED.`, issueIdentifier)
 }
 

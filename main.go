@@ -18,6 +18,7 @@ import (
 	"github.com/tomnagengast/network/apps/factory/internal/activity"
 	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
 	"github.com/tomnagengast/network/apps/factory/internal/githubhook"
+	"github.com/tomnagengast/network/apps/factory/internal/linearhook"
 	"github.com/tomnagengast/network/apps/factory/internal/server"
 	"github.com/tomnagengast/network/apps/factory/internal/viewerauth"
 )
@@ -27,6 +28,7 @@ const (
 	activityEventLimit       = 250
 	agentRunLimit            = 100
 	githubEventLimit         = 1000
+	linearCommentEventLimit  = 500
 	defaultMaxConcurrentRuns = 3
 	defaultRepoURL           = "git@github.com:tomnagengast/network.git"
 	defaultTmuxSocket        = "factory-agents"
@@ -109,6 +111,10 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	linearComments, err := linearhook.Open(filepath.Join(dataRoot, "linear-comments.json"), linearCommentEventLimit)
+	if err != nil {
+		return err
+	}
 	binaryPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve Factory binary: %w", err)
@@ -160,17 +166,18 @@ func serve(ctx context.Context) error {
 	}
 
 	handler, err := server.New(server.Config{
-		Web:           web,
-		ActivityStore: activityStore,
-		RunStore:      runStore,
-		RunNotifier:   manager,
-		AgentObserver: observer,
-		ViewerAuth:    viewerAuth,
-		LinearSecret:  []byte(secret),
-		GitHubSecret:  []byte(githubSecret),
-		GitHubEvents:  githubEvents,
-		TriggerActor:  triggerActorID,
-		Now:           time.Now,
+		Web:            web,
+		ActivityStore:  activityStore,
+		RunStore:       runStore,
+		RunNotifier:    manager,
+		AgentObserver:  observer,
+		ViewerAuth:     viewerAuth,
+		LinearSecret:   []byte(secret),
+		GitHubSecret:   []byte(githubSecret),
+		GitHubEvents:   githubEvents,
+		LinearComments: linearComments,
+		TriggerActor:   triggerActorID,
+		Now:            time.Now,
 	})
 	if err != nil {
 		return err

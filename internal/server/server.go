@@ -20,6 +20,7 @@ import (
 	"github.com/tomnagengast/network/apps/factory/internal/activity"
 	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
 	"github.com/tomnagengast/network/apps/factory/internal/githubhook"
+	"github.com/tomnagengast/network/apps/factory/internal/linearhook"
 	"github.com/tomnagengast/network/apps/factory/internal/viewerauth"
 )
 
@@ -57,35 +58,41 @@ type GitHubEventStore interface {
 	Add(githubhook.Event) (bool, error)
 }
 
+type LinearCommentStore interface {
+	Add(linearhook.Event) (bool, error)
+}
+
 type AgentObserver interface {
 	Observe(context.Context, string) (agentrun.AgentView, error)
 }
 
 type Config struct {
-	Web           fs.FS
-	ActivityStore EventStore
-	RunStore      RunStore
-	RunNotifier   RunNotifier
-	AgentObserver AgentObserver
-	ViewerAuth    *viewerauth.Authenticator
-	LinearSecret  []byte
-	GitHubSecret  []byte
-	GitHubEvents  GitHubEventStore
-	TriggerActor  string
-	Now           func() time.Time
+	Web            fs.FS
+	ActivityStore  EventStore
+	RunStore       RunStore
+	RunNotifier    RunNotifier
+	AgentObserver  AgentObserver
+	ViewerAuth     *viewerauth.Authenticator
+	LinearSecret   []byte
+	GitHubSecret   []byte
+	GitHubEvents   GitHubEventStore
+	LinearComments LinearCommentStore
+	TriggerActor   string
+	Now            func() time.Time
 }
 
 type appServer struct {
-	activityStore EventStore
-	runStore      RunStore
-	runNotifier   RunNotifier
-	agentObserver AgentObserver
-	viewerAuth    *viewerauth.Authenticator
-	linearSecret  []byte
-	githubSecret  []byte
-	githubEvents  GitHubEventStore
-	triggerActor  string
-	now           func() time.Time
+	activityStore  EventStore
+	runStore       RunStore
+	runNotifier    RunNotifier
+	agentObserver  AgentObserver
+	viewerAuth     *viewerauth.Authenticator
+	linearSecret   []byte
+	githubSecret   []byte
+	githubEvents   GitHubEventStore
+	linearComments LinearCommentStore
+	triggerActor   string
+	now            func() time.Time
 }
 
 type healthResponse struct {
@@ -96,17 +103,26 @@ type healthResponse struct {
 type linearPayload struct {
 	Type             string `json:"type"`
 	Action           string `json:"action"`
+	URL              string `json:"url"`
 	WebhookTimestamp int64  `json:"webhookTimestamp"`
 	Actor            struct {
 		ID string `json:"id"`
 	} `json:"actor"`
 	Data struct {
+		ID         string   `json:"id"`
+		Body       string   `json:"body"`
+		IssueID    string   `json:"issueId"`
+		ParentID   string   `json:"parentId"`
 		Identifier string   `json:"identifier"`
 		LabelIDs   []string `json:"labelIds"`
 		Labels     []struct {
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"labels"`
+		Issue struct {
+			ID         string `json:"id"`
+			Identifier string `json:"identifier"`
+		} `json:"issue"`
 	} `json:"data"`
 	UpdatedFrom struct {
 		LabelIDs json.RawMessage `json:"labelIds"`
@@ -134,6 +150,9 @@ func New(config Config) (http.Handler, error) {
 	if config.GitHubEvents == nil {
 		return nil, errors.New("server: GitHub event store is required")
 	}
+	if config.LinearComments == nil {
+		return nil, errors.New("server: Linear comment store is required")
+	}
 	if config.RunStore == nil {
 		return nil, errors.New("server: agent run store is required")
 	}
@@ -154,16 +173,17 @@ func New(config Config) (http.Handler, error) {
 	}
 
 	app := &appServer{
-		activityStore: config.ActivityStore,
-		runStore:      config.RunStore,
-		runNotifier:   config.RunNotifier,
-		agentObserver: config.AgentObserver,
-		viewerAuth:    config.ViewerAuth,
-		linearSecret:  config.LinearSecret,
-		githubSecret:  config.GitHubSecret,
-		githubEvents:  config.GitHubEvents,
-		triggerActor:  config.TriggerActor,
-		now:           config.Now,
+		activityStore:  config.ActivityStore,
+		runStore:       config.RunStore,
+		runNotifier:    config.RunNotifier,
+		agentObserver:  config.AgentObserver,
+		viewerAuth:     config.ViewerAuth,
+		linearSecret:   config.LinearSecret,
+		githubSecret:   config.GitHubSecret,
+		githubEvents:   config.GitHubEvents,
+		linearComments: config.LinearComments,
+		triggerActor:   config.TriggerActor,
+		now:            config.Now,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", healthz)
@@ -333,6 +353,12 @@ func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
+	if event, ok := commentWake(payload, deliveryID, s.triggerActor, now); ok {
+		if _, err := s.linearComments.Add(event); err != nil {
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+	}
 	if trigger, ok := agentTrigger(payload, deliveryID, s.triggerActor); ok {
 		_, created, claimErr := s.runStore.Claim(trigger, now)
 		if claimErr != nil {
@@ -344,6 +370,32 @@ func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func commentWake(payload linearPayload, deliveryID, allowedActorID string, now time.Time) (linearhook.Event, bool) {
+	if payload.Type != "Comment" || payload.Action != "create" || payload.Actor.ID != allowedActorID || linearhook.FactoryAuthored(payload.Data.Body) {
+		return linearhook.Event{}, false
+	}
+	issueID := payload.Data.IssueID
+	if issueID == "" {
+		issueID = payload.Data.Issue.ID
+	}
+	identifier := strings.ToUpper(strings.TrimSpace(payload.Data.Issue.Identifier))
+	if !agentrun.ValidIssueIdentifier(identifier) {
+		identifier = ""
+	}
+	if payload.Data.ID == "" || issueID == "" || identifier == "" {
+		return linearhook.Event{}, false
+	}
+	return linearhook.Event{
+		DeliveryID:      deliveryID,
+		CommentID:       payload.Data.ID,
+		IssueID:         issueID,
+		IssueIdentifier: identifier,
+		ParentID:        payload.Data.ParentID,
+		URL:             payload.URL,
+		ReceivedAt:      now,
+	}, true
 }
 
 func (s *appServer) githubWebhook(w http.ResponseWriter, r *http.Request) {
