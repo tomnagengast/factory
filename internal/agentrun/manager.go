@@ -9,6 +9,7 @@ import (
 
 type Launcher interface {
 	Prepare(context.Context) error
+	CleanupWorktrees(context.Context) error
 	Start(context.Context, Run, string, string) error
 	SessionExists(context.Context, string) (bool, error)
 	ReadResult(string) (ProcessResult, error)
@@ -118,6 +119,11 @@ func (m *Manager) reconcile(ctx context.Context) {
 			if err := m.launcher.Prepare(ctx); err != nil {
 				m.logger.Error("prepare agent workspace", "error", err)
 				return
+			}
+			if running == 0 {
+				if err := m.launcher.CleanupWorktrees(ctx); err != nil {
+					m.logger.Warn("clean agent worktrees", "error", err)
+				}
 			}
 			prepared = true
 		}

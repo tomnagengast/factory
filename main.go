@@ -116,13 +116,14 @@ func serve(ctx context.Context) error {
 	tmuxPath := requiredCommand("tmux")
 	tmuxSocket := envOr("FACTORY_TMUX_SOCKET", defaultTmuxSocket)
 	launcher, err := agentrun.NewTmuxLauncher(agentrun.LauncherConfig{
-		RepoURL:    envOr("FACTORY_REPO_URL", defaultRepoURL),
-		RepoPath:   envOr("FACTORY_REPO_PATH", filepath.Join(stateRoot, "workspace", "network")),
-		StateRoot:  stateRoot,
-		BinaryPath: binaryPath,
-		GitPath:    requiredCommand("git"),
-		TmuxPath:   tmuxPath,
-		TmuxSocket: tmuxSocket,
+		RepoURL:       envOr("FACTORY_REPO_URL", defaultRepoURL),
+		RepoPath:      envOr("FACTORY_REPO_PATH", filepath.Join(stateRoot, "workspace", "network")),
+		StateRoot:     stateRoot,
+		BinaryPath:    binaryPath,
+		GitPath:       requiredCommand("git"),
+		WorktrunkPath: requiredCommand("wt"),
+		TmuxPath:      tmuxPath,
+		TmuxSocket:    tmuxSocket,
 	})
 	if err != nil {
 		return err

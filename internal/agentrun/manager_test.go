@@ -12,14 +12,21 @@ import (
 )
 
 type fakeLauncher struct {
-	prepareErr error
-	starts     []Run
-	sessions   map[string]bool
-	results    map[string]ProcessResult
+	prepareErr   error
+	cleanupErr   error
+	cleanupCalls int
+	starts       []Run
+	sessions     map[string]bool
+	results      map[string]ProcessResult
 }
 
 func (f *fakeLauncher) Prepare(context.Context) error {
 	return f.prepareErr
+}
+
+func (f *fakeLauncher) CleanupWorktrees(context.Context) error {
+	f.cleanupCalls++
+	return f.cleanupErr
 }
 
 func (f *fakeLauncher) Start(_ context.Context, run Run, sessionName, runDirectory string) error {
@@ -57,8 +64,9 @@ func TestManagerStartsPendingRunAndRecordsCompletion(t *testing.T) {
 		t.Fatalf("claim: %v", err)
 	}
 	launcher := &fakeLauncher{
-		sessions: make(map[string]bool),
-		results:  make(map[string]ProcessResult),
+		cleanupErr: errors.New("cleanup unavailable"),
+		sessions:   make(map[string]bool),
+		results:    make(map[string]ProcessResult),
 	}
 	stateRoot := t.TempDir()
 	manager := newTestManager(t, store, launcher, stateRoot, func() time.Time { return now })
@@ -66,6 +74,9 @@ func TestManagerStartsPendingRunAndRecordsCompletion(t *testing.T) {
 
 	if len(launcher.starts) != 1 || launcher.starts[0].ID != run.ID {
 		t.Fatalf("starts = %#v", launcher.starts)
+	}
+	if launcher.cleanupCalls != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", launcher.cleanupCalls)
 	}
 	running := store.Snapshot().Runs[0]
 	if running.State != StateRunning || running.SessionName != "factory-eng-123" {
@@ -136,6 +147,46 @@ func TestManagerHonorsConcurrencyLimit(t *testing.T) {
 	}
 	if got := store.Snapshot().Active; got != 2 {
 		t.Fatalf("active runs = %d, want 2 including one pending", got)
+	}
+}
+
+func TestManagerSkipsWorktreeCleanupWhileRunIsActive(t *testing.T) {
+	t.Parallel()
+
+	store := openTestStore(t, 10)
+	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
+	active, _, err := store.Claim(Trigger{
+		DeliveryID:      "delivery-1",
+		IssueIdentifier: "ENG-123",
+		Kind:            "linear-comment",
+	}, now)
+	if err != nil {
+		t.Fatalf("claim active: %v", err)
+	}
+	runDirectory := filepath.Join(t.TempDir(), active.ID)
+	if err := store.MarkStarting(active.ID, "factory-eng-123", runDirectory, now); err != nil {
+		t.Fatalf("mark active starting: %v", err)
+	}
+	if err := store.MarkRunning(active.ID, 1, now); err != nil {
+		t.Fatalf("mark active running: %v", err)
+	}
+	_, _, err = store.Claim(Trigger{
+		DeliveryID:      "delivery-2",
+		IssueIdentifier: "ENG-124",
+		Kind:            "linear-comment",
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("claim pending: %v", err)
+	}
+	launcher := &fakeLauncher{sessions: map[string]bool{"factory-eng-123": true}}
+	manager := newTestManager(t, store, launcher, t.TempDir(), func() time.Time { return now })
+	manager.reconcile(context.Background())
+
+	if launcher.cleanupCalls != 0 {
+		t.Fatalf("cleanup calls = %d, want 0", launcher.cleanupCalls)
+	}
+	if len(launcher.starts) != 1 || launcher.starts[0].IssueIdentifier != "ENG-124" {
+		t.Fatalf("starts = %#v", launcher.starts)
 	}
 }
 
