@@ -24,6 +24,7 @@ const (
 
 type PrincipalConfig struct {
 	IssueIdentifier string
+	TriggerKind     string
 	RepoPath        string
 	RunDirectory    string
 	CodexPath       string
@@ -46,7 +47,7 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 		fmt.Fprintf(os.Stderr, "create run directory: %v\n", err)
 		return 1
 	}
-	prompt := principalPrompt(config.IssueIdentifier)
+	prompt := principalPrompt(config.IssueIdentifier, config.TriggerKind)
 	if err := os.WriteFile(filepath.Join(config.RunDirectory, "prompt.txt"), []byte(prompt), 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "write principal prompt: %v\n", err)
 		return 1
@@ -238,8 +239,16 @@ func runCodex(
 	return 0, nil
 }
 
-func principalPrompt(issueIdentifier string) string {
-	return fmt.Sprintf(`Use $do to complete %s through a green, mergeable pull request.
+func principalPrompt(issueIdentifier, triggerKind string) string {
+	opening := fmt.Sprintf("Use $do to complete %s through a green, mergeable pull request.", issueIdentifier)
+	if triggerKind == TriggerKindComment {
+		opening = fmt.Sprintf(`Use $do to continue %s in response to new human Linear feedback.
+
+This is a Factory continuation run. A prior Factory run for this issue reached a terminal state before a human commented. Before doing anything else, fresh-read the complete Linear issue and conversation with linear_graphql.py. Treat every human comment not yet addressed by a Factory reply or completed work as this run's scope.
+
+The original branch or pull request may already be merged or closed. Resume active work when it still exists; otherwise start a focused follow-up from the fetched default branch and open a new pull request. Do not redo completed work, and do not report success by pointing at the prior result without addressing the new feedback. If all human feedback is already addressed, reply in Linear with the evidence before finishing.`, issueIdentifier)
+	}
+	return fmt.Sprintf(`%s
 
 You are the principal agent in a Factory-managed tmux session. The /do skill owns the SDLC and terminal conditions. Continue until it succeeds or reaches a genuine blocker.
 
@@ -257,7 +266,7 @@ During the pull request green loop, use "$FACTORY_AGENT_HELPER" agent github-eve
 
 While waiting for Linear feedback, use "$FACTORY_AGENT_HELPER" agent linear-comments as documented by the /do skill. Linear comment events are durable wake signals; refresh the authoritative issue conversation with linear_graphql.py after every event or timeout.
 
-If the /do workflow succeeds, end the final response with exactly FACTORY_RESULT: SUCCEEDED. If it is genuinely blocked, end with exactly FACTORY_RESULT: BLOCKED.`, issueIdentifier)
+If the /do workflow succeeds, end the final response with exactly FACTORY_RESULT: SUCCEEDED. If it is genuinely blocked, end with exactly FACTORY_RESULT: BLOCKED.`, opening)
 }
 
 func resultFromFinalMessage(message string) (State, string) {

@@ -45,6 +45,7 @@ type EventStore interface {
 
 type RunStore interface {
 	Claim(trigger agentrun.Trigger, now time.Time) (agentrun.Run, bool, error)
+	ClaimContinuation(trigger agentrun.Trigger, now time.Time) (agentrun.Run, bool, error)
 	PublicSnapshot() agentrun.PublicSnapshot
 	ActivitySnapshot() agentrun.ActivitySnapshot
 	FindStarted(issueIdentifier string, startedUnixMilli int64) (agentrun.Run, bool)
@@ -358,6 +359,18 @@ func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
+		_, created, claimErr := s.runStore.ClaimContinuation(agentrun.Trigger{
+			DeliveryID:      deliveryID,
+			IssueIdentifier: event.IssueIdentifier,
+			Kind:            agentrun.TriggerKindComment,
+		}, now)
+		if claimErr != nil {
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		if created {
+			s.runNotifier.Notify()
+		}
 	}
 	if trigger, ok := agentTrigger(payload, deliveryID, s.triggerActor); ok {
 		_, created, claimErr := s.runStore.Claim(trigger, now)
@@ -456,7 +469,7 @@ func agentTrigger(payload linearPayload, deliveryID, allowedActorID string) (age
 	return agentrun.Trigger{
 		DeliveryID:      deliveryID,
 		IssueIdentifier: strings.ToUpper(payload.Data.Identifier),
-		Kind:            "linear-label",
+		Kind:            agentrun.TriggerKindLabel,
 	}, true
 }
 

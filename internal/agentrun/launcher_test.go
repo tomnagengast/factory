@@ -120,6 +120,45 @@ func TestTmuxLauncherCleanupRemovesEmptyWorktreeDirectory(t *testing.T) {
 	}
 }
 
+func TestTmuxLauncherPropagatesTriggerKind(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	argumentsPath := filepath.Join(root, "tmux-arguments")
+	tmuxPath := filepath.Join(root, "tmux")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", argumentsPath)
+	if err := os.WriteFile(tmuxPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	launcher, err := NewTmuxLauncher(LauncherConfig{
+		RepoURL:       "git@example.invalid:repo.git",
+		RepoPath:      root,
+		StateRoot:     root,
+		BinaryPath:    "/tmp/factory",
+		GitPath:       "git",
+		WorktrunkPath: "wt",
+		TmuxPath:      tmuxPath,
+		TmuxSocket:    "factory-agents",
+	})
+	if err != nil {
+		t.Fatalf("new launcher: %v", err)
+	}
+	run := Run{ID: "run-123", IssueIdentifier: "ENG-123", TriggerKind: TriggerKindComment}
+	if err := launcher.Start(context.Background(), run, "factory-eng-123", filepath.Join(root, "runs", run.ID)); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	data, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatalf("read tmux arguments: %v", err)
+	}
+	arguments := string(data)
+	for _, expected := range []string{"FACTORY_TRIGGER_KIND=" + TriggerKindComment, "--trigger-kind\n" + TriggerKindComment} {
+		if !strings.Contains(arguments, expected) {
+			t.Fatalf("arguments missing %q:\n%s", expected, arguments)
+		}
+	}
+}
+
 func newLauncherFixture(t *testing.T) launcherFixture {
 	t.Helper()
 	gitPath, err := exec.LookPath("git")

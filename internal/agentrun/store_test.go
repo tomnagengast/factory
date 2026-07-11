@@ -110,6 +110,113 @@ func TestStoreDoesNotRestartTerminalRunForRetriedDelivery(t *testing.T) {
 	}
 }
 
+func TestStoreClaimContinuationIgnoresIssueWithoutHistory(t *testing.T) {
+	t.Parallel()
+
+	store := openTestStore(t, 10)
+	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
+	if _, _, err := store.Claim(Trigger{DeliveryID: "other-label", IssueIdentifier: "ENG-999", Kind: TriggerKindLabel}, now); err != nil {
+		t.Fatalf("seed other issue: %v", err)
+	}
+
+	run, created, err := store.ClaimContinuation(Trigger{
+		DeliveryID:      "comment-1",
+		IssueIdentifier: "ENG-123",
+		Kind:            TriggerKindComment,
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("claim continuation: %v", err)
+	}
+	if created || run.ID != "" {
+		t.Fatalf("unmanaged issue continuation = %#v, created=%t", run, created)
+	}
+	if snapshot := store.Snapshot(); snapshot.Total != 1 || len(snapshot.Runs) != 1 {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
+func TestStoreClaimContinuationStartsAfterTerminalHistory(t *testing.T) {
+	t.Parallel()
+
+	for _, terminal := range []State{StateSucceeded, StateBlocked, StateFailed} {
+		terminal := terminal
+		t.Run(string(terminal), func(t *testing.T) {
+			t.Parallel()
+			store := openTestStore(t, 10)
+			now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
+			prior, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+			if err != nil {
+				t.Fatalf("seed run: %v", err)
+			}
+			if err := store.Finish(prior.ID, terminal, 1, "done", now.Add(time.Second)); err != nil {
+				t.Fatalf("finish prior run: %v", err)
+			}
+
+			continuation, created, err := store.ClaimContinuation(Trigger{
+				DeliveryID:      "comment-1",
+				IssueIdentifier: "ENG-123",
+				Kind:            TriggerKindComment,
+			}, now.Add(2*time.Second))
+			if err != nil {
+				t.Fatalf("claim continuation: %v", err)
+			}
+			if !created || continuation.ID == prior.ID || continuation.State != StatePending || continuation.TriggerKind != TriggerKindComment {
+				t.Fatalf("continuation = %#v, created=%t", continuation, created)
+			}
+			if snapshot := store.Snapshot(); snapshot.Total != 2 || snapshot.Active != 1 || len(snapshot.Runs) != 2 {
+				t.Fatalf("snapshot = %#v", snapshot)
+			}
+		})
+	}
+}
+
+func TestStoreClaimContinuationCoalescesActiveAndDeduplicatesRetry(t *testing.T) {
+	t.Parallel()
+
+	for _, activeState := range []State{StatePending, StateStarting, StateRunning} {
+		activeState := activeState
+		t.Run(string(activeState), func(t *testing.T) {
+			t.Parallel()
+			store := openTestStore(t, 10)
+			now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
+			active, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+			if err != nil {
+				t.Fatalf("seed active run: %v", err)
+			}
+			if activeState != StatePending {
+				if err := store.MarkStarting(active.ID, "factory-eng-123", t.TempDir(), now); err != nil {
+					t.Fatalf("mark starting: %v", err)
+				}
+			}
+			if activeState == StateRunning {
+				if err := store.MarkRunning(active.ID, 1, now); err != nil {
+					t.Fatalf("mark running: %v", err)
+				}
+			}
+
+			trigger := Trigger{DeliveryID: "comment-1", IssueIdentifier: "ENG-123", Kind: TriggerKindComment}
+			coalesced, created, err := store.ClaimContinuation(trigger, now.Add(time.Second))
+			if err != nil {
+				t.Fatalf("claim active continuation: %v", err)
+			}
+			if created || coalesced.ID != active.ID || coalesced.DuplicateTriggers != 1 {
+				t.Fatalf("coalesced = %#v, created=%t", coalesced, created)
+			}
+
+			retried, created, err := store.ClaimContinuation(trigger, now.Add(2*time.Second))
+			if err != nil {
+				t.Fatalf("retry continuation: %v", err)
+			}
+			if created || retried.ID != active.ID || retried.DuplicateTriggers != 1 {
+				t.Fatalf("retried = %#v, created=%t", retried, created)
+			}
+			if snapshot := store.Snapshot(); snapshot.Total != 1 || snapshot.Active != 1 {
+				t.Fatalf("snapshot = %#v", snapshot)
+			}
+		})
+	}
+}
+
 func TestStorePersistsPrivateAndPublicState(t *testing.T) {
 	t.Parallel()
 

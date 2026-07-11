@@ -1,6 +1,6 @@
 # Factory agent runner
 
-Factory turns an explicit Linear label application into a durable Codex SDLC run.
+Factory turns an explicit Linear label application or later human feedback on a previously managed issue into a durable Codex SDLC run.
 
 ## Trigger
 
@@ -10,7 +10,7 @@ Apply the workspace label:
 Factory
 ```
 
-Factory launches only for a signed `Issue` `update` webhook where the configured Linear actor newly added that label. It compares the current label IDs with `updatedFrom.labelIds`, so unrelated issue updates, label removal, and updates where `Factory` was already present do not start agents.
+Factory initially launches only for a signed `Issue` `update` webhook where the configured Linear actor newly added that label. It compares the current label IDs with `updatedFrom.labelIds`, so unrelated issue updates, label removal, and updates where `Factory` was already present do not start agents. After an issue has retained Factory run history, an eligible human `Comment/create` can start a focused continuation as described below.
 
 ## Run lifecycle
 
@@ -18,7 +18,7 @@ Factory launches only for a signed `Issue` `update` webhook where the configured
 2. The delivery and a pending run are persisted before the handler returns `200`.
 3. The background manager fetches and fast-forwards the internal clone at `~/.local/share/factory/workspace/network` to its configured upstream. Registered linked worktrees are excluded from the main checkout's dirty check; all other local changes and divergence still fail preparation instead of being overwritten. Before starting a new pending run with no other agent active, Factory removes clean, unlocked worktrees whose branches are already integrated into the fetched upstream.
 4. One isolated tmux session named `factory-<issue-lower>` starts on the `factory-agents` tmux socket.
-5. The principal runs `$do TEAM-123` with Codex `gpt-5.6-sol` and high reasoning.
+5. The principal runs `$do TEAM-123` with Codex `gpt-5.6-sol` and high reasoning. Comment continuations fresh-read the Linear thread and treat only unaddressed human feedback as new scope.
 6. A failed Codex process is resumed, when a thread ID is available, up to three total attempts.
 7. The session stays active while any child windows remain. Factory records the terminal result only after the tmux session exits.
 
@@ -32,7 +32,7 @@ Redundant work is prevented at three layers:
 - The persistent run store allows only one pending, starting, or running record for an issue.
 - The deterministic tmux session name is a final process-level lock.
 
-Additional `Factory` label applications are coalesced while the issue has an active run. After a run becomes terminal, remove and reapply the label to start another run. The `$do` skill then resumes any existing branch, worktree, or pull request instead of duplicating them.
+Additional `Factory` label applications and eligible human comments are coalesced while the issue has an active run. After a run becomes terminal, either remove and reapply the label or add a human comment to start another run. The `$do` skill resumes active work when it exists; after an earlier PR is integrated, a comment continuation starts a deterministic focused follow-up branch instead of rewriting completed work.
 
 ## Activity views
 
@@ -75,7 +75,9 @@ Factory also records eligible signed `Comment/create` deliveries in a body-free 
 
 The journal retains the latest 500 eligible deliveries, deduplicates Linear delivery IDs, and returns matching events in Factory receipt order with a monotonic cursor. Events contain comment and issue identifiers, reply parent ID, private Linear URL, and receipt time, but never the comment body. The agent refreshes the authoritative conversation through Linear GraphQL after every wake or timeout.
 
-Only comments created by the configured trigger actor enter this journal. Factory-authored comments are excluded by the reserved final-line `🐘` signature or `🐘` plus `codex-do` marker, because Factory and the human can share the same Linear identity. Comment events never create or resume runs. A comment on a terminal issue remains visible in Linear but requires removing and reapplying the `Factory` label before an agent can resume the retry-safe workflow.
+Only comments created by the configured trigger actor enter this journal. Factory-authored comments are excluded by the reserved final-line `🐘` signature or `🐘` plus `codex-do` marker, because Factory and the human can share the same Linear identity.
+
+For an issue with retained Factory run history, a human comment coalesces into a pending, starting, or running agent and wakes its journal listener. If the latest run is terminal, the same delivery creates exactly one fresh `linear-comment` continuation run. The new principal reads the authoritative Linear thread, addresses unhandled feedback, and may open a focused follow-up PR when prior work is already merged. Comments on issues without retained Factory history never start runs; applying the `Factory` label remains the initial opt-in. Run history is bounded to the latest 100 records globally, so pruned issues lose comment-continuation eligibility. Factory-authored comments never start or wake runs.
 
 ## Child agents
 
@@ -85,6 +87,7 @@ Every principal and child receives these environment variables:
 - `FACTORY_TMUX_SESSION`
 - `FACTORY_RUN_ID`
 - `FACTORY_RUN_DIR`
+- `FACTORY_TRIGGER_KIND`
 - `FACTORY_REPO_PATH`
 - `FACTORY_AGENT_HELPER`
 

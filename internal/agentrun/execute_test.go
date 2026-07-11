@@ -47,11 +47,38 @@ func TestReadThreadID(t *testing.T) {
 func TestPrincipalPromptGroupsChildAgentsInTmux(t *testing.T) {
 	t.Parallel()
 
-	prompt := principalPrompt("ENG-123")
+	prompt := principalPrompt("ENG-123", TriggerKindLabel)
 	for _, expected := range []string{"Use $do", "ENG-123", "linear_graphql.py", "FACTORY_AGENT_HELPER", "linear-comments", "FACTORY_RESULT: SUCCEEDED"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("prompt missing %q: %s", expected, prompt)
 		}
+	}
+}
+
+func TestContinuationPromptRequiresFreshLinearFeedbackRead(t *testing.T) {
+	t.Parallel()
+
+	prompt := principalPrompt("ENG-123", TriggerKindComment)
+	for _, expected := range []string{
+		"continue ENG-123 in response to new human Linear feedback",
+		"fresh-read the complete Linear issue and conversation",
+		"not yet addressed",
+		"focused follow-up",
+		"Do not redo completed work",
+		"FACTORY_RESULT: SUCCEEDED",
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("continuation prompt missing %q: %s", expected, prompt)
+		}
+	}
+}
+
+func TestUnknownTriggerKindUsesStandardPrompt(t *testing.T) {
+	t.Parallel()
+
+	standard := principalPrompt("ENG-123", TriggerKindLabel)
+	if got := principalPrompt("ENG-123", "future-trigger"); got != standard {
+		t.Fatalf("unknown trigger changed standard prompt:\n%s", got)
 	}
 }
 

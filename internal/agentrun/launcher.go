@@ -212,11 +212,13 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 		"-e", "FACTORY_TMUX_SESSION=" + sessionName,
 		"-e", "FACTORY_RUN_ID=" + run.ID,
 		"-e", "FACTORY_RUN_DIR=" + runDirectory,
+		"-e", "FACTORY_TRIGGER_KIND=" + run.TriggerKind,
 		"-e", "FACTORY_REPO_PATH=" + l.config.RepoPath,
 		"-e", "FACTORY_AGENT_HELPER=" + l.config.BinaryPath,
 		l.config.BinaryPath,
 		"agent-exec",
 		"--issue", run.IssueIdentifier,
+		"--trigger-kind", run.TriggerKind,
 		"--repo", l.config.RepoPath,
 		"--run-dir", runDirectory,
 	}

@@ -442,7 +442,7 @@ func TestLinearNonTriggerEventsDoNotStartRun(t *testing.T) {
 	}
 }
 
-func TestLinearCommentsCreateWakeEventsWithoutStartingRuns(t *testing.T) {
+func TestLinearCommentsJournalUnmanagedIssuesWithoutStartingRuns(t *testing.T) {
 	t.Parallel()
 	handler, runStore, notifier, journalPath := testHandlerWithLinearComments(t)
 	comments := []struct {
@@ -484,6 +484,75 @@ func TestLinearCommentsCreateWakeEventsWithoutStartingRuns(t *testing.T) {
 	}
 }
 
+func TestLinearCommentStartsOneContinuationAfterTerminalRun(t *testing.T) {
+	t.Parallel()
+
+	handler, runStore, notifier, journalPath := testHandlerWithLinearComments(t)
+	prior, _, err := runStore.Claim(agentrun.Trigger{
+		DeliveryID:      "label-delivery",
+		IssueIdentifier: "ENG-123",
+		Kind:            agentrun.TriggerKindLabel,
+	}, testNow.Add(-2*time.Second))
+	if err != nil {
+		t.Fatalf("seed prior run: %v", err)
+	}
+	if err := runStore.Finish(prior.ID, agentrun.StateSucceeded, 1, "done", testNow.Add(-time.Second)); err != nil {
+		t.Fatalf("finish prior run: %v", err)
+	}
+
+	body := testLinearCommentBody("comment-1", "Please continue")
+	for range 2 {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, signedWebhookRequest(body, "comment-delivery", testSecret))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+		}
+	}
+
+	snapshot := runStore.Snapshot()
+	if snapshot.Total != 2 || snapshot.Active != 1 || len(snapshot.Runs) != 2 {
+		t.Fatalf("run snapshot = %#v", snapshot)
+	}
+	continuation := snapshot.Runs[0]
+	if continuation.ID == prior.ID || continuation.State != agentrun.StatePending || continuation.TriggerKind != agentrun.TriggerKindComment {
+		t.Fatalf("continuation = %#v", continuation)
+	}
+	if got := notifier.count.Load(); got != 1 {
+		t.Fatalf("notifications = %d, want 1", got)
+	}
+	batch, err := linearhook.Read(journalPath, linearhook.Filter{IssueIdentifier: "ENG-123"}, 0)
+	if err != nil || len(batch.Events) != 1 {
+		t.Fatalf("batch = %#v, %v", batch, err)
+	}
+}
+
+func TestLinearCommentCoalescesIntoActiveRunWithoutNotification(t *testing.T) {
+	t.Parallel()
+
+	handler, runStore, notifier, _ := testHandlerWithLinearComments(t)
+	active, _, err := runStore.Claim(agentrun.Trigger{
+		DeliveryID:      "label-delivery",
+		IssueIdentifier: "ENG-123",
+		Kind:            agentrun.TriggerKindLabel,
+	}, testNow.Add(-time.Second))
+	if err != nil {
+		t.Fatalf("seed active run: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, signedWebhookRequest(testLinearCommentBody("comment-1", "Please continue"), "comment-delivery", testSecret))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	snapshot := runStore.Snapshot()
+	if snapshot.Total != 1 || snapshot.Active != 1 || len(snapshot.Runs) != 1 || snapshot.Runs[0].ID != active.ID || snapshot.Runs[0].DuplicateTriggers != 1 {
+		t.Fatalf("run snapshot = %#v", snapshot)
+	}
+	if got := notifier.count.Load(); got != 0 {
+		t.Fatalf("notifications = %d, want 0", got)
+	}
+}
+
 func TestLinearCommentWakeFiltersFactoryAndUnsupportedComments(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -500,7 +569,14 @@ func TestLinearCommentWakeFiltersFactoryAndUnsupportedComments(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			handler, _, _, journalPath := testHandlerWithLinearComments(t)
+			handler, runStore, notifier, journalPath := testHandlerWithLinearComments(t)
+			prior, _, err := runStore.Claim(agentrun.Trigger{DeliveryID: "label-delivery", IssueIdentifier: "ENG-123", Kind: agentrun.TriggerKindLabel}, testNow.Add(-2*time.Second))
+			if err != nil {
+				t.Fatalf("seed prior run: %v", err)
+			}
+			if err := runStore.Finish(prior.ID, agentrun.StateSucceeded, 1, "done", testNow.Add(-time.Second)); err != nil {
+				t.Fatalf("finish prior run: %v", err)
+			}
 			body := fmt.Sprintf(
 				`{"type":"Comment","action":%q,"webhookTimestamp":%d,"actor":{"id":%q},"data":{"id":"comment-1","body":%q,"issueId":"issue-123","issue":{"identifier":"ENG-123"}}}`,
 				test.action,
@@ -516,6 +592,12 @@ func TestLinearCommentWakeFiltersFactoryAndUnsupportedComments(t *testing.T) {
 			batch, err := linearhook.Read(journalPath, linearhook.Filter{IssueIdentifier: "ENG-123"}, 0)
 			if err != nil || len(batch.Events) != 0 {
 				t.Fatalf("batch = %#v, %v", batch, err)
+			}
+			if snapshot := runStore.Snapshot(); snapshot.Total != 1 || snapshot.Active != 0 {
+				t.Fatalf("run snapshot = %#v", snapshot)
+			}
+			if got := notifier.count.Load(); got != 0 {
+				t.Fatalf("notifications = %d, want 0", got)
 			}
 		})
 	}
@@ -819,6 +901,17 @@ func signedWebhookRequest(body, deliveryID string, secret []byte) *http.Request 
 	request.Header.Set("Linear-Signature", hex.EncodeToString(mac.Sum(nil)))
 	request.Header.Set("Content-Type", "application/json")
 	return request
+}
+
+func testLinearCommentBody(commentID, body string) string {
+	return fmt.Sprintf(
+		`{"type":"Comment","action":"create","url":"https://linear.example/comment/%s","webhookTimestamp":%d,"actor":{"id":"%s"},"data":{"id":"%s","body":%q,"issueId":"issue-123","issue":{"id":"issue-123","identifier":"ENG-123"}}}`,
+		commentID,
+		testNow.UnixMilli(),
+		testActorID,
+		commentID,
+		body,
+	)
 }
 
 func signedGitHubWebhookRequest(body, deliveryID, eventType string, secret []byte) *http.Request {

@@ -16,6 +16,11 @@ import (
 
 const stateVersion = 1
 
+const (
+	TriggerKindLabel   = "linear-label"
+	TriggerKindComment = "linear-comment"
+)
+
 var issueIdentifierPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[1-9][0-9]*$`)
 
 type State string
@@ -140,6 +145,14 @@ func Open(path string, limit int) (*Store, error) {
 }
 
 func (s *Store) Claim(trigger Trigger, now time.Time) (Run, bool, error) {
+	return s.claim(trigger, now, false)
+}
+
+func (s *Store) ClaimContinuation(trigger Trigger, now time.Time) (Run, bool, error) {
+	return s.claim(trigger, now, true)
+}
+
+func (s *Store) claim(trigger Trigger, now time.Time, requireHistory bool) (Run, bool, error) {
 	if trigger.DeliveryID == "" {
 		return Run{}, false, errors.New("agent run store: delivery ID is required")
 	}
@@ -154,12 +167,17 @@ func (s *Store) Claim(trigger Trigger, now time.Time) (Run, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	hasHistory := false
 	for i := range s.state.Runs {
 		run := s.state.Runs[i]
 		if slices.Contains(run.DeliveryIDs, trigger.DeliveryID) {
 			return run, false, nil
 		}
-		if run.IssueIdentifier == trigger.IssueIdentifier && run.State.Active() {
+		if run.IssueIdentifier != trigger.IssueIdentifier {
+			continue
+		}
+		hasHistory = true
+		if run.State.Active() {
 			next := s.state
 			next.Runs = slices.Clone(s.state.Runs)
 			nextRun := &next.Runs[i]
@@ -172,6 +190,9 @@ func (s *Store) Claim(trigger Trigger, now time.Time) (Run, bool, error) {
 			s.state = next
 			return *nextRun, false, nil
 		}
+	}
+	if requireHistory && !hasHistory {
+		return Run{}, false, nil
 	}
 
 	id, err := newID()

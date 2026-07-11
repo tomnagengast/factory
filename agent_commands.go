@@ -40,6 +40,7 @@ func runAgentCommand(ctx context.Context, args []string) (int, bool) {
 func runPrincipal(ctx context.Context, args []string) int {
 	flags := flag.NewFlagSet("agent-exec", flag.ContinueOnError)
 	issue := flags.String("issue", "", "Linear issue identifier")
+	triggerKind := flags.String("trigger-kind", "", "Factory trigger kind")
 	repo := flags.String("repo", "", "repository path")
 	runDirectory := flags.String("run-dir", "", "run output directory")
 	if flags.Parse(args) != nil || *issue == "" || *repo == "" || *runDirectory == "" {
@@ -47,6 +48,7 @@ func runPrincipal(ctx context.Context, args []string) int {
 	}
 	return agentrun.ExecutePrincipal(ctx, agentrun.PrincipalConfig{
 		IssueIdentifier: *issue,
+		TriggerKind:     *triggerKind,
 		RepoPath:        *repo,
 		RunDirectory:    *runDirectory,
 		CodexPath:       requiredCommand("codex"),
