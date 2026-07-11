@@ -16,7 +16,7 @@ Factory launches only for a signed `Issue` `update` webhook where the configured
 
 1. The webhook is signature-checked and replay-window checked.
 2. The delivery and a pending run are persisted before the handler returns `200`.
-3. The background manager refreshes the internal clone at `~/.local/share/factory/workspace/network`.
+3. The background manager fetches and fast-forwards the internal clone at `~/.local/share/factory/workspace/network` to its configured upstream. A dirty or diverged managed checkout fails preparation instead of being overwritten.
 4. One isolated tmux session named `factory-<issue-lower>` starts on the `factory-agents` tmux socket.
 5. The principal runs `$do TEAM-123` with Codex `gpt-5.6-sol` and high reasoning.
 6. A failed Codex process is resumed, when a thread ID is available, up to three total attempts.

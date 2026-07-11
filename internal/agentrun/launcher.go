@@ -56,7 +56,19 @@ func (l *TmuxLauncher) Prepare(ctx context.Context) error {
 	} else if err != nil {
 		return fmt.Errorf("inspect agent workspace: %w", err)
 	}
-	return runCommand(ctx, "fetch agent workspace", l.config.RepoPath, l.config.GitPath, "fetch", "--prune", "origin")
+	status := exec.CommandContext(ctx, l.config.GitPath, "status", "--porcelain")
+	status.Dir = l.config.RepoPath
+	output, err := status.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("inspect agent workspace status: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	if strings.TrimSpace(string(output)) != "" {
+		return errors.New("agent workspace has local changes")
+	}
+	if err := runCommand(ctx, "fetch agent workspace", l.config.RepoPath, l.config.GitPath, "fetch", "--prune", "origin"); err != nil {
+		return err
+	}
+	return runCommand(ctx, "fast-forward agent workspace", l.config.RepoPath, l.config.GitPath, "merge", "--ff-only", "@{upstream}")
 }
 
 func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirectory string) error {
