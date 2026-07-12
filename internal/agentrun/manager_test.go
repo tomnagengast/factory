@@ -341,6 +341,39 @@ func TestManagerParksValidatedReadyRun(t *testing.T) {
 	}
 }
 
+func TestManagerResumesMergeThatWinsReadyParkingRace(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	store := openTestStore(t, 10)
+	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	checkpoint := testReadyCheckpoint(run.ID, now)
+	reader := &fakePullRequestReader{snapshot: PullRequestSnapshot{
+		State:          "MERGED",
+		BaseBranch:     checkpoint.BaseBranch,
+		HeadBranch:     checkpoint.HeadBranch,
+		HeadOID:        checkpoint.VerifiedHeadOID,
+		MergeCommitOID: "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b",
+		UpdatedAt:      now.Add(time.Minute),
+	}}
+	launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult), ready: make(map[string]ReadyCheckpoint)}
+	manager := newTestManagerWithReader(t, store, launcher, t.TempDir(), reader, func() time.Time { return now })
+	manager.reconcile(context.Background())
+	running, _ := store.Find(run.ID)
+	launcher.sessions[running.SessionName] = false
+	launcher.results[running.RunDirectory] = ProcessResult{Status: ResultReadyForMerge, Attempts: 1, FinishedAt: now.Add(2 * time.Minute)}
+	launcher.ready[running.RunDirectory] = checkpoint
+
+	manager.reconcile(context.Background())
+	resumed, _ := store.Find(run.ID)
+	if resumed.State != StatePostMergePending || resumed.TriggerKind != TriggerKindPostMerge || resumed.MergeCommitOID != reader.snapshot.MergeCommitOID || resumed.Ready == nil {
+		t.Fatalf("resumed = %#v", resumed)
+	}
+}
+
 func TestManagerRejectsForgedReadyCheckpoint(t *testing.T) {
 	t.Parallel()
 

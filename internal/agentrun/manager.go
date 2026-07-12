@@ -254,15 +254,38 @@ func (m *Manager) parkReadyRun(ctx context.Context, run Run, result ProcessResul
 		m.finishInvalidReady(run, result, err)
 		return
 	}
-	if err := validateReadySnapshot(checkpoint, snapshot); err != nil {
-		m.finishInvalidReady(run, result, err)
-		return
-	}
 	checkpoint.Repository = m.lifecycle.Repository
 	checkpoint.PullRequestUpdatedAt = snapshot.UpdatedAt
 	now := m.now()
+	switch snapshot.State {
+	case "OPEN":
+		if err := validateReadySnapshot(checkpoint, snapshot); err != nil {
+			m.finishInvalidReady(run, result, err)
+			return
+		}
+	case "MERGED", "CLOSED":
+		if snapshot.BaseBranch != checkpoint.BaseBranch || snapshot.HeadBranch != checkpoint.HeadBranch {
+			m.finishInvalidReady(run, result, errors.New("closed pull request identity does not match the ready checkpoint"))
+			return
+		}
+	default:
+		m.finishInvalidReady(run, result, fmt.Errorf("pull request state is %q", snapshot.State))
+		return
+	}
 	if err := m.store.MarkAwaitingMerge(run.ID, checkpoint, now.Add(m.mergeInterval), result.Attempts, now); err != nil {
 		m.logger.Error("park agent run", "run_id", run.ID, "error", err)
+		return
+	}
+	if snapshot.State == "MERGED" {
+		if err := m.store.ResumeAwaiting(run.ID, TriggerKindPostMerge, snapshot.MergeCommitOID, "pull request merged while checkpoint was being parked", now); err != nil {
+			m.logger.Error("resume ready merge race", "run_id", run.ID, "error", err)
+		}
+		return
+	}
+	if snapshot.State == "CLOSED" {
+		if err := m.store.ResumeAwaiting(run.ID, TriggerKindPostMerge, "", "pull request closed while checkpoint was being parked", now); err != nil {
+			m.logger.Error("resume ready close race", "run_id", run.ID, "error", err)
+		}
 		return
 	}
 	m.logger.Info("agent run awaiting human merge", "run_id", run.ID, "repository", checkpoint.Repository, "pull_request", checkpoint.PullRequest)
