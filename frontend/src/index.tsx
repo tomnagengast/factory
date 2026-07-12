@@ -1116,6 +1116,12 @@ function agentStatusLabel(
   if (agent?.live) {
     return "Session live";
   }
+  if (agent?.state === "awaiting_human_merge") {
+    return "Run parked";
+  }
+  if (agent?.state === "post_merge_pending") {
+    return "Continuation queued";
+  }
   if (agent && !runStateIsActive(agent.state) && agent.windows.length > 0) {
     return "History retained";
   }
