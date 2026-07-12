@@ -18,10 +18,10 @@ Factory initially launches only for a signed `Issue` `update` webhook where the 
 2. The delivery and a pending run are persisted before the handler returns `200`.
 3. The background manager fetches and fast-forwards the internal clone at `~/.local/share/factory/workspace/network` to its configured upstream. Registered linked worktrees are excluded from the main checkout's dirty check; all other local changes and divergence still fail preparation instead of being overwritten. Before starting a new pending run with no other agent active, Factory removes clean, unlocked worktrees whose branches are already integrated into the fetched upstream as a backstop for interrupted cleanup.
 4. One isolated tmux session named `factory-<issue-lower>` starts on the `factory-agents` tmux socket.
-5. The principal runs `$do TEAM-123` with Codex `gpt-5.6-sol` and high reasoning through gated research, implementation, GitHub approval, merge, deployment from updated main, and cleanup. Comment continuations fresh-read the Linear thread and treat only unaddressed human feedback as new scope.
+5. The principal runs `$do TEAM-123` with Codex `gpt-5.6-sol` and high reasoning through gated research, implementation, a human merge, deployment from updated main, and cleanup. Comment continuations fresh-read the Linear thread and treat only unaddressed human feedback as new scope.
 6. A failed Codex process is resumed, when a thread ID is available, up to three total attempts.
-7. After the PR is green, the principal remains active until a distinct authorized GitHub reviewer approves the current head. Review webhooks wake the loop, but only a fresh authoritative GitHub snapshot can authorize merge.
-8. The principal merges the exact validated head, fast-forwards the clean primary checkout, deploys every applicable changed surface from merged main, verifies health and GitHub's automatic remote-branch deletion, then removes the clean integrated local worktree/branch with Worktrunk.
+7. After the PR is ready, the principal records the exact locally verified head and remains active until the human merges it. Pull-request webhooks wake the loop, but only a fresh authoritative GitHub snapshot with `state == MERGED` and a merge commit proves the merge.
+8. The principal revalidates that the human merged the exact locally verified head and that final checks and feedback still pass, then fast-forwards the clean primary checkout, deploys every applicable changed surface from merged main, verifies health and GitHub's automatic remote-branch deletion, and removes the clean integrated local worktree/branch with Worktrunk.
 9. The session stays active while any child windows remain. Factory records the terminal result only after the tmux session exits, so post-merge deployment or cleanup failures remain visible as incomplete runs.
 
 Run state and output live under `~/.local/share/factory/runs/<run-id>/`. Standard output, diagnostics, final messages, prompts, and process results are separate files with private permissions.
@@ -51,7 +51,7 @@ Validated Linear request bodies are retained prospectively as private `0600` sid
 
 Factory accepts signed repository webhooks at `https://factory.nags.cloud/api/webhooks/github`. It verifies `X-Hub-Signature-256`, deduplicates `X-GitHub-Delivery`, and stores a bounded journal of compact PR, review, check, status, and workflow metadata. Raw GitHub webhook payloads and comment bodies are not retained.
 
-During the PR green and approval loop, a Factory agent waits on the local journal instead of polling GitHub:
+During the PR green and human-merge loop, a Factory agent waits on the local journal instead of polling GitHub:
 
 ```bash
 "$FACTORY_AGENT_HELPER" agent github-events \
@@ -62,11 +62,11 @@ During the PR green and approval loop, a Factory agent waits on the local journa
   --wait 60s
 ```
 
-The JSON response contains a monotonic cursor and matching events ordered by Factory receipt sequence. The journal retains the latest 1,000 deliveries globally and deduplicates retained GitHub delivery IDs. Events are wake signals only; the agent always refreshes authoritative PR, review, and check state with `gh` before acting. An empty `reviewDecision` keeps waiting, and Yolo never bypasses GitHub approval. Register or refresh a repository webhook with `bin/network-app github-hook owner/repository` after `refresh-env` and deployment.
+The JSON response contains a monotonic cursor and matching events ordered by Factory receipt sequence. The journal retains the latest 1,000 deliveries globally and deduplicates retained GitHub delivery IDs. Events are wake signals only; the agent always refreshes authoritative PR, review, check, and merge state with `gh` before acting. While the PR is open, the agent remediates or keeps waiting; Yolo never authorizes a merge. Register or refresh a repository webhook with `bin/network-app github-hook owner/repository` after `refresh-env` and deployment.
 
-## Approved merge and deployment
+## Human merge and deployment
 
-Immediately before merge, `$do` repeats the complete checks, mergeability, review, comment, thread, and Linear feedback snapshot and binds the merge to the observed `headRefOid`. It never uses admin bypass or auto-merge. Retries detect an already merged PR and resume at the first incomplete post-merge boundary.
+At the ready checkpoint, `$do` repeats the complete checks, mergeability, review, comment, thread, and Linear feedback snapshot and durably records the locally verified `headRefOid`. The human performs the merge; the principal never calls a merge mutation or enables auto-merge. A close/merge webhook only wakes the run. Before deployment, a fresh GitHub snapshot must report `MERGED` with a merge commit, the merged head must equal the recorded verified head, and the final checks and feedback snapshot must still pass. A closed-unmerged, changed, or regressed head becomes a precise blocker. Retries detect an already merged PR and resume at the first incomplete post-merge boundary only after reconstructing that verified-head record.
 
 After merge, the principal resolves the primary checkout with Worktrunk, refuses to overwrite unrelated changes, fetches/prunes origin, and fast-forwards the default branch. Deployment commands and post-deploy probes come from the issue's approved plan and run from that updated primary checkout, never from the feature worktree. A failed deployment is reported as a post-merge recovery blocker; cleanup does not hide it. The manager's next-run cleanup can still remove a clean integrated worktree as a backstop, so retained worktrees are not guaranteed to persist indefinitely.
 

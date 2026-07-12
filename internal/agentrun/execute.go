@@ -240,7 +240,7 @@ func runCodex(
 }
 
 func principalPrompt(issueIdentifier, triggerKind string) string {
-	opening := fmt.Sprintf("Use $do to complete %s through GitHub approval, merge, deployment from updated main, and branch/worktree cleanup.", issueIdentifier)
+	opening := fmt.Sprintf("Use $do to complete %s through a human merge, deployment from updated main, and branch/worktree cleanup. The principal must wait for the human merge event and must not merge the pull request itself.", issueIdentifier)
 	if triggerKind == TriggerKindComment {
 		opening = fmt.Sprintf(`Use $do to continue %s in response to new human Linear feedback.
 

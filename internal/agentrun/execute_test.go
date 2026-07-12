@@ -51,7 +51,8 @@ func TestPrincipalPromptGroupsChildAgentsInTmux(t *testing.T) {
 	for _, expected := range []string{
 		"Use $do",
 		"ENG-123",
-		"GitHub approval",
+		"human merge",
+		"wait for the human merge event",
 		"deployment from updated main",
 		"branch/worktree cleanup",
 		"linear_graphql.py",
@@ -62,6 +63,9 @@ func TestPrincipalPromptGroupsChildAgentsInTmux(t *testing.T) {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("prompt missing %q: %s", expected, prompt)
 		}
+	}
+	if strings.Contains(prompt, "GitHub approval") {
+		t.Fatalf("prompt still requires GitHub approval: %s", prompt)
 	}
 }
 
