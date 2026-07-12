@@ -87,6 +87,18 @@ func (j *Journal) add(sequence uint64, event Event) (bool, error) {
 	defer j.mu.Unlock()
 	for _, existing := range j.state.Events {
 		if existing.DeliveryID == event.DeliveryID {
+			if sequence == 0 || sequence <= j.state.Total {
+				return false, nil
+			}
+			if sequence != j.state.Total+1 {
+				return false, fmt.Errorf("Linear comment journal: sequence %d does not follow %d", sequence, j.state.Total)
+			}
+			next := j.state
+			next.Total = sequence
+			if err := writeState(j.path, next); err != nil {
+				return false, err
+			}
+			j.state = next
 			return false, nil
 		}
 	}

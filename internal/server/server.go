@@ -430,7 +430,12 @@ func (s *appServer) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
-	if _, _, err := s.events.Publish(r.Context(), githubhook.ToWire(event)); err != nil {
+	normalized := githubhook.ToWire(event)
+	if _, ok := githubhook.FromWire(normalized); !ok {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	if _, _, err := s.events.Publish(r.Context(), normalized); err != nil {
 		slog.Error("publish GitHub event", "delivery_id", deliveryID, "error", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
@@ -562,13 +567,17 @@ func agentTrigger(payload linearPayload, deliveryID, allowedActorID string) (age
 	if factoryLabelID == "" || !slices.Contains(payload.Data.LabelIDs, factoryLabelID) || len(payload.UpdatedFrom.LabelIDs) == 0 {
 		return agentrun.Trigger{}, false
 	}
+	identifier := strings.ToUpper(strings.TrimSpace(payload.Data.Identifier))
+	if !agentrun.ValidIssueIdentifier(identifier) {
+		return agentrun.Trigger{}, false
+	}
 	var previousLabelIDs []string
 	if err := json.Unmarshal(payload.UpdatedFrom.LabelIDs, &previousLabelIDs); err != nil || slices.Contains(previousLabelIDs, factoryLabelID) {
 		return agentrun.Trigger{}, false
 	}
 	return agentrun.Trigger{
 		DeliveryID:      deliveryID,
-		IssueIdentifier: strings.ToUpper(payload.Data.Identifier),
+		IssueIdentifier: identifier,
 		Kind:            agentrun.TriggerKindLabel,
 	}, true
 }

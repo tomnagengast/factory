@@ -501,6 +501,10 @@ func TestLinearNonTriggerEventsDoNotStartRun(t *testing.T) {
 			body: `{"type":"Issue","action":"update","actor":{"id":"actor-tom"},"data":{"identifier":"ENG-123","labelIds":["label-other"],"labels":[{"id":"label-other","name":"other"}]},"updatedFrom":{"labelIds":["label-other","label-factory"]}}`,
 		},
 		{
+			name: "Factory label with invalid issue identifier",
+			body: `{"type":"Issue","action":"update","actor":{"id":"actor-tom"},"data":{"identifier":"not-an-issue","labelIds":["label-factory"],"labels":[{"id":"label-factory","name":"Factory"}]},"updatedFrom":{"labelIds":[]}}`,
+		},
+		{
 			name: "unrelated issue update",
 			body: `{"type":"Issue","action":"update","actor":{"id":"actor-tom"},"data":{"identifier":"ENG-123","labelIds":["label-other"],"labels":[{"id":"label-other","name":"other"}]},"updatedFrom":{"title":"Old title"}}`,
 		},
@@ -744,6 +748,23 @@ func TestGitHubWebhookRejectsInvalidSignature(t *testing.T) {
 	handler.ServeHTTP(recorder, signedGitHubWebhookRequest(body, "github-delivery-1", "ping", []byte("wrong")))
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestGitHubWebhookRejectsUnprojectableDeliveryBeforeWire(t *testing.T) {
+	t.Parallel()
+
+	handler := testHandler(t)
+	invalid := httptest.NewRecorder()
+	handler.ServeHTTP(invalid, signedGitHubWebhookRequest(`{"action":"completed"}`, "github-invalid", "check_run", testGitHubSecret))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status = %d, want %d", invalid.Code, http.StatusBadRequest)
+	}
+
+	valid := httptest.NewRecorder()
+	handler.ServeHTTP(valid, signedGitHubWebhookRequest(`{"repository":{"full_name":"tomnagengast/network"}}`, "github-valid", "ping", testGitHubSecret))
+	if valid.Code != http.StatusOK {
+		t.Fatalf("valid status after rejection = %d, want %d", valid.Code, http.StatusOK)
 	}
 }
 

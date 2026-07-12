@@ -92,3 +92,26 @@ func TestReadMissingJournal(t *testing.T) {
 		t.Fatalf("batch = %#v, %v", batch, err)
 	}
 }
+
+func TestAddAtConsumesSequenceForExistingDelivery(t *testing.T) {
+	t.Parallel()
+
+	journal, err := Open(filepath.Join(t.TempDir(), "events.json"), 10)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	existing := Event{DeliveryID: "delivery-1", CommentID: "comment-1", IssueID: "issue-1", IssueIdentifier: "ENG-1"}
+	if added, err := journal.Add(existing); err != nil || !added {
+		t.Fatalf("seed existing delivery = %t, %v", added, err)
+	}
+	if added, err := journal.AddAt(2, existing); err != nil || added {
+		t.Fatalf("project redelivery = %t, %v", added, err)
+	}
+	if journal.Total() != 2 {
+		t.Fatalf("total after redelivery = %d, want 2", journal.Total())
+	}
+	next := Event{DeliveryID: "delivery-2", CommentID: "comment-2", IssueID: "issue-2", IssueIdentifier: "ENG-2"}
+	if added, err := journal.AddAt(3, next); err != nil || !added {
+		t.Fatalf("project next delivery = %t, %v", added, err)
+	}
+}
