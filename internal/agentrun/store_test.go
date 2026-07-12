@@ -299,6 +299,76 @@ func TestStoreFindsNewestRunByIssueAndStartedMillisecond(t *testing.T) {
 	}
 }
 
+func TestStorePersistsAndAcknowledgesLifecycleTransitions(t *testing.T) {
+	t.Parallel()
+
+	store := openTestStore(t, 10)
+	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
+	run, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := store.MarkStarting(run.ID, "factory-eng-123", t.TempDir(), now.Add(time.Second)); err != nil {
+		t.Fatalf("mark starting: %v", err)
+	}
+	if err := store.MarkRunning(run.ID, 1, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	if err := store.Finish(run.ID, StateSucceeded, 1, "done", now.Add(3*time.Second)); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+
+	transitions := store.Snapshot().Runs[0].Transitions
+	if len(transitions) != 4 {
+		t.Fatalf("transitions = %#v, want four", transitions)
+	}
+	for i, want := range []State{StatePending, StateStarting, StateRunning, StateSucceeded} {
+		if transitions[i].State != want || transitions[i].ID == "" {
+			t.Fatalf("transition %d = %#v, want state %q", i, transitions[i], want)
+		}
+	}
+	if err := store.AcknowledgeTransitions([]string{transitions[0].ID, transitions[1].ID}); err != nil {
+		t.Fatalf("acknowledge: %v", err)
+	}
+	remaining := store.Snapshot().Runs[0].Transitions
+	if len(remaining) != 2 || remaining[0].State != StateRunning {
+		t.Fatalf("remaining transitions = %#v", remaining)
+	}
+}
+
+func TestStorePruningRetainsRunsWithPendingTransitions(t *testing.T) {
+	t.Parallel()
+
+	store := openTestStore(t, 1)
+	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
+	first, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, now)
+	if err != nil {
+		t.Fatalf("claim first: %v", err)
+	}
+	if err := store.Finish(first.ID, StateSucceeded, 0, "done", now.Add(time.Second)); err != nil {
+		t.Fatalf("finish first: %v", err)
+	}
+	second, _, err := store.Claim(Trigger{DeliveryID: "delivery-2", IssueIdentifier: "ENG-124", Kind: "test"}, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("claim second: %v", err)
+	}
+	if len(store.Snapshot().Runs) != 2 {
+		t.Fatal("run with pending transitions was pruned")
+	}
+	firstRun, _ := store.Find(first.ID)
+	ids := make([]string, len(firstRun.Transitions))
+	for i, transition := range firstRun.Transitions {
+		ids[i] = transition.ID
+	}
+	if err := store.AcknowledgeTransitions(ids); err != nil {
+		t.Fatalf("acknowledge first transitions: %v", err)
+	}
+	runs := store.Snapshot().Runs
+	if len(runs) != 1 || runs[0].ID != second.ID {
+		t.Fatalf("runs after acknowledgment = %#v", runs)
+	}
+}
+
 func openTestStore(t *testing.T, limit int) *Store {
 	t.Helper()
 

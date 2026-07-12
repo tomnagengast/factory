@@ -44,21 +44,29 @@ type Trigger struct {
 	Kind            string
 }
 
+type Transition struct {
+	ID       string    `json:"id"`
+	State    State     `json:"state"`
+	Attempts int       `json:"attempts"`
+	At       time.Time `json:"at"`
+}
+
 type Run struct {
-	ID                string     `json:"id"`
-	IssueIdentifier   string     `json:"issueIdentifier"`
-	TriggerKind       string     `json:"triggerKind"`
-	DeliveryIDs       []string   `json:"deliveryIds"`
-	State             State      `json:"state"`
-	SessionName       string     `json:"sessionName,omitempty"`
-	RunDirectory      string     `json:"runDirectory,omitempty"`
-	Attempts          int        `json:"attempts"`
-	DuplicateTriggers uint64     `json:"duplicateTriggers"`
-	Detail            string     `json:"detail,omitempty"`
-	CreatedAt         time.Time  `json:"createdAt"`
-	UpdatedAt         time.Time  `json:"updatedAt"`
-	StartedAt         *time.Time `json:"startedAt,omitempty"`
-	FinishedAt        *time.Time `json:"finishedAt,omitempty"`
+	ID                string       `json:"id"`
+	IssueIdentifier   string       `json:"issueIdentifier"`
+	TriggerKind       string       `json:"triggerKind"`
+	DeliveryIDs       []string     `json:"deliveryIds"`
+	State             State        `json:"state"`
+	SessionName       string       `json:"sessionName,omitempty"`
+	RunDirectory      string       `json:"runDirectory,omitempty"`
+	Attempts          int          `json:"attempts"`
+	DuplicateTriggers uint64       `json:"duplicateTriggers"`
+	Detail            string       `json:"detail,omitempty"`
+	CreatedAt         time.Time    `json:"createdAt"`
+	UpdatedAt         time.Time    `json:"updatedAt"`
+	StartedAt         *time.Time   `json:"startedAt,omitempty"`
+	FinishedAt        *time.Time   `json:"finishedAt,omitempty"`
+	Transitions       []Transition `json:"transitions,omitempty"`
 }
 
 type PublicRun struct {
@@ -207,6 +215,7 @@ func (s *Store) claim(trigger Trigger, now time.Time, requireHistory bool) (Run,
 		State:           StatePending,
 		CreatedAt:       now,
 		UpdatedAt:       now,
+		Transitions:     []Transition{newTransition(id, StatePending, 0, now)},
 	}
 	next := s.state
 	next.Total++
@@ -274,7 +283,7 @@ func (s *Store) Snapshot() Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	runs := slices.Clone(s.state.Runs)
+	runs := cloneRuns(s.state.Runs)
 	active := 0
 	for _, run := range runs {
 		if run.State.Active() {
@@ -290,7 +299,7 @@ func (s *Store) Find(id string) (Run, bool) {
 
 	for _, run := range s.state.Runs {
 		if run.ID == id {
-			run.DeliveryIDs = slices.Clone(run.DeliveryIDs)
+			run = cloneRun(run)
 			return run, true
 		}
 	}
@@ -317,7 +326,7 @@ func (s *Store) FindStarted(issueIdentifier string, startedUnixMilli int64) (Run
 		}
 	}
 	if found {
-		matched.DeliveryIDs = slices.Clone(matched.DeliveryIDs)
+		matched = cloneRun(matched)
 	}
 	return matched, found
 }
@@ -364,15 +373,21 @@ func (s *Store) update(id string, now time.Time, mutate func(*Run) error) error 
 	defer s.mu.Unlock()
 
 	next := s.state
-	next.Runs = slices.Clone(s.state.Runs)
+	next.Runs = cloneRuns(s.state.Runs)
 	for i := range next.Runs {
 		if next.Runs[i].ID != id {
 			continue
 		}
+		previousState := next.Runs[i].State
 		if err := mutate(&next.Runs[i]); err != nil {
 			return fmt.Errorf("agent run store: update %s: %w", id, err)
 		}
 		next.Runs[i].UpdatedAt = now.UTC()
+		if next.Runs[i].State != previousState {
+			next.Runs[i].Transitions = append(next.Runs[i].Transitions,
+				newTransition(next.Runs[i].ID, next.Runs[i].State, next.Runs[i].Attempts, now),
+			)
+		}
 		if err := writeState(s.path, next); err != nil {
 			return err
 		}
@@ -382,17 +397,76 @@ func (s *Store) update(id string, now time.Time, mutate func(*Run) error) error 
 	return fmt.Errorf("agent run store: run %s not found", id)
 }
 
+func (s *Store) AcknowledgeTransitions(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		wanted[id] = struct{}{}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.state
+	next.Runs = cloneRuns(s.state.Runs)
+	changed := false
+	for i := range next.Runs {
+		kept := next.Runs[i].Transitions[:0]
+		for _, transition := range next.Runs[i].Transitions {
+			if _, ok := wanted[transition.ID]; ok {
+				changed = true
+				continue
+			}
+			kept = append(kept, transition)
+		}
+		next.Runs[i].Transitions = kept
+	}
+	if !changed {
+		return nil
+	}
+	next.Runs = prune(next.Runs, s.limit)
+	if err := writeState(s.path, next); err != nil {
+		return err
+	}
+	s.state = next
+	return nil
+}
+
 func prune(runs []Run, limit int) []Run {
 	if len(runs) <= limit {
 		return runs
 	}
 	kept := make([]Run, 0, limit)
 	for _, run := range runs {
-		if len(kept) < limit || run.State.Active() {
+		if len(kept) < limit || run.State.Active() || len(run.Transitions) > 0 {
 			kept = append(kept, run)
 		}
 	}
 	return kept
+}
+
+func newTransition(runID string, state State, attempts int, at time.Time) Transition {
+	return Transition{
+		ID:       fmt.Sprintf("%s:%s:%d", runID, state, at.UTC().UnixNano()),
+		State:    state,
+		Attempts: attempts,
+		At:       at.UTC(),
+	}
+}
+
+func cloneRuns(runs []Run) []Run {
+	cloned := make([]Run, len(runs))
+	for i, run := range runs {
+		cloned[i] = cloneRun(run)
+	}
+	return cloned
+}
+
+func cloneRun(run Run) Run {
+	run.DeliveryIDs = slices.Clone(run.DeliveryIDs)
+	run.Transitions = slices.Clone(run.Transitions)
+	return run
 }
 
 func newID() (string, error) {
