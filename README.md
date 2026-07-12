@@ -132,7 +132,7 @@ Review the plan for blocking correctness or security problems. Do not modify fil
 PROMPT
 ```
 
-The helper returns JSON containing the tmux window ID and durable output paths. Codex children use `gpt-5.6-sol` with high reasoning. Claude children use `fable` with high effort and a reduced headless tool configuration. Children inherit the helper, so they can launch their own bounded windows.
+The helper returns JSON containing the tmux window ID and durable output paths. Codex children use `gpt-5.6-sol` with high reasoning. Claude children use `fable` with high effort and a reduced headless tool configuration. Children inherit the helper, so they can launch their own bounded windows. The principal prefers Claude for reviews, but repeats the same review with a Codex child when the Claude CLI fails because of authentication, usage limits, service availability, or another operational error.
 
 ## Inspecting runs
 

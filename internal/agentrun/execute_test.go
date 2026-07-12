@@ -60,6 +60,9 @@ func TestPrincipalPromptGroupsChildAgentsInTmux(t *testing.T) {
 		"linear_graphql.py",
 		"FACTORY_AGENT_HELPER",
 		"linear-comments",
+		"Claude review child exits nonzero",
+		"--provider codex",
+		"exact same prompt",
 		"FACTORY_RESULT: SUCCEEDED",
 	} {
 		if !strings.Contains(prompt, expected) {

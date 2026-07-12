@@ -270,6 +270,8 @@ PROMPT
 
 The helper returns the tmux window and durable output paths. Child windows inherit the same helper and may spawn their own bounded children. Keep all work for this issue inside this session. Wait for every child window and consume its result before you finish. If a child must be stopped, kill only that window. Never use tmux kill-server.
 
+Use Claude as the first choice for review children. If a Claude review child exits nonzero or fails to produce a usable review because of a CLI, authentication, usage-limit, or service-availability failure, spawn a Codex review child with --provider codex and the exact same prompt, then use the Codex result. This is a fallback for the same logical review, not an additional review round. A valid revise verdict is a completed review and must not trigger the fallback.
+
 During the pull request green loop, use "$FACTORY_AGENT_HELPER" agent github-events as documented by the /do skill. GitHub webhook events are durable wake signals; refresh authoritative state with gh after each event.
 
 While waiting for Linear feedback, use "$FACTORY_AGENT_HELPER" agent linear-comments as documented by the /do skill. Linear comment events are durable wake signals; refresh the authoritative issue conversation with linear_graphql.py after every event or timeout.
