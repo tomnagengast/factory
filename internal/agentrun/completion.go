@@ -2,6 +2,7 @@ package agentrun
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -95,6 +96,30 @@ type CompletionDecision struct {
 	Validation CompletionValidation
 }
 
+type externalAuthenticationError struct {
+	operation string
+	detail    string
+}
+
+func (e externalAuthenticationError) Error() string {
+	return e.operation + ": " + e.detail
+}
+
+func isExternalAuthenticationError(err error) bool {
+	var target externalAuthenticationError
+	return errors.As(err, &target)
+}
+
+func looksLikeAuthenticationFailure(detail string) bool {
+	detail = strings.ToLower(detail)
+	for _, marker := range []string{"http 401", "http 403", "authentication", "auth login", "not logged in", "not logged into"} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 type TerminalValidator interface {
 	Validate(context.Context, Run, ProcessResult) CompletionDecision
 }
@@ -140,6 +165,12 @@ func (v *MechanicalCompletionValidator) Validate(ctx context.Context, run Run, r
 
 	snapshot, err := v.pullRequests.Snapshot(ctx, *run.Ready)
 	if err != nil {
+		if result.Status == string(StateBlocked) && result.Blocker == BlockerExternalAuthentication && isExternalAuthenticationError(err) {
+			decision.Validation.Accepted = true
+			decision.Validation.Reason = "authoritative pull request authentication failed"
+			decision.Detail = decision.Validation.Reason
+			return decision
+		}
 		return rejectCompletion(decision, "authoritative pull request refresh failed: "+err.Error(), true)
 	}
 	decision.Validation.PullRequestState = snapshot.State
@@ -222,6 +253,12 @@ func (v *MechanicalCompletionValidator) validatePostReadyBlocker(
 	}
 	evidence, err := v.evidence.ReadCompletionEvidence(ctx, run, snapshot)
 	if err != nil {
+		if result.Blocker == BlockerExternalAuthentication && isExternalAuthenticationError(err) {
+			decision.Validation.Accepted = true
+			decision.Validation.Reason = "post-merge authority authentication failed"
+			decision.Detail = decision.Validation.Reason
+			return decision
+		}
 		return rejectCompletion(decision, "read blocker evidence: "+err.Error(), true)
 	}
 	matched := result.Blocker == BlockerSafeguardRegression && evidence.SafeguardRegression ||

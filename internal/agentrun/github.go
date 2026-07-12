@@ -62,7 +62,11 @@ func (c *GitHubCLI) Snapshot(ctx context.Context, checkpoint ReadyCheckpoint) (P
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
-		return PullRequestSnapshot{}, fmt.Errorf("GitHub CLI: read PR %d: %w: %s", checkpoint.PullRequest, err, stderr.String())
+		detail := strings.TrimSpace(stderr.String())
+		if looksLikeAuthenticationFailure(detail) {
+			return PullRequestSnapshot{}, externalAuthenticationError{operation: "GitHub CLI", detail: detail}
+		}
+		return PullRequestSnapshot{}, fmt.Errorf("GitHub CLI: read PR %d: %w: %s", checkpoint.PullRequest, err, detail)
 	}
 	var value struct {
 		State       string             `json:"state"`
@@ -128,7 +132,11 @@ func (c *GitHubCLI) MatchingIssuePullRequests(ctx context.Context, repository, i
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("GitHub CLI: discover issue PRs: %w: %s", err, stderr.String())
+		detail := strings.TrimSpace(stderr.String())
+		if looksLikeAuthenticationFailure(detail) {
+			return nil, externalAuthenticationError{operation: "GitHub CLI", detail: detail}
+		}
+		return nil, fmt.Errorf("GitHub CLI: discover issue PRs: %w: %s", err, detail)
 	}
 	var values []struct {
 		Number      int       `json:"number"`

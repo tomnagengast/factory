@@ -133,6 +133,29 @@ func TestCompletionValidatorVerifiesTypedPostReadyBlockers(t *testing.T) {
 	if decision.Validation.Accepted || decision.State != StateFailed || !decision.Repark {
 		t.Fatalf("unverified blocker = %#v", decision)
 	}
+
+	authFailure := externalAuthenticationError{operation: "GitHub CLI", detail: "HTTP 401"}
+	decision = mustCompletionValidator(t, &fakePullRequestReader{err: authFailure}, completeEvidence(), now).Validate(context.Background(), run, ProcessResult{Status: string(StateBlocked), Blocker: BlockerExternalAuthentication})
+	if !decision.Validation.Accepted || decision.State != StateBlocked {
+		t.Fatalf("pull request authentication blocker = %#v", decision)
+	}
+	decision = mustCompletionValidator(t, merged, staticCompletionEvidence{err: authFailure}, now).Validate(context.Background(), run, ProcessResult{Status: string(StateBlocked), Blocker: BlockerExternalAuthentication})
+	if !decision.Validation.Accepted || decision.State != StateBlocked {
+		t.Fatalf("evidence authentication blocker = %#v", decision)
+	}
+}
+
+func TestAuthenticationFailureClassification(t *testing.T) {
+	t.Parallel()
+
+	for _, detail := range []string{"HTTP 401", "HTTP 403", "run gh auth login", "not logged into github.com"} {
+		if !looksLikeAuthenticationFailure(detail) {
+			t.Fatalf("authentication failure %q was not classified", detail)
+		}
+	}
+	if looksLikeAuthenticationFailure("connection timed out") {
+		t.Fatal("network timeout was classified as authentication failure")
+	}
 }
 
 func completeEvidence() staticCompletionEvidence {

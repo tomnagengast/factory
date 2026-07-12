@@ -247,6 +247,9 @@ func (r *SystemCompletionEvidence) linearComplete(ctx context.Context, issueIden
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, response.Body)
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			return false, externalAuthenticationError{operation: "Linear issue state", detail: fmt.Sprintf("HTTP %d", response.StatusCode)}
+		}
 		return false, fmt.Errorf("read Linear issue state: HTTP %d", response.StatusCode)
 	}
 	var value struct {
