@@ -15,9 +15,14 @@ type Launcher interface {
 	ReadResult(string) (ProcessResult, error)
 }
 
+type RunCollector interface {
+	Collect(context.Context, []Run) error
+}
+
 type Manager struct {
 	store         *Store
 	launcher      Launcher
+	collector     RunCollector
 	stateRoot     string
 	maxConcurrent int
 	pollInterval  time.Duration
@@ -29,6 +34,7 @@ type Manager struct {
 func NewManager(
 	store *Store,
 	launcher Launcher,
+	collector RunCollector,
 	stateRoot string,
 	maxConcurrent int,
 	pollInterval time.Duration,
@@ -40,6 +46,9 @@ func NewManager(
 	}
 	if launcher == nil {
 		return nil, fmt.Errorf("agent run manager: launcher is required")
+	}
+	if collector == nil {
+		return nil, fmt.Errorf("agent run manager: collector is required")
 	}
 	if stateRoot == "" {
 		return nil, fmt.Errorf("agent run manager: state root is required")
@@ -59,6 +68,7 @@ func NewManager(
 	return &Manager{
 		store:         store,
 		launcher:      launcher,
+		collector:     collector,
 		stateRoot:     stateRoot,
 		maxConcurrent: maxConcurrent,
 		pollInterval:  pollInterval,
@@ -96,6 +106,15 @@ func (m *Manager) reconcile(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+
+	if err := m.collector.Collect(ctx, m.store.Snapshot().Runs); err != nil {
+		m.logger.Warn("collect agent events", "error", err)
+	}
+	defer func() {
+		if err := m.collector.Collect(ctx, m.store.Snapshot().Runs); err != nil {
+			m.logger.Warn("collect agent events", "error", err)
+		}
+	}()
 
 	snapshot := m.store.Snapshot()
 	running := 0

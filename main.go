@@ -34,6 +34,7 @@ const (
 	defaultMaxConcurrentRuns = 3
 	defaultRepoURL           = "git@github.com:tomnagengast/network.git"
 	defaultTmuxSocket        = "factory-agents"
+	serviceHeartbeatInterval = 30 * time.Second
 	googleRedirectURL        = "https://factory.nags.cloud/auth/google/callback"
 	viewerUsername           = "factory"
 )
@@ -128,6 +129,15 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	collector, err := agentrun.NewCollector(
+		runStore,
+		events,
+		stateRoot,
+		filepath.Join(dataRoot, "agent-event-offsets.json"),
+	)
+	if err != nil {
+		return err
+	}
 	binaryPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve Factory binary: %w", err)
@@ -150,6 +160,7 @@ func serve(ctx context.Context) error {
 	manager, err := agentrun.NewManager(
 		runStore,
 		launcher,
+		collector,
 		stateRoot,
 		envInt("FACTORY_MAX_AGENTS", defaultMaxConcurrentRuns),
 		2*time.Second,
@@ -159,7 +170,6 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	go manager.Run(ctx)
 	observer, err := agentrun.NewObserver(
 		runStore,
 		tmuxPath,
@@ -199,6 +209,12 @@ func serve(ctx context.Context) error {
 	if err := events.CatchUp(ctx); err != nil {
 		return fmt.Errorf("catch up Factory events: %w", err)
 	}
+	go manager.Run(ctx)
+	serviceStartedAt := time.Now().UTC()
+	if err := publishServiceEvent(ctx, events, "started", serviceStartedAt, serviceStartedAt); err != nil {
+		return err
+	}
+	go publishServiceHeartbeats(ctx, events, serviceStartedAt, serviceHeartbeatInterval, time.Now)
 	httpServer := &http.Server{
 		Addr:              "127.0.0.1:" + port,
 		Handler:           handler,
@@ -223,8 +239,55 @@ func serve(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		if err := publishServiceEvent(shutdownCtx, events, "stopping", serviceStartedAt, time.Now().UTC()); err != nil {
+			slog.Error("publish Factory stopping event", "error", err)
+		}
 		return httpServer.Shutdown(shutdownCtx)
 	}
+}
+
+func publishServiceHeartbeats(
+	ctx context.Context,
+	publisher agentrun.EventPublisher,
+	startedAt time.Time,
+	interval time.Duration,
+	now func() time.Time,
+) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := publishServiceEvent(ctx, publisher, "heartbeat", startedAt, now().UTC()); err != nil && ctx.Err() == nil {
+				slog.Error("publish Factory heartbeat", "error", err)
+			}
+		}
+	}
+}
+
+func publishServiceEvent(
+	ctx context.Context,
+	publisher agentrun.EventPublisher,
+	action string,
+	startedAt time.Time,
+	at time.Time,
+) error {
+	instance := strconv.Itoa(os.Getpid()) + ":" + strconv.FormatInt(startedAt.UnixNano(), 10)
+	event := eventwire.Event{
+		ID:         "factory:service:" + instance + ":" + action + ":" + strconv.FormatInt(at.UnixNano(), 10),
+		Source:     eventwire.SourceFactory,
+		Type:       "service",
+		Action:     action,
+		Subject:    "factory",
+		Attributes: map[string][]string{"pid": {strconv.Itoa(os.Getpid())}, "startedAt": {startedAt.Format(time.RFC3339Nano)}, "status": {action}},
+		ReceivedAt: at,
+	}
+	if _, err := publisher.PublishBatch(ctx, []eventwire.Event{event}); err != nil {
+		return fmt.Errorf("publish Factory service %s: %w", action, err)
+	}
+	return nil
 }
 
 func envOr(name, fallback string) string {
