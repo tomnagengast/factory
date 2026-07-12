@@ -168,6 +168,9 @@ func (m *Manager) reconcile(ctx context.Context) {
 		if (run.State != StatePending && run.State != StatePostMergePending) || running >= m.maxConcurrent {
 			continue
 		}
+		if run.NextReconcileAt != nil && m.now().Before(*run.NextReconcileAt) {
+			continue
+		}
 		if !prepared {
 			if err := m.launcher.Prepare(ctx); err != nil {
 				m.logger.Error("prepare agent workspace", "error", err)
@@ -187,6 +190,9 @@ func (m *Manager) reconcile(ctx context.Context) {
 }
 
 func (m *Manager) reconcileActive(ctx context.Context, run Run) {
+	if run.NextReconcileAt != nil && m.now().Before(*run.NextReconcileAt) {
+		return
+	}
 	exists, err := m.launcher.SessionExists(ctx, run.SessionName)
 	if err != nil {
 		m.logger.Warn("inspect agent session", "run_id", run.ID, "error", err)
@@ -203,6 +209,14 @@ func (m *Manager) reconcileActive(ctx context.Context, run Run) {
 
 	result, err := m.launcher.ReadResult(run.RunDirectory)
 	if err != nil {
+		if _, checkpointErr := m.launcher.ReadReadyCheckpoint(run.RunDirectory); checkpointErr == nil {
+			m.parkReadyRun(ctx, run, ProcessResult{
+				Status:     ResultReadyForMerge,
+				Attempts:   max(run.Attempts, run.SegmentAttempt+1),
+				FinishedAt: m.now(),
+			})
+			return
+		}
 		detail := "tmux session ended without a process result"
 		if finishErr := m.store.Finish(run.ID, StateFailed, run.Attempts, detail, m.now()); finishErr != nil {
 			m.logger.Error("finish lost agent run", "run_id", run.ID, "error", finishErr)
@@ -258,7 +272,14 @@ func (m *Manager) parkReadyRun(ctx context.Context, run Run, result ProcessResul
 	}
 	snapshot, err := m.pullRequests.Snapshot(ctx, checkpoint)
 	if err != nil {
-		m.finishInvalidReady(run, result, err)
+		now := m.now()
+		next := now.Add(reconcileDelay(m.pollInterval, run.ReconcileFailures))
+		detail := "ready checkpoint refresh failed: " + err.Error()
+		if deferErr := m.store.DeferReadyValidation(run.ID, detail, next, now); deferErr != nil {
+			m.logger.Error("defer ready checkpoint validation", "run_id", run.ID, "error", deferErr)
+			return
+		}
+		m.logger.Warn("defer ready checkpoint validation", "run_id", run.ID, "error", err)
 		return
 	}
 	checkpoint.Repository = m.lifecycle.Repository
@@ -428,6 +449,15 @@ func (m *Manager) start(ctx context.Context, run Run) bool {
 	}
 	if err := m.launcher.Start(ctx, run, sessionName, runDirectory); err != nil {
 		detail := fmt.Sprintf("start tmux session: %v", err)
+		if run.State == StatePostMergePending {
+			now := m.now()
+			next := now.Add(reconcileDelay(m.pollInterval, run.ReconcileFailures))
+			if retryErr := m.store.RetryPostMergeStart(run.ID, detail, next, now); retryErr != nil {
+				m.logger.Error("record post-merge start retry", "run_id", run.ID, "error", retryErr)
+			}
+			m.logger.Warn("defer post-merge agent start", "run_id", run.ID, "error", err)
+			return false
+		}
 		if finishErr := m.store.Finish(run.ID, StateFailed, 0, detail, m.now()); finishErr != nil {
 			m.logger.Error("record agent start failure", "run_id", run.ID, "error", finishErr)
 		}

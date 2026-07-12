@@ -143,10 +143,6 @@ func (r *SystemCompletionEvidence) readRepository(ctx context.Context, run Run, 
 	if err != nil {
 		return result, err
 	}
-	tree, err := completionCommand(ctx, r.config.RepoPath, r.config.GitPath, "rev-parse", "HEAD^{tree}")
-	if err != nil {
-		return result, err
-	}
 	branch, err := completionCommand(ctx, r.config.RepoPath, r.config.GitPath, "symbolic-ref", "--quiet", "--short", "HEAD")
 	if err != nil {
 		return result, err
@@ -163,21 +159,28 @@ func (r *SystemCompletionEvidence) readRepository(ctx context.Context, run Run, 
 	if err != nil {
 		return result, err
 	}
+	headOnMain := completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, strings.TrimSpace(string(head)), strings.TrimSpace(string(originMain)))
+	receiptOnMain := false
+	receiptTree := ""
+	if gitOIDPattern.MatchString(receipt.SourceCommit) {
+		receiptOnMain = completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, receipt.SourceCommit, strings.TrimSpace(string(originMain)))
+		if output, treeErr := completionCommand(ctx, r.config.RepoPath, r.config.GitPath, "rev-parse", receipt.SourceCommit+"^{tree}"); treeErr == nil {
+			receiptTree = strings.TrimSpace(string(output))
+		}
+	}
 	checkpointTime := run.Ready.CreatedAt
 	if !run.Ready.ValidatedAt.IsZero() {
 		checkpointTime = run.Ready.ValidatedAt
 	}
 	result.sourceValid = strings.TrimSpace(string(status)) == "" && strings.TrimSpace(string(branch)) == "main" &&
-		strings.TrimSpace(string(upstream)) == "origin/main" && strings.TrimSpace(string(head)) == strings.TrimSpace(string(originMain)) &&
+		strings.TrimSpace(string(upstream)) == "origin/main" && headOnMain && receiptOnMain &&
 		receipt.Status == "success" && receipt.App == "factory" && receipt.SourceBranch == "main" &&
-		receipt.SourceCommit == strings.TrimSpace(string(head)) && receipt.SourceTree == strings.TrimSpace(string(tree)) &&
+		receipt.SourceTree == receiptTree &&
 		receipt.ContractVersion == LifecycleContractVersion && gitOIDPattern.MatchString(receipt.SourceCommit) && gitOIDPattern.MatchString(receipt.SourceTree) &&
 		sha256Pattern.MatchString(receipt.BinarySHA256) && receipt.DeploymentID != "" && receipt.BuildID != "" &&
 		slices.Contains(r.config.RemoteURLs, strings.TrimSpace(string(remoteURL))) && receipt.SourceRepository == r.config.Repository && !receipt.StartedAt.Before(checkpointTime) &&
 		!receipt.FinishedAt.Before(receipt.StartedAt)
-	mergeCommand := exec.CommandContext(ctx, r.config.GitPath, "merge-base", "--is-ancestor", snapshot.MergeCommitOID, receipt.SourceCommit)
-	mergeCommand.Dir = r.config.RepoPath
-	result.mergeContained = mergeCommand.Run() == nil
+	result.mergeContained = completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, snapshot.MergeCommitOID, receipt.SourceCommit)
 
 	remote, err := completionCommand(ctx, r.config.RepoPath, r.config.GitPath, "ls-remote", "--heads", "origin", "refs/heads/"+run.Ready.HeadBranch)
 	if err != nil {
@@ -300,4 +303,10 @@ func completionCommand(ctx context.Context, directory, name string, args ...stri
 		return nil, fmt.Errorf("completion evidence command %s: %w: %s", filepath.Base(name), err, strings.TrimSpace(stderr.String()))
 	}
 	return output, nil
+}
+
+func completionAncestor(ctx context.Context, directory, gitPath, ancestor, descendant string) bool {
+	cmd := exec.CommandContext(ctx, gitPath, "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd.Dir = directory
+	return cmd.Run() == nil
 }

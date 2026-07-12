@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestSystemCompletionEvidenceVerifiesDeploymentRepositoryAndLinearState(t *testing.T) {
+func TestSystemCompletionEvidenceVerifiesDeploymentAfterMainAdvances(t *testing.T) {
 	t.Parallel()
 
 	gitPath, err := exec.LookPath("git")
@@ -36,6 +36,12 @@ func TestSystemCompletionEvidenceVerifiesDeploymentRepositoryAndLinearState(t *t
 	runGit(t, gitPath, repository, "push", "-u", "origin", "main")
 	commit := gitOutput(t, gitPath, repository, "rev-parse", "HEAD")
 	tree := gitOutput(t, gitPath, repository, "rev-parse", "HEAD^{tree}")
+	if err := os.WriteFile(filepath.Join(repository, "version.txt"), []byte("two\n"), 0o600); err != nil {
+		t.Fatalf("advance source: %v", err)
+	}
+	runGit(t, gitPath, repository, "add", "version.txt")
+	runGit(t, gitPath, repository, "-c", "user.name=Factory Test", "-c", "user.email=factory@example.invalid", "commit", "-m", "advance main")
+	runGit(t, gitPath, repository, "push", "origin", "main")
 
 	worktrunk := filepath.Join(root, "wt")
 	if err := os.WriteFile(worktrunk, []byte("#!/bin/sh\nprintf '[]\\n'\n"), 0o700); err != nil {

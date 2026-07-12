@@ -283,6 +283,7 @@ func (s *Store) MarkStarting(id, sessionName, runDirectory string, now time.Time
 		startedAt := now.UTC()
 		run.SegmentStartedAt = &startedAt
 		run.SegmentAttempt = run.Attempts
+		run.NextReconcileAt = nil
 		run.Detail = ""
 		return nil
 	})
@@ -301,7 +302,40 @@ func (s *Store) MarkRunning(id string, attempts int, now time.Time) error {
 			startedAt := now.UTC()
 			run.StartedAt = &startedAt
 		}
+		run.NextReconcileAt = nil
+		run.ReconcileFailures = 0
 		run.Detail = ""
+		return nil
+	})
+}
+
+func (s *Store) DeferReadyValidation(id, detail string, next time.Time, now time.Time) error {
+	return s.update(id, now, func(run *Run) error {
+		if run.State != StateStarting && run.State != StateRunning {
+			return fmt.Errorf("cannot defer ready validation from state %q", run.State)
+		}
+		next = next.UTC()
+		run.NextReconcileAt = &next
+		refreshedAt := now.UTC()
+		run.LastAuthoritativeRefreshAt = &refreshedAt
+		run.ReconcileFailures++
+		run.Detail = detail
+		return nil
+	})
+}
+
+func (s *Store) RetryPostMergeStart(id, detail string, next time.Time, now time.Time) error {
+	return s.update(id, now, func(run *Run) error {
+		if run.State != StateStarting || run.TriggerKind != TriggerKindPostMerge || run.Ready == nil {
+			return fmt.Errorf("cannot retry post-merge start from state %q", run.State)
+		}
+		next = next.UTC()
+		run.State = StatePostMergePending
+		run.SessionName = ""
+		run.SegmentStartedAt = nil
+		run.NextReconcileAt = &next
+		run.ReconcileFailures++
+		run.Detail = detail
 		return nil
 	})
 }
