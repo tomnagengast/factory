@@ -425,6 +425,10 @@ func TestManagerResumesMergedParkedRun(t *testing.T) {
 	if err := store.MarkAwaitingMerge(run.ID, checkpoint, now, 1, now); err != nil {
 		t.Fatalf("mark awaiting: %v", err)
 	}
+	reopened, err := Open(store.path, 10)
+	if err != nil {
+		t.Fatalf("reopen parked store: %v", err)
+	}
 	reader := &fakePullRequestReader{snapshot: PullRequestSnapshot{
 		State:          "MERGED",
 		HeadBranch:     checkpoint.HeadBranch,
@@ -432,10 +436,10 @@ func TestManagerResumesMergedParkedRun(t *testing.T) {
 		MergeCommitOID: "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b",
 	}}
 	launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult)}
-	manager := newTestManagerWithReader(t, store, launcher, t.TempDir(), reader, func() time.Time { return now })
+	manager := newTestManagerWithReader(t, reopened, launcher, t.TempDir(), reader, func() time.Time { return now })
 
 	manager.reconcile(context.Background())
-	resumed, _ := store.Find(run.ID)
+	resumed, _ := reopened.Find(run.ID)
 	if resumed.State != StatePostMergePending || resumed.TriggerKind != TriggerKindPostMerge || resumed.MergeCommitOID == "" {
 		t.Fatalf("resumed = %#v", resumed)
 	}
