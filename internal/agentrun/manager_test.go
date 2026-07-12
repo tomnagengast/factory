@@ -399,6 +399,35 @@ func TestManagerRejectsForgedReadyCheckpoint(t *testing.T) {
 	}
 }
 
+func TestManagerParksValidCheckpointAfterProcessFailure(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	store := openTestStore(t, 10)
+	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult), ready: make(map[string]ReadyCheckpoint)}
+	reader := &fakePullRequestReader{snapshot: PullRequestSnapshot{
+		State:      "OPEN",
+		HeadBranch: "eng-123-fix",
+		HeadOID:    "08c1c678a0b23bbe8e2dc2da1e398583d7e4c416",
+	}}
+	manager := newTestManagerWithReader(t, store, launcher, t.TempDir(), reader, func() time.Time { return now })
+	manager.reconcile(context.Background())
+	running, _ := store.Find(run.ID)
+	launcher.sessions[running.SessionName] = false
+	launcher.results[running.RunDirectory] = ProcessResult{Status: string(StateFailed), Attempts: 3, ExitCode: 1, FinishedAt: now.Add(time.Minute)}
+	launcher.ready[running.RunDirectory] = testReadyCheckpoint(run.ID, now)
+
+	manager.reconcile(context.Background())
+	parked, _ := store.Find(run.ID)
+	if parked.State != StateAwaitingMerge || parked.Ready == nil || parked.FinishedAt != nil {
+		t.Fatalf("parked = %#v", parked)
+	}
+}
+
 func TestManagerRejectsCheckpointOutsideConfiguredLifecycle(t *testing.T) {
 	t.Parallel()
 

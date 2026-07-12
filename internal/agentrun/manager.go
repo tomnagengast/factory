@@ -220,6 +220,12 @@ func (m *Manager) reconcileActive(ctx context.Context, run Run) {
 		m.parkReadyRun(ctx, run, result)
 		return
 	}
+	if result.Status == string(StateFailed) {
+		if _, checkpointErr := m.launcher.ReadReadyCheckpoint(run.RunDirectory); checkpointErr == nil {
+			m.parkReadyRun(ctx, run, result)
+			return
+		}
+	}
 	state := State(result.Status)
 	decision := m.terminal.Validate(ctx, run, result)
 	if decision.Repark && run.Ready != nil {
