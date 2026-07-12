@@ -17,8 +17,10 @@ import (
 const stateVersion = 1
 
 const (
-	TriggerKindLabel   = "linear-label"
-	TriggerKindComment = "linear-comment"
+	TriggerKindLabel     = "linear-label"
+	TriggerKindComment   = "linear-comment"
+	TriggerKindGitHub    = "github-update"
+	TriggerKindPostMerge = "post-merge"
 )
 
 var issueIdentifierPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[1-9][0-9]*$`)
@@ -26,16 +28,25 @@ var issueIdentifierPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[1-9][0-9]*$`)
 type State string
 
 const (
-	StatePending   State = "pending"
-	StateStarting  State = "starting"
-	StateRunning   State = "running"
-	StateSucceeded State = "succeeded"
-	StateBlocked   State = "blocked"
-	StateFailed    State = "failed"
+	StatePending       State = "pending"
+	StateStarting      State = "starting"
+	StateRunning       State = "running"
+	StateAwaitingMerge State = "awaiting_human_merge"
+	StateSucceeded     State = "succeeded"
+	StateBlocked       State = "blocked"
+	StateFailed        State = "failed"
 )
 
 func (s State) Active() bool {
-	return s == StatePending || s == StateStarting || s == StateRunning
+	return s.Nonterminal()
+}
+
+func (s State) Nonterminal() bool {
+	return s == StatePending || s == StateStarting || s == StateRunning || s == StateAwaitingMerge
+}
+
+func (s State) HasWorker() bool {
+	return s == StateStarting || s == StateRunning
 }
 
 type Trigger struct {
@@ -52,21 +63,29 @@ type Transition struct {
 }
 
 type Run struct {
-	ID                string       `json:"id"`
-	IssueIdentifier   string       `json:"issueIdentifier"`
-	TriggerKind       string       `json:"triggerKind"`
-	DeliveryIDs       []string     `json:"deliveryIds"`
-	State             State        `json:"state"`
-	SessionName       string       `json:"sessionName,omitempty"`
-	RunDirectory      string       `json:"runDirectory,omitempty"`
-	Attempts          int          `json:"attempts"`
-	DuplicateTriggers uint64       `json:"duplicateTriggers"`
-	Detail            string       `json:"detail,omitempty"`
-	CreatedAt         time.Time    `json:"createdAt"`
-	UpdatedAt         time.Time    `json:"updatedAt"`
-	StartedAt         *time.Time   `json:"startedAt,omitempty"`
-	FinishedAt        *time.Time   `json:"finishedAt,omitempty"`
-	Transitions       []Transition `json:"transitions,omitempty"`
+	ID                string           `json:"id"`
+	IssueIdentifier   string           `json:"issueIdentifier"`
+	TriggerKind       string           `json:"triggerKind"`
+	DeliveryIDs       []string         `json:"deliveryIds"`
+	State             State            `json:"state"`
+	SessionName       string           `json:"sessionName,omitempty"`
+	RunDirectory      string           `json:"runDirectory,omitempty"`
+	Attempts          int              `json:"attempts"`
+	DuplicateTriggers uint64           `json:"duplicateTriggers"`
+	Detail            string           `json:"detail,omitempty"`
+	CreatedAt         time.Time        `json:"createdAt"`
+	UpdatedAt         time.Time        `json:"updatedAt"`
+	StartedAt         *time.Time       `json:"startedAt,omitempty"`
+	SegmentStartedAt  *time.Time       `json:"segmentStartedAt,omitempty"`
+	SegmentAttempt    int              `json:"segmentAttemptOffset,omitempty"`
+	FinishedAt        *time.Time       `json:"finishedAt,omitempty"`
+	Transitions       []Transition     `json:"transitions,omitempty"`
+	Ready             *ReadyCheckpoint `json:"ready,omitempty"`
+	MergeCommitOID    string           `json:"mergeCommitOid,omitempty"`
+	NextReconcileAt   *time.Time       `json:"nextReconcileAt,omitempty"`
+	ResumeCount       int              `json:"resumeCount,omitempty"`
+	TerminalIntent    string           `json:"terminalIntent,omitempty"`
+	TerminalRejection string           `json:"terminalRejection,omitempty"`
 }
 
 type PublicRun struct {
@@ -93,15 +112,20 @@ type PublicSnapshot struct {
 }
 
 type ActivityRun struct {
-	ID                string     `json:"id"`
-	IssueIdentifier   string     `json:"issueIdentifier"`
-	State             State      `json:"state"`
-	Attempts          int        `json:"attempts"`
-	DuplicateTriggers uint64     `json:"duplicateTriggers"`
-	CreatedAt         time.Time  `json:"createdAt"`
-	UpdatedAt         time.Time  `json:"updatedAt"`
-	StartedAt         *time.Time `json:"startedAt,omitempty"`
-	FinishedAt        *time.Time `json:"finishedAt,omitempty"`
+	ID                string           `json:"id"`
+	IssueIdentifier   string           `json:"issueIdentifier"`
+	State             State            `json:"state"`
+	Attempts          int              `json:"attempts"`
+	DuplicateTriggers uint64           `json:"duplicateTriggers"`
+	CreatedAt         time.Time        `json:"createdAt"`
+	UpdatedAt         time.Time        `json:"updatedAt"`
+	StartedAt         *time.Time       `json:"startedAt,omitempty"`
+	FinishedAt        *time.Time       `json:"finishedAt,omitempty"`
+	Ready             *ReadyCheckpoint `json:"ready,omitempty"`
+	MergeCommitOID    string           `json:"mergeCommitOid,omitempty"`
+	NextReconcileAt   *time.Time       `json:"nextReconcileAt,omitempty"`
+	ResumeCount       int              `json:"resumeCount,omitempty"`
+	TerminalRejection string           `json:"terminalRejection,omitempty"`
 }
 
 type ActivitySnapshot struct {
@@ -192,6 +216,13 @@ func (s *Store) claim(trigger Trigger, now time.Time, requireHistory bool) (Run,
 			nextRun.DeliveryIDs = append(slices.Clone(nextRun.DeliveryIDs), trigger.DeliveryID)
 			nextRun.DuplicateTriggers++
 			nextRun.UpdatedAt = now
+			previousState := nextRun.State
+			if nextRun.State == StateAwaitingMerge && trigger.Kind == TriggerKindComment {
+				resumeAwaitingRun(nextRun, trigger.Kind, "", "Linear feedback received; resuming lifecycle")
+			}
+			if nextRun.State != previousState {
+				nextRun.Transitions = append(nextRun.Transitions, newTransition(nextRun.ID, nextRun.State, nextRun.Attempts, now))
+			}
 			if err := writeState(s.path, next); err != nil {
 				return Run{}, false, err
 			}
@@ -239,6 +270,9 @@ func (s *Store) MarkStarting(id, sessionName, runDirectory string, now time.Time
 		run.State = StateStarting
 		run.SessionName = sessionName
 		run.RunDirectory = runDirectory
+		startedAt := now.UTC()
+		run.SegmentStartedAt = &startedAt
+		run.SegmentAttempt = run.Attempts
 		run.Detail = ""
 		return nil
 	})
@@ -260,6 +294,95 @@ func (s *Store) MarkRunning(id string, attempts int, now time.Time) error {
 		run.Detail = ""
 		return nil
 	})
+}
+
+func (s *Store) MarkAwaitingMerge(id string, checkpoint ReadyCheckpoint, next time.Time, attempts int, now time.Time) error {
+	if err := checkpoint.Validate(); err != nil {
+		return err
+	}
+	return s.update(id, now, func(run *Run) error {
+		if run.State != StateStarting && run.State != StateRunning {
+			return fmt.Errorf("cannot await merge from state %q", run.State)
+		}
+		if checkpoint.RunID != run.ID {
+			return errors.New("ready checkpoint belongs to another run")
+		}
+		checkpoint.ValidatedAt = now.UTC()
+		next = next.UTC()
+		run.State = StateAwaitingMerge
+		run.Ready = &checkpoint
+		run.NextReconcileAt = &next
+		run.Attempts = max(run.Attempts, attempts)
+		run.Detail = "waiting for human merge"
+		run.TerminalIntent = ""
+		run.TerminalRejection = ""
+		return nil
+	})
+}
+
+func (s *Store) DeferMergeReconcile(id, detail string, next, now time.Time) error {
+	return s.update(id, now, func(run *Run) error {
+		if run.State != StateAwaitingMerge {
+			return fmt.Errorf("cannot defer merge reconcile from state %q", run.State)
+		}
+		next = next.UTC()
+		run.NextReconcileAt = &next
+		run.Detail = detail
+		return nil
+	})
+}
+
+func (s *Store) ResumeAwaiting(id, kind, mergeCommitOID, detail string, now time.Time) error {
+	return s.update(id, now, func(run *Run) error {
+		if run.State != StateAwaitingMerge {
+			return fmt.Errorf("cannot resume merge lifecycle from state %q", run.State)
+		}
+		resumeAwaitingRun(run, kind, mergeCommitOID, detail)
+		return nil
+	})
+}
+
+func resumeAwaitingRun(run *Run, kind, mergeCommitOID, detail string) {
+	run.State = StatePending
+	run.TriggerKind = kind
+	run.MergeCommitOID = mergeCommitOID
+	run.NextReconcileAt = nil
+	run.ResumeCount++
+	run.SessionName = ""
+	run.Detail = detail
+}
+
+func (s *Store) SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, now time.Time) (bool, error) {
+	if !repositoryPattern.MatchString(repository) || pullRequest < 1 || deliveryID == "" {
+		return false, errors.New("schedule pull request reconcile: invalid wake")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	next := s.state
+	next.Runs = cloneRuns(s.state.Runs)
+	for i := range next.Runs {
+		run := &next.Runs[i]
+		if run.State != StateAwaitingMerge || run.Ready == nil || run.Ready.Repository != repository || run.Ready.PullRequest != pullRequest {
+			continue
+		}
+		if headBranch != "" && run.Ready.HeadBranch != headBranch {
+			continue
+		}
+		if !slices.Contains(run.DeliveryIDs, deliveryID) {
+			run.DeliveryIDs = append(run.DeliveryIDs, deliveryID)
+			run.DuplicateTriggers++
+		}
+		at := now.UTC()
+		run.NextReconcileAt = &at
+		run.UpdatedAt = at
+		if err := writeState(s.path, next); err != nil {
+			return false, err
+		}
+		s.state = next
+		return true, nil
+	}
+	return false, nil
 }
 
 func (s *Store) Finish(id string, state State, attempts int, detail string, now time.Time) error {
@@ -363,6 +486,11 @@ func (s *Store) ActivitySnapshot() ActivitySnapshot {
 			UpdatedAt:         run.UpdatedAt,
 			StartedAt:         run.StartedAt,
 			FinishedAt:        run.FinishedAt,
+			Ready:             cloneReady(run.Ready),
+			MergeCommitOID:    run.MergeCommitOID,
+			NextReconcileAt:   cloneTime(run.NextReconcileAt),
+			ResumeCount:       run.ResumeCount,
+			TerminalRejection: run.TerminalRejection,
 		}
 	}
 	return ActivitySnapshot{Total: snapshot.Total, Active: snapshot.Active, Runs: runs}
@@ -466,7 +594,26 @@ func cloneRuns(runs []Run) []Run {
 func cloneRun(run Run) Run {
 	run.DeliveryIDs = slices.Clone(run.DeliveryIDs)
 	run.Transitions = slices.Clone(run.Transitions)
+	run.Ready = cloneReady(run.Ready)
+	run.SegmentStartedAt = cloneTime(run.SegmentStartedAt)
+	run.NextReconcileAt = cloneTime(run.NextReconcileAt)
 	return run
+}
+
+func cloneReady(value *ReadyCheckpoint) *ReadyCheckpoint {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func newID() (string, error) {

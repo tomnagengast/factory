@@ -30,6 +30,7 @@ type PrincipalConfig struct {
 	CodexPath       string
 	Now             func() time.Time
 	Sleep           func(context.Context, time.Duration) error
+	AttemptOffset   int
 }
 
 type ChildConfig struct {
@@ -59,9 +60,10 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 	threadID := ""
 	for attempt := 1; attempt <= principalMaxAttempts; attempt++ {
 		attemptsUsed = attempt
-		finalPath := filepath.Join(config.RunDirectory, fmt.Sprintf("attempt-%d-final.txt", attempt))
-		eventsPath := filepath.Join(config.RunDirectory, fmt.Sprintf("attempt-%d-events.jsonl", attempt))
-		errPath := filepath.Join(config.RunDirectory, fmt.Sprintf("attempt-%d-stderr.log", attempt))
+		attemptNumber := config.AttemptOffset + attempt
+		finalPath := filepath.Join(config.RunDirectory, fmt.Sprintf("attempt-%d-final.txt", attemptNumber))
+		eventsPath := filepath.Join(config.RunDirectory, fmt.Sprintf("attempt-%d-events.jsonl", attemptNumber))
+		errPath := filepath.Join(config.RunDirectory, fmt.Sprintf("attempt-%d-stderr.log", attemptNumber))
 		continuation := prompt
 		if attempt > 1 {
 			continuation = "Resume the Factory /do run. Continue from durable repository, Linear, PR, and run state. Do not duplicate work."
@@ -76,8 +78,8 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 			}
 			status, detail := resultFromFinalMessage(string(finalMessage))
 			result := ProcessResult{
-				Status:     string(status),
-				Attempts:   attempt,
+				Status:     status,
+				Attempts:   attemptNumber,
 				ExitCode:   0,
 				Detail:     detail,
 				FinishedAt: config.Now().UTC(),
@@ -86,7 +88,7 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 				fmt.Fprintf(os.Stderr, "write process result: %v\n", writeErr)
 				return 1
 			}
-			if status == StateFailed {
+			if status == string(StateFailed) {
 				return 1
 			}
 			return 0
@@ -106,7 +108,7 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 
 	result := ProcessResult{
 		Status:     string(StateFailed),
-		Attempts:   attemptsUsed,
+		Attempts:   config.AttemptOffset + attemptsUsed,
 		ExitCode:   lastExit,
 		Detail:     lastDetail,
 		FinishedAt: config.Now().UTC(),
@@ -240,13 +242,18 @@ func runCodex(
 }
 
 func principalPrompt(issueIdentifier, triggerKind string) string {
-	opening := fmt.Sprintf("Use $do to complete %s through a human merge, deployment from updated main, and branch/worktree cleanup. The principal must wait for the human merge event and must not merge the pull request itself.", issueIdentifier)
+	opening := fmt.Sprintf("Use $do to complete %s. Follow lifecycle contract v%d and return a structured Factory result only after writing every required checkpoint.", issueIdentifier, LifecycleContractVersion)
 	if triggerKind == TriggerKindComment {
 		opening = fmt.Sprintf(`Use $do to continue %s in response to new human Linear feedback.
 
 This is a Factory continuation run. A prior Factory run for this issue reached a terminal state before a human commented. Before doing anything else, fresh-read the complete Linear issue and conversation with linear_graphql.py. Treat every human comment not yet addressed by a Factory reply or completed work as this run's scope.
 
 The original branch or pull request may already be merged or closed. Resume active work when it still exists; otherwise start a focused follow-up from the fetched default branch and open a new pull request. Do not redo completed work, and do not report success by pointing at the prior result without addressing the new feedback. If all human feedback is already addressed, reply in Linear with the evidence before finishing.`, issueIdentifier)
+	}
+	if triggerKind == TriggerKindPostMerge || triggerKind == TriggerKindGitHub {
+		opening = fmt.Sprintf(`Continue %s from its durable Factory lifecycle checkpoint.
+
+Fresh-read the authoritative PR, Linear issue, repository, approved plan, deployment, and cleanup state. If the PR is still open, address any changed head or feedback and write a replacement ready checkpoint. If it is merged, complete post-merge validation, deployment from updated main, verification, Linear completion, and cleanup. Do not recreate completed implementation work or reuse stale conclusions.`, issueIdentifier)
 	}
 	return fmt.Sprintf(`%s
 
@@ -266,22 +273,26 @@ During the pull request green loop, use "$FACTORY_AGENT_HELPER" agent github-eve
 
 While waiting for Linear feedback, use "$FACTORY_AGENT_HELPER" agent linear-comments as documented by the /do skill. Linear comment events are durable wake signals; refresh the authoritative issue conversation with linear_graphql.py after every event or timeout.
 
-If the /do workflow succeeds, end the final response with exactly FACTORY_RESULT: SUCCEEDED. If it is genuinely blocked, end with exactly FACTORY_RESULT: BLOCKED.`, opening)
+At the ready-for-human-merge boundary, write the validated checkpoint with "$FACTORY_AGENT_HELPER" agent checkpoint ready-for-merge, then end with exactly FACTORY_RESULT: READY_FOR_HUMAN_MERGE. Do not keep an LLM turn alive while waiting for the human.
+
+If the complete post-merge workflow succeeds, end with exactly FACTORY_RESULT: SUCCEEDED. If it reaches a genuine typed blocker, end with exactly FACTORY_RESULT: BLOCKED.`, opening)
 }
 
-func resultFromFinalMessage(message string) (State, string) {
+func resultFromFinalMessage(message string) (string, string) {
 	trimmed := strings.TrimSpace(message)
 	if trimmed == "" {
-		return StateFailed, "principal returned an empty final message"
+		return string(StateFailed), "principal returned an empty final message"
 	}
 	lines := strings.Split(trimmed, "\n")
 	switch strings.TrimSpace(lines[len(lines)-1]) {
 	case "FACTORY_RESULT: SUCCEEDED":
-		return StateSucceeded, ""
+		return string(StateSucceeded), ""
 	case "FACTORY_RESULT: BLOCKED":
-		return StateBlocked, "principal reported a blocker"
+		return string(StateBlocked), "principal reported a blocker"
+	case "FACTORY_RESULT: READY_FOR_HUMAN_MERGE":
+		return ResultReadyForMerge, "waiting for human merge"
 	default:
-		return StateFailed, "principal final message is missing a Factory result marker"
+		return string(StateFailed), "principal final message is missing a Factory result marker"
 	}
 }
 

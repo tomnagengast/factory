@@ -33,8 +33,11 @@ const (
 	systemEventLimit         = 10_000
 	defaultMaxConcurrentRuns = 3
 	defaultRepoURL           = "git@github.com:tomnagengast/network.git"
+	defaultRepository        = "tomnagengast/network"
+	defaultBaseBranch        = "main"
 	defaultTmuxSocket        = "factory-agents"
 	serviceHeartbeatInterval = 30 * time.Second
+	mergeReconcileInterval   = 60 * time.Second
 	googleRedirectURL        = "https://factory.nags.cloud/auth/google/callback"
 	viewerUsername           = "factory"
 )
@@ -144,9 +147,10 @@ func serve(ctx context.Context) error {
 	}
 	tmuxPath := requiredCommand("tmux")
 	tmuxSocket := envOr("FACTORY_TMUX_SOCKET", defaultTmuxSocket)
+	repoPath := envOr("FACTORY_REPO_PATH", filepath.Join(stateRoot, "workspace", "network"))
 	launcher, err := agentrun.NewTmuxLauncher(agentrun.LauncherConfig{
 		RepoURL:       envOr("FACTORY_REPO_URL", defaultRepoURL),
-		RepoPath:      envOr("FACTORY_REPO_PATH", filepath.Join(stateRoot, "workspace", "network")),
+		RepoPath:      repoPath,
 		StateRoot:     stateRoot,
 		BinaryPath:    binaryPath,
 		GitPath:       requiredCommand("git"),
@@ -157,13 +161,23 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	pullRequests, err := agentrun.NewGitHubCLI(requiredCommand("gh"), repoPath)
+	if err != nil {
+		return err
+	}
 	manager, err := agentrun.NewManager(
 		runStore,
 		launcher,
 		collector,
+		pullRequests,
+		agentrun.LifecycleConfig{
+			Repository: envOr("FACTORY_REPOSITORY", defaultRepository),
+			BaseBranch: envOr("FACTORY_BASE_BRANCH", defaultBaseBranch),
+		},
 		stateRoot,
 		envInt("FACTORY_MAX_AGENTS", defaultMaxConcurrentRuns),
 		2*time.Second,
+		mergeReconcileInterval,
 		slog.Default(),
 		time.Now,
 	)

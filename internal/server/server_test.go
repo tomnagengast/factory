@@ -640,6 +640,50 @@ func TestLinearCommentCoalescesIntoActiveRunWithoutNotification(t *testing.T) {
 	}
 }
 
+func TestLinearCommentResumesParkedRunAndNotifiesManager(t *testing.T) {
+	t.Parallel()
+
+	handler, runStore, notifier, _ := testHandlerWithLinearComments(t)
+	run, _, err := runStore.Claim(agentrun.Trigger{
+		DeliveryID:      "label-delivery",
+		IssueIdentifier: "ENG-123",
+		Kind:            agentrun.TriggerKindLabel,
+	}, testNow.Add(-2*time.Second))
+	if err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	if err := runStore.MarkStarting(run.ID, "factory-eng-123", t.TempDir(), testNow.Add(-2*time.Second)); err != nil {
+		t.Fatalf("mark starting: %v", err)
+	}
+	checkpoint := agentrun.ReadyCheckpoint{
+		ContractVersion: agentrun.LifecycleContractVersion,
+		RunID:           run.ID,
+		Repository:      "tomnagengast/network",
+		PullRequest:     8,
+		BaseBranch:      "main",
+		HeadBranch:      "eng-123-fix",
+		VerifiedHeadOID: "08c1c678a0b23bbe8e2dc2da1e398583d7e4c416",
+		CreatedAt:       testNow.Add(-time.Second),
+	}
+	if err := runStore.MarkAwaitingMerge(run.ID, checkpoint, testNow.Add(time.Hour), 1, testNow.Add(-time.Second)); err != nil {
+		t.Fatalf("mark awaiting: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, signedWebhookRequest(testLinearCommentBody("comment-1", "Please revise"), "comment-delivery", testSecret))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	resumed, ok := runStore.Find(run.ID)
+	if !ok || resumed.State != agentrun.StatePending || resumed.TriggerKind != agentrun.TriggerKindComment || resumed.ResumeCount != 1 {
+		t.Fatalf("resumed = %#v, found=%t", resumed, ok)
+	}
+	if got := notifier.count.Load(); got != 1 {
+		t.Fatalf("notifications = %d, want 1", got)
+	}
+}
+
 func TestLinearCommentWakeFiltersFactoryAndUnsupportedComments(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

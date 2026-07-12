@@ -15,6 +15,8 @@ import (
 
 const resultFileName = "result.json"
 
+const ResultReadyForMerge = "ready_for_human_merge"
+
 type LauncherConfig struct {
 	RepoURL       string
 	RepoPath      string
@@ -202,6 +204,9 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 	if err := os.MkdirAll(runDirectory, 0o700); err != nil {
 		return fmt.Errorf("create run directory: %w", err)
 	}
+	if err := removeLifecycleArtifacts(runDirectory); err != nil {
+		return err
+	}
 	args := []string{
 		"-L", l.config.TmuxSocket,
 		"new-session", "-d",
@@ -221,11 +226,22 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 		"--trigger-kind", run.TriggerKind,
 		"--repo", l.config.RepoPath,
 		"--run-dir", runDirectory,
+		"--attempt-offset", fmt.Sprintf("%d", run.Attempts),
 	}
 	cmd := exec.CommandContext(ctx, l.config.TmuxPath, args...)
 	cmd.Env = agentEnvironment(os.Environ())
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux new-session: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func removeLifecycleArtifacts(runDirectory string) error {
+	for _, name := range []string{resultFileName, readyCheckpointFileName} {
+		path := filepath.Join(runDirectory, name)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale lifecycle artifact %s: %w", name, err)
+		}
 	}
 	return nil
 }
@@ -281,10 +297,14 @@ func (l *TmuxLauncher) ReadResult(runDirectory string) (ProcessResult, error) {
 	if err := json.Unmarshal(data, &result); err != nil {
 		return ProcessResult{}, fmt.Errorf("decode agent result: %w", err)
 	}
-	if result.Status != string(StateSucceeded) && result.Status != string(StateBlocked) && result.Status != string(StateFailed) {
+	if result.Status != string(StateSucceeded) && result.Status != string(StateBlocked) && result.Status != string(StateFailed) && result.Status != ResultReadyForMerge {
 		return ProcessResult{}, fmt.Errorf("invalid agent result status %q", result.Status)
 	}
 	return result, nil
+}
+
+func (l *TmuxLauncher) ReadReadyCheckpoint(runDirectory string) (ReadyCheckpoint, error) {
+	return ReadReadyCheckpoint(runDirectory)
 }
 
 func sessionName(issueIdentifier string) string {

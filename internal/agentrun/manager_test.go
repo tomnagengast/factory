@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ type fakeLauncher struct {
 	starts       []Run
 	sessions     map[string]bool
 	results      map[string]ProcessResult
+	ready        map[string]ReadyCheckpoint
 }
 
 type noopCollector struct{}
@@ -55,6 +57,27 @@ func (f *fakeLauncher) ReadResult(runDirectory string) (ProcessResult, error) {
 		return ProcessResult{}, errors.New("not found")
 	}
 	return result, nil
+}
+
+func (f *fakeLauncher) ReadReadyCheckpoint(runDirectory string) (ReadyCheckpoint, error) {
+	checkpoint, ok := f.ready[runDirectory]
+	if !ok {
+		return ReadyCheckpoint{}, errors.New("not found")
+	}
+	return checkpoint, nil
+}
+
+type fakePullRequestReader struct {
+	snapshot PullRequestSnapshot
+	err      error
+}
+
+func (f fakePullRequestReader) Snapshot(context.Context, ReadyCheckpoint) (PullRequestSnapshot, error) {
+	snapshot := f.snapshot
+	if snapshot.BaseBranch == "" {
+		snapshot.BaseBranch = "main"
+	}
+	return snapshot, f.err
 }
 
 func TestManagerStartsPendingRunAndRecordsCompletion(t *testing.T) {
@@ -223,7 +246,7 @@ func TestManagerCollectsFinalAgentOutputAndTerminalTransition(t *testing.T) {
 		t.Fatalf("new collector: %v", err)
 	}
 	launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult)}
-	manager, err := NewManager(store, launcher, collector, stateRoot, 1, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return now })
+	manager, err := NewManager(store, launcher, collector, fakePullRequestReader{}, testLifecycleConfig(), stateRoot, 1, time.Second, time.Minute, slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -250,6 +273,250 @@ func TestManagerCollectsFinalAgentOutputAndTerminalTransition(t *testing.T) {
 	}
 }
 
+func TestManagerParksValidatedReadyRun(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	store := openTestStore(t, 10)
+	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult), ready: make(map[string]ReadyCheckpoint)}
+	reader := &fakePullRequestReader{snapshot: PullRequestSnapshot{
+		State:      "OPEN",
+		HeadBranch: "eng-123-fix",
+		HeadOID:    "08c1c678a0b23bbe8e2dc2da1e398583d7e4c416",
+	}}
+	manager := newTestManagerWithReader(t, store, launcher, t.TempDir(), reader, func() time.Time { return now })
+	manager.reconcile(context.Background())
+	running, _ := store.Find(run.ID)
+	launcher.sessions[running.SessionName] = false
+	launcher.results[running.RunDirectory] = ProcessResult{Status: ResultReadyForMerge, Attempts: 1, FinishedAt: now.Add(time.Minute)}
+	launcher.ready[running.RunDirectory] = testReadyCheckpoint(run.ID, now)
+
+	manager.reconcile(context.Background())
+	parked, _ := store.Find(run.ID)
+	if parked.State != StateAwaitingMerge || parked.Ready == nil || parked.NextReconcileAt == nil || parked.FinishedAt != nil {
+		t.Fatalf("parked = %#v", parked)
+	}
+}
+
+func TestManagerRejectsForgedReadyCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	store := openTestStore(t, 10)
+	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult), ready: make(map[string]ReadyCheckpoint)}
+	reader := &fakePullRequestReader{snapshot: PullRequestSnapshot{State: "OPEN", HeadBranch: "other-branch", HeadOID: "08c1c678a0b23bbe8e2dc2da1e398583d7e4c416"}}
+	manager := newTestManagerWithReader(t, store, launcher, t.TempDir(), reader, func() time.Time { return now })
+	manager.reconcile(context.Background())
+	running, _ := store.Find(run.ID)
+	launcher.sessions[running.SessionName] = false
+	launcher.results[running.RunDirectory] = ProcessResult{Status: ResultReadyForMerge, Attempts: 1, FinishedAt: now.Add(time.Minute)}
+	launcher.ready[running.RunDirectory] = testReadyCheckpoint(run.ID, now)
+
+	manager.reconcile(context.Background())
+	failed, _ := store.Find(run.ID)
+	if failed.State != StateFailed || !strings.Contains(failed.Detail, "head branch") {
+		t.Fatalf("failed = %#v", failed)
+	}
+}
+
+func TestManagerRejectsCheckpointOutsideConfiguredLifecycle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*ReadyCheckpoint, time.Time)
+		want   string
+	}{
+		{name: "repository", mutate: func(checkpoint *ReadyCheckpoint, _ time.Time) { checkpoint.Repository = "other/repository" }, want: "configured repository"},
+		{name: "base", mutate: func(checkpoint *ReadyCheckpoint, _ time.Time) { checkpoint.BaseBranch = "release" }, want: "configured base"},
+		{name: "stale", mutate: func(checkpoint *ReadyCheckpoint, now time.Time) { checkpoint.CreatedAt = now.Add(-time.Second) }, want: "predates"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+			store := openTestStore(t, 10)
+			run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+			if err != nil {
+				t.Fatalf("claim: %v", err)
+			}
+			launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult), ready: make(map[string]ReadyCheckpoint)}
+			manager := newTestManagerWithReader(t, store, launcher, t.TempDir(), &fakePullRequestReader{snapshot: PullRequestSnapshot{
+				State: "OPEN", HeadBranch: "eng-123-fix", HeadOID: "08c1c678a0b23bbe8e2dc2da1e398583d7e4c416",
+			}}, func() time.Time { return now })
+			manager.reconcile(context.Background())
+			running, _ := store.Find(run.ID)
+			checkpoint := testReadyCheckpoint(run.ID, now)
+			test.mutate(&checkpoint, now)
+			launcher.sessions[running.SessionName] = false
+			launcher.results[running.RunDirectory] = ProcessResult{Status: ResultReadyForMerge, Attempts: 1, FinishedAt: now.Add(time.Minute)}
+			launcher.ready[running.RunDirectory] = checkpoint
+
+			manager.reconcile(context.Background())
+			failed, _ := store.Find(run.ID)
+			if failed.State != StateFailed || !strings.Contains(failed.Detail, test.want) {
+				t.Fatalf("failed = %#v, want detail containing %q", failed, test.want)
+			}
+		})
+	}
+}
+
+func TestManagerResumesMergedParkedRun(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	store := openTestStore(t, 10)
+	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := store.MarkStarting(run.ID, "factory-eng-123", t.TempDir(), now); err != nil {
+		t.Fatalf("mark starting: %v", err)
+	}
+	checkpoint := testReadyCheckpoint(run.ID, now)
+	if err := store.MarkAwaitingMerge(run.ID, checkpoint, now, 1, now); err != nil {
+		t.Fatalf("mark awaiting: %v", err)
+	}
+	reader := &fakePullRequestReader{snapshot: PullRequestSnapshot{
+		State:          "MERGED",
+		HeadBranch:     checkpoint.HeadBranch,
+		HeadOID:        checkpoint.VerifiedHeadOID,
+		MergeCommitOID: "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b",
+	}}
+	launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult)}
+	manager := newTestManagerWithReader(t, store, launcher, t.TempDir(), reader, func() time.Time { return now })
+
+	manager.reconcile(context.Background())
+	resumed, _ := store.Find(run.ID)
+	if resumed.State != StatePending || resumed.TriggerKind != TriggerKindPostMerge || resumed.MergeCommitOID == "" {
+		t.Fatalf("resumed = %#v", resumed)
+	}
+}
+
+func TestManagerRejectsTerminalIntentWhilePullRequestOpen(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	store := openTestStore(t, 10)
+	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := store.MarkStarting(run.ID, "factory-eng-123", t.TempDir(), now); err != nil {
+		t.Fatalf("mark starting: %v", err)
+	}
+	checkpoint := testReadyCheckpoint(run.ID, now)
+	if err := store.MarkAwaitingMerge(run.ID, checkpoint, now, 1, now); err != nil {
+		t.Fatalf("mark awaiting: %v", err)
+	}
+	if err := store.ResumeAwaiting(run.ID, TriggerKindPostMerge, "", "resume", now); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult)}
+	reader := &fakePullRequestReader{snapshot: PullRequestSnapshot{State: "OPEN", HeadBranch: checkpoint.HeadBranch, HeadOID: checkpoint.VerifiedHeadOID}}
+	manager := newTestManagerWithReader(t, store, launcher, t.TempDir(), reader, func() time.Time { return now })
+	manager.reconcile(context.Background())
+	running, _ := store.Find(run.ID)
+	launcher.sessions[running.SessionName] = false
+	launcher.results[running.RunDirectory] = ProcessResult{Status: string(StateBlocked), Attempts: 2, FinishedAt: now.Add(time.Minute)}
+
+	manager.reconcile(context.Background())
+	parked, _ := store.Find(run.ID)
+	if parked.State != StateAwaitingMerge || parked.FinishedAt != nil || !strings.Contains(parked.Detail, "rejected terminal intent") {
+		t.Fatalf("parked = %#v", parked)
+	}
+}
+
+func TestManagerRequiresVerifiedMergeBeforeTerminalSuccess(t *testing.T) {
+	t.Parallel()
+
+	validMergeOID := "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b"
+	tests := []struct {
+		name     string
+		snapshot func(ReadyCheckpoint) PullRequestSnapshot
+		want     State
+	}{
+		{name: "closed unmerged", snapshot: func(checkpoint ReadyCheckpoint) PullRequestSnapshot {
+			return PullRequestSnapshot{State: "CLOSED", BaseBranch: checkpoint.BaseBranch, HeadBranch: checkpoint.HeadBranch, HeadOID: checkpoint.VerifiedHeadOID}
+		}, want: StateAwaitingMerge},
+		{name: "missing merge commit", snapshot: func(checkpoint ReadyCheckpoint) PullRequestSnapshot {
+			return PullRequestSnapshot{State: "MERGED", BaseBranch: checkpoint.BaseBranch, HeadBranch: checkpoint.HeadBranch, HeadOID: checkpoint.VerifiedHeadOID}
+		}, want: StateAwaitingMerge},
+		{name: "head mismatch", snapshot: func(checkpoint ReadyCheckpoint) PullRequestSnapshot {
+			return PullRequestSnapshot{State: "MERGED", BaseBranch: checkpoint.BaseBranch, HeadBranch: checkpoint.HeadBranch, HeadOID: "18c1c678a0b23bbe8e2dc2da1e398583d7e4c416", MergeCommitOID: validMergeOID}
+		}, want: StateAwaitingMerge},
+		{name: "verified merge", snapshot: func(checkpoint ReadyCheckpoint) PullRequestSnapshot {
+			return PullRequestSnapshot{State: "MERGED", BaseBranch: checkpoint.BaseBranch, HeadBranch: checkpoint.HeadBranch, HeadOID: checkpoint.VerifiedHeadOID, MergeCommitOID: validMergeOID}
+		}, want: StateSucceeded},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+			store := openTestStore(t, 10)
+			run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+			if err != nil {
+				t.Fatalf("claim: %v", err)
+			}
+			if err := store.MarkStarting(run.ID, "factory-eng-123", t.TempDir(), now); err != nil {
+				t.Fatalf("mark starting: %v", err)
+			}
+			checkpoint := testReadyCheckpoint(run.ID, now)
+			if err := store.MarkAwaitingMerge(run.ID, checkpoint, now, 1, now); err != nil {
+				t.Fatalf("mark awaiting: %v", err)
+			}
+			if err := store.ResumeAwaiting(run.ID, TriggerKindPostMerge, "", "resume", now); err != nil {
+				t.Fatalf("resume: %v", err)
+			}
+			launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult)}
+			manager := newTestManagerWithReader(t, store, launcher, t.TempDir(), &fakePullRequestReader{snapshot: test.snapshot(checkpoint)}, func() time.Time { return now })
+			manager.reconcile(context.Background())
+			running, _ := store.Find(run.ID)
+			launcher.sessions[running.SessionName] = false
+			launcher.results[running.RunDirectory] = ProcessResult{Status: string(StateSucceeded), Attempts: 2, FinishedAt: now.Add(time.Minute)}
+
+			manager.reconcile(context.Background())
+			finished, _ := store.Find(run.ID)
+			if finished.State != test.want {
+				t.Fatalf("finished = %#v, want state %q", finished, test.want)
+			}
+		})
+	}
+}
+
+func TestManagerRejectsStaleSegmentResult(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	store := openTestStore(t, 10)
+	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult)}
+	manager := newTestManager(t, store, launcher, t.TempDir(), func() time.Time { return now })
+	manager.reconcile(context.Background())
+	running, _ := store.Find(run.ID)
+	launcher.sessions[running.SessionName] = false
+	launcher.results[running.RunDirectory] = ProcessResult{Status: string(StateSucceeded), Attempts: running.SegmentAttempt, FinishedAt: now.Add(time.Minute)}
+
+	manager.reconcile(context.Background())
+	failed, _ := store.Find(run.ID)
+	if failed.State != StateFailed || !strings.Contains(failed.Detail, "stale") {
+		t.Fatalf("failed = %#v", failed)
+	}
+}
+
 func newTestManager(
 	t *testing.T,
 	store *Store,
@@ -258,13 +525,28 @@ func newTestManager(
 	now func() time.Time,
 ) *Manager {
 	t.Helper()
+	return newTestManagerWithReader(t, store, launcher, stateRoot, &fakePullRequestReader{}, now)
+}
+
+func newTestManagerWithReader(
+	t *testing.T,
+	store *Store,
+	launcher Launcher,
+	stateRoot string,
+	pullRequests PullRequestReader,
+	now func() time.Time,
+) *Manager {
+	t.Helper()
 	manager, err := NewManager(
 		store,
 		launcher,
 		noopCollector{},
+		pullRequests,
+		testLifecycleConfig(),
 		filepath.Clean(stateRoot),
 		3,
 		time.Second,
+		time.Minute,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		now,
 	)
@@ -272,4 +554,8 @@ func newTestManager(
 		t.Fatalf("new manager: %v", err)
 	}
 	return manager
+}
+
+func testLifecycleConfig() LifecycleConfig {
+	return LifecycleConfig{Repository: "tomnagengast/network", BaseBranch: "main"}
 }

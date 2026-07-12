@@ -13,12 +13,13 @@ func TestResultFromFinalMessage(t *testing.T) {
 	tests := []struct {
 		name    string
 		message string
-		want    State
+		want    string
 	}{
-		{name: "succeeded", message: "Done\nFACTORY_RESULT: SUCCEEDED\n", want: StateSucceeded},
-		{name: "blocked", message: "Need access\nFACTORY_RESULT: BLOCKED", want: StateBlocked},
-		{name: "missing marker", message: "Done", want: StateFailed},
-		{name: "empty", message: "", want: StateFailed},
+		{name: "succeeded", message: "Done\nFACTORY_RESULT: SUCCEEDED\n", want: string(StateSucceeded)},
+		{name: "blocked", message: "Need access\nFACTORY_RESULT: BLOCKED", want: string(StateBlocked)},
+		{name: "ready", message: "Ready\nFACTORY_RESULT: READY_FOR_HUMAN_MERGE", want: ResultReadyForMerge},
+		{name: "missing marker", message: "Done", want: string(StateFailed)},
+		{name: "empty", message: "", want: string(StateFailed)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -51,10 +52,10 @@ func TestPrincipalPromptGroupsChildAgentsInTmux(t *testing.T) {
 	for _, expected := range []string{
 		"Use $do",
 		"ENG-123",
-		"human merge",
-		"wait for the human merge event",
-		"deployment from updated main",
-		"branch/worktree cleanup",
+		"lifecycle contract v1",
+		"ready-for-human-merge boundary",
+		"checkpoint ready-for-merge",
+		"READY_FOR_HUMAN_MERGE",
 		"linear_graphql.py",
 		"FACTORY_AGENT_HELPER",
 		"linear-comments",
@@ -66,6 +67,22 @@ func TestPrincipalPromptGroupsChildAgentsInTmux(t *testing.T) {
 	}
 	if strings.Contains(prompt, "GitHub approval") {
 		t.Fatalf("prompt still requires GitHub approval: %s", prompt)
+	}
+}
+
+func TestPostMergePromptReconstructsDurableState(t *testing.T) {
+	t.Parallel()
+
+	prompt := principalPrompt("ENG-123", TriggerKindPostMerge)
+	for _, expected := range []string{
+		"Continue ENG-123 from its durable Factory lifecycle checkpoint",
+		"Fresh-read the authoritative PR",
+		"complete post-merge validation",
+		"Do not recreate completed implementation work",
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("post-merge prompt missing %q: %s", expected, prompt)
+		}
 	}
 }
 

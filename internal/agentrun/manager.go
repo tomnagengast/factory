@@ -2,8 +2,10 @@ package agentrun
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -13,19 +15,28 @@ type Launcher interface {
 	Start(context.Context, Run, string, string) error
 	SessionExists(context.Context, string) (bool, error)
 	ReadResult(string) (ProcessResult, error)
+	ReadReadyCheckpoint(string) (ReadyCheckpoint, error)
 }
 
 type RunCollector interface {
 	Collect(context.Context, []Run) error
 }
 
+type LifecycleConfig struct {
+	Repository string
+	BaseBranch string
+}
+
 type Manager struct {
 	store         *Store
 	launcher      Launcher
 	collector     RunCollector
+	pullRequests  PullRequestReader
+	lifecycle     LifecycleConfig
 	stateRoot     string
 	maxConcurrent int
 	pollInterval  time.Duration
+	mergeInterval time.Duration
 	logger        *slog.Logger
 	now           func() time.Time
 	notify        chan struct{}
@@ -35,9 +46,12 @@ func NewManager(
 	store *Store,
 	launcher Launcher,
 	collector RunCollector,
+	pullRequests PullRequestReader,
+	lifecycle LifecycleConfig,
 	stateRoot string,
 	maxConcurrent int,
 	pollInterval time.Duration,
+	mergeInterval time.Duration,
 	logger *slog.Logger,
 	now func() time.Time,
 ) (*Manager, error) {
@@ -50,6 +64,12 @@ func NewManager(
 	if collector == nil {
 		return nil, fmt.Errorf("agent run manager: collector is required")
 	}
+	if pullRequests == nil {
+		return nil, fmt.Errorf("agent run manager: pull request reader is required")
+	}
+	if !repositoryPattern.MatchString(lifecycle.Repository) || !validBranch(lifecycle.BaseBranch) {
+		return nil, fmt.Errorf("agent run manager: repository and base branch are required")
+	}
 	if stateRoot == "" {
 		return nil, fmt.Errorf("agent run manager: state root is required")
 	}
@@ -58,6 +78,9 @@ func NewManager(
 	}
 	if pollInterval <= 0 {
 		return nil, fmt.Errorf("agent run manager: poll interval must be positive")
+	}
+	if mergeInterval <= 0 {
+		return nil, fmt.Errorf("agent run manager: merge interval must be positive")
 	}
 	if logger == nil {
 		return nil, fmt.Errorf("agent run manager: logger is required")
@@ -69,9 +92,12 @@ func NewManager(
 		store:         store,
 		launcher:      launcher,
 		collector:     collector,
+		pullRequests:  pullRequests,
+		lifecycle:     lifecycle,
 		stateRoot:     stateRoot,
 		maxConcurrent: maxConcurrent,
 		pollInterval:  pollInterval,
+		mergeInterval: mergeInterval,
 		logger:        logger,
 		now:           now,
 		notify:        make(chan struct{}, 1),
@@ -123,6 +149,8 @@ func (m *Manager) reconcile(ctx context.Context) {
 		case StateStarting, StateRunning:
 			running++
 			m.reconcileActive(ctx, run)
+		case StateAwaitingMerge:
+			m.reconcileAwaitingMerge(ctx, run)
 		}
 	}
 
@@ -175,12 +203,181 @@ func (m *Manager) reconcileActive(ctx context.Context, run Run) {
 		}
 		return
 	}
+	if run.SegmentStartedAt == nil || result.Attempts <= run.SegmentAttempt || result.FinishedAt.Before(*run.SegmentStartedAt) {
+		detail := "rejected stale or unbound process result"
+		if finishErr := m.store.Finish(run.ID, StateFailed, run.Attempts, detail, m.now()); finishErr != nil {
+			m.logger.Error("finish invalid agent result", "run_id", run.ID, "error", finishErr)
+		}
+		return
+	}
+	if result.Status == ResultReadyForMerge {
+		m.parkReadyRun(ctx, run, result)
+		return
+	}
 	state := State(result.Status)
+	if run.Ready != nil && (state == StateSucceeded || state == StateBlocked) {
+		snapshot, snapshotErr := m.pullRequests.Snapshot(ctx, *run.Ready)
+		rejection := snapshotErr
+		if rejection == nil && state == StateSucceeded {
+			rejection = validateMergedSnapshot(*run.Ready, snapshot)
+		}
+		if rejection == nil && state == StateBlocked && snapshot.State == "OPEN" {
+			rejection = errors.New("pull request is still open")
+		}
+		if rejection != nil {
+			now := m.now()
+			nextReconcile := now.Add(m.mergeInterval)
+			detail := "rejected terminal intent while awaiting human merge: " + rejection.Error()
+			if err := m.store.MarkAwaitingMerge(run.ID, *run.Ready, nextReconcile, result.Attempts, now); err != nil {
+				m.logger.Error("repark agent run", "run_id", run.ID, "error", err)
+				return
+			}
+			_ = m.store.DeferMergeReconcile(run.ID, detail, nextReconcile, now)
+			m.logger.Warn("rejected terminal agent intent", "run_id", run.ID, "intent", result.Status)
+			return
+		}
+	}
 	if finishErr := m.store.Finish(run.ID, state, result.Attempts, result.Detail, result.FinishedAt); finishErr != nil {
 		m.logger.Error("finish agent run", "run_id", run.ID, "error", finishErr)
 		return
 	}
 	m.logger.Info("agent run finished", "run_id", run.ID, "state", state, "attempts", result.Attempts)
+}
+
+func (m *Manager) parkReadyRun(ctx context.Context, run Run, result ProcessResult) {
+	checkpoint, err := m.launcher.ReadReadyCheckpoint(run.RunDirectory)
+	if err != nil {
+		m.finishInvalidReady(run, result, err)
+		return
+	}
+	if err := m.validateCheckpoint(run, checkpoint); err != nil {
+		m.finishInvalidReady(run, result, err)
+		return
+	}
+	snapshot, err := m.pullRequests.Snapshot(ctx, checkpoint)
+	if err != nil {
+		m.finishInvalidReady(run, result, err)
+		return
+	}
+	if err := validateReadySnapshot(checkpoint, snapshot); err != nil {
+		m.finishInvalidReady(run, result, err)
+		return
+	}
+	checkpoint.Repository = m.lifecycle.Repository
+	now := m.now()
+	if err := m.store.MarkAwaitingMerge(run.ID, checkpoint, now.Add(m.mergeInterval), result.Attempts, now); err != nil {
+		m.logger.Error("park agent run", "run_id", run.ID, "error", err)
+		return
+	}
+	m.logger.Info("agent run awaiting human merge", "run_id", run.ID, "repository", checkpoint.Repository, "pull_request", checkpoint.PullRequest)
+}
+
+func (m *Manager) finishInvalidReady(run Run, result ProcessResult, cause error) {
+	detail := "invalid ready checkpoint: " + cause.Error()
+	if err := m.store.Finish(run.ID, StateFailed, result.Attempts, detail, m.now()); err != nil {
+		m.logger.Error("finish invalid ready checkpoint", "run_id", run.ID, "error", err)
+		return
+	}
+	m.logger.Error("reject ready checkpoint", "run_id", run.ID, "error", cause)
+}
+
+func validateReadySnapshot(checkpoint ReadyCheckpoint, snapshot PullRequestSnapshot) error {
+	if snapshot.State != "OPEN" {
+		return fmt.Errorf("pull request state is %q, want OPEN", snapshot.State)
+	}
+	if snapshot.IsDraft {
+		return fmt.Errorf("pull request is still a draft")
+	}
+	if snapshot.BaseBranch != checkpoint.BaseBranch {
+		return fmt.Errorf("pull request base branch is %q, want %q", snapshot.BaseBranch, checkpoint.BaseBranch)
+	}
+	if snapshot.HeadBranch != checkpoint.HeadBranch {
+		return fmt.Errorf("pull request head branch is %q, want %q", snapshot.HeadBranch, checkpoint.HeadBranch)
+	}
+	if snapshot.HeadOID != checkpoint.VerifiedHeadOID {
+		return fmt.Errorf("pull request head is %q, want verified head %q", snapshot.HeadOID, checkpoint.VerifiedHeadOID)
+	}
+	return nil
+}
+
+func (m *Manager) validateCheckpoint(run Run, checkpoint ReadyCheckpoint) error {
+	if err := checkpoint.Validate(); err != nil {
+		return err
+	}
+	if !strings.EqualFold(checkpoint.Repository, m.lifecycle.Repository) {
+		return fmt.Errorf("repository is %q, want configured repository %q", checkpoint.Repository, m.lifecycle.Repository)
+	}
+	if checkpoint.BaseBranch != m.lifecycle.BaseBranch {
+		return fmt.Errorf("base branch is %q, want configured base %q", checkpoint.BaseBranch, m.lifecycle.BaseBranch)
+	}
+	if run.SegmentStartedAt == nil || checkpoint.CreatedAt.Before(*run.SegmentStartedAt) {
+		return errors.New("checkpoint predates the current lifecycle segment")
+	}
+	return nil
+}
+
+func validateMergedSnapshot(checkpoint ReadyCheckpoint, snapshot PullRequestSnapshot) error {
+	if snapshot.State != "MERGED" {
+		return fmt.Errorf("pull request state is %q, want MERGED", snapshot.State)
+	}
+	if snapshot.BaseBranch != checkpoint.BaseBranch {
+		return fmt.Errorf("merged pull request base branch is %q, want %q", snapshot.BaseBranch, checkpoint.BaseBranch)
+	}
+	if snapshot.HeadBranch != checkpoint.HeadBranch || snapshot.HeadOID != checkpoint.VerifiedHeadOID {
+		return errors.New("merged pull request head does not match the verified checkpoint")
+	}
+	if !gitOIDPattern.MatchString(snapshot.MergeCommitOID) {
+		return errors.New("merged pull request has no valid merge commit OID")
+	}
+	return nil
+}
+
+func (m *Manager) reconcileAwaitingMerge(ctx context.Context, run Run) {
+	if run.Ready == nil {
+		if err := m.store.Finish(run.ID, StateFailed, run.Attempts, "awaiting merge without a ready checkpoint", m.now()); err != nil {
+			m.logger.Error("finish invalid awaiting run", "run_id", run.ID, "error", err)
+		}
+		return
+	}
+	now := m.now()
+	if run.NextReconcileAt != nil && now.Before(*run.NextReconcileAt) {
+		return
+	}
+	snapshot, err := m.pullRequests.Snapshot(ctx, *run.Ready)
+	if err != nil {
+		if deferErr := m.store.DeferMergeReconcile(run.ID, "GitHub refresh failed: "+err.Error(), now.Add(m.mergeInterval), now); deferErr != nil {
+			m.logger.Error("defer merge reconciliation", "run_id", run.ID, "error", deferErr)
+		}
+		return
+	}
+	switch snapshot.State {
+	case "OPEN":
+		if snapshot.IsDraft || snapshot.HeadBranch != run.Ready.HeadBranch || snapshot.HeadOID != run.Ready.VerifiedHeadOID {
+			if err := m.store.ResumeAwaiting(run.ID, TriggerKindGitHub, "", "pull request changed; resuming remediation", now); err != nil {
+				m.logger.Error("resume changed pull request", "run_id", run.ID, "error", err)
+			}
+			return
+		}
+		if err := m.store.DeferMergeReconcile(run.ID, "waiting for human merge", now.Add(m.mergeInterval), now); err != nil {
+			m.logger.Error("defer open pull request", "run_id", run.ID, "error", err)
+		}
+	case "MERGED":
+		detail := "pull request merged; resuming post-merge lifecycle"
+		if snapshot.MergeCommitOID == "" || snapshot.HeadOID != run.Ready.VerifiedHeadOID {
+			detail = "merged pull request requires authoritative blocker review"
+		}
+		if err := m.store.ResumeAwaiting(run.ID, TriggerKindPostMerge, snapshot.MergeCommitOID, detail, now); err != nil {
+			m.logger.Error("resume merged pull request", "run_id", run.ID, "error", err)
+		}
+	case "CLOSED":
+		if err := m.store.ResumeAwaiting(run.ID, TriggerKindPostMerge, "", "pull request closed without merge; resuming blocker report", now); err != nil {
+			m.logger.Error("resume closed pull request", "run_id", run.ID, "error", err)
+		}
+	default:
+		if err := m.store.DeferMergeReconcile(run.ID, "unknown pull request state: "+snapshot.State, now.Add(m.mergeInterval), now); err != nil {
+			m.logger.Error("defer unknown pull request state", "run_id", run.ID, "error", err)
+		}
+	}
 }
 
 func (m *Manager) start(ctx context.Context, run Run) bool {

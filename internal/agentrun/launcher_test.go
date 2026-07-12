@@ -144,8 +144,22 @@ func TestTmuxLauncherPropagatesTriggerKind(t *testing.T) {
 		t.Fatalf("new launcher: %v", err)
 	}
 	run := Run{ID: "run-123", IssueIdentifier: "ENG-123", TriggerKind: TriggerKindComment}
-	if err := launcher.Start(context.Background(), run, "factory-eng-123", filepath.Join(root, "runs", run.ID)); err != nil {
+	runDirectory := filepath.Join(root, "runs", run.ID)
+	if err := os.MkdirAll(runDirectory, 0o700); err != nil {
+		t.Fatalf("create run directory: %v", err)
+	}
+	for _, name := range []string{resultFileName, readyCheckpointFileName} {
+		if err := os.WriteFile(filepath.Join(runDirectory, name), []byte("stale"), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	if err := launcher.Start(context.Background(), run, "factory-eng-123", runDirectory); err != nil {
 		t.Fatalf("start: %v", err)
+	}
+	for _, name := range []string{resultFileName, readyCheckpointFileName} {
+		if _, err := os.Stat(filepath.Join(runDirectory, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stale %s still exists: %v", name, err)
+		}
 	}
 	data, err := os.ReadFile(argumentsPath)
 	if err != nil {

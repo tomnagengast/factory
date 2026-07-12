@@ -44,7 +44,8 @@ func runPrincipal(ctx context.Context, args []string) int {
 	triggerKind := flags.String("trigger-kind", "", "Factory trigger kind")
 	repo := flags.String("repo", "", "repository path")
 	runDirectory := flags.String("run-dir", "", "run output directory")
-	if flags.Parse(args) != nil || *issue == "" || *repo == "" || *runDirectory == "" {
+	attemptOffset := flags.Int("attempt-offset", 0, "completed attempts before this lifecycle segment")
+	if flags.Parse(args) != nil || *issue == "" || *repo == "" || *runDirectory == "" || *attemptOffset < 0 {
 		return 2
 	}
 	return agentrun.ExecutePrincipal(ctx, agentrun.PrincipalConfig{
@@ -55,6 +56,7 @@ func runPrincipal(ctx context.Context, args []string) int {
 		CodexPath:       requiredCommand("codex"),
 		Now:             time.Now,
 		Sleep:           sleepContext,
+		AttemptOffset:   *attemptOffset,
 	})
 }
 
@@ -80,12 +82,14 @@ func runChild(ctx context.Context, args []string) int {
 
 func runAgentHelper(ctx context.Context, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: factory agent spawn|events|github-events|linear-comments")
+		fmt.Fprintln(os.Stderr, "usage: factory agent spawn|checkpoint|events|github-events|linear-comments")
 		return 2
 	}
 	switch args[0] {
 	case "spawn":
 		return runSpawnHelper(ctx, args[1:])
+	case "checkpoint":
+		return runCheckpointHelper(args[1:])
 	case "events":
 		return runEventsHelper(ctx, args[1:], os.Stdout)
 	case "github-events":
@@ -96,6 +100,47 @@ func runAgentHelper(ctx context.Context, args []string) int {
 		fmt.Fprintf(os.Stderr, "unknown Factory agent command %q\n", args[0])
 		return 2
 	}
+}
+
+func runCheckpointHelper(args []string) int {
+	if len(args) == 0 || args[0] != "ready-for-merge" {
+		fmt.Fprintln(os.Stderr, "usage: factory agent checkpoint ready-for-merge --repo owner/name --pr N --base branch --head branch --verified-head OID")
+		return 2
+	}
+	flags := flag.NewFlagSet("agent checkpoint ready-for-merge", flag.ContinueOnError)
+	repository := flags.String("repo", "", "GitHub repository in owner/name form")
+	pullRequest := flags.Int("pr", 0, "pull request number")
+	baseBranch := flags.String("base", "", "pull request base branch")
+	headBranch := flags.String("head", "", "pull request head branch")
+	verifiedHead := flags.String("verified-head", "", "locally verified head OID")
+	if flags.Parse(args[1:]) != nil {
+		return 2
+	}
+	runID := os.Getenv("FACTORY_RUN_ID")
+	runDirectory := filepath.Clean(os.Getenv("FACTORY_RUN_DIR"))
+	if runID == "" || runDirectory == "." || filepath.Base(runDirectory) != runID || filepath.Base(filepath.Dir(runDirectory)) != "runs" {
+		fmt.Fprintln(os.Stderr, "ready checkpoint: Factory run environment is invalid")
+		return 2
+	}
+	checkpoint := agentrun.ReadyCheckpoint{
+		ContractVersion: agentrun.LifecycleContractVersion,
+		RunID:           runID,
+		Repository:      strings.TrimSpace(*repository),
+		PullRequest:     *pullRequest,
+		BaseBranch:      strings.TrimSpace(*baseBranch),
+		HeadBranch:      strings.TrimSpace(*headBranch),
+		VerifiedHeadOID: strings.TrimSpace(*verifiedHead),
+		CreatedAt:       time.Now().UTC(),
+	}
+	if err := agentrun.WriteReadyCheckpoint(runDirectory, checkpoint); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(checkpoint); err != nil {
+		fmt.Fprintf(os.Stderr, "ready checkpoint: encode response: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 type matchFlags []string

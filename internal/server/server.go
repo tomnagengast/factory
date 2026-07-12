@@ -55,6 +55,7 @@ type RunStore interface {
 	PublicSnapshot() agentrun.PublicSnapshot
 	ActivitySnapshot() agentrun.ActivitySnapshot
 	FindStarted(issueIdentifier string, startedUnixMilli int64) (agentrun.Run, bool)
+	SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, now time.Time) (bool, error)
 }
 
 type RunNotifier interface {
@@ -496,7 +497,7 @@ func (s *appServer) dispatchLinear(_ context.Context, record eventwire.Record) e
 				return fmt.Errorf("server: project Linear comment: %w", err)
 			}
 		}
-		_, created, err := s.runStore.ClaimContinuation(agentrun.Trigger{
+		run, created, err := s.runStore.ClaimContinuation(agentrun.Trigger{
 			DeliveryID:      deliveryID,
 			IssueIdentifier: event.IssueIdentifier,
 			Kind:            agentrun.TriggerKindComment,
@@ -504,7 +505,7 @@ func (s *appServer) dispatchLinear(_ context.Context, record eventwire.Record) e
 		if err != nil {
 			return fmt.Errorf("server: claim Linear continuation: %w", err)
 		}
-		if created {
+		if created || (run.State == agentrun.StatePending && run.ResumeCount > 0) {
 			s.runNotifier.Notify()
 		}
 	}
@@ -541,6 +542,15 @@ func (s *appServer) dispatchGitHub(_ context.Context, record eventwire.Record) e
 		ReceivedAt: event.ReceivedAt,
 	}); err != nil {
 		return fmt.Errorf("server: project GitHub activity: %w", err)
+	}
+	for _, pullRequest := range event.PullRequests {
+		scheduled, err := s.runStore.SchedulePullRequestReconcile(event.Repository, pullRequest, event.HeadBranch, event.DeliveryID, event.ReceivedAt)
+		if err != nil {
+			return fmt.Errorf("server: schedule pull request reconciliation: %w", err)
+		}
+		if scheduled {
+			s.runNotifier.Notify()
+		}
 	}
 	return nil
 }

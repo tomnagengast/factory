@@ -336,6 +336,88 @@ func TestStorePersistsAndAcknowledgesLifecycleTransitions(t *testing.T) {
 	}
 }
 
+func TestStoreParksAndCoalescesAwaitingMergeRun(t *testing.T) {
+	t.Parallel()
+
+	store := openTestStore(t, 10)
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	if err != nil {
+		t.Fatalf("claim run: %v", err)
+	}
+	if err := store.MarkStarting(run.ID, "factory-eng-123", t.TempDir(), now); err != nil {
+		t.Fatalf("mark starting: %v", err)
+	}
+	if err := store.MarkRunning(run.ID, 1, now); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	checkpoint := testReadyCheckpoint(run.ID, now)
+	if err := store.MarkAwaitingMerge(run.ID, checkpoint, now.Add(time.Minute), 1, now); err != nil {
+		t.Fatalf("mark awaiting merge: %v", err)
+	}
+
+	coalesced, created, err := store.ClaimContinuation(Trigger{
+		DeliveryID:      "comment-1",
+		IssueIdentifier: "ENG-123",
+		Kind:            TriggerKindComment,
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("coalesce comment: %v", err)
+	}
+	if created || coalesced.ID != run.ID || coalesced.State != StatePending || coalesced.TriggerKind != TriggerKindComment || coalesced.NextReconcileAt != nil || coalesced.ResumeCount != 1 {
+		t.Fatalf("coalesced run = %#v, created=%t", coalesced, created)
+	}
+	if snapshot := store.Snapshot(); snapshot.Total != 1 || snapshot.Active != 1 {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
+func TestStoreSchedulesMatchingPullRequestAndResumesOnce(t *testing.T) {
+	t.Parallel()
+
+	store := openTestStore(t, 10)
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	if err != nil {
+		t.Fatalf("claim run: %v", err)
+	}
+	if err := store.MarkStarting(run.ID, "factory-eng-123", t.TempDir(), now); err != nil {
+		t.Fatalf("mark starting: %v", err)
+	}
+	checkpoint := testReadyCheckpoint(run.ID, now)
+	if err := store.MarkAwaitingMerge(run.ID, checkpoint, now.Add(time.Hour), 1, now); err != nil {
+		t.Fatalf("mark awaiting merge: %v", err)
+	}
+
+	scheduled, err := store.SchedulePullRequestReconcile(checkpoint.Repository, checkpoint.PullRequest, checkpoint.HeadBranch, "github-1", now.Add(time.Second))
+	if err != nil || !scheduled {
+		t.Fatalf("schedule = %t, err = %v", scheduled, err)
+	}
+	if scheduled, err := store.SchedulePullRequestReconcile(checkpoint.Repository, 99, checkpoint.HeadBranch, "github-2", now.Add(2*time.Second)); err != nil || scheduled {
+		t.Fatalf("nonmatching schedule = %t, err = %v", scheduled, err)
+	}
+	if err := store.ResumeAwaiting(run.ID, TriggerKindPostMerge, "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b", "merged", now.Add(3*time.Second)); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	resumed, _ := store.Find(run.ID)
+	if resumed.State != StatePending || resumed.TriggerKind != TriggerKindPostMerge || resumed.ResumeCount != 1 || resumed.MergeCommitOID == "" {
+		t.Fatalf("resumed = %#v", resumed)
+	}
+}
+
+func testReadyCheckpoint(runID string, now time.Time) ReadyCheckpoint {
+	return ReadyCheckpoint{
+		ContractVersion: LifecycleContractVersion,
+		RunID:           runID,
+		Repository:      "tomnagengast/network",
+		PullRequest:     8,
+		BaseBranch:      "main",
+		HeadBranch:      "eng-123-fix",
+		VerifiedHeadOID: "08c1c678a0b23bbe8e2dc2da1e398583d7e4c416",
+		CreatedAt:       now,
+	}
+}
+
 func TestStorePruningRetainsRunsWithPendingTransitions(t *testing.T) {
 	t.Parallel()
 
