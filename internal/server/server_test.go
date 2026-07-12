@@ -784,6 +784,45 @@ func TestGitHubWebhookPersistsAndDeduplicatesSignedDelivery(t *testing.T) {
 	}
 }
 
+func TestGitHubBranchOnlyFailureWakeSchedulesParkedRun(t *testing.T) {
+	t.Parallel()
+
+	handler, runStore, notifier := testHandlerWithRuns(t)
+	run, _, err := runStore.Claim(agentrun.Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: agentrun.TriggerKindLabel}, testNow.Add(-2*time.Second))
+	if err != nil {
+		t.Fatalf("claim run: %v", err)
+	}
+	if err := runStore.MarkStarting(run.ID, "factory-eng-123", t.TempDir(), testNow.Add(-2*time.Second)); err != nil {
+		t.Fatalf("mark starting: %v", err)
+	}
+	checkpoint := agentrun.ReadyCheckpoint{
+		ContractVersion: agentrun.LifecycleContractVersion,
+		RunID:           run.ID,
+		Repository:      "tomnagengast/network",
+		PullRequest:     8,
+		BaseBranch:      "main",
+		HeadBranch:      "eng-123-fix",
+		VerifiedHeadOID: "08c1c678a0b23bbe8e2dc2da1e398583d7e4c416",
+		CreatedAt:       testNow.Add(-time.Second),
+	}
+	if err := runStore.MarkAwaitingMerge(run.ID, checkpoint, testNow.Add(time.Hour), 1, testNow.Add(-time.Second)); err != nil {
+		t.Fatalf("mark awaiting: %v", err)
+	}
+	body := `{"state":"failure","sha":"08c1c678a0b23bbe8e2dc2da1e398583d7e4c416","branches":[{"name":"eng-123-fix"}],"repository":{"full_name":"tomnagengast/network"}}`
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, signedGitHubWebhookRequest(body, "status-1", "status", testGitHubSecret))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	parked, _ := runStore.Find(run.ID)
+	if !parked.RemediationRequested || parked.LastGitHubCursor == 0 || parked.NextReconcileAt == nil {
+		t.Fatalf("parked = %#v", parked)
+	}
+	if got := notifier.count.Load(); got != 1 {
+		t.Fatalf("notifications = %d, want 1", got)
+	}
+}
+
 func TestGitHubWebhookRejectsInvalidSignature(t *testing.T) {
 	t.Parallel()
 

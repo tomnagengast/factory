@@ -560,7 +560,11 @@ func (s *appServer) dispatchGitHub(_ context.Context, record eventwire.Record) e
 		return fmt.Errorf("server: project GitHub activity: %w", err)
 	}
 	remediation := githubWakeRequiresRemediation(event)
-	for _, pullRequest := range event.PullRequests {
+	pullRequests := event.PullRequests
+	if len(pullRequests) == 0 && event.HeadBranch != "" {
+		pullRequests = []int{0}
+	}
+	for _, pullRequest := range pullRequests {
 		scheduled, err := s.runStore.SchedulePullRequestReconcile(event.Repository, pullRequest, event.HeadBranch, event.DeliveryID, record.Sequence, remediation, event.ReceivedAt)
 		if err != nil {
 			return fmt.Errorf("server: schedule pull request reconciliation: %w", err)

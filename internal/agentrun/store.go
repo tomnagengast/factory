@@ -408,7 +408,7 @@ func resumeAwaitingRun(run *Run, kind, mergeCommitOID, detail string, now time.T
 }
 
 func (s *Store) SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, cursor uint64, remediation bool, now time.Time) (bool, error) {
-	if !repositoryPattern.MatchString(repository) || pullRequest < 1 || deliveryID == "" {
+	if !repositoryPattern.MatchString(repository) || (pullRequest < 1 && !validBranch(headBranch)) || deliveryID == "" {
 		return false, errors.New("schedule pull request reconcile: invalid wake")
 	}
 	s.mu.Lock()
@@ -418,7 +418,10 @@ func (s *Store) SchedulePullRequestReconcile(repository string, pullRequest int,
 	next.Runs = cloneRuns(s.state.Runs)
 	for i := range next.Runs {
 		run := &next.Runs[i]
-		if run.State != StateAwaitingMerge || run.Ready == nil || run.Ready.Repository != repository || run.Ready.PullRequest != pullRequest {
+		if run.State != StateAwaitingMerge || run.Ready == nil || run.Ready.Repository != repository {
+			continue
+		}
+		if pullRequest > 0 && run.Ready.PullRequest != pullRequest {
 			continue
 		}
 		if headBranch != "" && run.Ready.HeadBranch != headBranch {

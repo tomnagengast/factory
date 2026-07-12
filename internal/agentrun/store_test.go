@@ -423,11 +423,14 @@ func TestStoreSchedulesMatchingPullRequestAndResumesOnce(t *testing.T) {
 	if scheduled, err := store.SchedulePullRequestReconcile(checkpoint.Repository, 99, checkpoint.HeadBranch, "github-2", 43, false, now.Add(2*time.Second)); err != nil || scheduled {
 		t.Fatalf("nonmatching schedule = %t, err = %v", scheduled, err)
 	}
+	if scheduled, err := store.SchedulePullRequestReconcile(checkpoint.Repository, 0, checkpoint.HeadBranch, "github-branch", 44, false, now.Add(2*time.Second)); err != nil || !scheduled {
+		t.Fatalf("branch schedule = %t, err = %v", scheduled, err)
+	}
 	if err := store.ResumeAwaiting(run.ID, TriggerKindPostMerge, "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b", "merged", now.Add(3*time.Second)); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	resumed, _ := store.Find(run.ID)
-	if resumed.State != StatePostMergePending || resumed.TriggerKind != TriggerKindPostMerge || resumed.ResumeCount != 1 || resumed.MergeCommitOID == "" || resumed.LastGitHubCursor != 42 || resumed.RemediationRequested {
+	if resumed.State != StatePostMergePending || resumed.TriggerKind != TriggerKindPostMerge || resumed.ResumeCount != 1 || resumed.MergeCommitOID == "" || resumed.LastGitHubCursor != 44 || resumed.RemediationRequested {
 		t.Fatalf("resumed = %#v", resumed)
 	}
 }
