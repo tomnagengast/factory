@@ -47,11 +47,12 @@ func ToWire(event Event) eventwire.Event {
 }
 
 func FromWire(value eventwire.Event) (Event, bool) {
-	if value.Source != eventwire.SourceGitHub || !value.Has(attributeDeliveryID, first(value.Values(attributeDeliveryID))) {
+	deliveryID := first(value.Values(attributeDeliveryID))
+	if value.Source != eventwire.SourceGitHub || deliveryID == "" {
 		return Event{}, false
 	}
 	event := Event{
-		DeliveryID: first(value.Values(attributeDeliveryID)),
+		DeliveryID: deliveryID,
 		Type:       value.Type,
 		Action:     value.Action,
 		Repository: first(value.Values(attributeRepository)),

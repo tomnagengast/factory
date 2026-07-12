@@ -47,11 +47,31 @@ Factory separates public health from authenticated operational detail:
 
 Validated Linear request bodies are retained prospectively as private `0600` sidecar files beside the bounded activity index. Sidecars age out with their metadata records. Historical records from before payload retention remain listable without a body, and GitHub request bodies are never retained. `/agents/<run-id>` remains available for existing links and for pending runs that do not have a start timestamp yet.
 
+## System event wire
+
+Every accepted Linear delivery, GitHub delivery, Factory service lifecycle change, agent-run state transition, and complete principal or child JSONL record enters `~/.local/share/factory/data/system-events.jsonl`. This private `0600` append journal is the single ingress and dispatch sequence. It retains the newest 10,000 acknowledged records plus any records still awaiting dispatch, preserves a lifetime monotonic cursor, and replays unacknowledged effects after a restart or before the next publication.
+
+Normalized records contain only routing and audit metadata. Linear bodies remain in protected activity sidecars, GitHub bodies are not retained, and agent message bodies remain in private run JSONL files. Agent audit events contain only the run ID, run-relative file, byte offset and length, SHA-256 digest, and an allowlisted record type. `agent-event-offsets.json` checkpoints completed lines so partial tails wait for completion and restarts do not duplicate audit records.
+
+Use the source-agnostic helper inside a Factory run to read or wait on the global cursor:
+
+```bash
+"$FACTORY_AGENT_HELPER" agent events \
+  --source factory \
+  --type agent-run \
+  --subject TEAM-123 \
+  --match runId="$FACTORY_RUN_ID" \
+  --after 0 \
+  --wait 60s
+```
+
+Filters may use `--source linear|github|factory`, `--type`, `--action`, `--subject`, and repeated `--match key=value`. Factory emits `service/started`, `service/heartbeat` every 30 seconds, `service/stopping` during graceful shutdown, each agent-run state, and one compact `agent-record` event per complete JSONL record. `/api/healthz` remains the synchronous current-state probe; lifecycle records provide durable history for monitoring and future remediation.
+
 ## GitHub event sink
 
-Factory accepts signed repository webhooks at `https://factory.nags.cloud/api/webhooks/github`. It verifies `X-Hub-Signature-256`, deduplicates `X-GitHub-Delivery`, and stores a bounded journal of compact PR, review, check, status, and workflow metadata. Raw GitHub webhook payloads and comment bodies are not retained.
+Factory accepts signed repository webhooks at `https://factory.nags.cloud/api/webhooks/github`. It verifies `X-Hub-Signature-256`, deduplicates `X-GitHub-Delivery`, and appends compact PR, review, check, status, and workflow metadata to the unified system wire. Raw GitHub webhook payloads and comment bodies are not retained.
 
-During the PR green and human-merge loop, a Factory agent waits on the local journal instead of polling GitHub:
+During the PR green and human-merge loop, a Factory agent waits through the deprecated compatibility adapter instead of polling GitHub:
 
 ```bash
 "$FACTORY_AGENT_HELPER" agent github-events \
@@ -62,7 +82,7 @@ During the PR green and human-merge loop, a Factory agent waits on the local jou
   --wait 60s
 ```
 
-The JSON response contains a monotonic cursor and matching events ordered by Factory receipt sequence. The journal retains the latest 1,000 deliveries globally and deduplicates retained GitHub delivery IDs. Events are wake signals only; the agent always refreshes authoritative PR, review, check, and merge state with `gh` before acting. While the PR is open, the agent remediates or keeps waiting; Yolo never authorizes a merge. Register or refresh a repository webhook with `bin/network-app github-hook owner/repository` after `refresh-env` and deployment.
+The JSON response and GitHub-specific cursor domain remain unchanged, but the adapter now reads the unified wire. Factory still maintains the old `github-events.json` only as an exact-sequence post-wire rollback projection, never as ingress or dispatch authority. Events are wake signals only; the agent always refreshes authoritative PR, review, check, and merge state with `gh` before acting. While the PR is open, the agent remediates or keeps waiting; Yolo never authorizes a merge. Register or refresh a repository webhook with `bin/network-app github-hook owner/repository` after `refresh-env` and deployment.
 
 ## Human merge and deployment
 
@@ -76,7 +96,7 @@ Only after deployment verification does the principal prove GitHub auto-deleted 
 
 ## Linear comment wake
 
-Factory also records eligible signed `Comment/create` deliveries in a body-free wake journal. A running issue agent waits for top-level comments and replies with:
+Factory also records eligible signed `Comment/create` deliveries as body-free events on the unified wire. A running issue agent waits for top-level comments and replies through the deprecated compatibility adapter:
 
 ```bash
 "$FACTORY_AGENT_HELPER" agent linear-comments \
@@ -85,7 +105,7 @@ Factory also records eligible signed `Comment/create` deliveries in a body-free 
   --wait 60s
 ```
 
-The journal retains the latest 500 eligible deliveries, deduplicates Linear delivery IDs, and returns matching events in Factory receipt order with a monotonic cursor. Events contain comment and issue identifiers, reply parent ID, private Linear URL, and receipt time, but never the comment body. The agent refreshes the authoritative conversation through Linear GraphQL after every wake or timeout.
+The adapter's response and Linear-comment cursor domain remain unchanged. Factory maintains `linear-comments.json` only as an exact-sequence post-wire rollback projection. Events contain comment and issue identifiers, reply parent ID, private Linear URL, and receipt time, but never the comment body. The agent refreshes the authoritative conversation through Linear GraphQL after every wake or timeout.
 
 Only comments created by the configured trigger actor enter this journal. Factory-authored comments are excluded by the reserved final-line `🐘` signature or `🐘` plus `codex-do` marker, because Factory and the human can share the same Linear identity.
 

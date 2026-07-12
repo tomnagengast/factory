@@ -7,9 +7,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -399,6 +401,86 @@ func TestLinearFactoryLabelStartsOneRunPerActiveIssue(t *testing.T) {
 	}
 }
 
+func TestLinearWebhookReplaysStagedPayloadWithoutProviderRedelivery(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	activityStore, err := activity.Open(filepath.Join(directory, "activity.json"), 10)
+	if err != nil {
+		t.Fatalf("open activity: %v", err)
+	}
+	flaky := &flakyActivityStore{Store: activityStore, failNext: true}
+	runStore, err := agentrun.Open(filepath.Join(directory, "runs.json"), 10)
+	if err != nil {
+		t.Fatalf("open runs: %v", err)
+	}
+	githubEvents, err := githubhook.Open(filepath.Join(directory, "github-events.json"), 10)
+	if err != nil {
+		t.Fatalf("open GitHub events: %v", err)
+	}
+	linearComments, err := linearhook.Open(filepath.Join(directory, "linear-comments.json"), 10)
+	if err != nil {
+		t.Fatalf("open Linear comments: %v", err)
+	}
+	journalPath := filepath.Join(directory, "system-events.jsonl")
+	journal, err := eventwire.Open(journalPath, 100, nil)
+	if err != nil {
+		t.Fatalf("open wire journal: %v", err)
+	}
+	wire, err := eventwire.New(journal)
+	if err != nil {
+		t.Fatalf("new wire: %v", err)
+	}
+	notifier := &testNotifier{}
+	handler, err := New(Config{
+		Web:            testWeb(),
+		ActivityStore:  flaky,
+		RunStore:       runStore,
+		RunNotifier:    notifier,
+		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
+		ViewerAuth:     testViewerAuth(t),
+		LinearSecret:   testSecret,
+		GitHubSecret:   testGitHubSecret,
+		Events:         wire,
+		GitHubEvents:   githubEvents,
+		LinearComments: linearComments,
+		TriggerActor:   testActorID,
+		Now:            func() time.Time { return testNow },
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	body := fmt.Sprintf(
+		`{"type":"Issue","action":"update","webhookTimestamp":%d,"private":"must not enter wire","actor":{"id":"%s"},"data":{"identifier":"ENG-123","labelIds":["label-factory"],"labels":[{"id":"label-factory","name":"Factory"}]},"updatedFrom":{"labelIds":[]}}`,
+		testNow.UnixMilli(),
+		testActorID,
+	)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, signedWebhookRequest(body, "delivery-replay", testSecret))
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("first status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+	if len(journal.Pending()) != 1 {
+		t.Fatalf("pending records = %#v", journal.Pending())
+	}
+	if err := wire.CatchUp(context.Background()); err != nil {
+		t.Fatalf("internal catch-up: %v", err)
+	}
+	if len(journal.Pending()) != 0 || activityStore.Snapshot().Total != 1 || runStore.Snapshot().Total != 1 {
+		t.Fatalf("replayed state: pending=%#v activity=%#v runs=%#v", journal.Pending(), activityStore.Snapshot(), runStore.Snapshot())
+	}
+	if notifier.count.Load() != 1 {
+		t.Fatalf("notifications = %d, want 1", notifier.count.Load())
+	}
+	wireData, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatalf("read wire: %v", err)
+	}
+	if strings.Contains(string(wireData), "must not enter wire") {
+		t.Fatal("wire contains staged private payload")
+	}
+}
+
 func TestLinearNonTriggerEventsDoNotStartRun(t *testing.T) {
 	t.Parallel()
 
@@ -685,6 +767,19 @@ func testHandler(t *testing.T) http.Handler {
 
 type testNotifier struct {
 	count atomic.Int32
+}
+
+type flakyActivityStore struct {
+	*activity.Store
+	failNext bool
+}
+
+func (s *flakyActivityStore) AddStaged(deliveryID string, event activity.Event) (bool, error) {
+	if s.failNext {
+		s.failNext = false
+		return false, errors.New("temporary projection failure")
+	}
+	return s.Store.AddStaged(deliveryID, event)
 }
 
 type testObserver struct {

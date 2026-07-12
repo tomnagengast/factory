@@ -214,7 +214,10 @@ func TestManagerCollectsFinalAgentOutputAndTerminalTransition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open journal: %v", err)
 	}
-	wire, _ := eventwire.New(journal)
+	wire, err := eventwire.New(journal)
+	if err != nil {
+		t.Fatalf("new wire: %v", err)
+	}
 	collector, err := NewCollector(store, wire, stateRoot, filepath.Join(stateRoot, "data", "offsets.json"))
 	if err != nil {
 		t.Fatalf("new collector: %v", err)

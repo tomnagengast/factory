@@ -48,7 +48,10 @@ func TestCollectorPublishesCompleteAgentRecordsAndLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open journal: %v", err)
 	}
-	wire, _ := eventwire.New(journal)
+	wire, err := eventwire.New(journal)
+	if err != nil {
+		t.Fatalf("new wire: %v", err)
+	}
 	collector, err := NewCollector(store, wire, root, filepath.Join(root, "data", "offsets.json"))
 	if err != nil {
 		t.Fatalf("new collector: %v", err)
@@ -105,6 +108,17 @@ func TestCollectorPublishesCompleteAgentRecordsAndLifecycle(t *testing.T) {
 	_, _, _, records = journal.Snapshot()
 	if len(records) != 6 {
 		t.Fatalf("restart duplicated records: %#v", records)
+	}
+
+	if err := os.WriteFile(filepath.Join(runDirectory, "attempt-1-events.jsonl"), []byte("{\"type\":\"assistant\"}\n"), 0o600); err != nil {
+		t.Fatalf("replace principal file: %v", err)
+	}
+	if err := reopened.Collect(context.Background(), store.Snapshot().Runs); err != nil {
+		t.Fatalf("collect replaced file: %v", err)
+	}
+	_, _, _, records = journal.Snapshot()
+	if len(records) != 7 || records[6].Event.Action != "assistant" {
+		t.Fatalf("records after replacement = %#v", records)
 	}
 }
 
