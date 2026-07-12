@@ -14,9 +14,10 @@ func TestResultFromFinalMessage(t *testing.T) {
 		name    string
 		message string
 		want    string
+		blocker string
 	}{
 		{name: "succeeded", message: "Done\nFACTORY_RESULT: SUCCEEDED\n", want: string(StateSucceeded)},
-		{name: "blocked", message: "Need access\nFACTORY_RESULT: BLOCKED", want: string(StateBlocked)},
+		{name: "blocked", message: "Need access\nFACTORY_BLOCKER: authority_unavailable\nFACTORY_RESULT: BLOCKED", want: string(StateBlocked), blocker: "authority_unavailable"},
 		{name: "ready", message: "Ready\nFACTORY_RESULT: READY_FOR_HUMAN_MERGE", want: ResultReadyForMerge},
 		{name: "missing marker", message: "Done", want: string(StateFailed)},
 		{name: "empty", message: "", want: string(StateFailed)},
@@ -24,9 +25,9 @@ func TestResultFromFinalMessage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, _ := resultFromFinalMessage(tt.message)
-			if got != tt.want {
-				t.Fatalf("state = %q, want %q", got, tt.want)
+			got, blocker, _ := resultFromFinalMessage(tt.message)
+			if got != tt.want || blocker != tt.blocker {
+				t.Fatalf("result = %q blocker %q, want %q blocker %q", got, blocker, tt.want, tt.blocker)
 			}
 		})
 	}

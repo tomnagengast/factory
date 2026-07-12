@@ -336,6 +336,33 @@ func TestStorePersistsAndAcknowledgesLifecycleTransitions(t *testing.T) {
 	}
 }
 
+func TestStorePersistsTerminalValidationReceipt(t *testing.T) {
+	t.Parallel()
+
+	store := openTestStore(t, 10)
+	now := time.Date(2026, time.July, 11, 22, 0, 0, 0, time.UTC)
+	run, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	validation := CompletionValidation{
+		Accepted: true, Intent: string(StateSucceeded), State: StateSucceeded,
+		Reason: "all mechanical post-merge conditions verified", ValidatedAt: now.Add(time.Minute),
+		DeploymentID: "deploy-1", DeploymentCommit: "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b",
+	}
+	if err := store.FinishValidated(run.ID, StateSucceeded, 1, validation.Reason, validation, now.Add(time.Minute)); err != nil {
+		t.Fatalf("finish validated: %v", err)
+	}
+	finished, ok := store.Find(run.ID)
+	if !ok || finished.Completion == nil || !finished.Completion.Accepted || finished.Completion.DeploymentID != "deploy-1" || finished.TerminalRejection != "" {
+		t.Fatalf("finished = %#v, found=%t", finished, ok)
+	}
+	activity := store.ActivitySnapshot().Runs[0]
+	if activity.Completion == nil || activity.Completion.DeploymentCommit == "" {
+		t.Fatalf("activity = %#v", activity)
+	}
+}
+
 func TestStoreParksAndCoalescesAwaitingMergeRun(t *testing.T) {
 	t.Parallel()
 
@@ -389,18 +416,18 @@ func TestStoreSchedulesMatchingPullRequestAndResumesOnce(t *testing.T) {
 		t.Fatalf("mark awaiting merge: %v", err)
 	}
 
-	scheduled, err := store.SchedulePullRequestReconcile(checkpoint.Repository, checkpoint.PullRequest, checkpoint.HeadBranch, "github-1", now.Add(time.Second))
+	scheduled, err := store.SchedulePullRequestReconcile(checkpoint.Repository, checkpoint.PullRequest, checkpoint.HeadBranch, "github-1", 42, now.Add(time.Second))
 	if err != nil || !scheduled {
 		t.Fatalf("schedule = %t, err = %v", scheduled, err)
 	}
-	if scheduled, err := store.SchedulePullRequestReconcile(checkpoint.Repository, 99, checkpoint.HeadBranch, "github-2", now.Add(2*time.Second)); err != nil || scheduled {
+	if scheduled, err := store.SchedulePullRequestReconcile(checkpoint.Repository, 99, checkpoint.HeadBranch, "github-2", 43, now.Add(2*time.Second)); err != nil || scheduled {
 		t.Fatalf("nonmatching schedule = %t, err = %v", scheduled, err)
 	}
 	if err := store.ResumeAwaiting(run.ID, TriggerKindPostMerge, "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b", "merged", now.Add(3*time.Second)); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	resumed, _ := store.Find(run.ID)
-	if resumed.State != StatePending || resumed.TriggerKind != TriggerKindPostMerge || resumed.ResumeCount != 1 || resumed.MergeCommitOID == "" {
+	if resumed.State != StatePostMergePending || resumed.TriggerKind != TriggerKindPostMerge || resumed.ResumeCount != 1 || resumed.MergeCommitOID == "" || resumed.LastGitHubCursor != 42 {
 		t.Fatalf("resumed = %#v", resumed)
 	}
 }

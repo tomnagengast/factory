@@ -56,6 +56,10 @@ func main() {
 }
 
 func serve(ctx context.Context) error {
+	serviceStartedAt := time.Now().UTC()
+	if buildContractVersion != strconv.Itoa(agentrun.LifecycleContractVersion) {
+		return fmt.Errorf("build contract version %q does not match lifecycle contract %d", buildContractVersion, agentrun.LifecycleContractVersion)
+	}
 	port := envOr("PORT", defaultPort)
 	web := os.DirFS("frontend/dist")
 	if _, err := fs.Stat(web, "index.html"); err != nil {
@@ -146,6 +150,8 @@ func serve(ctx context.Context) error {
 		return fmt.Errorf("resolve Factory binary: %w", err)
 	}
 	tmuxPath := requiredCommand("tmux")
+	gitPath := requiredCommand("git")
+	worktrunkPath := requiredCommand("wt")
 	tmuxSocket := envOr("FACTORY_TMUX_SOCKET", defaultTmuxSocket)
 	repoPath := envOr("FACTORY_REPO_PATH", filepath.Join(stateRoot, "workspace", "network"))
 	launcher, err := agentrun.NewTmuxLauncher(agentrun.LauncherConfig{
@@ -153,8 +159,8 @@ func serve(ctx context.Context) error {
 		RepoPath:      repoPath,
 		StateRoot:     stateRoot,
 		BinaryPath:    binaryPath,
-		GitPath:       requiredCommand("git"),
-		WorktrunkPath: requiredCommand("wt"),
+		GitPath:       gitPath,
+		WorktrunkPath: worktrunkPath,
 		TmuxPath:      tmuxPath,
 		TmuxSocket:    tmuxSocket,
 	})
@@ -165,11 +171,36 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	completionEvidence, err := agentrun.NewSystemCompletionEvidence(agentrun.SystemCompletionConfig{
+		Repository: envOr("FACTORY_REPOSITORY", defaultRepository),
+		RemoteURLs: []string{
+			"git@github.com:tomnagengast/network.git",
+			"https://github.com/tomnagengast/network",
+			"https://github.com/tomnagengast/network.git",
+		},
+		RepoPath:       repoPath,
+		ReceiptPath:    filepath.Join(stateRoot, "deployments", "current.json"),
+		PendingReceipt: filepath.Join(stateRoot, "deployments", "pending.json"),
+		HealthURL:      "http://127.0.0.1:" + port + "/api/healthz",
+		LinearURL:      "https://api.linear.app/graphql",
+		GitPath:        gitPath,
+		WorktrunkPath:  worktrunkPath,
+		LinearAPIKey:   linearAPIKey,
+		HTTPClient:     &http.Client{Timeout: 10 * time.Second},
+	})
+	if err != nil {
+		return err
+	}
+	terminalValidator, err := agentrun.NewMechanicalCompletionValidator(pullRequests, completionEvidence, envOr("FACTORY_REPOSITORY", defaultRepository), time.Now)
+	if err != nil {
+		return err
+	}
 	manager, err := agentrun.NewManager(
 		runStore,
 		launcher,
 		collector,
 		pullRequests,
+		terminalValidator,
 		agentrun.LifecycleConfig{
 			Repository: envOr("FACTORY_REPOSITORY", defaultRepository),
 			BaseBranch: envOr("FACTORY_BASE_BRANCH", defaultBaseBranch),
@@ -216,6 +247,14 @@ func serve(ctx context.Context) error {
 		LinearComments: linearComments,
 		TriggerActor:   triggerActorID,
 		Now:            time.Now,
+		Build: server.BuildIdentity{
+			Commit:          buildCommit,
+			Tree:            buildTree,
+			BuildID:         buildID,
+			DeploymentID:    buildDeploymentID,
+			ContractVersion: buildContractVersion,
+			StartedAt:       serviceStartedAt,
+		},
 	})
 	if err != nil {
 		return err
@@ -224,7 +263,6 @@ func serve(ctx context.Context) error {
 		return fmt.Errorf("catch up Factory events: %w", err)
 	}
 	go manager.Run(ctx)
-	serviceStartedAt := time.Now().UTC()
 	if err := publishServiceEvent(ctx, events, "started", serviceStartedAt, serviceStartedAt); err != nil {
 		return err
 	}

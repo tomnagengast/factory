@@ -32,6 +32,7 @@ type Manager struct {
 	launcher      Launcher
 	collector     RunCollector
 	pullRequests  PullRequestReader
+	terminal      TerminalValidator
 	lifecycle     LifecycleConfig
 	stateRoot     string
 	maxConcurrent int
@@ -47,6 +48,7 @@ func NewManager(
 	launcher Launcher,
 	collector RunCollector,
 	pullRequests PullRequestReader,
+	terminal TerminalValidator,
 	lifecycle LifecycleConfig,
 	stateRoot string,
 	maxConcurrent int,
@@ -66,6 +68,9 @@ func NewManager(
 	}
 	if pullRequests == nil {
 		return nil, fmt.Errorf("agent run manager: pull request reader is required")
+	}
+	if terminal == nil {
+		return nil, fmt.Errorf("agent run manager: terminal validator is required")
 	}
 	if !repositoryPattern.MatchString(lifecycle.Repository) || !validBranch(lifecycle.BaseBranch) {
 		return nil, fmt.Errorf("agent run manager: repository and base branch are required")
@@ -93,6 +98,7 @@ func NewManager(
 		launcher:      launcher,
 		collector:     collector,
 		pullRequests:  pullRequests,
+		terminal:      terminal,
 		lifecycle:     lifecycle,
 		stateRoot:     stateRoot,
 		maxConcurrent: maxConcurrent,
@@ -159,7 +165,7 @@ func (m *Manager) reconcile(ctx context.Context) {
 	}
 	prepared := false
 	for _, run := range snapshot.Runs {
-		if run.State != StatePending || running >= m.maxConcurrent {
+		if (run.State != StatePending && run.State != StatePostMergePending) || running >= m.maxConcurrent {
 			continue
 		}
 		if !prepared {
@@ -215,29 +221,18 @@ func (m *Manager) reconcileActive(ctx context.Context, run Run) {
 		return
 	}
 	state := State(result.Status)
-	if run.Ready != nil && (state == StateSucceeded || state == StateBlocked) {
-		snapshot, snapshotErr := m.pullRequests.Snapshot(ctx, *run.Ready)
-		rejection := snapshotErr
-		if rejection == nil && state == StateSucceeded {
-			rejection = validateMergedSnapshot(*run.Ready, snapshot)
-		}
-		if rejection == nil && state == StateBlocked && snapshot.State == "OPEN" {
-			rejection = errors.New("pull request is still open")
-		}
-		if rejection != nil {
-			now := m.now()
-			nextReconcile := now.Add(m.mergeInterval)
-			detail := "rejected terminal intent while awaiting human merge: " + rejection.Error()
-			if err := m.store.MarkAwaitingMerge(run.ID, *run.Ready, nextReconcile, result.Attempts, now); err != nil {
-				m.logger.Error("repark agent run", "run_id", run.ID, "error", err)
-				return
-			}
-			_ = m.store.DeferMergeReconcile(run.ID, detail, nextReconcile, now)
-			m.logger.Warn("rejected terminal agent intent", "run_id", run.ID, "intent", result.Status)
+	decision := m.terminal.Validate(ctx, run, result)
+	if decision.Repark && run.Ready != nil {
+		now := m.now()
+		if err := m.store.ReparkRejected(run.ID, *run.Ready, now.Add(m.mergeInterval), result.Attempts, decision.Validation, now); err != nil {
+			m.logger.Error("repark agent run", "run_id", run.ID, "error", err)
 			return
 		}
+		m.logger.Warn("rejected terminal agent intent", "run_id", run.ID, "intent", result.Status, "reason", decision.Validation.Reason)
+		return
 	}
-	if finishErr := m.store.Finish(run.ID, state, result.Attempts, result.Detail, result.FinishedAt); finishErr != nil {
+	state = decision.State
+	if finishErr := m.store.FinishValidated(run.ID, state, result.Attempts, decision.Detail, decision.Validation, result.FinishedAt); finishErr != nil {
 		m.logger.Error("finish agent run", "run_id", run.ID, "error", finishErr)
 		return
 	}
@@ -345,7 +340,8 @@ func (m *Manager) reconcileAwaitingMerge(ctx context.Context, run Run) {
 	}
 	snapshot, err := m.pullRequests.Snapshot(ctx, *run.Ready)
 	if err != nil {
-		if deferErr := m.store.DeferMergeReconcile(run.ID, "GitHub refresh failed: "+err.Error(), now.Add(m.mergeInterval), now); deferErr != nil {
+		next := now.Add(reconcileDelay(m.mergeInterval, run.ReconcileFailures))
+		if deferErr := m.store.DeferMergeReconcile(run.ID, "GitHub refresh failed: "+err.Error(), next, true, now); deferErr != nil {
 			m.logger.Error("defer merge reconciliation", "run_id", run.ID, "error", deferErr)
 		}
 		return
@@ -358,7 +354,7 @@ func (m *Manager) reconcileAwaitingMerge(ctx context.Context, run Run) {
 			}
 			return
 		}
-		if err := m.store.DeferMergeReconcile(run.ID, "waiting for human merge", now.Add(m.mergeInterval), now); err != nil {
+		if err := m.store.DeferMergeReconcile(run.ID, "waiting for human merge", now.Add(m.mergeInterval), false, now); err != nil {
 			m.logger.Error("defer open pull request", "run_id", run.ID, "error", err)
 		}
 	case "MERGED":
@@ -374,10 +370,21 @@ func (m *Manager) reconcileAwaitingMerge(ctx context.Context, run Run) {
 			m.logger.Error("resume closed pull request", "run_id", run.ID, "error", err)
 		}
 	default:
-		if err := m.store.DeferMergeReconcile(run.ID, "unknown pull request state: "+snapshot.State, now.Add(m.mergeInterval), now); err != nil {
+		next := now.Add(reconcileDelay(m.mergeInterval, run.ReconcileFailures))
+		if err := m.store.DeferMergeReconcile(run.ID, "unknown pull request state: "+snapshot.State, next, true, now); err != nil {
 			m.logger.Error("defer unknown pull request state", "run_id", run.ID, "error", err)
 		}
 	}
+}
+
+func reconcileDelay(base time.Duration, failures int) time.Duration {
+	if failures < 0 {
+		failures = 0
+	}
+	if failures > 4 {
+		failures = 4
+	}
+	return base * time.Duration(1<<failures)
 }
 
 func (m *Manager) start(ctx context.Context, run Run) bool {

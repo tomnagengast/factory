@@ -28,13 +28,14 @@ var issueIdentifierPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[1-9][0-9]*$`)
 type State string
 
 const (
-	StatePending       State = "pending"
-	StateStarting      State = "starting"
-	StateRunning       State = "running"
-	StateAwaitingMerge State = "awaiting_human_merge"
-	StateSucceeded     State = "succeeded"
-	StateBlocked       State = "blocked"
-	StateFailed        State = "failed"
+	StatePending          State = "pending"
+	StatePostMergePending State = "post_merge_pending"
+	StateStarting         State = "starting"
+	StateRunning          State = "running"
+	StateAwaitingMerge    State = "awaiting_human_merge"
+	StateSucceeded        State = "succeeded"
+	StateBlocked          State = "blocked"
+	StateFailed           State = "failed"
 )
 
 func (s State) Active() bool {
@@ -42,7 +43,7 @@ func (s State) Active() bool {
 }
 
 func (s State) Nonterminal() bool {
-	return s == StatePending || s == StateStarting || s == StateRunning || s == StateAwaitingMerge
+	return s == StatePending || s == StatePostMergePending || s == StateStarting || s == StateRunning || s == StateAwaitingMerge
 }
 
 func (s State) HasWorker() bool {
@@ -63,29 +64,33 @@ type Transition struct {
 }
 
 type Run struct {
-	ID                string           `json:"id"`
-	IssueIdentifier   string           `json:"issueIdentifier"`
-	TriggerKind       string           `json:"triggerKind"`
-	DeliveryIDs       []string         `json:"deliveryIds"`
-	State             State            `json:"state"`
-	SessionName       string           `json:"sessionName,omitempty"`
-	RunDirectory      string           `json:"runDirectory,omitempty"`
-	Attempts          int              `json:"attempts"`
-	DuplicateTriggers uint64           `json:"duplicateTriggers"`
-	Detail            string           `json:"detail,omitempty"`
-	CreatedAt         time.Time        `json:"createdAt"`
-	UpdatedAt         time.Time        `json:"updatedAt"`
-	StartedAt         *time.Time       `json:"startedAt,omitempty"`
-	SegmentStartedAt  *time.Time       `json:"segmentStartedAt,omitempty"`
-	SegmentAttempt    int              `json:"segmentAttemptOffset,omitempty"`
-	FinishedAt        *time.Time       `json:"finishedAt,omitempty"`
-	Transitions       []Transition     `json:"transitions,omitempty"`
-	Ready             *ReadyCheckpoint `json:"ready,omitempty"`
-	MergeCommitOID    string           `json:"mergeCommitOid,omitempty"`
-	NextReconcileAt   *time.Time       `json:"nextReconcileAt,omitempty"`
-	ResumeCount       int              `json:"resumeCount,omitempty"`
-	TerminalIntent    string           `json:"terminalIntent,omitempty"`
-	TerminalRejection string           `json:"terminalRejection,omitempty"`
+	ID                         string                `json:"id"`
+	IssueIdentifier            string                `json:"issueIdentifier"`
+	TriggerKind                string                `json:"triggerKind"`
+	DeliveryIDs                []string              `json:"deliveryIds"`
+	State                      State                 `json:"state"`
+	SessionName                string                `json:"sessionName,omitempty"`
+	RunDirectory               string                `json:"runDirectory,omitempty"`
+	Attempts                   int                   `json:"attempts"`
+	DuplicateTriggers          uint64                `json:"duplicateTriggers"`
+	Detail                     string                `json:"detail,omitempty"`
+	CreatedAt                  time.Time             `json:"createdAt"`
+	UpdatedAt                  time.Time             `json:"updatedAt"`
+	StartedAt                  *time.Time            `json:"startedAt,omitempty"`
+	SegmentStartedAt           *time.Time            `json:"segmentStartedAt,omitempty"`
+	SegmentAttempt             int                   `json:"segmentAttemptOffset,omitempty"`
+	FinishedAt                 *time.Time            `json:"finishedAt,omitempty"`
+	Transitions                []Transition          `json:"transitions,omitempty"`
+	Ready                      *ReadyCheckpoint      `json:"ready,omitempty"`
+	MergeCommitOID             string                `json:"mergeCommitOid,omitempty"`
+	LastGitHubCursor           uint64                `json:"lastGitHubCursor,omitempty"`
+	LastAuthoritativeRefreshAt *time.Time            `json:"lastAuthoritativeRefreshAt,omitempty"`
+	NextReconcileAt            *time.Time            `json:"nextReconcileAt,omitempty"`
+	ReconcileFailures          int                   `json:"reconcileFailures,omitempty"`
+	ResumeCount                int                   `json:"resumeCount,omitempty"`
+	TerminalIntent             string                `json:"terminalIntent,omitempty"`
+	TerminalRejection          string                `json:"terminalRejection,omitempty"`
+	Completion                 *CompletionValidation `json:"completion,omitempty"`
 }
 
 type PublicRun struct {
@@ -112,20 +117,24 @@ type PublicSnapshot struct {
 }
 
 type ActivityRun struct {
-	ID                string           `json:"id"`
-	IssueIdentifier   string           `json:"issueIdentifier"`
-	State             State            `json:"state"`
-	Attempts          int              `json:"attempts"`
-	DuplicateTriggers uint64           `json:"duplicateTriggers"`
-	CreatedAt         time.Time        `json:"createdAt"`
-	UpdatedAt         time.Time        `json:"updatedAt"`
-	StartedAt         *time.Time       `json:"startedAt,omitempty"`
-	FinishedAt        *time.Time       `json:"finishedAt,omitempty"`
-	Ready             *ReadyCheckpoint `json:"ready,omitempty"`
-	MergeCommitOID    string           `json:"mergeCommitOid,omitempty"`
-	NextReconcileAt   *time.Time       `json:"nextReconcileAt,omitempty"`
-	ResumeCount       int              `json:"resumeCount,omitempty"`
-	TerminalRejection string           `json:"terminalRejection,omitempty"`
+	ID                         string                `json:"id"`
+	IssueIdentifier            string                `json:"issueIdentifier"`
+	State                      State                 `json:"state"`
+	Attempts                   int                   `json:"attempts"`
+	DuplicateTriggers          uint64                `json:"duplicateTriggers"`
+	CreatedAt                  time.Time             `json:"createdAt"`
+	UpdatedAt                  time.Time             `json:"updatedAt"`
+	StartedAt                  *time.Time            `json:"startedAt,omitempty"`
+	FinishedAt                 *time.Time            `json:"finishedAt,omitempty"`
+	Ready                      *ReadyCheckpoint      `json:"ready,omitempty"`
+	MergeCommitOID             string                `json:"mergeCommitOid,omitempty"`
+	LastGitHubCursor           uint64                `json:"lastGitHubCursor,omitempty"`
+	LastAuthoritativeRefreshAt *time.Time            `json:"lastAuthoritativeRefreshAt,omitempty"`
+	NextReconcileAt            *time.Time            `json:"nextReconcileAt,omitempty"`
+	ReconcileFailures          int                   `json:"reconcileFailures,omitempty"`
+	ResumeCount                int                   `json:"resumeCount,omitempty"`
+	TerminalRejection          string                `json:"terminalRejection,omitempty"`
+	Completion                 *CompletionValidation `json:"completion,omitempty"`
 }
 
 type ActivitySnapshot struct {
@@ -218,7 +227,7 @@ func (s *Store) claim(trigger Trigger, now time.Time, requireHistory bool) (Run,
 			nextRun.UpdatedAt = now
 			previousState := nextRun.State
 			if nextRun.State == StateAwaitingMerge && trigger.Kind == TriggerKindComment {
-				resumeAwaitingRun(nextRun, trigger.Kind, "", "Linear feedback received; resuming lifecycle")
+				resumeAwaitingRun(nextRun, trigger.Kind, "", "Linear feedback received; resuming lifecycle", now)
 			}
 			if nextRun.State != previousState {
 				nextRun.Transitions = append(nextRun.Transitions, newTransition(nextRun.ID, nextRun.State, nextRun.Attempts, now))
@@ -264,7 +273,7 @@ func (s *Store) MarkStarting(id, sessionName, runDirectory string, now time.Time
 		return errors.New("agent run store: session name and run directory are required")
 	}
 	return s.update(id, now, func(run *Run) error {
-		if run.State != StatePending {
+		if run.State != StatePending && run.State != StatePostMergePending {
 			return fmt.Errorf("cannot start run in state %q", run.State)
 		}
 		run.State = StateStarting
@@ -312,6 +321,9 @@ func (s *Store) MarkAwaitingMerge(id string, checkpoint ReadyCheckpoint, next ti
 		run.State = StateAwaitingMerge
 		run.Ready = &checkpoint
 		run.NextReconcileAt = &next
+		refreshedAt := now.UTC()
+		run.LastAuthoritativeRefreshAt = &refreshedAt
+		run.ReconcileFailures = 0
 		run.Attempts = max(run.Attempts, attempts)
 		run.Detail = "waiting for human merge"
 		run.TerminalIntent = ""
@@ -320,7 +332,7 @@ func (s *Store) MarkAwaitingMerge(id string, checkpoint ReadyCheckpoint, next ti
 	})
 }
 
-func (s *Store) DeferMergeReconcile(id, detail string, next, now time.Time) error {
+func (s *Store) DeferMergeReconcile(id, detail string, next time.Time, failed bool, now time.Time) error {
 	return s.update(id, now, func(run *Run) error {
 		if run.State != StateAwaitingMerge {
 			return fmt.Errorf("cannot defer merge reconcile from state %q", run.State)
@@ -328,6 +340,39 @@ func (s *Store) DeferMergeReconcile(id, detail string, next, now time.Time) erro
 		next = next.UTC()
 		run.NextReconcileAt = &next
 		run.Detail = detail
+		refreshedAt := now.UTC()
+		run.LastAuthoritativeRefreshAt = &refreshedAt
+		if failed {
+			run.ReconcileFailures++
+		} else {
+			run.ReconcileFailures = 0
+		}
+		return nil
+	})
+}
+
+func (s *Store) ReparkRejected(id string, checkpoint ReadyCheckpoint, next time.Time, attempts int, validation CompletionValidation, now time.Time) error {
+	if err := checkpoint.Validate(); err != nil {
+		return err
+	}
+	return s.update(id, now, func(run *Run) error {
+		if run.State != StateStarting && run.State != StateRunning {
+			return fmt.Errorf("cannot repark rejected terminal intent from state %q", run.State)
+		}
+		if checkpoint.RunID != run.ID {
+			return errors.New("ready checkpoint belongs to another run")
+		}
+		next = next.UTC()
+		run.State = StateAwaitingMerge
+		run.Ready = &checkpoint
+		run.NextReconcileAt = &next
+		refreshedAt := now.UTC()
+		run.LastAuthoritativeRefreshAt = &refreshedAt
+		run.Attempts = max(run.Attempts, attempts)
+		run.Detail = "terminal intent rejected: " + validation.Reason
+		run.TerminalIntent = validation.Intent
+		run.TerminalRejection = validation.Reason
+		run.Completion = &validation
 		return nil
 	})
 }
@@ -337,22 +382,28 @@ func (s *Store) ResumeAwaiting(id, kind, mergeCommitOID, detail string, now time
 		if run.State != StateAwaitingMerge {
 			return fmt.Errorf("cannot resume merge lifecycle from state %q", run.State)
 		}
-		resumeAwaitingRun(run, kind, mergeCommitOID, detail)
+		resumeAwaitingRun(run, kind, mergeCommitOID, detail, now)
 		return nil
 	})
 }
 
-func resumeAwaitingRun(run *Run, kind, mergeCommitOID, detail string) {
+func resumeAwaitingRun(run *Run, kind, mergeCommitOID, detail string, now time.Time) {
 	run.State = StatePending
+	if kind == TriggerKindPostMerge {
+		run.State = StatePostMergePending
+	}
 	run.TriggerKind = kind
 	run.MergeCommitOID = mergeCommitOID
 	run.NextReconcileAt = nil
+	refreshedAt := now.UTC()
+	run.LastAuthoritativeRefreshAt = &refreshedAt
+	run.ReconcileFailures = 0
 	run.ResumeCount++
 	run.SessionName = ""
 	run.Detail = detail
 }
 
-func (s *Store) SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, now time.Time) (bool, error) {
+func (s *Store) SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, cursor uint64, now time.Time) (bool, error) {
 	if !repositoryPattern.MatchString(repository) || pullRequest < 1 || deliveryID == "" {
 		return false, errors.New("schedule pull request reconcile: invalid wake")
 	}
@@ -375,6 +426,7 @@ func (s *Store) SchedulePullRequestReconcile(repository string, pullRequest int,
 		}
 		at := now.UTC()
 		run.NextReconcileAt = &at
+		run.LastGitHubCursor = max(run.LastGitHubCursor, cursor)
 		run.UpdatedAt = at
 		if err := writeState(s.path, next); err != nil {
 			return false, err
@@ -386,6 +438,14 @@ func (s *Store) SchedulePullRequestReconcile(repository string, pullRequest int,
 }
 
 func (s *Store) Finish(id string, state State, attempts int, detail string, now time.Time) error {
+	return s.finish(id, state, attempts, detail, nil, now)
+}
+
+func (s *Store) FinishValidated(id string, state State, attempts int, detail string, validation CompletionValidation, now time.Time) error {
+	return s.finish(id, state, attempts, detail, &validation, now)
+}
+
+func (s *Store) finish(id string, state State, attempts int, detail string, validation *CompletionValidation, now time.Time) error {
 	if state != StateSucceeded && state != StateBlocked && state != StateFailed {
 		return fmt.Errorf("agent run store: invalid terminal state %q", state)
 	}
@@ -398,6 +458,15 @@ func (s *Store) Finish(id string, state State, attempts int, detail string, now 
 		run.Attempts = max(run.Attempts, attempts)
 		run.Detail = detail
 		run.FinishedAt = &finishedAt
+		run.Completion = validation
+		if validation != nil {
+			run.TerminalIntent = validation.Intent
+			if validation.Accepted {
+				run.TerminalRejection = ""
+			} else {
+				run.TerminalRejection = validation.Reason
+			}
+		}
 		return nil
 	})
 }
@@ -477,20 +546,24 @@ func (s *Store) ActivitySnapshot() ActivitySnapshot {
 	runs := make([]ActivityRun, len(snapshot.Runs))
 	for i, run := range snapshot.Runs {
 		runs[i] = ActivityRun{
-			ID:                run.ID,
-			IssueIdentifier:   run.IssueIdentifier,
-			State:             run.State,
-			Attempts:          run.Attempts,
-			DuplicateTriggers: run.DuplicateTriggers,
-			CreatedAt:         run.CreatedAt,
-			UpdatedAt:         run.UpdatedAt,
-			StartedAt:         run.StartedAt,
-			FinishedAt:        run.FinishedAt,
-			Ready:             cloneReady(run.Ready),
-			MergeCommitOID:    run.MergeCommitOID,
-			NextReconcileAt:   cloneTime(run.NextReconcileAt),
-			ResumeCount:       run.ResumeCount,
-			TerminalRejection: run.TerminalRejection,
+			ID:                         run.ID,
+			IssueIdentifier:            run.IssueIdentifier,
+			State:                      run.State,
+			Attempts:                   run.Attempts,
+			DuplicateTriggers:          run.DuplicateTriggers,
+			CreatedAt:                  run.CreatedAt,
+			UpdatedAt:                  run.UpdatedAt,
+			StartedAt:                  run.StartedAt,
+			FinishedAt:                 run.FinishedAt,
+			Ready:                      cloneReady(run.Ready),
+			MergeCommitOID:             run.MergeCommitOID,
+			LastGitHubCursor:           run.LastGitHubCursor,
+			LastAuthoritativeRefreshAt: cloneTime(run.LastAuthoritativeRefreshAt),
+			NextReconcileAt:            cloneTime(run.NextReconcileAt),
+			ReconcileFailures:          run.ReconcileFailures,
+			ResumeCount:                run.ResumeCount,
+			TerminalRejection:          run.TerminalRejection,
+			Completion:                 cloneCompletion(run.Completion),
 		}
 	}
 	return ActivitySnapshot{Total: snapshot.Total, Active: snapshot.Active, Runs: runs}
@@ -596,8 +669,18 @@ func cloneRun(run Run) Run {
 	run.Transitions = slices.Clone(run.Transitions)
 	run.Ready = cloneReady(run.Ready)
 	run.SegmentStartedAt = cloneTime(run.SegmentStartedAt)
+	run.LastAuthoritativeRefreshAt = cloneTime(run.LastAuthoritativeRefreshAt)
 	run.NextReconcileAt = cloneTime(run.NextReconcileAt)
+	run.Completion = cloneCompletion(run.Completion)
 	return run
+}
+
+func cloneCompletion(value *CompletionValidation) *CompletionValidation {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func cloneReady(value *ReadyCheckpoint) *ReadyCheckpoint {

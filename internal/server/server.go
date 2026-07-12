@@ -55,7 +55,7 @@ type RunStore interface {
 	PublicSnapshot() agentrun.PublicSnapshot
 	ActivitySnapshot() agentrun.ActivitySnapshot
 	FindStarted(issueIdentifier string, startedUnixMilli int64) (agentrun.Run, bool)
-	SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, now time.Time) (bool, error)
+	SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, cursor uint64, now time.Time) (bool, error)
 }
 
 type RunNotifier interface {
@@ -92,6 +92,7 @@ type Config struct {
 	LinearComments LinearCommentStore
 	TriggerActor   string
 	Now            func() time.Time
+	Build          BuildIdentity
 }
 
 type appServer struct {
@@ -107,11 +108,22 @@ type appServer struct {
 	linearComments LinearCommentStore
 	triggerActor   string
 	now            func() time.Time
+	build          BuildIdentity
+}
+
+type BuildIdentity struct {
+	Commit          string    `json:"commit"`
+	Tree            string    `json:"tree"`
+	BuildID         string    `json:"buildId"`
+	DeploymentID    string    `json:"deploymentId"`
+	ContractVersion string    `json:"contractVersion"`
+	StartedAt       time.Time `json:"startedAt"`
 }
 
 type healthResponse struct {
 	Status string `json:"status"`
 	App    string `json:"app"`
+	BuildIdentity
 }
 
 type linearPayload struct {
@@ -188,6 +200,9 @@ func New(config Config) (http.Handler, error) {
 	if config.Now == nil {
 		return nil, errors.New("server: clock is required")
 	}
+	if config.Build.Commit == "" || config.Build.Tree == "" || config.Build.BuildID == "" || config.Build.DeploymentID == "" || config.Build.ContractVersion == "" || config.Build.StartedAt.IsZero() {
+		return nil, errors.New("server: build identity is required")
+	}
 
 	app := &appServer{
 		activityStore:  config.ActivityStore,
@@ -202,6 +217,7 @@ func New(config Config) (http.Handler, error) {
 		linearComments: config.LinearComments,
 		triggerActor:   config.TriggerActor,
 		now:            config.Now,
+		build:          config.Build,
 	}
 	if err := app.events.Handle(eventwire.Filter{Source: eventwire.SourceLinear}, app.dispatchLinear); err != nil {
 		return nil, err
@@ -210,7 +226,7 @@ func New(config Config) (http.Handler, error) {
 		return nil, err
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/healthz", healthz)
+	mux.HandleFunc("GET /api/healthz", app.healthz)
 	mux.HandleFunc("GET /api/activity", app.activity)
 	mux.Handle("GET /api/activity/linear", app.viewerAuth.API(http.HandlerFunc(app.linearActivity)))
 	mux.Handle("GET /api/activity/linear/{id}", app.viewerAuth.API(http.HandlerFunc(app.linearEvent)))
@@ -233,11 +249,11 @@ func New(config Config) (http.Handler, error) {
 	return mux, nil
 }
 
-func healthz(w http.ResponseWriter, _ *http.Request) {
+func (s *appServer) healthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_ = json.NewEncoder(w).Encode(healthResponse{Status: "ok", App: "factory"})
+	_ = json.NewEncoder(w).Encode(healthResponse{Status: "ok", App: "factory", BuildIdentity: s.build})
 }
 
 func cloudflareBeacon(w http.ResponseWriter, _ *http.Request) {
@@ -544,7 +560,7 @@ func (s *appServer) dispatchGitHub(_ context.Context, record eventwire.Record) e
 		return fmt.Errorf("server: project GitHub activity: %w", err)
 	}
 	for _, pullRequest := range event.PullRequests {
-		scheduled, err := s.runStore.SchedulePullRequestReconcile(event.Repository, pullRequest, event.HeadBranch, event.DeliveryID, event.ReceivedAt)
+		scheduled, err := s.runStore.SchedulePullRequestReconcile(event.Repository, pullRequest, event.HeadBranch, event.DeliveryID, record.Sequence, event.ReceivedAt)
 		if err != nil {
 			return fmt.Errorf("server: schedule pull request reconciliation: %w", err)
 		}

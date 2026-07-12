@@ -42,6 +42,7 @@ type linkedWorktree struct {
 
 type ProcessResult struct {
 	Status     string    `json:"status"`
+	Blocker    string    `json:"blocker,omitempty"`
 	Attempts   int       `json:"attempts"`
 	ExitCode   int       `json:"exitCode"`
 	Detail     string    `json:"detail,omitempty"`

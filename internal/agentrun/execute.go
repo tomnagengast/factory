@@ -76,9 +76,10 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 				lastDetail = fmt.Sprintf("read final message: %v", readErr)
 				break
 			}
-			status, detail := resultFromFinalMessage(string(finalMessage))
+			status, blocker, detail := resultFromFinalMessage(string(finalMessage))
 			result := ProcessResult{
 				Status:     status,
+				Blocker:    blocker,
 				Attempts:   attemptNumber,
 				ExitCode:   0,
 				Detail:     detail,
@@ -275,24 +276,31 @@ While waiting for Linear feedback, use "$FACTORY_AGENT_HELPER" agent linear-comm
 
 At the ready-for-human-merge boundary, write the validated checkpoint with "$FACTORY_AGENT_HELPER" agent checkpoint ready-for-merge, then end with exactly FACTORY_RESULT: READY_FOR_HUMAN_MERGE. Do not keep an LLM turn alive while waiting for the human.
 
-If the complete post-merge workflow succeeds, end with exactly FACTORY_RESULT: SUCCEEDED. If it reaches a genuine typed blocker, end with exactly FACTORY_RESULT: BLOCKED.`, opening)
+If the complete post-merge workflow succeeds, end with exactly FACTORY_RESULT: SUCCEEDED. If it reaches a genuine typed blocker, put FACTORY_BLOCKER: <type> on the preceding line and end with exactly FACTORY_RESULT: BLOCKED. Allowed types are missing_routing_metadata, approval_denied, authority_unavailable, decision_required, closed_unmerged, verified_head_mismatch, safeguard_regression, deployment_source_invalid, external_authentication, deployment_failed, and cleanup_failed.`, opening)
 }
 
-func resultFromFinalMessage(message string) (string, string) {
+func resultFromFinalMessage(message string) (string, string, string) {
 	trimmed := strings.TrimSpace(message)
 	if trimmed == "" {
-		return string(StateFailed), "principal returned an empty final message"
+		return string(StateFailed), "", "principal returned an empty final message"
 	}
 	lines := strings.Split(trimmed, "\n")
 	switch strings.TrimSpace(lines[len(lines)-1]) {
 	case "FACTORY_RESULT: SUCCEEDED":
-		return string(StateSucceeded), ""
+		return string(StateSucceeded), "", ""
 	case "FACTORY_RESULT: BLOCKED":
-		return string(StateBlocked), "principal reported a blocker"
+		blocker := ""
+		if len(lines) > 1 {
+			blocker = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[len(lines)-2]), "FACTORY_BLOCKER:"))
+			if !strings.HasPrefix(strings.TrimSpace(lines[len(lines)-2]), "FACTORY_BLOCKER:") {
+				blocker = ""
+			}
+		}
+		return string(StateBlocked), blocker, "principal reported blocker " + blocker
 	case "FACTORY_RESULT: READY_FOR_HUMAN_MERGE":
-		return ResultReadyForMerge, "waiting for human merge"
+		return ResultReadyForMerge, "", "waiting for human merge"
 	default:
-		return string(StateFailed), "principal final message is missing a Factory result marker"
+		return string(StateFailed), "", "principal final message is missing a Factory result marker"
 	}
 }
 

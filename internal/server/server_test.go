@@ -49,7 +49,7 @@ func TestHealthz(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	want := healthResponse{Status: "ok", App: "factory"}
+	want := healthResponse{Status: "ok", App: "factory", BuildIdentity: testBuildIdentity()}
 	if got != want {
 		t.Fatalf("response = %#v, want %#v", got, want)
 	}
@@ -446,6 +446,7 @@ func TestLinearWebhookReplaysStagedPayloadWithoutProviderRedelivery(t *testing.T
 		LinearComments: linearComments,
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
+		Build:          testBuildIdentity(),
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -896,6 +897,7 @@ func testHandlerWithRuns(t *testing.T) (http.Handler, *agentrun.Store, *testNoti
 		LinearComments: linearComments,
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
+		Build:          testBuildIdentity(),
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -941,6 +943,7 @@ func testHandlerWithObserverAndStore(t *testing.T, observer AgentObserver) (http
 		LinearComments: linearComments,
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
+		Build:          testBuildIdentity(),
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -982,6 +985,7 @@ func testHandlerWithGitHub(t *testing.T) (http.Handler, string) {
 		LinearComments: linearComments,
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
+		Build:          testBuildIdentity(),
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -1024,6 +1028,7 @@ func testHandlerWithLinearComments(t *testing.T) (http.Handler, *agentrun.Store,
 		LinearComments: linearComments,
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
+		Build:          testBuildIdentity(),
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -1047,6 +1052,17 @@ func testViewerAuth(t *testing.T) *viewerauth.Authenticator {
 		t.Fatalf("new viewer auth: %v", err)
 	}
 	return auth
+}
+
+func testBuildIdentity() BuildIdentity {
+	return BuildIdentity{
+		Commit:          "08c1c678a0b23bbe8e2dc2da1e398583d7e4c416",
+		Tree:            "4236dfd6f63c814726d34887e24659e231fde7a5",
+		BuildID:         "test-build",
+		DeploymentID:    "test-deployment",
+		ContractVersion: "1",
+		StartedAt:       testNow,
+	}
 }
 
 func testEventWire(t *testing.T, githubTotal, linearTotal uint64) *eventwire.Wire {

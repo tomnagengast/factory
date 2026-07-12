@@ -29,6 +29,40 @@ type noopCollector struct{}
 
 func (noopCollector) Collect(context.Context, []Run) error { return nil }
 
+type permissiveTerminalValidator struct {
+	now func() time.Time
+}
+
+func (v permissiveTerminalValidator) Validate(_ context.Context, _ Run, result ProcessResult) CompletionDecision {
+	state := State(result.Status)
+	return CompletionDecision{
+		State:  state,
+		Detail: result.Detail,
+		Validation: CompletionValidation{
+			Accepted:    true,
+			Intent:      result.Status,
+			State:       state,
+			Reason:      "accepted by test validator",
+			ValidatedAt: v.now(),
+		},
+	}
+}
+
+type completeTestEvidence struct{}
+
+func (completeTestEvidence) ReadCompletionEvidence(context.Context, Run, PullRequestSnapshot) (CompletionEvidence, error) {
+	return CompletionEvidence{
+		Deployment:         DeploymentReceipt{Status: "success", DeploymentID: "deploy-test", SourceCommit: "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b"},
+		SourceValid:        true,
+		MergeContained:     true,
+		HealthMatches:      true,
+		RemoteBranchAbsent: true,
+		WorktreeAbsent:     true,
+		LinearComplete:     true,
+		ChildrenComplete:   true,
+	}, nil
+}
+
 func (f *fakeLauncher) Prepare(context.Context) error {
 	return f.prepareErr
 }
@@ -69,6 +103,7 @@ func (f *fakeLauncher) ReadReadyCheckpoint(runDirectory string) (ReadyCheckpoint
 
 type fakePullRequestReader struct {
 	snapshot PullRequestSnapshot
+	matches  []PullRequestSnapshot
 	err      error
 }
 
@@ -78,6 +113,10 @@ func (f fakePullRequestReader) Snapshot(context.Context, ReadyCheckpoint) (PullR
 		snapshot.BaseBranch = "main"
 	}
 	return snapshot, f.err
+}
+
+func (f fakePullRequestReader) MatchingIssuePullRequests(context.Context, string, string) ([]PullRequestSnapshot, error) {
+	return f.matches, f.err
 }
 
 func TestManagerStartsPendingRunAndRecordsCompletion(t *testing.T) {
@@ -246,7 +285,7 @@ func TestManagerCollectsFinalAgentOutputAndTerminalTransition(t *testing.T) {
 		t.Fatalf("new collector: %v", err)
 	}
 	launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult)}
-	manager, err := NewManager(store, launcher, collector, fakePullRequestReader{}, testLifecycleConfig(), stateRoot, 1, time.Second, time.Minute, slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return now })
+	manager, err := NewManager(store, launcher, collector, fakePullRequestReader{}, permissiveTerminalValidator{now: func() time.Time { return now }}, testLifecycleConfig(), stateRoot, 1, time.Second, time.Minute, slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -397,7 +436,7 @@ func TestManagerResumesMergedParkedRun(t *testing.T) {
 
 	manager.reconcile(context.Background())
 	resumed, _ := store.Find(run.ID)
-	if resumed.State != StatePending || resumed.TriggerKind != TriggerKindPostMerge || resumed.MergeCommitOID == "" {
+	if resumed.State != StatePostMergePending || resumed.TriggerKind != TriggerKindPostMerge || resumed.MergeCommitOID == "" {
 		t.Fatalf("resumed = %#v", resumed)
 	}
 }
@@ -431,7 +470,7 @@ func TestManagerRejectsTerminalIntentWhilePullRequestOpen(t *testing.T) {
 
 	manager.reconcile(context.Background())
 	parked, _ := store.Find(run.ID)
-	if parked.State != StateAwaitingMerge || parked.FinishedAt != nil || !strings.Contains(parked.Detail, "rejected terminal intent") {
+	if parked.State != StateAwaitingMerge || parked.FinishedAt != nil || !strings.Contains(parked.Detail, "terminal intent rejected") {
 		t.Fatalf("parked = %#v", parked)
 	}
 }
@@ -447,13 +486,13 @@ func TestManagerRequiresVerifiedMergeBeforeTerminalSuccess(t *testing.T) {
 	}{
 		{name: "closed unmerged", snapshot: func(checkpoint ReadyCheckpoint) PullRequestSnapshot {
 			return PullRequestSnapshot{State: "CLOSED", BaseBranch: checkpoint.BaseBranch, HeadBranch: checkpoint.HeadBranch, HeadOID: checkpoint.VerifiedHeadOID}
-		}, want: StateAwaitingMerge},
+		}, want: StateFailed},
 		{name: "missing merge commit", snapshot: func(checkpoint ReadyCheckpoint) PullRequestSnapshot {
 			return PullRequestSnapshot{State: "MERGED", BaseBranch: checkpoint.BaseBranch, HeadBranch: checkpoint.HeadBranch, HeadOID: checkpoint.VerifiedHeadOID}
-		}, want: StateAwaitingMerge},
+		}, want: StateFailed},
 		{name: "head mismatch", snapshot: func(checkpoint ReadyCheckpoint) PullRequestSnapshot {
 			return PullRequestSnapshot{State: "MERGED", BaseBranch: checkpoint.BaseBranch, HeadBranch: checkpoint.HeadBranch, HeadOID: "18c1c678a0b23bbe8e2dc2da1e398583d7e4c416", MergeCommitOID: validMergeOID}
-		}, want: StateAwaitingMerge},
+		}, want: StateFailed},
 		{name: "verified merge", snapshot: func(checkpoint ReadyCheckpoint) PullRequestSnapshot {
 			return PullRequestSnapshot{State: "MERGED", BaseBranch: checkpoint.BaseBranch, HeadBranch: checkpoint.HeadBranch, HeadOID: checkpoint.VerifiedHeadOID, MergeCommitOID: validMergeOID}
 		}, want: StateSucceeded},
@@ -525,7 +564,24 @@ func newTestManager(
 	now func() time.Time,
 ) *Manager {
 	t.Helper()
-	return newTestManagerWithReader(t, store, launcher, stateRoot, &fakePullRequestReader{}, now)
+	manager, err := NewManager(
+		store,
+		launcher,
+		noopCollector{},
+		&fakePullRequestReader{},
+		permissiveTerminalValidator{now: now},
+		testLifecycleConfig(),
+		filepath.Clean(stateRoot),
+		3,
+		time.Second,
+		time.Minute,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		now,
+	)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	return manager
 }
 
 func newTestManagerWithReader(
@@ -537,11 +593,16 @@ func newTestManagerWithReader(
 	now func() time.Time,
 ) *Manager {
 	t.Helper()
+	terminal, err := NewMechanicalCompletionValidator(pullRequests, completeTestEvidence{}, "tomnagengast/network", now)
+	if err != nil {
+		t.Fatalf("new terminal validator: %v", err)
+	}
 	manager, err := NewManager(
 		store,
 		launcher,
 		noopCollector{},
 		pullRequests,
+		terminal,
 		testLifecycleConfig(),
 		filepath.Clean(stateRoot),
 		3,
