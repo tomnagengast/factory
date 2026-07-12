@@ -658,6 +658,39 @@ func TestManagerRejectsStaleSegmentResult(t *testing.T) {
 	}
 }
 
+func TestManagerReparksPostMergeProcessFailure(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	store := openTestStore(t, 10)
+	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := store.MarkStarting(run.ID, "factory-eng-123", t.TempDir(), now); err != nil {
+		t.Fatalf("mark starting: %v", err)
+	}
+	checkpoint := testReadyCheckpoint(run.ID, now)
+	if err := store.MarkAwaitingMerge(run.ID, checkpoint, now, 1, now); err != nil {
+		t.Fatalf("mark awaiting: %v", err)
+	}
+	if err := store.ResumeAwaiting(run.ID, TriggerKindPostMerge, "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b", "merged", now); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult)}
+	manager := newTestManagerWithReader(t, store, launcher, t.TempDir(), &fakePullRequestReader{}, func() time.Time { return now })
+	manager.reconcile(context.Background())
+	running, _ := store.Find(run.ID)
+	launcher.sessions[running.SessionName] = false
+	launcher.results[running.RunDirectory] = ProcessResult{Status: string(StateFailed), Attempts: 4, ExitCode: 1, FinishedAt: now.Add(time.Minute)}
+
+	manager.reconcile(context.Background())
+	parked, _ := store.Find(run.ID)
+	if parked.State != StateAwaitingMerge || parked.FinishedAt != nil || parked.NextReconcileAt == nil || !strings.Contains(parked.TerminalRejection, "process failure") {
+		t.Fatalf("parked = %#v", parked)
+	}
+}
+
 func newTestManager(
 	t *testing.T,
 	store *Store,

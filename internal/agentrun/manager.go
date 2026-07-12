@@ -224,7 +224,8 @@ func (m *Manager) reconcileActive(ctx context.Context, run Run) {
 	decision := m.terminal.Validate(ctx, run, result)
 	if decision.Repark && run.Ready != nil {
 		now := m.now()
-		if err := m.store.ReparkRejected(run.ID, *run.Ready, now.Add(m.mergeInterval), result.Attempts, decision.Validation, now); err != nil {
+		next := now.Add(reconcileDelay(m.mergeInterval, run.ResumeCount))
+		if err := m.store.ReparkRejected(run.ID, *run.Ready, next, result.Attempts, decision.Validation, now); err != nil {
 			m.logger.Error("repark agent run", "run_id", run.ID, "error", err)
 			return
 		}

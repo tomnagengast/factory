@@ -155,6 +155,9 @@ func (v *MechanicalCompletionValidator) Validate(ctx context.Context, run Run, r
 		},
 	}
 	if result.Status == string(StateFailed) {
+		if run.Ready != nil {
+			return rejectCompletion(decision, "post-checkpoint process failure preserved for recovery", true)
+		}
 		decision.Validation.Accepted = true
 		decision.Validation.Reason = "process failure preserved"
 		return decision

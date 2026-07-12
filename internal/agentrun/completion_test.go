@@ -56,6 +56,22 @@ func TestCompletionValidatorRequiresCheckpointOrTypedPrePRBlocker(t *testing.T) 
 	}
 }
 
+func TestCompletionValidatorReparksPostCheckpointProcessFailure(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 11, 22, 0, 0, 0, time.UTC)
+	checkpoint := testReadyCheckpoint("run-1", now)
+	validator := mustCompletionValidator(t, &fakePullRequestReader{}, completeEvidence(), now)
+	preCheckpoint := validator.Validate(context.Background(), Run{}, ProcessResult{Status: string(StateFailed)})
+	if !preCheckpoint.Validation.Accepted || preCheckpoint.State != StateFailed || preCheckpoint.Repark {
+		t.Fatalf("pre-checkpoint failure = %#v", preCheckpoint)
+	}
+	postCheckpoint := validator.Validate(context.Background(), Run{Ready: &checkpoint}, ProcessResult{Status: string(StateFailed)})
+	if postCheckpoint.Validation.Accepted || postCheckpoint.State != StateFailed || !postCheckpoint.Repark {
+		t.Fatalf("post-checkpoint failure = %#v", postCheckpoint)
+	}
+}
+
 func TestCompletionValidatorRequiresEveryPostMergeCondition(t *testing.T) {
 	t.Parallel()
 
