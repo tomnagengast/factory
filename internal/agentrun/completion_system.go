@@ -260,10 +260,17 @@ func (r *SystemCompletionEvidence) linearComplete(ctx context.Context, issueIden
 				} `json:"state"`
 			} `json:"issue"`
 		} `json:"data"`
-		Errors []json.RawMessage `json:"errors"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&value); err != nil {
 		return false, fmt.Errorf("decode Linear issue state: %w", err)
+	}
+	for _, responseError := range value.Errors {
+		if looksLikeAuthenticationFailure(responseError.Message) {
+			return false, externalAuthenticationError{operation: "Linear issue state", detail: responseError.Message}
+		}
 	}
 	if len(value.Errors) > 0 || value.Data.Issue == nil {
 		return false, errors.New("Linear issue state response is incomplete")

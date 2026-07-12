@@ -131,6 +131,23 @@ func TestCompletedChildResultsRequiresEveryChildSuccess(t *testing.T) {
 	}
 }
 
+func TestLinearCompleteClassifiesGraphQLAuthenticationFailure(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]string{{"message": "Authentication required"}}})
+	}))
+	defer server.Close()
+	reader := &SystemCompletionEvidence{config: SystemCompletionConfig{
+		LinearURL:    server.URL,
+		LinearAPIKey: "invalid",
+		HTTPClient:   server.Client(),
+	}}
+	if _, err := reader.linearComplete(t.Context(), "ENG-123"); !isExternalAuthenticationError(err) {
+		t.Fatalf("linearComplete error = %v, want external authentication error", err)
+	}
+}
+
 func writeTestJSON(t *testing.T, path string, value any) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
