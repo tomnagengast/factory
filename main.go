@@ -61,6 +61,11 @@ func serve(ctx context.Context) error {
 		return fmt.Errorf("build contract version %q does not match lifecycle contract %d", buildContractVersion, agentrun.LifecycleContractVersion)
 	}
 	port := envOr("PORT", defaultPort)
+	repository := envOr("FACTORY_REPOSITORY", defaultRepository)
+	baseBranch := envOr("FACTORY_BASE_BRANCH", defaultBaseBranch)
+	if repository != defaultRepository || baseBranch != defaultBaseBranch {
+		return fmt.Errorf("Factory lifecycle supports only %s on %s", defaultRepository, defaultBaseBranch)
+	}
 	web := os.DirFS("frontend/dist")
 	if _, err := fs.Stat(web, "index.html"); err != nil {
 		return fmt.Errorf("frontend is not built (run bun run build in frontend): %w", err)
@@ -172,7 +177,7 @@ func serve(ctx context.Context) error {
 		return err
 	}
 	completionEvidence, err := agentrun.NewSystemCompletionEvidence(agentrun.SystemCompletionConfig{
-		Repository: envOr("FACTORY_REPOSITORY", defaultRepository),
+		Repository: repository,
 		RemoteURLs: []string{
 			"git@github.com:tomnagengast/network.git",
 			"https://github.com/tomnagengast/network",
@@ -191,7 +196,7 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	terminalValidator, err := agentrun.NewMechanicalCompletionValidator(pullRequests, completionEvidence, envOr("FACTORY_REPOSITORY", defaultRepository), time.Now)
+	terminalValidator, err := agentrun.NewMechanicalCompletionValidator(pullRequests, completionEvidence, repository, time.Now)
 	if err != nil {
 		return err
 	}
@@ -202,8 +207,8 @@ func serve(ctx context.Context) error {
 		pullRequests,
 		terminalValidator,
 		agentrun.LifecycleConfig{
-			Repository: envOr("FACTORY_REPOSITORY", defaultRepository),
-			BaseBranch: envOr("FACTORY_BASE_BRANCH", defaultBaseBranch),
+			Repository: repository,
+			BaseBranch: baseBranch,
 		},
 		stateRoot,
 		envInt("FACTORY_MAX_AGENTS", defaultMaxConcurrentRuns),

@@ -178,9 +178,9 @@ Optional variables:
 - `FACTORY_MAX_AGENTS`, default `3`.
 - `FACTORY_REPO_URL`, default `git@github.com:tomnagengast/network.git`.
 - `FACTORY_REPO_PATH`, default `~/.local/share/factory/workspace/network`.
-- `FACTORY_REPOSITORY`, default `tomnagengast/network`.
-- `FACTORY_BASE_BRANCH`, default `main`.
 - `FACTORY_TMUX_SOCKET`, default `factory-agents`.
+
+Lifecycle and deployment evidence are deliberately restricted to `tomnagengast/network` on `main`. Setting `FACTORY_REPOSITORY` or `FACTORY_BASE_BRANCH` to another value fails startup until a repository-owned deployment authorization contract is implemented.
 
 The public activity API exposes only delivery metadata and opaque run state. Linear issue identifiers, raw request bodies, prompts, logs, errors, repository paths, and session names remain private unless the operator authenticates to the dedicated Linear or agent activity routes.
 
