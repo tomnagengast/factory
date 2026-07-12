@@ -348,7 +348,7 @@ func (m *Manager) reconcileAwaitingMerge(ctx context.Context, run Run) {
 	}
 	switch snapshot.State {
 	case "OPEN":
-		if snapshot.IsDraft || snapshot.HeadBranch != run.Ready.HeadBranch || snapshot.HeadOID != run.Ready.VerifiedHeadOID {
+		if run.RemediationRequested || snapshot.IsDraft || snapshot.HeadBranch != run.Ready.HeadBranch || snapshot.HeadOID != run.Ready.VerifiedHeadOID {
 			if err := m.store.ResumeAwaiting(run.ID, TriggerKindGitHub, "", "pull request changed; resuming remediation", now); err != nil {
 				m.logger.Error("resume changed pull request", "run_id", run.ID, "error", err)
 			}

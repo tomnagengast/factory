@@ -416,18 +416,18 @@ func TestStoreSchedulesMatchingPullRequestAndResumesOnce(t *testing.T) {
 		t.Fatalf("mark awaiting merge: %v", err)
 	}
 
-	scheduled, err := store.SchedulePullRequestReconcile(checkpoint.Repository, checkpoint.PullRequest, checkpoint.HeadBranch, "github-1", 42, now.Add(time.Second))
+	scheduled, err := store.SchedulePullRequestReconcile(checkpoint.Repository, checkpoint.PullRequest, checkpoint.HeadBranch, "github-1", 42, true, now.Add(time.Second))
 	if err != nil || !scheduled {
 		t.Fatalf("schedule = %t, err = %v", scheduled, err)
 	}
-	if scheduled, err := store.SchedulePullRequestReconcile(checkpoint.Repository, 99, checkpoint.HeadBranch, "github-2", 43, now.Add(2*time.Second)); err != nil || scheduled {
+	if scheduled, err := store.SchedulePullRequestReconcile(checkpoint.Repository, 99, checkpoint.HeadBranch, "github-2", 43, false, now.Add(2*time.Second)); err != nil || scheduled {
 		t.Fatalf("nonmatching schedule = %t, err = %v", scheduled, err)
 	}
 	if err := store.ResumeAwaiting(run.ID, TriggerKindPostMerge, "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b", "merged", now.Add(3*time.Second)); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	resumed, _ := store.Find(run.ID)
-	if resumed.State != StatePostMergePending || resumed.TriggerKind != TriggerKindPostMerge || resumed.ResumeCount != 1 || resumed.MergeCommitOID == "" || resumed.LastGitHubCursor != 42 {
+	if resumed.State != StatePostMergePending || resumed.TriggerKind != TriggerKindPostMerge || resumed.ResumeCount != 1 || resumed.MergeCommitOID == "" || resumed.LastGitHubCursor != 42 || resumed.RemediationRequested {
 		t.Fatalf("resumed = %#v", resumed)
 	}
 }

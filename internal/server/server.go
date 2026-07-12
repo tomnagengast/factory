@@ -55,7 +55,7 @@ type RunStore interface {
 	PublicSnapshot() agentrun.PublicSnapshot
 	ActivitySnapshot() agentrun.ActivitySnapshot
 	FindStarted(issueIdentifier string, startedUnixMilli int64) (agentrun.Run, bool)
-	SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, cursor uint64, now time.Time) (bool, error)
+	SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, cursor uint64, remediation bool, now time.Time) (bool, error)
 }
 
 type RunNotifier interface {
@@ -559,8 +559,9 @@ func (s *appServer) dispatchGitHub(_ context.Context, record eventwire.Record) e
 	}); err != nil {
 		return fmt.Errorf("server: project GitHub activity: %w", err)
 	}
+	remediation := githubWakeRequiresRemediation(event)
 	for _, pullRequest := range event.PullRequests {
-		scheduled, err := s.runStore.SchedulePullRequestReconcile(event.Repository, pullRequest, event.HeadBranch, event.DeliveryID, record.Sequence, event.ReceivedAt)
+		scheduled, err := s.runStore.SchedulePullRequestReconcile(event.Repository, pullRequest, event.HeadBranch, event.DeliveryID, record.Sequence, remediation, event.ReceivedAt)
 		if err != nil {
 			return fmt.Errorf("server: schedule pull request reconciliation: %w", err)
 		}
@@ -569,6 +570,23 @@ func (s *appServer) dispatchGitHub(_ context.Context, record eventwire.Record) e
 		}
 	}
 	return nil
+}
+
+func githubWakeRequiresRemediation(event githubhook.Event) bool {
+	switch event.Type {
+	case "issue_comment", "pull_request_review", "pull_request_review_comment":
+		return event.Action == "created" || event.Action == "edited" || event.Action == "submitted"
+	case "pull_request_review_thread":
+		return event.Action == "unresolved"
+	case "pull_request":
+		return slices.Contains([]string{"converted_to_draft", "edited", "ready_for_review", "reopened", "review_requested", "synchronize"}, event.Action)
+	case "check_run", "check_suite", "workflow_run":
+		return slices.Contains([]string{"action_required", "cancelled", "failure", "stale", "startup_failure", "timed_out"}, strings.ToLower(event.Conclusion))
+	case "status":
+		return strings.EqualFold(event.Status, "error") || strings.EqualFold(event.Status, "failure")
+	default:
+		return false
+	}
 }
 
 func firstAttribute(event eventwire.Event, key string) string {

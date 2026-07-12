@@ -796,6 +796,33 @@ func TestGitHubWebhookRejectsInvalidSignature(t *testing.T) {
 	}
 }
 
+func TestGitHubWakeRequiresRemediation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		event githubhook.Event
+		want  bool
+	}{
+		{name: "review comment", event: githubhook.Event{Type: "pull_request_review_comment", Action: "created"}, want: true},
+		{name: "requested changes", event: githubhook.Event{Type: "pull_request_review", Action: "submitted"}, want: true},
+		{name: "failed check", event: githubhook.Event{Type: "check_run", Conclusion: "failure"}, want: true},
+		{name: "synchronized pull request", event: githubhook.Event{Type: "pull_request", Action: "synchronize"}, want: true},
+		{name: "successful check", event: githubhook.Event{Type: "check_run", Conclusion: "success"}},
+		{name: "labeled pull request", event: githubhook.Event{Type: "pull_request", Action: "labeled"}},
+		{name: "closed pull request", event: githubhook.Event{Type: "pull_request", Action: "closed"}},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := githubWakeRequiresRemediation(test.event); got != test.want {
+				t.Fatalf("githubWakeRequiresRemediation(%#v) = %t, want %t", test.event, got, test.want)
+			}
+		})
+	}
+}
+
 func TestGitHubWebhookRejectsUnprojectableDeliveryBeforeWire(t *testing.T) {
 	t.Parallel()
 

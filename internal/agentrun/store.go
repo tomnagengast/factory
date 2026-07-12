@@ -87,6 +87,7 @@ type Run struct {
 	LastAuthoritativeRefreshAt *time.Time            `json:"lastAuthoritativeRefreshAt,omitempty"`
 	NextReconcileAt            *time.Time            `json:"nextReconcileAt,omitempty"`
 	ReconcileFailures          int                   `json:"reconcileFailures,omitempty"`
+	RemediationRequested       bool                  `json:"remediationRequested,omitempty"`
 	ResumeCount                int                   `json:"resumeCount,omitempty"`
 	TerminalIntent             string                `json:"terminalIntent,omitempty"`
 	TerminalRejection          string                `json:"terminalRejection,omitempty"`
@@ -324,6 +325,7 @@ func (s *Store) MarkAwaitingMerge(id string, checkpoint ReadyCheckpoint, next ti
 		refreshedAt := now.UTC()
 		run.LastAuthoritativeRefreshAt = &refreshedAt
 		run.ReconcileFailures = 0
+		run.RemediationRequested = false
 		run.Attempts = max(run.Attempts, attempts)
 		run.Detail = "waiting for human merge"
 		run.TerminalIntent = ""
@@ -369,6 +371,7 @@ func (s *Store) ReparkRejected(id string, checkpoint ReadyCheckpoint, next time.
 		refreshedAt := now.UTC()
 		run.LastAuthoritativeRefreshAt = &refreshedAt
 		run.Attempts = max(run.Attempts, attempts)
+		run.RemediationRequested = false
 		run.Detail = "terminal intent rejected: " + validation.Reason
 		run.TerminalIntent = validation.Intent
 		run.TerminalRejection = validation.Reason
@@ -398,12 +401,13 @@ func resumeAwaitingRun(run *Run, kind, mergeCommitOID, detail string, now time.T
 	refreshedAt := now.UTC()
 	run.LastAuthoritativeRefreshAt = &refreshedAt
 	run.ReconcileFailures = 0
+	run.RemediationRequested = false
 	run.ResumeCount++
 	run.SessionName = ""
 	run.Detail = detail
 }
 
-func (s *Store) SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, cursor uint64, now time.Time) (bool, error) {
+func (s *Store) SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, cursor uint64, remediation bool, now time.Time) (bool, error) {
 	if !repositoryPattern.MatchString(repository) || pullRequest < 1 || deliveryID == "" {
 		return false, errors.New("schedule pull request reconcile: invalid wake")
 	}
@@ -427,6 +431,7 @@ func (s *Store) SchedulePullRequestReconcile(repository string, pullRequest int,
 		at := now.UTC()
 		run.NextReconcileAt = &at
 		run.LastGitHubCursor = max(run.LastGitHubCursor, cursor)
+		run.RemediationRequested = run.RemediationRequested || remediation
 		run.UpdatedAt = at
 		if err := writeState(s.path, next); err != nil {
 			return false, err
