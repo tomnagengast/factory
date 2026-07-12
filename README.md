@@ -196,7 +196,7 @@ curl -fsS https://factory.nags.cloud/api/healthz
 curl -fsS https://factory.nags.cloud/api/activity | jq .agentRuns
 ```
 
-Normal deployment is intentionally refused unless the checkout is clean, on `main`, tracking the official `origin`, and exactly equal to `origin/main` and `--expected-commit`. A detached release checkout may be used only with `--allow-detached` and only when its expected commit is contained in `origin/main`.
+Normal deployment is intentionally refused unless the checkout is clean, on `main`, tracking the official `origin`, and exactly equal to `origin/main` and `--expected-commit`. A detached release checkout may be used only with `--allow-detached` and only when its expected commit is contained in `origin/main`. Deploy and rollback share a fail-closed per-app lock so concurrent post-merge continuations cannot interleave release or receipt state.
 
 ## Recovery runbook
 
@@ -222,3 +222,5 @@ curl -fsS https://factory.nags.cloud/api/healthz | jq .
 If a run is parked at `awaiting_human_merge`, confirm its ready checkpoint under `~/.local/share/factory/runs/<run-id>/ready-for-merge.json`, then restart the Factory service if necessary. The manager reloads persisted schedules and its next authoritative sweep resumes the parked run without replaying the implementation segment.
 
 Never repair deployment drift by stashing, resetting, or deploying a dirty or diverged checkout. Make the primary checkout clean and fast-forwardable, or use a clean detached release checkout whose expected commit is already contained in `origin/main`.
+
+If deployment reports an existing `~/.local/share/factory/.deployment-lock`, read its `owner` PID and confirm whether that process is still running. Never remove a live lock. After proving the owner is gone, remove only that stale lock directory and retry the same commit-pinned command.
