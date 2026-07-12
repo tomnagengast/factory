@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/tomnagengast/network/apps/factory/internal/activity"
 	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
+	"github.com/tomnagengast/network/apps/factory/internal/eventwire"
 	"github.com/tomnagengast/network/apps/factory/internal/githubhook"
 	"github.com/tomnagengast/network/apps/factory/internal/linearhook"
 	"github.com/tomnagengast/network/apps/factory/internal/viewerauth"
@@ -33,11 +35,15 @@ const (
 	defaultActivityLimit = 25
 	maxActivityPage      = 1_000_000
 	maxActivityLimit     = 100
+	attributeDeliveryID  = "deliveryId"
+	attributeTriggerKind = "triggerKind"
+	attributeIssue       = "issueIdentifier"
 )
 
 type EventStore interface {
 	Add(deliveryID string, event activity.Event) (bool, error)
-	AddWithPayload(deliveryID string, event activity.Event, payload []byte) (bool, error)
+	StagePayload(deliveryID string, payload []byte) error
+	AddStaged(deliveryID string, event activity.Event) (bool, error)
 	Snapshot() activity.Snapshot
 	LinearPage(page, pageSize int) (activity.LinearPage, error)
 	LinearEvent(id string) (activity.EventDetail, bool, error)
@@ -57,10 +63,14 @@ type RunNotifier interface {
 
 type GitHubEventStore interface {
 	Add(githubhook.Event) (bool, error)
+	AddAt(uint64, githubhook.Event) (bool, error)
+	Total() uint64
 }
 
 type LinearCommentStore interface {
 	Add(linearhook.Event) (bool, error)
+	AddAt(uint64, linearhook.Event) (bool, error)
+	Total() uint64
 }
 
 type AgentObserver interface {
@@ -76,6 +86,7 @@ type Config struct {
 	ViewerAuth     *viewerauth.Authenticator
 	LinearSecret   []byte
 	GitHubSecret   []byte
+	Events         *eventwire.Wire
 	GitHubEvents   GitHubEventStore
 	LinearComments LinearCommentStore
 	TriggerActor   string
@@ -90,6 +101,7 @@ type appServer struct {
 	viewerAuth     *viewerauth.Authenticator
 	linearSecret   []byte
 	githubSecret   []byte
+	events         *eventwire.Wire
 	githubEvents   GitHubEventStore
 	linearComments LinearCommentStore
 	triggerActor   string
@@ -148,6 +160,9 @@ func New(config Config) (http.Handler, error) {
 	if len(config.GitHubSecret) == 0 {
 		return nil, errors.New("server: GitHub webhook secret is required")
 	}
+	if config.Events == nil {
+		return nil, errors.New("server: event wire is required")
+	}
 	if config.GitHubEvents == nil {
 		return nil, errors.New("server: GitHub event store is required")
 	}
@@ -181,10 +196,17 @@ func New(config Config) (http.Handler, error) {
 		viewerAuth:     config.ViewerAuth,
 		linearSecret:   config.LinearSecret,
 		githubSecret:   config.GitHubSecret,
+		events:         config.Events,
 		githubEvents:   config.GitHubEvents,
 		linearComments: config.LinearComments,
 		triggerActor:   config.TriggerActor,
 		now:            config.Now,
+	}
+	if err := app.events.Handle(eventwire.Filter{Source: eventwire.SourceLinear}, app.dispatchLinear); err != nil {
+		return nil, err
+	}
+	if err := app.events.Handle(eventwire.Filter{Source: eventwire.SourceGitHub}, app.dispatchGitHub); err != nil {
+		return nil, err
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", healthz)
@@ -345,42 +367,17 @@ func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
-	_, err = s.activityStore.AddWithPayload(deliveryID, activity.Event{
-		Type:       payload.Type,
-		Action:     payload.Action,
-		ReceivedAt: now,
-	}, body)
-	if err != nil {
+	wake, hasWake := commentWake(payload, deliveryID, s.triggerActor, now)
+	trigger, hasTrigger := agentTrigger(payload, deliveryID, s.triggerActor)
+	event := linearWireEvent(payload, deliveryID, wake, hasWake, trigger, hasTrigger, now)
+	if err := s.activityStore.StagePayload(deliveryID, body); err != nil {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
-	if event, ok := commentWake(payload, deliveryID, s.triggerActor, now); ok {
-		if _, err := s.linearComments.Add(event); err != nil {
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-			return
-		}
-		_, created, claimErr := s.runStore.ClaimContinuation(agentrun.Trigger{
-			DeliveryID:      deliveryID,
-			IssueIdentifier: event.IssueIdentifier,
-			Kind:            agentrun.TriggerKindComment,
-		}, now)
-		if claimErr != nil {
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-			return
-		}
-		if created {
-			s.runNotifier.Notify()
-		}
-	}
-	if trigger, ok := agentTrigger(payload, deliveryID, s.triggerActor); ok {
-		_, created, claimErr := s.runStore.Claim(trigger, now)
-		if claimErr != nil {
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-			return
-		}
-		if created {
-			s.runNotifier.Notify()
-		}
+	if _, _, err := s.events.Publish(r.Context(), event); err != nil {
+		slog.Error("publish Linear event", "delivery_id", deliveryID, "error", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -433,19 +430,122 @@ func (s *appServer) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
-	if _, err := s.githubEvents.Add(event); err != nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-	if _, err := s.activityStore.Add("github:"+deliveryID, activity.Event{
-		Type:       "github/" + event.Type,
-		Action:     event.Action,
-		ReceivedAt: now,
-	}); err != nil {
+	if _, _, err := s.events.Publish(r.Context(), githubhook.ToWire(event)); err != nil {
+		slog.Error("publish GitHub event", "delivery_id", deliveryID, "error", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func linearWireEvent(
+	payload linearPayload,
+	deliveryID string,
+	wake linearhook.Event,
+	hasWake bool,
+	trigger agentrun.Trigger,
+	hasTrigger bool,
+	now time.Time,
+) eventwire.Event {
+	identifier := strings.ToUpper(strings.TrimSpace(payload.Data.Identifier))
+	if identifier == "" {
+		identifier = strings.ToUpper(strings.TrimSpace(payload.Data.Issue.Identifier))
+	}
+	event := eventwire.Event{
+		ID:         "linear:" + deliveryID,
+		Source:     eventwire.SourceLinear,
+		Type:       payload.Type,
+		Action:     payload.Action,
+		Subject:    identifier,
+		Attributes: map[string][]string{attributeDeliveryID: {deliveryID}},
+		ReceivedAt: now,
+	}
+	if hasWake {
+		event = linearhook.ToWire(wake)
+		event.Attributes[attributeTriggerKind] = []string{agentrun.TriggerKindComment}
+		event.Attributes[attributeIssue] = []string{wake.IssueIdentifier}
+	}
+	if hasTrigger {
+		event.Attributes[attributeTriggerKind] = []string{trigger.Kind}
+		event.Attributes[attributeIssue] = []string{trigger.IssueIdentifier}
+	}
+	return event
+}
+
+func (s *appServer) dispatchLinear(_ context.Context, record eventwire.Record) error {
+	deliveryID := firstAttribute(record.Event, attributeDeliveryID)
+	if deliveryID == "" {
+		return errors.New("server: Linear event delivery ID is missing")
+	}
+	if _, err := s.activityStore.AddStaged(deliveryID, activity.Event{
+		Type:       record.Event.Type,
+		Action:     record.Event.Action,
+		ReceivedAt: record.Event.ReceivedAt,
+	}); err != nil {
+		return fmt.Errorf("server: project Linear activity: %w", err)
+	}
+
+	if event, ok := linearhook.FromWire(record.Event); ok {
+		if sequence := record.ChannelSequences[linearhook.WireChannel]; sequence > s.linearComments.Total() {
+			if _, err := s.linearComments.AddAt(sequence, event); err != nil {
+				return fmt.Errorf("server: project Linear comment: %w", err)
+			}
+		}
+		_, created, err := s.runStore.ClaimContinuation(agentrun.Trigger{
+			DeliveryID:      deliveryID,
+			IssueIdentifier: event.IssueIdentifier,
+			Kind:            agentrun.TriggerKindComment,
+		}, record.Event.ReceivedAt)
+		if err != nil {
+			return fmt.Errorf("server: claim Linear continuation: %w", err)
+		}
+		if created {
+			s.runNotifier.Notify()
+		}
+	}
+
+	if firstAttribute(record.Event, attributeTriggerKind) == agentrun.TriggerKindLabel {
+		_, created, err := s.runStore.Claim(agentrun.Trigger{
+			DeliveryID:      deliveryID,
+			IssueIdentifier: firstAttribute(record.Event, attributeIssue),
+			Kind:            agentrun.TriggerKindLabel,
+		}, record.Event.ReceivedAt)
+		if err != nil {
+			return fmt.Errorf("server: claim Linear run: %w", err)
+		}
+		if created {
+			s.runNotifier.Notify()
+		}
+	}
+	return nil
+}
+
+func (s *appServer) dispatchGitHub(_ context.Context, record eventwire.Record) error {
+	event, ok := githubhook.FromWire(record.Event)
+	if !ok {
+		return errors.New("server: invalid normalized GitHub event")
+	}
+	if sequence := record.ChannelSequences[githubhook.WireChannel]; sequence > s.githubEvents.Total() {
+		if _, err := s.githubEvents.AddAt(sequence, event); err != nil {
+			return fmt.Errorf("server: project GitHub wake: %w", err)
+		}
+	}
+	if _, err := s.activityStore.Add("github:"+event.DeliveryID, activity.Event{
+		Type:       "github/" + event.Type,
+		Action:     event.Action,
+		ReceivedAt: event.ReceivedAt,
+	}); err != nil {
+		return fmt.Errorf("server: project GitHub activity: %w", err)
+	}
+	return nil
+}
+
+func firstAttribute(event eventwire.Event, key string) string {
+	values := event.Values(key)
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 func agentTrigger(payload linearPayload, deliveryID, allowedActorID string) (agentrun.Trigger, bool) {

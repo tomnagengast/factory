@@ -20,6 +20,7 @@ import (
 
 	"github.com/tomnagengast/network/apps/factory/internal/activity"
 	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
+	"github.com/tomnagengast/network/apps/factory/internal/eventwire"
 	"github.com/tomnagengast/network/apps/factory/internal/githubhook"
 	"github.com/tomnagengast/network/apps/factory/internal/linearhook"
 	"github.com/tomnagengast/network/apps/factory/internal/viewerauth"
@@ -730,6 +731,7 @@ func testHandlerWithRuns(t *testing.T) (http.Handler, *agentrun.Store, *testNoti
 		ViewerAuth:     testViewerAuth(t),
 		LinearSecret:   testSecret,
 		GitHubSecret:   testGitHubSecret,
+		Events:         testEventWire(t, githubEvents.Total(), linearComments.Total()),
 		GitHubEvents:   githubEvents,
 		LinearComments: linearComments,
 		TriggerActor:   testActorID,
@@ -774,6 +776,7 @@ func testHandlerWithObserverAndStore(t *testing.T, observer AgentObserver) (http
 		ViewerAuth:     testViewerAuth(t),
 		LinearSecret:   testSecret,
 		GitHubSecret:   testGitHubSecret,
+		Events:         testEventWire(t, githubEvents.Total(), linearComments.Total()),
 		GitHubEvents:   githubEvents,
 		LinearComments: linearComments,
 		TriggerActor:   testActorID,
@@ -814,6 +817,7 @@ func testHandlerWithGitHub(t *testing.T) (http.Handler, string) {
 		ViewerAuth:     testViewerAuth(t),
 		LinearSecret:   testSecret,
 		GitHubSecret:   testGitHubSecret,
+		Events:         testEventWire(t, journal.Total(), linearComments.Total()),
 		GitHubEvents:   journal,
 		LinearComments: linearComments,
 		TriggerActor:   testActorID,
@@ -855,6 +859,7 @@ func testHandlerWithLinearComments(t *testing.T) (http.Handler, *agentrun.Store,
 		ViewerAuth:     testViewerAuth(t),
 		LinearSecret:   testSecret,
 		GitHubSecret:   testGitHubSecret,
+		Events:         testEventWire(t, githubEvents.Total(), linearComments.Total()),
 		GitHubEvents:   githubEvents,
 		LinearComments: linearComments,
 		TriggerActor:   testActorID,
@@ -882,6 +887,26 @@ func testViewerAuth(t *testing.T) *viewerauth.Authenticator {
 		t.Fatalf("new viewer auth: %v", err)
 	}
 	return auth
+}
+
+func testEventWire(t *testing.T, githubTotal, linearTotal uint64) *eventwire.Wire {
+	t.Helper()
+	journal, err := eventwire.Open(
+		filepath.Join(t.TempDir(), "system-events.jsonl"),
+		100,
+		map[string]uint64{
+			githubhook.WireChannel: githubTotal,
+			linearhook.WireChannel: linearTotal,
+		},
+	)
+	if err != nil {
+		t.Fatalf("open event wire: %v", err)
+	}
+	wire, err := eventwire.New(journal)
+	if err != nil {
+		t.Fatalf("new event wire: %v", err)
+	}
+	return wire
 }
 
 func authenticatedRequest(t *testing.T, handler http.Handler, target string) *httptest.ResponseRecorder {

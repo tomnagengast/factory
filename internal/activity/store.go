@@ -106,17 +106,37 @@ func Open(path string, limit int) (*Store, error) {
 }
 
 func (s *Store) Add(deliveryID string, event Event) (bool, error) {
-	return s.add(deliveryID, event, nil)
+	return s.add(deliveryID, event, false)
 }
 
 func (s *Store) AddWithPayload(deliveryID string, event Event, payload []byte) (bool, error) {
-	if !json.Valid(payload) {
-		return false, errors.New("activity store: payload must be valid JSON")
+	if err := s.StagePayload(deliveryID, payload); err != nil {
+		return false, err
 	}
-	return s.add(deliveryID, event, payload)
+	return s.AddStaged(deliveryID, event)
 }
 
-func (s *Store) add(deliveryID string, event Event, payload []byte) (bool, error) {
+func (s *Store) StagePayload(deliveryID string, payload []byte) error {
+	if deliveryID == "" {
+		return errors.New("activity store: delivery ID is required")
+	}
+	if !json.Valid(payload) {
+		return errors.New("activity store: payload must be valid JSON")
+	}
+	return s.writePayload(eventID(deliveryID), payload)
+}
+
+func (s *Store) AddStaged(deliveryID string, event Event) (bool, error) {
+	if deliveryID == "" {
+		return false, errors.New("activity store: delivery ID is required")
+	}
+	if _, err := os.Stat(s.payloadPath(eventID(deliveryID))); err != nil {
+		return false, fmt.Errorf("activity store: inspect staged payload: %w", err)
+	}
+	return s.add(deliveryID, event, true)
+}
+
+func (s *Store) add(deliveryID string, event Event, payloadAvailable bool) (bool, error) {
 	if deliveryID == "" {
 		return false, errors.New("activity store: delivery ID is required")
 	}
@@ -130,7 +150,6 @@ func (s *Store) add(deliveryID string, event Event, payload []byte) (bool, error
 		}
 	}
 
-	payloadAvailable := len(payload) > 0
 	added := record{
 		DeliveryID:       deliveryID,
 		PayloadAvailable: payloadAvailable,
@@ -147,15 +166,7 @@ func (s *Store) add(deliveryID string, event Event, payload []byte) (bool, error
 		pruned = slices.Clone(next.Events[s.limit:])
 		next.Events = next.Events[:s.limit]
 	}
-	if payloadAvailable {
-		if err := s.writePayload(eventID(deliveryID), payload); err != nil {
-			return false, err
-		}
-	}
 	if err := writeState(s.path, next); err != nil {
-		if payloadAvailable {
-			_ = os.Remove(s.payloadPath(eventID(deliveryID)))
-		}
 		return false, err
 	}
 	s.state = next

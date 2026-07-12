@@ -17,6 +17,7 @@ import (
 
 	"github.com/tomnagengast/network/apps/factory/internal/activity"
 	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
+	"github.com/tomnagengast/network/apps/factory/internal/eventwire"
 	"github.com/tomnagengast/network/apps/factory/internal/githubhook"
 	"github.com/tomnagengast/network/apps/factory/internal/linearhook"
 	"github.com/tomnagengast/network/apps/factory/internal/server"
@@ -29,6 +30,7 @@ const (
 	agentRunLimit            = 100
 	githubEventLimit         = 1000
 	linearCommentEventLimit  = 500
+	systemEventLimit         = 10_000
 	defaultMaxConcurrentRuns = 3
 	defaultRepoURL           = "git@github.com:tomnagengast/network.git"
 	defaultTmuxSocket        = "factory-agents"
@@ -115,6 +117,17 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	eventJournal, err := eventwire.Open(filepath.Join(dataRoot, "system-events.jsonl"), systemEventLimit, map[string]uint64{
+		githubhook.WireChannel: githubEvents.Total(),
+		linearhook.WireChannel: linearComments.Total(),
+	})
+	if err != nil {
+		return err
+	}
+	events, err := eventwire.New(eventJournal)
+	if err != nil {
+		return err
+	}
 	binaryPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve Factory binary: %w", err)
@@ -174,6 +187,7 @@ func serve(ctx context.Context) error {
 		ViewerAuth:     viewerAuth,
 		LinearSecret:   []byte(secret),
 		GitHubSecret:   []byte(githubSecret),
+		Events:         events,
 		GitHubEvents:   githubEvents,
 		LinearComments: linearComments,
 		TriggerActor:   triggerActorID,
@@ -181,6 +195,9 @@ func serve(ctx context.Context) error {
 	})
 	if err != nil {
 		return err
+	}
+	if err := events.CatchUp(ctx); err != nil {
+		return fmt.Errorf("catch up Factory events: %w", err)
 	}
 	httpServer := &http.Server{
 		Addr:              "127.0.0.1:" + port,
