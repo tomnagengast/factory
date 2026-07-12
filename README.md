@@ -18,11 +18,12 @@ Factory initially launches only for a signed `Issue` `update` webhook where the 
 2. The delivery and a pending run are persisted before the handler returns `200`.
 3. The background manager fetches and fast-forwards the internal clone at `~/.local/share/factory/workspace/network` to its configured upstream. Registered linked worktrees are excluded from the main checkout's dirty check; all other local changes and divergence still fail preparation instead of being overwritten. Before starting a new pending run with no other agent active, Factory removes clean, unlocked worktrees whose branches are already integrated into the fetched upstream as a backstop for interrupted cleanup.
 4. One isolated tmux session named `factory-<issue-lower>` starts on the `factory-agents` tmux socket.
-5. The principal runs `$do TEAM-123` with Codex `gpt-5.6-sol` and high reasoning through gated research, implementation, a human merge, deployment from updated main, and cleanup. Comment continuations fresh-read the Linear thread and treat only unaddressed human feedback as new scope.
+5. The principal runs `$do TEAM-123` with Codex `gpt-5.6-sol` and high reasoning through gated research, implementation, and the complete ready-for-human-merge predicate. Comment continuations fresh-read the Linear thread and treat only unaddressed human feedback as new scope.
 6. A failed Codex process is resumed, when a thread ID is available, up to three total attempts.
-7. After the PR is ready, the principal records the exact locally verified head and remains active until the human merges it. Pull-request webhooks wake the loop, but only a fresh authoritative GitHub snapshot with `state == MERGED` and a merge commit proves the merge.
-8. The principal revalidates that the human merged the exact locally verified head and that final checks and feedback still pass, then fast-forwards the clean primary checkout, deploys every applicable changed surface from merged main, verifies health and GitHub's automatic remote-branch deletion, and removes the clean integrated local worktree/branch with Worktrunk.
-9. The session stays active while any child windows remain. Factory records the terminal result only after the tmux session exits, so post-merge deployment or cleanup failures remain visible as incomplete runs.
+7. After the PR is ready, the principal records the exact locally verified head through `agent checkpoint ready-for-merge` and exits with `FACTORY_RESULT: READY_FOR_HUMAN_MERGE`. Factory validates the contract-v1 checkpoint, parks the run as `awaiting_human_merge`, and closes the tmux segment. This is nonterminal and does not consume an LLM while waiting.
+8. GitHub webhooks wake the parked run immediately. A supervisor sweep also refreshes authoritative GitHub state at least once per minute with a persisted cursor, bounded backoff, and restart-safe schedule. An `OPEN` PR stays parked, a closed-unmerged PR becomes a typed blocker, and only a fresh `MERGED` snapshot with a merge commit starts a new `post-merge` continuation.
+9. The fresh continuation reconstructs the repository, PR, base, head branch, and verified head from durable evidence. It revalidates that the human merged the exact locally verified head and that final checks and feedback still pass, then fast-forwards the clean primary checkout, deploys every applicable changed surface from merged main, verifies health and GitHub's automatic remote-branch deletion, and removes the clean integrated local worktree/branch with Worktrunk.
+10. A terminal intent is accepted only after Factory mechanically validates the authoritative PR, deployment receipt, exact health identity, source checkout, Linear completion, child results, and branch/worktree cleanup. Missing or transient evidence reparks the run; contradictory evidence records the typed rejection instead of falsely declaring success.
 
 Run state and output live under `~/.local/share/factory/runs/<run-id>/`. Standard output, diagnostics, final messages, prompts, and process results are separate files with private permissions.
 
@@ -31,7 +32,7 @@ Run state and output live under `~/.local/share/factory/runs/<run-id>/`. Standar
 Redundant work is prevented at three layers:
 
 - Linear delivery IDs make webhook retries idempotent.
-- The persistent run store allows only one pending, starting, or running record for an issue.
+- The persistent run store allows only one nonterminal record for an issue, including parked merge waits and post-merge continuations.
 - The deterministic tmux session name is a final process-level lock.
 
 Additional `Factory` label applications and eligible human comments are coalesced while the issue has an active run. After a run becomes terminal, either remove and reapply the label or add a human comment to start another run. The `$do` skill resumes active work when it exists; after an earlier PR is integrated, a comment continuation starts a deterministic focused follow-up branch instead of rewriting completed work.
@@ -42,7 +43,7 @@ Factory separates public health from authenticated operational detail:
 
 - `/activity` is a public, privacy-safe summary of verified deliveries and agent-run totals.
 - `/activity/linear` is an authenticated Linear delivery workspace with retained-window charts, 25-event pages, a scrollable ledger, and raw-payload inspection.
-- `/activity/agents` is an authenticated run dashboard with issue context and state totals.
+- `/activity/agents` is an authenticated run dashboard with issue context, lifecycle phase, ready-checkpoint PR and verified head, authoritative refresh timing, resume counts, deployment receipt identity, and terminal rejection evidence.
 - `/activity/agents/<issue-id>/<started-unix-ms>/run` is the authenticated, read-only loop observer for one started run.
 
 Validated Linear request bodies are retained prospectively as private `0600` sidecar files beside the bounded activity index. Sidecars age out with their metadata records. Historical records from before payload retention remain listable without a body, and GitHub request bodies are never retained. `/agents/<run-id>` remains available for existing links and for pending runs that do not have a start timestamp yet.
@@ -86,11 +87,11 @@ The JSON response and GitHub-specific cursor domain remain unchanged, but the ad
 
 ## Human merge and deployment
 
-At the ready checkpoint, `$do` repeats the complete checks, mergeability, review, comment, thread, and Linear feedback snapshot and durably records the locally verified `headRefOid`. The human performs the merge; the principal never calls a merge mutation or enables auto-merge. A close/merge webhook only wakes the run. Before deployment, a fresh GitHub snapshot must report `MERGED` with a merge commit, the merged head must equal the recorded verified head, and the final checks and feedback snapshot must still pass. A closed-unmerged, changed, or regressed head becomes a precise blocker. Retries detect an already merged PR and resume at the first incomplete post-merge boundary only after reconstructing that verified-head record.
+At the ready checkpoint, `$do` repeats the complete checks, mergeability, review, comment, thread, and Linear feedback snapshot and durably records the locally verified `headRefOid`. The human performs the merge; the principal never calls a merge mutation or enables auto-merge. The LLM exits after writing the checkpoint while Factory owns the durable parked wait. A close/merge webhook only wakes the supervisor, and the periodic authoritative sweep closes the missed-webhook gap. Before deployment, a fresh continuation must prove GitHub reports `MERGED` with a merge commit, the merged head equals the recorded verified head, and the final checks and feedback snapshot still passes. A closed-unmerged, changed, or regressed head becomes a precise blocker. Retries resume at the first incomplete post-merge boundary only after reconstructing and corroborating the verified-head record.
 
 After merge, the principal resolves the primary checkout with Worktrunk, refuses to overwrite unrelated changes, fetches/prunes origin, and fast-forwards the default branch. Deployment commands and post-deploy probes come from the issue's approved plan and run from that updated primary checkout, never from the feature worktree. A failed deployment is reported as a post-merge recovery blocker; cleanup does not hide it. The manager's next-run cleanup can still remove a clean integrated worktree as a backstop, so retained worktrees are not guaranteed to persist indefinitely.
 
-Factory self-deployment restarts `com.nags.factory`, but the issue tmux session runs under the separate `factory-agents` tmux server and continues. The loop verifies service health after restart and performs a timed authoritative `gh` refresh even if the brief restart missed a webhook delivery.
+Factory self-deployment builds an immutable release under `~/.local/share/factory/releases/<deployment-id>`, writes a pending receipt, switches the `current` symlink atomically, restarts `com.nags.factory`, and requires local and public health to report the exact expected commit, tree, build, deployment, and lifecycle-contract identity. Only then does it finalize the success receipt. A failed verification restores the prior release and records the failed attempt. The issue tmux session runs under the separate `factory-agents` tmux server and survives the service restart.
 
 Only after deployment verification does the principal prove GitHub auto-deleted the remote head ref, fetch/prune the remote-tracking ref, wait for every child window, and use foreground Worktrunk removal without force flags. Success means merged, deployed, healthy, updated main, and no local or remote issue branch/worktree.
 
@@ -177,6 +178,8 @@ Optional variables:
 - `FACTORY_MAX_AGENTS`, default `3`.
 - `FACTORY_REPO_URL`, default `git@github.com:tomnagengast/network.git`.
 - `FACTORY_REPO_PATH`, default `~/.local/share/factory/workspace/network`.
+- `FACTORY_REPOSITORY`, default `tomnagengast/network`.
+- `FACTORY_BASE_BRANCH`, default `main`.
 - `FACTORY_TMUX_SOCKET`, default `factory-agents`.
 
 The public activity API exposes only delivery metadata and opaque run state. Linear issue identifiers, raw request bodies, prompts, logs, errors, repository paths, and session names remain private unless the operator authenticates to the dedicated Linear or agent activity routes.
@@ -187,8 +190,35 @@ Factory also starts its tmux server with a restricted environment. Agent process
 
 ```bash
 bin/network-app refresh-env
-bin/network-app deploy factory
+bin/network-app deploy factory --expected-commit "$(git rev-parse HEAD)"
 bin/network-app github-hook tomnagengast/network
 curl -fsS https://factory.nags.cloud/api/healthz
 curl -fsS https://factory.nags.cloud/api/activity | jq .agentRuns
 ```
+
+Normal deployment is intentionally refused unless the checkout is clean, on `main`, tracking the official `origin`, and exactly equal to `origin/main` and `--expected-commit`. A detached release checkout may be used only with `--allow-detached` and only when its expected commit is contained in `origin/main`.
+
+## Recovery runbook
+
+Inspect the exact running identity and receipts first:
+
+```bash
+curl -fsS http://127.0.0.1:8787/api/healthz | jq .
+curl -fsS https://factory.nags.cloud/api/healthz | jq .
+jq . ~/.local/share/factory/deployments/current.json
+find ~/.local/share/factory/deployments -maxdepth 2 -type f -name '*.json' -print
+```
+
+The local health response, public health response, `current.json`, and `current` release symlink must agree on commit, tree, build ID, deployment ID, and contract version. A mismatch means the deployment is not verified even when the process is listening.
+
+For a failed release, inspect the failed receipt under `~/.local/share/factory/deployments/failed/` and confirm the previous release recovered. To select a known successful release explicitly:
+
+```bash
+bin/network-app rollback factory --to <deployment-id>
+curl -fsS http://127.0.0.1:8787/api/healthz | jq .
+curl -fsS https://factory.nags.cloud/api/healthz | jq .
+```
+
+If a run is parked at `awaiting_human_merge`, confirm its ready checkpoint under `~/.local/share/factory/runs/<run-id>/ready-for-merge.json`, then restart the Factory service if necessary. The manager reloads persisted schedules and its next authoritative sweep resumes the parked run without replaying the implementation segment.
+
+Never repair deployment drift by stashing, resetting, or deploying a dirty or diverged checkout. Make the primary checkout clean and fast-forwardable, or use a clean detached release checkout whose expected commit is already contained in `origin/main`.

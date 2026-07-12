@@ -14,6 +14,12 @@ import "./styles.css";
 type Health = {
   status: string;
   app: string;
+  commit: string;
+  tree: string;
+  buildId: string;
+  deploymentId: string;
+  contractVersion: string;
+  startedAt: string;
 };
 
 type ActivityEvent = {
@@ -74,8 +80,40 @@ type LinearEventDetail = LinearEvent & {
   payload?: unknown;
 };
 
+type ReadyCheckpoint = {
+  contractVersion: number;
+  repository: string;
+  pullRequest: number;
+  baseBranch: string;
+  headBranch: string;
+  verifiedHeadOid: string;
+  createdAt: string;
+  validatedAt?: string;
+};
+
+type CompletionValidation = {
+  accepted: boolean;
+  intent: string;
+  blocker?: string;
+  state: string;
+  reason: string;
+  validatedAt: string;
+  mergeCommitOid?: string;
+  deploymentId?: string;
+  deploymentCommit?: string;
+};
+
 type AgentActivityRun = AgentRun & {
   issueIdentifier: string;
+  ready?: ReadyCheckpoint;
+  mergeCommitOid?: string;
+  lastGitHubCursor?: number;
+  lastAuthoritativeRefreshAt?: string;
+  nextReconcileAt?: string;
+  reconcileFailures?: number;
+  resumeCount?: number;
+  terminalRejection?: string;
+  completion?: CompletionValidation;
 };
 
 type AgentActivitySnapshot = {
@@ -221,7 +259,11 @@ function HomePage(): JSX.Element {
               }}
             />
             <Show when={!health.loading} fallback={<span>Connecting</span>}>
-              <span>{health.error ? "Offline" : "Systems online"}</span>
+              <span>
+                {health.error
+                  ? "Offline"
+                  : `Systems online · ${shortOID(health()?.commit)} · contract ${health()?.contractVersion}`}
+              </span>
             </Show>
           </div>
           <a class="text-link" href="/activity">
@@ -661,9 +703,12 @@ function AgentActivityPage(): JSX.Element {
                         <strong class={`run-state ${run.state}`}>
                           {runStateLabel(run.state)}
                         </strong>
-                        <span>{run.attempts ? `Attempt ${run.attempts}` : "Queued"}</span>
-                        <time datetime={run.startedAt ?? run.createdAt}>
-                          {formatTime(run.startedAt ?? run.createdAt)}
+                        <span title={runLifecycleDetail(run)}>
+                          {runLifecycleDetail(run)}
+                        </span>
+                        <time datetime={run.lastAuthoritativeRefreshAt ?? run.startedAt ?? run.createdAt}>
+                          {run.lastAuthoritativeRefreshAt ? "REFRESH " : "START "}
+                          {formatTime(run.lastAuthoritativeRefreshAt ?? run.startedAt ?? run.createdAt)}
                         </time>
                       </li>
                     )}
@@ -993,6 +1038,40 @@ function runStateLabel(value: string): string {
   );
 }
 
+function runLifecycleDetail(run: AgentActivityRun): string {
+  const details: string[] = [];
+  if (run.ready) {
+    details.push(`PR #${run.ready.pullRequest}`);
+    details.push(`HEAD ${shortOID(run.ready.verifiedHeadOid)}`);
+  }
+  if (run.mergeCommitOid) {
+    details.push(`MERGE ${shortOID(run.mergeCommitOid)}`);
+  }
+  if (run.nextReconcileAt) {
+    details.push(`NEXT ${formatTime(run.nextReconcileAt)}`);
+  }
+  if (run.resumeCount) {
+    details.push(`RESUMES ${run.resumeCount}`);
+  }
+  if (run.reconcileFailures) {
+    details.push(`REFRESH FAILURES ${run.reconcileFailures}`);
+  }
+  if (run.completion?.deploymentId) {
+    details.push(`DEPLOY ${run.completion.deploymentId}`);
+  }
+  if (run.terminalRejection) {
+    details.push(`REJECTED ${run.terminalRejection}`);
+  }
+  if (details.length === 0) {
+    return run.attempts ? `ATTEMPT ${run.attempts}` : "QUEUED";
+  }
+  return details.join(" · ");
+}
+
+function shortOID(value: string | undefined): string {
+  return value ? value.slice(0, 12) : "unknown";
+}
+
 function formatTime(value: string | null | undefined): string {
   if (!value) {
     return "No activity yet";
@@ -1050,7 +1129,13 @@ function shouldRefreshAgent(agent: AgentView | undefined): boolean {
 }
 
 function runStateIsActive(state: string): boolean {
-  return ["pending", "starting", "running"].includes(state);
+  return [
+    "pending",
+    "post_merge_pending",
+    "starting",
+    "running",
+    "awaiting_human_merge",
+  ].includes(state);
 }
 
 function agentConsoleLabel(agent: AgentView): string {
