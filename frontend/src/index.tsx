@@ -87,6 +87,7 @@ type ReadyCheckpoint = {
   baseBranch: string;
   headBranch: string;
   verifiedHeadOid: string;
+  pullRequestUpdatedAt?: string;
   createdAt: string;
   validatedAt?: string;
 };

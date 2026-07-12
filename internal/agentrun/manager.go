@@ -259,6 +259,7 @@ func (m *Manager) parkReadyRun(ctx context.Context, run Run, result ProcessResul
 		return
 	}
 	checkpoint.Repository = m.lifecycle.Repository
+	checkpoint.PullRequestUpdatedAt = snapshot.UpdatedAt
 	now := m.now()
 	if err := m.store.MarkAwaitingMerge(run.ID, checkpoint, now.Add(m.mergeInterval), result.Attempts, now); err != nil {
 		m.logger.Error("park agent run", "run_id", run.ID, "error", err)
@@ -348,7 +349,8 @@ func (m *Manager) reconcileAwaitingMerge(ctx context.Context, run Run) {
 	}
 	switch snapshot.State {
 	case "OPEN":
-		if run.RemediationRequested || snapshot.IsDraft || snapshot.HeadBranch != run.Ready.HeadBranch || snapshot.HeadOID != run.Ready.VerifiedHeadOID {
+		updated := !run.Ready.PullRequestUpdatedAt.IsZero() && snapshot.UpdatedAt.After(run.Ready.PullRequestUpdatedAt)
+		if run.RemediationRequested || snapshot.SafeguardRegression || updated || snapshot.IsDraft || snapshot.HeadBranch != run.Ready.HeadBranch || snapshot.HeadOID != run.Ready.VerifiedHeadOID {
 			if err := m.store.ResumeAwaiting(run.ID, TriggerKindGitHub, "", "pull request changed; resuming remediation", now); err != nil {
 				m.logger.Error("resume changed pull request", "run_id", run.ID, "error", err)
 			}

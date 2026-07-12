@@ -478,6 +478,38 @@ func TestManagerResumesSameHeadForGitHubRemediationWake(t *testing.T) {
 	}
 }
 
+func TestManagerPeriodicSweepResumesDroppedSameHeadFeedback(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	store := openTestStore(t, 10)
+	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := store.MarkStarting(run.ID, "factory-eng-123", t.TempDir(), now); err != nil {
+		t.Fatalf("mark starting: %v", err)
+	}
+	checkpoint := testReadyCheckpoint(run.ID, now)
+	checkpoint.PullRequestUpdatedAt = now
+	if err := store.MarkAwaitingMerge(run.ID, checkpoint, now, 1, now); err != nil {
+		t.Fatalf("mark awaiting: %v", err)
+	}
+	reader := &fakePullRequestReader{snapshot: PullRequestSnapshot{
+		State:      "OPEN",
+		HeadBranch: checkpoint.HeadBranch,
+		HeadOID:    checkpoint.VerifiedHeadOID,
+		UpdatedAt:  now.Add(time.Minute),
+	}}
+	manager := newTestManagerWithReader(t, store, &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult)}, t.TempDir(), reader, func() time.Time { return now })
+
+	manager.reconcile(context.Background())
+	resumed, _ := store.Find(run.ID)
+	if resumed.State != StatePending || resumed.TriggerKind != TriggerKindGitHub || resumed.ResumeCount != 1 {
+		t.Fatalf("resumed = %#v", resumed)
+	}
+}
+
 func TestManagerRejectsTerminalIntentWhilePullRequestOpen(t *testing.T) {
 	t.Parallel()
 

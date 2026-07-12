@@ -23,15 +23,16 @@ var (
 )
 
 type ReadyCheckpoint struct {
-	ContractVersion int       `json:"contractVersion"`
-	RunID           string    `json:"runId"`
-	Repository      string    `json:"repository"`
-	PullRequest     int       `json:"pullRequest"`
-	BaseBranch      string    `json:"baseBranch"`
-	HeadBranch      string    `json:"headBranch"`
-	VerifiedHeadOID string    `json:"verifiedHeadOid"`
-	CreatedAt       time.Time `json:"createdAt"`
-	ValidatedAt     time.Time `json:"validatedAt,omitempty"`
+	ContractVersion      int       `json:"contractVersion"`
+	RunID                string    `json:"runId"`
+	Repository           string    `json:"repository"`
+	PullRequest          int       `json:"pullRequest"`
+	BaseBranch           string    `json:"baseBranch"`
+	HeadBranch           string    `json:"headBranch"`
+	VerifiedHeadOID      string    `json:"verifiedHeadOid"`
+	PullRequestUpdatedAt time.Time `json:"pullRequestUpdatedAt,omitempty"`
+	CreatedAt            time.Time `json:"createdAt"`
+	ValidatedAt          time.Time `json:"validatedAt,omitempty"`
 }
 
 func (c ReadyCheckpoint) Validate() error {
