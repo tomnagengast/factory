@@ -203,7 +203,7 @@ Normal deployment is intentionally refused unless the checkout is clean, on `mai
 Inspect the exact running identity and receipts first:
 
 ```bash
-curl -fsS http://127.0.0.1:8787/api/healthz | jq .
+curl -fsS http://127.0.0.1:8092/api/healthz | jq .
 curl -fsS https://factory.nags.cloud/api/healthz | jq .
 jq . ~/.local/share/factory/deployments/current.json
 find ~/.local/share/factory/deployments -maxdepth 2 -type f -name '*.json' -print
@@ -215,7 +215,7 @@ For a failed release, inspect the failed receipt under `~/.local/share/factory/d
 
 ```bash
 bin/network-app rollback factory --to <deployment-id>
-curl -fsS http://127.0.0.1:8787/api/healthz | jq .
+curl -fsS http://127.0.0.1:8092/api/healthz | jq .
 curl -fsS https://factory.nags.cloud/api/healthz | jq .
 ```
 
