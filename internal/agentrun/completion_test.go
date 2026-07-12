@@ -82,6 +82,7 @@ func TestCompletionValidatorRequiresEveryPostMergeCondition(t *testing.T) {
 		{name: "source", mutate: func(value *CompletionEvidence) { value.SourceValid = false }, want: "source"},
 		{name: "merge", mutate: func(value *CompletionEvidence) { value.MergeContained = false }, want: "contain"},
 		{name: "health", mutate: func(value *CompletionEvidence) { value.HealthMatches = false }, want: "health"},
+		{name: "safeguards", mutate: func(value *CompletionEvidence) { value.SafeguardRegression = true }, want: "reviews"},
 		{name: "remote", mutate: func(value *CompletionEvidence) { value.RemoteBranchAbsent = false }, want: "remote"},
 		{name: "worktree", mutate: func(value *CompletionEvidence) { value.WorktreeAbsent = false }, want: "worktree"},
 		{name: "Linear", mutate: func(value *CompletionEvidence) { value.LinearComplete = false }, want: "Linear"},
@@ -119,6 +120,13 @@ func TestCompletionValidatorVerifiesTypedPostReadyBlockers(t *testing.T) {
 	decision = mustCompletionValidator(t, merged, staticCompletionEvidence{evidence: failedEvidence}, now).Validate(context.Background(), run, ProcessResult{Status: string(StateBlocked), Blocker: BlockerDeploymentFailed})
 	if !decision.Validation.Accepted || decision.State != StateBlocked {
 		t.Fatalf("deployment blocker = %#v", decision)
+	}
+
+	regressed := mergedSnapshot(checkpoint)
+	regressed.SafeguardRegression = true
+	decision = mustCompletionValidator(t, &fakePullRequestReader{snapshot: regressed}, staticCompletionEvidence{err: errors.New("deployment has not started")}, now).Validate(context.Background(), run, ProcessResult{Status: string(StateBlocked), Blocker: BlockerSafeguardRegression})
+	if !decision.Validation.Accepted || decision.State != StateBlocked {
+		t.Fatalf("safeguard blocker = %#v", decision)
 	}
 
 	decision = mustCompletionValidator(t, merged, staticCompletionEvidence{err: errors.New("offline")}, now).Validate(context.Background(), run, ProcessResult{Status: string(StateBlocked), Blocker: BlockerDeploymentFailed})

@@ -211,6 +211,12 @@ func (v *MechanicalCompletionValidator) validatePostReadyBlocker(
 		decision.Detail = decision.Validation.Reason
 		return decision
 	}
+	if snapshot.State == "MERGED" && snapshot.SafeguardRegression && result.Blocker == BlockerSafeguardRegression {
+		decision.Validation.Accepted = true
+		decision.Validation.Reason = "pull request checks or reviews regressed after the ready checkpoint"
+		decision.Detail = decision.Validation.Reason
+		return decision
+	}
 	if snapshot.State != "MERGED" {
 		return rejectCompletion(decision, "blocker does not match authoritative pull request state", false)
 	}
@@ -252,6 +258,7 @@ func completionProblems(evidence CompletionEvidence) []string {
 		{evidence.SourceValid, "deployment source is not clean updated main"},
 		{evidence.MergeContained, "deployed commit does not contain the merge"},
 		{evidence.HealthMatches, "running health identity does not match the deployment"},
+		{!evidence.SafeguardRegression, "pull request checks or reviews regressed"},
 		{evidence.RemoteBranchAbsent, "remote issue branch still exists"},
 		{evidence.WorktreeAbsent, "issue worktree still exists"},
 		{evidence.LinearComplete, "Linear issue is not complete"},

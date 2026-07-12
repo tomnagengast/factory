@@ -47,7 +47,7 @@ func NewSystemCompletionEvidence(config SystemCompletionConfig) (*SystemCompleti
 }
 
 func (r *SystemCompletionEvidence) ReadCompletionEvidence(ctx context.Context, run Run, snapshot PullRequestSnapshot) (CompletionEvidence, error) {
-	var evidence CompletionEvidence
+	evidence := CompletionEvidence{SafeguardRegression: snapshot.SafeguardRegression}
 	childrenComplete, err := completedChildResults(run.RunDirectory)
 	if err != nil {
 		return evidence, err

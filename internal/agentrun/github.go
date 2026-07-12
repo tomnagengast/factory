@@ -7,20 +7,28 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 )
 
 type PullRequestSnapshot struct {
-	Number         int
-	State          string
-	IsDraft        bool
-	BaseBranch     string
-	HeadBranch     string
-	HeadOID        string
-	MergeCommitOID string
-	UpdatedAt      time.Time
+	Number              int
+	State               string
+	IsDraft             bool
+	BaseBranch          string
+	HeadBranch          string
+	HeadOID             string
+	MergeCommitOID      string
+	SafeguardRegression bool
+	UpdatedAt           time.Time
+}
+
+type pullRequestCheck struct {
+	Conclusion string `json:"conclusion"`
+	State      string `json:"state"`
+	Status     string `json:"status"`
 }
 
 type PullRequestReader interface {
@@ -47,7 +55,7 @@ func (c *GitHubCLI) Snapshot(ctx context.Context, checkpoint ReadyCheckpoint) (P
 	cmd := exec.CommandContext(ctx, c.path,
 		"pr", "view", strconv.Itoa(checkpoint.PullRequest),
 		"--repo", checkpoint.Repository,
-		"--json", "state,isDraft,baseRefName,headRefName,headRefOid,mergeCommit,updatedAt",
+		"--json", "state,isDraft,baseRefName,headRefName,headRefOid,mergeCommit,reviewDecision,statusCheckRollup,updatedAt",
 	)
 	cmd.Dir = c.directory
 	var stderr bytes.Buffer
@@ -57,12 +65,14 @@ func (c *GitHubCLI) Snapshot(ctx context.Context, checkpoint ReadyCheckpoint) (P
 		return PullRequestSnapshot{}, fmt.Errorf("GitHub CLI: read PR %d: %w: %s", checkpoint.PullRequest, err, stderr.String())
 	}
 	var value struct {
-		State       string    `json:"state"`
-		IsDraft     bool      `json:"isDraft"`
-		BaseRefName string    `json:"baseRefName"`
-		HeadRefName string    `json:"headRefName"`
-		HeadRefOID  string    `json:"headRefOid"`
-		UpdatedAt   time.Time `json:"updatedAt"`
+		State       string             `json:"state"`
+		IsDraft     bool               `json:"isDraft"`
+		BaseRefName string             `json:"baseRefName"`
+		HeadRefName string             `json:"headRefName"`
+		HeadRefOID  string             `json:"headRefOid"`
+		Review      string             `json:"reviewDecision"`
+		Checks      []pullRequestCheck `json:"statusCheckRollup"`
+		UpdatedAt   time.Time          `json:"updatedAt"`
 		MergeCommit *struct {
 			OID string `json:"oid"`
 		} `json:"mergeCommit"`
@@ -77,12 +87,35 @@ func (c *GitHubCLI) Snapshot(ctx context.Context, checkpoint ReadyCheckpoint) (P
 		BaseBranch: value.BaseRefName,
 		HeadBranch: value.HeadRefName,
 		HeadOID:    value.HeadRefOID,
-		UpdatedAt:  value.UpdatedAt,
+		SafeguardRegression: pullRequestSafeguardRegression(
+			value.Review,
+			value.Checks,
+		),
+		UpdatedAt: value.UpdatedAt,
 	}
 	if value.MergeCommit != nil {
 		snapshot.MergeCommitOID = value.MergeCommit.OID
 	}
 	return snapshot, nil
+}
+
+func pullRequestSafeguardRegression(reviewDecision string, checks []pullRequestCheck) bool {
+	if strings.EqualFold(reviewDecision, "CHANGES_REQUESTED") {
+		return true
+	}
+	for _, check := range checks {
+		if check.Status != "" && !strings.EqualFold(check.Status, "COMPLETED") {
+			return true
+		}
+		outcome := check.Conclusion
+		if outcome == "" {
+			outcome = check.State
+		}
+		if outcome != "" && !slices.Contains([]string{"NEUTRAL", "SKIPPED", "SUCCESS"}, strings.ToUpper(outcome)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *GitHubCLI) MatchingIssuePullRequests(ctx context.Context, repository, issueIdentifier string) ([]PullRequestSnapshot, error) {
