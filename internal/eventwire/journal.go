@@ -494,10 +494,11 @@ func Wait(ctx context.Context, read func(uint64) (Batch, error), after uint64, i
 func cloneEvent(event Event) Event {
 	event.Channels = slices.Clone(event.Channels)
 	if event.Attributes != nil {
-		event.Attributes = make(map[string][]string, len(event.Attributes))
+		attributes := make(map[string][]string, len(event.Attributes))
 		for key, values := range event.Attributes {
-			event.Attributes[key] = slices.Clone(values)
+			attributes[key] = slices.Clone(values)
 		}
+		event.Attributes = attributes
 	}
 	return event
 }

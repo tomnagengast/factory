@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
+	"github.com/tomnagengast/network/apps/factory/internal/eventwire"
 	"github.com/tomnagengast/network/apps/factory/internal/githubhook"
 	"github.com/tomnagengast/network/apps/factory/internal/linearhook"
 )
@@ -79,12 +80,14 @@ func runChild(ctx context.Context, args []string) int {
 
 func runAgentHelper(ctx context.Context, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: factory agent spawn|github-events|linear-comments")
+		fmt.Fprintln(os.Stderr, "usage: factory agent spawn|events|github-events|linear-comments")
 		return 2
 	}
 	switch args[0] {
 	case "spawn":
 		return runSpawnHelper(ctx, args[1:])
+	case "events":
+		return runEventsHelper(ctx, args[1:], os.Stdout)
 	case "github-events":
 		return runGitHubEventsHelper(ctx, args[1:], os.Stdout)
 	case "linear-comments":
@@ -93,6 +96,89 @@ func runAgentHelper(ctx context.Context, args []string) int {
 		fmt.Fprintf(os.Stderr, "unknown Factory agent command %q\n", args[0])
 		return 2
 	}
+}
+
+type matchFlags []string
+
+func (m *matchFlags) String() string {
+	return strings.Join(*m, ",")
+}
+
+func (m *matchFlags) Set(value string) error {
+	*m = append(*m, value)
+	return nil
+}
+
+func runEventsHelper(ctx context.Context, args []string, output io.Writer) int {
+	flags := flag.NewFlagSet("agent events", flag.ContinueOnError)
+	source := flags.String("source", "", "event source")
+	eventType := flags.String("type", "", "event type")
+	action := flags.String("action", "", "event action")
+	subject := flags.String("subject", "", "event subject")
+	after := flags.Uint64("after", 0, "event cursor")
+	wait := flags.Duration("wait", time.Minute, "maximum time to wait")
+	var matches matchFlags
+	flags.Var(&matches, "match", "attribute match in key=value form")
+	if flags.Parse(args) != nil || *wait < 0 || *wait > 5*time.Minute {
+		return 2
+	}
+	filter := eventwire.Filter{
+		Source:     eventwire.Source(strings.TrimSpace(*source)),
+		Type:       strings.TrimSpace(*eventType),
+		Action:     strings.TrimSpace(*action),
+		Subject:    strings.TrimSpace(*subject),
+		Attributes: make(map[string]string, len(matches)),
+	}
+	if filter.Source != "" && filter.Source != eventwire.SourceLinear && filter.Source != eventwire.SourceGitHub && filter.Source != eventwire.SourceFactory {
+		fmt.Fprintln(os.Stderr, "event wire: invalid source")
+		return 2
+	}
+	for _, match := range matches {
+		key, value, found := strings.Cut(match, "=")
+		if !found || strings.TrimSpace(key) == "" {
+			fmt.Fprintln(os.Stderr, "event wire: --match must be key=value")
+			return 2
+		}
+		filter.Attributes[strings.TrimSpace(key)] = value
+	}
+	journalPath, err := factoryJournalPath("system-events.jsonl")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	read := func(cursor uint64) (eventwire.Batch, error) {
+		return eventwire.Read(journalPath, filter, cursor)
+	}
+	var batch eventwire.Batch
+	if *wait == 0 {
+		batch, err = read(*after)
+	} else {
+		waitCtx, cancel := context.WithTimeout(ctx, *wait)
+		defer cancel()
+		batch, err = eventwire.Wait(waitCtx, read, *after, 250*time.Millisecond)
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = nil
+		}
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := json.NewEncoder(output).Encode(batch); err != nil {
+		fmt.Fprintf(os.Stderr, "agent events: encode response: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func factoryJournalPath(name string) (string, error) {
+	runID := os.Getenv("FACTORY_RUN_ID")
+	runDirectory := filepath.Clean(os.Getenv("FACTORY_RUN_DIR"))
+	if runID == "" || runDirectory == "." || filepath.Base(runDirectory) != runID || filepath.Base(filepath.Dir(runDirectory)) != "runs" {
+		return "", errors.New("agent events: Factory run environment is invalid")
+	}
+	stateRoot := filepath.Dir(filepath.Dir(runDirectory))
+	return filepath.Join(stateRoot, "data", name), nil
 }
 
 func runLinearCommentsHelper(ctx context.Context, args []string, output io.Writer) int {
@@ -121,16 +207,16 @@ func runLinearCommentsHelper(ctx context.Context, args []string, output io.Write
 		return 2
 	}
 	stateRoot := filepath.Dir(filepath.Dir(runDirectory))
-	journalPath := filepath.Join(stateRoot, "data", "linear-comments.json")
+	journalPath := filepath.Join(stateRoot, "data", "system-events.jsonl")
 
 	var batch linearhook.Batch
 	var err error
 	if *wait == 0 {
-		batch, err = linearhook.Read(journalPath, filter, *after)
+		batch, err = linearhook.ReadWire(journalPath, filter, *after)
 	} else {
 		waitCtx, cancel := context.WithTimeout(ctx, *wait)
 		defer cancel()
-		batch, err = linearhook.Wait(waitCtx, journalPath, filter, *after, 250*time.Millisecond)
+		batch, err = linearhook.WaitWire(waitCtx, journalPath, filter, *after, 250*time.Millisecond)
 		if errors.Is(err, context.DeadlineExceeded) {
 			err = nil
 		}
@@ -202,16 +288,16 @@ func runGitHubEventsHelper(ctx context.Context, args []string, output io.Writer)
 		return 2
 	}
 	stateRoot := filepath.Dir(filepath.Dir(runDirectory))
-	journalPath := filepath.Join(stateRoot, "data", "github-events.json")
+	journalPath := filepath.Join(stateRoot, "data", "system-events.jsonl")
 
 	var batch githubhook.Batch
 	var err error
 	if *wait == 0 {
-		batch, err = githubhook.Read(journalPath, filter, *after)
+		batch, err = githubhook.ReadWire(journalPath, filter, *after)
 	} else {
 		waitCtx, cancel := context.WithTimeout(ctx, *wait)
 		defer cancel()
-		batch, err = githubhook.Wait(waitCtx, journalPath, filter, *after, 250*time.Millisecond)
+		batch, err = githubhook.WaitWire(waitCtx, journalPath, filter, *after, 250*time.Millisecond)
 		if errors.Is(err, context.DeadlineExceeded) {
 			err = nil
 		}

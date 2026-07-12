@@ -68,6 +68,17 @@ func Open(path string, limit int) (*Journal, error) {
 }
 
 func (j *Journal) Add(event Event) (bool, error) {
+	return j.add(0, event)
+}
+
+func (j *Journal) AddAt(sequence uint64, event Event) (bool, error) {
+	if sequence < 1 {
+		return false, errors.New("Linear comment journal: sequence must be positive")
+	}
+	return j.add(sequence, event)
+}
+
+func (j *Journal) add(sequence uint64, event Event) (bool, error) {
 	if event.DeliveryID == "" || event.CommentID == "" || event.IssueID == "" {
 		return false, errors.New("Linear comment journal: delivery, comment, and issue IDs are required")
 	}
@@ -79,9 +90,16 @@ func (j *Journal) Add(event Event) (bool, error) {
 			return false, nil
 		}
 	}
+	if sequence > 0 && sequence != j.state.Total+1 {
+		return false, fmt.Errorf("Linear comment journal: sequence %d does not follow %d", sequence, j.state.Total)
+	}
 
 	next := j.state
-	next.Total++
+	if sequence == 0 {
+		next.Total++
+	} else {
+		next.Total = sequence
+	}
 	next.Events = slices.Clone(j.state.Events)
 	next.Events = append([]record{{Sequence: next.Total, Event: event}}, next.Events...)
 	next.Events = prune(next.Events, j.limit)
@@ -90,6 +108,12 @@ func (j *Journal) Add(event Event) (bool, error) {
 	}
 	j.state = next
 	return true, nil
+}
+
+func (j *Journal) Total() uint64 {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.state.Total
 }
 
 func (f Filter) Validate() error {
