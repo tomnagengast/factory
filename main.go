@@ -183,7 +183,7 @@ func serve(ctx context.Context) error {
 			App: "factory", Repository: "tomnagengast/factory",
 			RepoURL:        "git@github.com:tomnagengast/factory.git",
 			RepoPath:       filepath.Join(home, "repos", "tomnagengast", "factory"),
-			ProjectPath:    "/Volumes/T9/Repos/tomnagengast/network/apps/factory",
+			ProjectPath:    filepath.Join(home, "repos", "tomnagengast", "factory"),
 			BaseBranch:     "main",
 			ReceiptPath:    filepath.Join(stateRoot, "deployments", "current.json"),
 			PendingReceipt: filepath.Join(stateRoot, "deployments", "pending.json"),
