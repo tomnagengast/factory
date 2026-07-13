@@ -322,14 +322,6 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := events.CatchUp(ctx); err != nil {
-		return fmt.Errorf("catch up Factory events: %w", err)
-	}
-	go manager.Run(ctx)
-	if err := publishServiceEvent(ctx, events, "started", serviceStartedAt, serviceStartedAt); err != nil {
-		return err
-	}
-	go publishServiceHeartbeats(ctx, events, serviceStartedAt, serviceHeartbeatInterval, time.Now)
 	httpServer := &http.Server{
 		Addr:              "127.0.0.1:" + port,
 		Handler:           handler,
@@ -344,6 +336,14 @@ func serve(ctx context.Context) error {
 		slog.Info("factory listening", "address", httpServer.Addr)
 		errCh <- httpServer.ListenAndServe()
 	}()
+	go recoverEventWire(ctx, events, 5*time.Second, func() error {
+		if err := publishServiceEvent(ctx, events, "started", serviceStartedAt, serviceStartedAt); err != nil {
+			return err
+		}
+		go manager.Run(ctx)
+		go publishServiceHeartbeats(ctx, events, serviceStartedAt, serviceHeartbeatInterval, time.Now)
+		return nil
+	}, slog.Default())
 
 	select {
 	case err := <-errCh:
@@ -358,6 +358,35 @@ func serve(ctx context.Context) error {
 			slog.Error("publish Factory stopping event", "error", err)
 		}
 		return httpServer.Shutdown(shutdownCtx)
+	}
+}
+
+func recoverEventWire(
+	ctx context.Context,
+	events *eventwire.Wire,
+	retryInterval time.Duration,
+	onReady func() error,
+	logger *slog.Logger,
+) {
+	for {
+		err := events.CatchUp(ctx)
+		if err == nil {
+			err = onReady()
+		}
+		if err == nil {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		logger.Warn("Factory event wire recovery pending", "error", err, "retry_in", retryInterval)
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 	}
 }
 

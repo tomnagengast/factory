@@ -50,9 +50,38 @@ func TestHealthz(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	want := healthResponse{Status: "ok", App: "factory", BuildIdentity: testBuildIdentity()}
+	want := healthResponse{Status: "ok", App: "factory", Wire: wireHealthStatus{}, BuildIdentity: testBuildIdentity()}
 	if got != want {
 		t.Fatalf("response = %#v, want %#v", got, want)
+	}
+}
+
+func TestHealthzReportsPendingWireAsDegraded(t *testing.T) {
+	t.Parallel()
+	handler, _, _, _, wire := testHandlerWithRunsAndSettingsAndWire(t)
+	if err := wire.Handle(eventwire.Filter{Source: eventwire.SourceFactory}, func(context.Context, eventwire.Record) error {
+		return errors.New("temporary projection failure")
+	}); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	event := eventwire.Event{
+		ID: "factory:test:pending", Source: eventwire.SourceFactory, Type: "service",
+		Action: "heartbeat", Subject: "factory", ReceivedAt: testNow,
+	}
+	if _, _, err := wire.Publish(context.Background(), event); err == nil {
+		t.Fatal("pending event published without transient error")
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/healthz", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	var got healthResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Status != "degraded" || got.Wire.Pending != 1 || got.Wire.Total != 1 || got.Wire.Dispatched != 0 {
+		t.Fatalf("response = %#v", got)
 	}
 }
 
@@ -1078,6 +1107,12 @@ func testHandlerWithRuns(t *testing.T) (http.Handler, *agentrun.Store, *testNoti
 
 func testHandlerWithRunsAndSettings(t *testing.T) (http.Handler, *agentrun.Store, *testNotifier, *settings.Store) {
 	t.Helper()
+	handler, runStore, notifier, configuration, _ := testHandlerWithRunsAndSettingsAndWire(t)
+	return handler, runStore, notifier, configuration
+}
+
+func testHandlerWithRunsAndSettingsAndWire(t *testing.T) (http.Handler, *agentrun.Store, *testNotifier, *settings.Store, *eventwire.Wire) {
+	t.Helper()
 
 	store, err := activity.Open(filepath.Join(t.TempDir(), "activity.json"), 10)
 	if err != nil {
@@ -1097,6 +1132,7 @@ func testHandlerWithRunsAndSettings(t *testing.T) (http.Handler, *agentrun.Store
 	if err != nil {
 		t.Fatalf("open Linear comment journal: %v", err)
 	}
+	wire := testEventWire(t, githubEvents.Total(), linearComments.Total())
 	handler, err := New(Config{
 		Web:            testWeb(),
 		ActivityStore:  store,
@@ -1107,7 +1143,7 @@ func testHandlerWithRunsAndSettings(t *testing.T) (http.Handler, *agentrun.Store
 		ViewerAuth:     testViewerAuth(t),
 		LinearSecret:   testSecret,
 		GitHubSecret:   testGitHubSecret,
-		Events:         testEventWire(t, githubEvents.Total(), linearComments.Total()),
+		Events:         wire,
 		GitHubEvents:   githubEvents,
 		LinearComments: linearComments,
 		TriggerActor:   testActorID,
@@ -1117,7 +1153,7 @@ func testHandlerWithRunsAndSettings(t *testing.T) (http.Handler, *agentrun.Store
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
-	return handler, runStore, notifier, configuration
+	return handler, runStore, notifier, configuration, wire
 }
 
 func testHandlerWithObserver(t *testing.T, observer AgentObserver) http.Handler {

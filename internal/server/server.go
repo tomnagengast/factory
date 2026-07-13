@@ -149,9 +149,27 @@ func (legacyRepositoryResolver) Resolve(context.Context, string) (agentrun.Repos
 }
 
 type healthResponse struct {
-	Status string `json:"status"`
-	App    string `json:"app"`
+	Status string           `json:"status"`
+	App    string           `json:"app"`
+	Wire   wireHealthStatus `json:"wire"`
 	BuildIdentity
+}
+
+type wireHealthStatus struct {
+	Total         uint64               `json:"total"`
+	Dispatched    uint64               `json:"dispatched"`
+	Pending       uint64               `json:"pending"`
+	RejectedTotal uint64               `json:"rejectedTotal"`
+	LastRejection *wireHealthRejection `json:"lastRejection,omitempty"`
+}
+
+type wireHealthRejection struct {
+	Sequence   uint64           `json:"sequence"`
+	EventID    string           `json:"eventId"`
+	Source     eventwire.Source `json:"source"`
+	Type       string           `json:"type"`
+	Action     string           `json:"action"`
+	RejectedAt time.Time        `json:"rejectedAt"`
 }
 
 type linearPayload struct {
@@ -290,10 +308,25 @@ func New(config Config) (http.Handler, error) {
 }
 
 func (s *appServer) healthz(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_ = json.NewEncoder(w).Encode(healthResponse{Status: "ok", App: "factory", BuildIdentity: s.build})
+	status := s.events.Status()
+	wire := wireHealthStatus{
+		Total: status.Total, Dispatched: status.Dispatched, Pending: status.Pending,
+		RejectedTotal: status.RejectedTotal,
+	}
+	if status.LastRejection != nil {
+		wire.LastRejection = &wireHealthRejection{
+			Sequence: status.LastRejection.Sequence, EventID: status.LastRejection.EventID,
+			Source: status.LastRejection.Source, Type: status.LastRejection.Type,
+			Action: status.LastRejection.Action, RejectedAt: status.LastRejection.RejectedAt,
+		}
+	}
+	health := healthResponse{Status: "ok", App: "factory", Wire: wire, BuildIdentity: s.build}
+	httpStatus := http.StatusOK
+	if status.Pending > 0 {
+		health.Status = "degraded"
+		httpStatus = http.StatusServiceUnavailable
+	}
+	writeJSON(w, httpStatus, health)
 }
 
 func cloudflareBeacon(w http.ResponseWriter, _ *http.Request) {
