@@ -57,6 +57,7 @@ type HealthIdentity struct {
 }
 
 type CompletionEvidence struct {
+	DeploymentRequired            bool
 	Deployment                    DeploymentReceipt
 	Health                        HealthIdentity
 	SourceValid                   bool
@@ -317,21 +318,28 @@ func rejectCompletion(decision CompletionDecision, reason string, repark bool) C
 }
 
 func completionProblems(evidence CompletionEvidence) []string {
-	var problems []string
-	checks := []struct {
+	type check struct {
 		ok      bool
 		message string
-	}{
-		{evidence.Deployment.Status == "success", "deployment receipt is not successful"},
-		{evidence.SourceValid, "deployment source is not clean updated main"},
-		{evidence.MergeContained, "deployed commit does not contain the merge"},
-		{evidence.HealthMatches, "running health identity does not match the deployment"},
+	}
+
+	var problems []string
+	var checks []check
+	if evidence.DeploymentRequired {
+		checks = append(checks,
+			check{evidence.Deployment.Status == "success", "deployment receipt is not successful"},
+			check{evidence.HealthMatches, "running health identity does not match the deployment"},
+		)
+	}
+	checks = append(checks, []check{
+		{evidence.SourceValid, "completion source is not clean updated main"},
+		{evidence.MergeContained, "updated main does not contain the merge"},
 		{!evidence.SafeguardRegression, "pull request checks or reviews regressed"},
 		{evidence.RemoteBranchAbsent, "remote issue branch still exists"},
 		{evidence.WorktreeAbsent, "issue worktree still exists"},
 		{evidence.LinearComplete, "Linear issue is not complete"},
 		{evidence.ChildrenComplete, "child work remains incomplete"},
-	}
+	}...)
 	for _, check := range checks {
 		if !check.ok {
 			problems = append(problems, check.message)

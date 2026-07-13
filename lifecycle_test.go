@@ -2,7 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +18,52 @@ type recordingPublisher struct {
 	mu     sync.Mutex
 	events []eventwire.Event
 	notify chan struct{}
+}
+
+func TestRecoverEventWireGatesRuntimeUntilCatchUp(t *testing.T) {
+	t.Parallel()
+	journal, err := eventwire.Open(filepath.Join(t.TempDir(), "events.jsonl"), 10, nil)
+	if err != nil {
+		t.Fatalf("open journal: %v", err)
+	}
+	wire, err := eventwire.New(journal)
+	if err != nil {
+		t.Fatalf("new wire: %v", err)
+	}
+	var attempts atomic.Int32
+	if err := wire.Handle(eventwire.Filter{Source: eventwire.SourceFactory}, func(context.Context, eventwire.Record) error {
+		if attempts.Add(1) < 3 {
+			return errors.New("temporary projection failure")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	event := eventwire.Event{
+		ID: "factory:test:recovery", Source: eventwire.SourceFactory, Type: "service",
+		Action: "started", Subject: "factory", ReceivedAt: time.Now().UTC(),
+	}
+	if _, _, err := wire.Publish(context.Background(), event); err == nil {
+		t.Fatal("initial publication succeeded")
+	}
+	ready := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go recoverEventWire(ctx, wire, time.Millisecond, func() error {
+		if pending := wire.Status().Pending; pending != 0 {
+			t.Errorf("runtime started with %d pending events", pending)
+		}
+		close(ready)
+		return nil
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not start after catch-up")
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("dispatch attempts = %d, want 3", got)
+	}
 }
 
 func (p *recordingPublisher) PublishBatch(_ context.Context, events []eventwire.Event) ([]eventwire.Record, error) {

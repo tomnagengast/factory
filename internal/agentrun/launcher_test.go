@@ -48,16 +48,168 @@ func TestTmuxLauncherPrepareFastForwardsExistingWorkspace(t *testing.T) {
 	}
 }
 
+func TestTmuxLauncherBootstrapsGreenfieldRepositoryIdempotently(t *testing.T) {
+	t.Parallel()
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is not available")
+	}
+	root := t.TempDir()
+	managedRoot := filepath.Join(root, "managed")
+	if err := os.MkdirAll(managedRoot, 0o700); err != nil {
+		t.Fatalf("create managed root: %v", err)
+	}
+	remote := filepath.Join(root, "artifacts.git")
+	state := filepath.Join(root, "github-created")
+	createLog := filepath.Join(root, "create.log")
+	repositoryURL := "git@github.com:tomnagengast/artifacts.git"
+	gitWrapper := filepath.Join(root, "git-wrapper")
+	gitScript := fmt.Sprintf("#!/bin/sh\nexport GIT_CONFIG_COUNT=1\nexport GIT_CONFIG_KEY_0=url.%s.insteadOf\nexport GIT_CONFIG_VALUE_0=%s\nif [ \"$1\" = clone ]; then\n  %s \"$@\" || exit $?\n  for destination do :; done\n  %s -C \"$destination\" remote set-url origin %s\n  exit 0\nfi\nexec %s \"$@\"\n", remote, repositoryURL, gitPath, gitPath, repositoryURL, gitPath)
+	if err := os.WriteFile(gitWrapper, []byte(gitScript), 0o700); err != nil {
+		t.Fatalf("write git wrapper: %v", err)
+	}
+	ghPath := filepath.Join(root, "gh")
+	ghScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "$1 $2" = "repo view" ]; then
+  if [ ! -f %q ]; then
+    echo 'Could not resolve to a Repository' >&2
+    exit 1
+  fi
+  branch=null
+  if %s --git-dir=%q show-ref --verify --quiet refs/heads/main; then branch='{"name":"main"}'; fi
+  printf '{"nameWithOwner":"tomnagengast/artifacts","isPrivate":true,"defaultBranchRef":%%s}\n' "$branch"
+  exit 0
+fi
+if [ "$1 $2" = "repo create" ]; then
+  %s init --bare --initial-branch=main %q >/dev/null
+  touch %q
+  printf 'create\n' >> %q
+  exit 0
+fi
+if [ "$1 $2" = "repo edit" ]; then exit 0; fi
+exit 2
+`, state, gitPath, remote, gitPath, remote, state, createLog)
+	if err := os.WriteFile(ghPath, []byte(ghScript), 0o700); err != nil {
+		t.Fatalf("write gh fake: %v", err)
+	}
+	workspace := filepath.Join(managedRoot, "artifacts")
+	launcher, err := NewTmuxLauncher(LauncherConfig{
+		Repository: "tomnagengast/artifacts", RepoURL: repositoryURL, RepoPath: workspace,
+		ManagedRoot: managedRoot, BaseBranch: "main", Bootstrap: true,
+		StateRoot: root, BinaryPath: "unused", GitPath: gitWrapper, GitHubPath: ghPath,
+		WorktrunkPath: "unused", TmuxPath: "unused", TmuxSocket: "unused",
+	})
+	if err != nil {
+		t.Fatalf("new launcher: %v", err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := launcher.Prepare(context.Background()); err != nil {
+			t.Fatalf("prepare attempt %d: %v", attempt, err)
+		}
+	}
+	if got := gitOutput(t, gitWrapper, workspace, "symbolic-ref", "--short", "HEAD"); got != "main" {
+		t.Fatalf("branch = %q, want main", got)
+	}
+	if got := gitOutput(t, gitWrapper, workspace, "rev-parse", "--abbrev-ref", "@{upstream}"); got != "origin/main" {
+		t.Fatalf("upstream = %q, want origin/main", got)
+	}
+	data, err := os.ReadFile(createLog)
+	if err != nil {
+		t.Fatalf("read create log: %v", err)
+	}
+	if got := strings.Count(string(data), "create\n"); got != 1 {
+		t.Fatalf("GitHub create calls = %d, want 1", got)
+	}
+}
+
+func TestTmuxLauncherRejectsUnsafeWorkspaceStates(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	managedRoot := filepath.Join(root, "managed")
+	outside := filepath.Join(root, "outside")
+	for _, directory := range []string{managedRoot, outside} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatalf("create %s: %v", directory, err)
+		}
+	}
+	base := LauncherConfig{
+		RepoURL: "unused", ManagedRoot: managedRoot, BaseBranch: "main",
+		StateRoot: root, BinaryPath: "unused", GitPath: "git", WorktrunkPath: "wt",
+		TmuxPath: "tmux", TmuxSocket: "factory-test",
+	}
+	t.Run("target symlink", func(t *testing.T) {
+		target := filepath.Join(managedRoot, "target")
+		if err := os.Symlink(outside, target); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		config := base
+		config.RepoPath = target
+		launcher, _ := NewTmuxLauncher(config)
+		if err := launcher.Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+			t.Fatalf("error = %v, want symbolic link rejection", err)
+		}
+	})
+	t.Run("ancestor symlink escape", func(t *testing.T) {
+		link := filepath.Join(managedRoot, "escape")
+		if err := os.Symlink(outside, link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		config := base
+		config.RepoPath = filepath.Join(link, "repository")
+		launcher, _ := NewTmuxLauncher(config)
+		if err := launcher.Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "escapes") {
+			t.Fatalf("error = %v, want escape rejection", err)
+		}
+	})
+	t.Run("existing non-git directory", func(t *testing.T) {
+		target := filepath.Join(managedRoot, "empty")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		config := base
+		config.RepoPath = target
+		launcher, _ := NewTmuxLauncher(config)
+		if err := launcher.Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "not a Git checkout") {
+			t.Fatalf("error = %v, want non-Git rejection", err)
+		}
+	})
+}
+
+func TestTmuxLauncherRejectsMismatchedOriginAndDefaultBranch(t *testing.T) {
+	t.Parallel()
+
+	t.Run("origin", func(t *testing.T) {
+		fixture := newLauncherFixture(t)
+		runGit(t, fixture.gitPath, fixture.workspacePath, "remote", "set-url", "origin", filepath.Join(fixture.root, "unexpected.git"))
+		if err := fixture.launcher.Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "does not match") {
+			t.Fatalf("error = %v, want origin mismatch", err)
+		}
+	})
+
+	t.Run("GitHub default branch", func(t *testing.T) {
+		fixture := newLauncherFixture(t)
+		ghPath := filepath.Join(fixture.root, "gh")
+		if err := os.WriteFile(ghPath, []byte("#!/bin/sh\nprintf '{\"nameWithOwner\":\"tomnagengast/test\",\"isPrivate\":true,\"defaultBranchRef\":{\"name\":\"release\"}}\\n'\n"), 0o700); err != nil {
+			t.Fatalf("write gh fake: %v", err)
+		}
+		remotePath := filepath.Join(fixture.root, "remote.git")
+		repositoryURL := "git@github.com:tomnagengast/test.git"
+		runGit(t, fixture.gitPath, fixture.workspacePath, "config", "url."+remotePath+".insteadOf", repositoryURL)
+		runGit(t, fixture.gitPath, fixture.workspacePath, "remote", "set-url", "origin", repositoryURL)
+		fixture.launcher.config.Repository = "tomnagengast/test"
+		fixture.launcher.config.GitHubPath = ghPath
+		if err := fixture.launcher.Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "default branch does not match main") {
+			t.Fatalf("error = %v, want default branch mismatch", err)
+		}
+	})
+}
+
 func TestTmuxLauncherPrepareAllowsRegisteredWorktreeOnly(t *testing.T) {
 	t.Parallel()
 
 	fixture := newLauncherFixture(t)
 	addTestWorktree(t, fixture, "integrated")
-	symlinkPath := filepath.Join(fixture.root, "workspace-link")
-	if err := os.Symlink(fixture.workspacePath, symlinkPath); err != nil {
-		t.Fatalf("symlink workspace: %v", err)
-	}
-	fixture.launcher.config.RepoPath = symlinkPath
 
 	if err := fixture.launcher.Prepare(context.Background()); err != nil {
 		t.Fatalf("prepare with registered worktree: %v", err)

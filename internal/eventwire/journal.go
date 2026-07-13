@@ -26,6 +26,25 @@ type Batch struct {
 	Events []Event `json:"events"`
 }
 
+type Rejection struct {
+	Sequence   uint64    `json:"sequence"`
+	EventID    string    `json:"eventId"`
+	Source     Source    `json:"source"`
+	Type       string    `json:"type"`
+	Action     string    `json:"action"`
+	Subject    string    `json:"subject,omitempty"`
+	Reason     string    `json:"reason"`
+	RejectedAt time.Time `json:"rejectedAt"`
+}
+
+type Status struct {
+	Total         uint64     `json:"total"`
+	Dispatched    uint64     `json:"dispatched"`
+	Pending       uint64     `json:"pending"`
+	RejectedTotal uint64     `json:"rejectedTotal"`
+	LastRejection *Rejection `json:"lastRejection,omitempty"`
+}
+
 type diskLine struct {
 	Kind          string            `json:"kind"`
 	Version       int               `json:"version,omitempty"`
@@ -34,6 +53,8 @@ type diskLine struct {
 	Dispatched    uint64            `json:"dispatched,omitempty"`
 	ChannelAcks   map[string]uint64 `json:"channelAcks,omitempty"`
 	Record        *Record           `json:"record,omitempty"`
+	RejectedTotal uint64            `json:"rejectedTotal,omitempty"`
+	Rejection     *Rejection        `json:"rejection,omitempty"`
 }
 
 type journalState struct {
@@ -42,6 +63,8 @@ type journalState struct {
 	dispatched    uint64
 	channelAcks   map[string]uint64
 	records       []Record
+	rejectedTotal uint64
+	rejections    []Rejection
 }
 
 type Journal struct {
@@ -208,13 +231,8 @@ func (j *Journal) Acknowledge(sequence uint64, channelAcks map[string]uint64) er
 	if j.poisoned != nil {
 		return fmt.Errorf("event wire: journal is poisoned: %w", j.poisoned)
 	}
-	if sequence < j.state.dispatched || sequence > j.state.total {
-		return errors.New("event wire: invalid dispatch acknowledgment")
-	}
-	for channel, value := range channelAcks {
-		if value < j.state.channelAcks[channel] || value > j.state.channelTotals[channel] {
-			return fmt.Errorf("event wire: invalid acknowledgment for channel %s", channel)
-		}
+	if err := j.validateAcknowledgmentLocked(sequence, channelAcks); err != nil {
+		return err
 	}
 	if sequence == j.state.dispatched && mapsEqualAtLeast(j.state.channelAcks, channelAcks) {
 		return nil
@@ -235,6 +253,62 @@ func (j *Journal) Acknowledge(sequence uint64, channelAcks map[string]uint64) er
 	return nil
 }
 
+func (j *Journal) Reject(record Record, channelAcks map[string]uint64, reason string, rejectedAt time.Time) error {
+	if reason == "" || rejectedAt.IsZero() {
+		return errors.New("event wire: rejection reason and time are required")
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.poisoned != nil {
+		return fmt.Errorf("event wire: journal is poisoned: %w", j.poisoned)
+	}
+	if record.Sequence <= j.state.dispatched {
+		return errors.New("event wire: rejected record is already dispatched")
+	}
+	if err := j.validateAcknowledgmentLocked(record.Sequence, channelAcks); err != nil {
+		return err
+	}
+	rejection := Rejection{
+		Sequence: record.Sequence, EventID: record.Event.ID, Source: record.Event.Source,
+		Type: record.Event.Type, Action: record.Event.Action, Subject: record.Event.Subject,
+		Reason: reason, RejectedAt: rejectedAt.UTC(),
+	}
+	rejectedTotal := j.state.rejectedTotal + 1
+	line := diskLine{
+		Kind: "ack", Dispatched: record.Sequence, ChannelAcks: cloneMap(channelAcks),
+		RejectedTotal: rejectedTotal, Rejection: &rejection,
+	}
+	data, err := json.Marshal(line)
+	if err != nil {
+		return fmt.Errorf("event wire: encode rejection: %w", err)
+	}
+	if err := j.appendLocked(append(data, '\n')); err != nil {
+		return err
+	}
+	j.state.dispatched = record.Sequence
+	for channel, value := range channelAcks {
+		j.state.channelAcks[channel] = max(j.state.channelAcks[channel], value)
+	}
+	j.state.rejectedTotal = rejectedTotal
+	j.state.rejections = append(j.state.rejections, rejection)
+	if len(j.state.rejections) > j.limit {
+		j.state.rejections = slices.Clone(j.state.rejections[len(j.state.rejections)-j.limit:])
+	}
+	return nil
+}
+
+func (j *Journal) validateAcknowledgmentLocked(sequence uint64, channelAcks map[string]uint64) error {
+	if sequence < j.state.dispatched || sequence > j.state.total {
+		return errors.New("event wire: invalid dispatch acknowledgment")
+	}
+	for channel, value := range channelAcks {
+		if value < j.state.channelAcks[channel] || value > j.state.channelTotals[channel] {
+			return fmt.Errorf("event wire: invalid acknowledgment for channel %s", channel)
+		}
+	}
+	return nil
+}
+
 func (j *Journal) Pending() []Record {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -251,6 +325,20 @@ func (j *Journal) Snapshot() (uint64, uint64, map[string]uint64, []Record) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return j.state.total, j.state.dispatched, cloneMap(j.state.channelAcks), cloneRecords(j.state.records)
+}
+
+func (j *Journal) Status() Status {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	status := Status{
+		Total: j.state.total, Dispatched: j.state.dispatched,
+		Pending: j.state.total - j.state.dispatched, RejectedTotal: j.state.rejectedTotal,
+	}
+	if len(j.state.rejections) > 0 {
+		last := j.state.rejections[len(j.state.rejections)-1]
+		status.LastRejection = &last
+	}
+	return status
 }
 
 func (j *Journal) appendLocked(data []byte) error {
@@ -338,6 +426,7 @@ func writeJournal(path string, state journalState, records []Record) error {
 		ChannelTotals: cloneMap(state.channelTotals),
 		Dispatched:    state.dispatched,
 		ChannelAcks:   cloneMap(state.channelAcks),
+		RejectedTotal: state.rejectedTotal,
 	}
 	if err := encoder.Encode(header); err != nil {
 		temp.Close()
@@ -347,6 +436,13 @@ func writeJournal(path string, state journalState, records []Record) error {
 		if err := encoder.Encode(diskLine{Kind: "event", Record: &records[i]}); err != nil {
 			temp.Close()
 			return fmt.Errorf("event wire: encode compacted event: %w", err)
+		}
+	}
+	for i := range state.rejections {
+		line := diskLine{Kind: "ack", Dispatched: state.dispatched, RejectedTotal: state.rejectedTotal, Rejection: &state.rejections[i]}
+		if err := encoder.Encode(line); err != nil {
+			temp.Close()
+			return fmt.Errorf("event wire: encode compacted rejection: %w", err)
 		}
 	}
 	if err := temp.Sync(); err != nil {
@@ -401,6 +497,7 @@ func readJournal(path string, recoverTail bool) (journalState, error) {
 			state.channelTotals = cloneMap(line.ChannelTotals)
 			state.dispatched = line.Dispatched
 			state.channelAcks = cloneMap(line.ChannelAcks)
+			state.rejectedTotal = line.RejectedTotal
 		case "event":
 			if !foundCheckpoint || line.Record == nil {
 				return journalState{}, errors.New("event wire: event precedes checkpoint")
@@ -420,6 +517,13 @@ func readJournal(path string, recoverTail bool) (journalState, error) {
 			state.dispatched = max(state.dispatched, line.Dispatched)
 			for channel, value := range line.ChannelAcks {
 				state.channelAcks[channel] = max(state.channelAcks[channel], value)
+			}
+			state.rejectedTotal = max(state.rejectedTotal, line.RejectedTotal)
+			if line.Rejection != nil {
+				if line.Rejection.Sequence == 0 || line.Rejection.EventID == "" || line.Rejection.Reason == "" || line.Rejection.RejectedAt.IsZero() {
+					return journalState{}, errors.New("event wire: invalid rejection")
+				}
+				state.rejections = append(state.rejections, *line.Rejection)
 			}
 		default:
 			return journalState{}, fmt.Errorf("event wire: unknown journal line %q", line.Kind)
