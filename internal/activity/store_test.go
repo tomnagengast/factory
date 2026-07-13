@@ -78,7 +78,7 @@ func TestStoreKeepsNewestEventsWithinLimit(t *testing.T) {
 	}
 }
 
-func TestStorePersistsPagesAndReadsPrivatePayload(t *testing.T) {
+func TestStorePersistsEventsAndReadsPrivatePayload(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "activity.json")
@@ -100,28 +100,15 @@ func TestStorePersistsPagesAndReadsPrivatePayload(t *testing.T) {
 		t.Fatalf("add GitHub event: %v", err)
 	}
 
-	page, err := store.LinearPage(1, 2)
-	if err != nil {
-		t.Fatalf("page events: %v", err)
-	}
-	if page.Total != 3 || page.PageCount != 2 || len(page.Events) != 2 {
-		t.Fatalf("page = %#v", page)
-	}
-	if len(page.TypeCounts) != 2 || page.TypeCounts[0] != (Count{Label: "Issue", Count: 2}) {
-		t.Fatalf("type counts = %#v", page.TypeCounts)
-	}
-	if len(page.HourCounts) != 3 {
-		t.Fatalf("hour counts = %#v", page.HourCounts)
-	}
-
-	detail, found, err := store.LinearEvent(page.Events[0].ID)
+	payloadID := "linear-Issue2"
+	detail, err := store.StagedPayload(payloadID)
 	if err != nil {
 		t.Fatalf("read detail: %v", err)
 	}
-	if !found || !detail.PayloadAvailable || string(detail.Payload) != `{"type":"Issue","private":"ENG-23"}` {
-		t.Fatalf("detail = %#v, found = %t", detail, found)
+	if string(detail) != `{"type":"Issue","private":"ENG-23"}` {
+		t.Fatalf("detail = %s", detail)
 	}
-	info, err := os.Stat(store.payloadPath(page.Events[0].ID))
+	info, err := os.Stat(store.payloadPath(eventID(payloadID)))
 	if err != nil {
 		t.Fatalf("stat payload: %v", err)
 	}
@@ -133,8 +120,8 @@ func TestStorePersistsPagesAndReadsPrivatePayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
-	if _, found, err := reopened.LinearEvent(page.Events[0].ID); err != nil || !found {
-		t.Fatalf("reopened detail: found=%t err=%v", found, err)
+	if payload, err := reopened.StagedPayload(payloadID); err != nil || string(payload) != string(detail) {
+		t.Fatalf("reopened detail: payload=%q err=%v", payload, err)
 	}
 	if body, err := os.ReadFile(path); err != nil || string(body) == "" || strings.Contains(string(body), "ENG-23") {
 		t.Fatalf("public index leaked payload: body=%q err=%v", body, err)
@@ -151,13 +138,8 @@ func TestStoreHandlesHistoricalEventsAndPrunesPayloads(t *testing.T) {
 	if _, err := store.Add("historical", Event{Type: "Issue", Action: "create", ReceivedAt: time.Unix(1, 0).UTC()}); err != nil {
 		t.Fatalf("add historical event: %v", err)
 	}
-	historicalPage, err := store.LinearPage(1, 25)
-	if err != nil {
-		t.Fatalf("page historical event: %v", err)
-	}
-	historical, found, err := store.LinearEvent(historicalPage.Events[0].ID)
-	if err != nil || !found || historical.PayloadAvailable || historical.Payload != nil {
-		t.Fatalf("historical detail = %#v, found=%t err=%v", historical, found, err)
+	if _, err := store.StagedPayload("historical"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("historical payload error = %v", err)
 	}
 
 	if _, err := store.AddWithPayload("payload-1", Event{Type: "Issue", Action: "update", ReceivedAt: time.Unix(2, 0).UTC()}, []byte(`{"n":1}`)); err != nil {
@@ -175,19 +157,5 @@ func TestStoreHandlesHistoricalEventsAndPrunesPayloads(t *testing.T) {
 	}
 	if _, err := store.AddWithPayload("invalid", Event{}, []byte(`{"broken"`)); err == nil {
 		t.Fatal("invalid payload was accepted")
-	}
-}
-
-func TestStoreRejectsInvalidPages(t *testing.T) {
-	t.Parallel()
-
-	store, err := Open(filepath.Join(t.TempDir(), "activity.json"), 2)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	for _, input := range [][2]int{{0, 25}, {1, 0}} {
-		if _, err := store.LinearPage(input[0], input[1]); err == nil {
-			t.Fatalf("LinearPage(%d, %d) succeeded", input[0], input[1])
-		}
 	}
 }

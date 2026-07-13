@@ -12,9 +12,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
+
+var issueIdentifierPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*$`)
 
 const (
 	authorizationEndpoint = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -245,7 +249,7 @@ func (a *Authenticator) Logout(w http.ResponseWriter, r *http.Request) {
 	setAuthHeaders(w)
 	clearCookie(w, sessionCookieName)
 	clearCookie(w, stateCookieName)
-	http.Redirect(w, r, "/activity", http.StatusFound)
+	http.Redirect(w, r, "/home", http.StatusFound)
 }
 
 func (a *Authenticator) callbackState(r *http.Request) (stateClaims, error) {
@@ -403,27 +407,28 @@ func (a *Authenticator) verify(value string, target any) error {
 
 func safeNext(value string) string {
 	if value == "" {
-		return "/activity"
+		return "/home"
 	}
 	parsed, err := url.ParseRequestURI(value)
 	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.Fragment != "" {
-		return "/activity"
+		return "/home"
 	}
 	if !protectedPagePath(parsed.Path) {
-		return "/activity"
+		return "/home"
 	}
 	return parsed.RequestURI()
 }
 
 func protectedPagePath(value string) bool {
-	return value == "/agents" ||
-		strings.HasPrefix(value, "/agents/") ||
-		value == "/settings" ||
-		strings.HasPrefix(value, "/settings/") ||
-		value == "/activity/linear" ||
-		strings.HasPrefix(value, "/activity/linear/") ||
-		value == "/activity/agents" ||
-		strings.HasPrefix(value, "/activity/agents/")
+	if value == "/home" || value == "/wire" || value == "/agents" || value == "/settings" {
+		return true
+	}
+	parts := strings.Split(strings.TrimPrefix(value, "/"), "/")
+	if len(parts) != 4 || parts[0] != "agents" || parts[3] != "run" || !issueIdentifierPattern.MatchString(parts[1]) {
+		return false
+	}
+	started, err := strconv.ParseInt(parts[2], 10, 64)
+	return err == nil && started > 0
 }
 
 func setCookie(w http.ResponseWriter, name, value string, lifetime time.Duration, now time.Time) {

@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,34 +23,6 @@ type Event struct {
 type Snapshot struct {
 	Total  uint64
 	Events []Event
-}
-
-type EventSummary struct {
-	ID               string    `json:"id"`
-	Type             string    `json:"type"`
-	Action           string    `json:"action"`
-	ReceivedAt       time.Time `json:"receivedAt"`
-	PayloadAvailable bool      `json:"payloadAvailable"`
-}
-
-type EventDetail struct {
-	EventSummary
-	Payload json.RawMessage `json:"payload,omitempty"`
-}
-
-type Count struct {
-	Label string `json:"label"`
-	Count int    `json:"count"`
-}
-
-type LinearPage struct {
-	Total      int            `json:"total"`
-	Page       int            `json:"page"`
-	PageSize   int            `json:"pageSize"`
-	PageCount  int            `json:"pageCount"`
-	Events     []EventSummary `json:"events"`
-	TypeCounts []Count        `json:"typeCounts"`
-	HourCounts []Count        `json:"hourCounts"`
 }
 
 type record struct {
@@ -201,123 +172,6 @@ func (s *Store) Snapshot() Snapshot {
 		events[i] = record.Event
 	}
 	return Snapshot{Total: s.state.Total, Events: events}
-}
-
-func (s *Store) LinearPage(page, pageSize int) (LinearPage, error) {
-	if page < 1 {
-		return LinearPage{}, errors.New("activity store: page must be positive")
-	}
-	if pageSize < 1 {
-		return LinearPage{}, errors.New("activity store: page size must be positive")
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	records := make([]record, 0, len(s.state.Events))
-	for _, record := range s.state.Events {
-		if !strings.HasPrefix(record.DeliveryID, "github:") {
-			records = append(records, record)
-		}
-	}
-
-	pageCount := 0
-	if len(records) > 0 {
-		pageCount = (len(records) + pageSize - 1) / pageSize
-	}
-	start := len(records)
-	if page <= pageCount {
-		start = (page - 1) * pageSize
-	}
-	end := min(start+pageSize, len(records))
-	events := make([]EventSummary, 0, end-start)
-	for _, record := range records[start:end] {
-		events = append(events, summarize(record))
-	}
-
-	return LinearPage{
-		Total:      len(records),
-		Page:       page,
-		PageSize:   pageSize,
-		PageCount:  pageCount,
-		Events:     events,
-		TypeCounts: countTypes(records),
-		HourCounts: countHours(records),
-	}, nil
-}
-
-func (s *Store) LinearEvent(id string) (EventDetail, bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	for _, record := range s.state.Events {
-		if strings.HasPrefix(record.DeliveryID, "github:") || eventID(record.DeliveryID) != id {
-			continue
-		}
-		detail := EventDetail{EventSummary: summarize(record)}
-		if !record.PayloadAvailable {
-			return detail, true, nil
-		}
-		payload, err := os.ReadFile(s.payloadPath(id))
-		if err != nil {
-			return EventDetail{}, false, fmt.Errorf("activity store: read payload: %w", err)
-		}
-		detail.Payload = json.RawMessage(payload)
-		return detail, true, nil
-	}
-	return EventDetail{}, false, nil
-}
-
-func summarize(record record) EventSummary {
-	return EventSummary{
-		ID:               eventID(record.DeliveryID),
-		Type:             record.Type,
-		Action:           record.Action,
-		ReceivedAt:       record.ReceivedAt,
-		PayloadAvailable: record.PayloadAvailable,
-	}
-}
-
-func countTypes(records []record) []Count {
-	counts := make(map[string]int)
-	for _, record := range records {
-		counts[record.Type]++
-	}
-	result := make([]Count, 0, len(counts))
-	for label, count := range counts {
-		result = append(result, Count{Label: label, Count: count})
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Count == result[j].Count {
-			return result[i].Label < result[j].Label
-		}
-		return result[i].Count > result[j].Count
-	})
-	return result
-}
-
-func countHours(records []record) []Count {
-	counts := make(map[time.Time]int)
-	for _, record := range records {
-		hour := record.ReceivedAt.UTC().Truncate(time.Hour)
-		counts[hour]++
-	}
-	hours := make([]time.Time, 0, len(counts))
-	for hour := range counts {
-		hours = append(hours, hour)
-	}
-	slices.SortFunc(hours, func(a, b time.Time) int { return a.Compare(b) })
-	if len(hours) > 12 {
-		hours = hours[len(hours)-12:]
-	}
-	result := make([]Count, 0, len(hours))
-	for _, hour := range hours {
-		result = append(result, Count{
-			Label: hour.Format("Jan 2 15:00"),
-			Count: counts[hour],
-		})
-	}
-	return result
 }
 
 func eventID(deliveryID string) string {

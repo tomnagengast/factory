@@ -299,6 +299,65 @@ func assertCurrentReaderCompatible(t *testing.T, path string) {
 	}
 }
 
+func TestJournalQueryPagesNewestMatchingRecordsAndReturnsRetainedCounts(t *testing.T) {
+	journal, err := Open(filepath.Join(t.TempDir(), "events.jsonl"), 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 13, 18, 0, 0, 0, time.UTC)
+	for _, event := range []Event{
+		{ID: "linear-1", Source: SourceLinear, Type: "Issue", Action: "create", ReceivedAt: base},
+		{ID: "github-1", Source: SourceGitHub, Type: "pull_request", Action: "opened", ReceivedAt: base.Add(time.Hour)},
+		{ID: "future-1", Source: SourceFactory, Type: "future-kind", Action: "observed", ReceivedAt: base.Add(2 * time.Hour)},
+		{ID: "linear-2", Source: SourceLinear, Type: "Issue", Action: "update", ReceivedAt: base.Add(3 * time.Hour)},
+	} {
+		if _, _, err := journal.Add(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	page, err := journal.Query(Query{Source: SourceLinear, Page: 1, PageSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Retained != 4 || page.Matching != 2 || page.PageCount != 2 {
+		t.Fatalf("unexpected page metadata: %#v", page)
+	}
+	if len(page.Records) != 1 || page.Records[0].Event.ID != "linear-2" {
+		t.Fatalf("unexpected records: %#v", page.Records)
+	}
+	if got := page.SourceCounts; len(got) != 3 || got[0] != (Count{Label: "linear", Count: 2}) {
+		t.Fatalf("unexpected source counts: %#v", got)
+	}
+	if got := page.TypeCounts; len(got) != 3 || got[0] != (Count{Label: "Issue", Count: 2}) {
+		t.Fatalf("unexpected type counts: %#v", got)
+	}
+	if len(page.HourCounts) != 4 {
+		t.Fatalf("unexpected hour counts: %#v", page.HourCounts)
+	}
+
+	record, found := journal.Record(3)
+	if !found || record.Event.Type != "future-kind" {
+		t.Fatalf("unexpected record lookup: found=%v record=%#v", found, record)
+	}
+	if _, found := journal.Record(99); found {
+		t.Fatal("unexpected missing record match")
+	}
+}
+
+func TestJournalQueryValidatesPagination(t *testing.T) {
+	journal, err := Open(filepath.Join(t.TempDir(), "events.jsonl"), 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.Query(Query{Page: 0, PageSize: 25}); err == nil {
+		t.Fatal("expected invalid page error")
+	}
+	if _, err := journal.Query(Query{Page: 1, PageSize: 0}); err == nil {
+		t.Fatal("expected invalid page size error")
+	}
+}
+
 func testEvent(id string, source Source, eventType string) Event {
 	return Event{
 		ID:         id,

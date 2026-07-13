@@ -87,18 +87,15 @@ func TestHealthzReportsPendingWireAsDegraded(t *testing.T) {
 	}
 }
 
-func TestFrontendFallsBackToIndex(t *testing.T) {
+func TestUnknownFrontendRouteIsNotFound(t *testing.T) {
 	t.Parallel()
 
 	handler := testHandler(t)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/future-route", nil))
 
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
-	}
-	if got, want := recorder.Body.String(), "<h1>Factory</h1>"; got != want {
-		t.Fatalf("body = %q, want %q", got, want)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
 	}
 }
 
@@ -114,17 +111,16 @@ func TestUnknownAPIIsNotFound(t *testing.T) {
 	}
 }
 
-func TestPrivateActivityAndAgentRoutesRequireViewerAuthentication(t *testing.T) {
+func TestPrivateCanonicalRoutesRequireViewerAuthentication(t *testing.T) {
 	t.Parallel()
 
 	handler := testHandler(t)
 	for _, target := range []string{
-		"/agents/run-123",
-		"/agents/run-123/",
+		"/home",
+		"/wire",
+		"/agents",
+		"/agents/ENG-23/1783714439062/run",
 		"/settings",
-		"/activity/linear",
-		"/activity/agents",
-		"/activity/agents/ENG-23/1783714439062/run",
 	} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
@@ -137,17 +133,32 @@ func TestPrivateActivityAndAgentRoutesRequireViewerAuthentication(t *testing.T) 
 	}
 
 	for _, target := range []string{
-		"/api/agents/run-123",
+		"/api/wire",
+		"/api/wire/1",
+		"/api/agents",
+		"/api/agents/ENG-23/1783714439062/run",
 		"/api/settings",
-		"/api/activity/linear",
-		"/api/activity/linear/" + strings.Repeat("a", 64),
-		"/api/activity/agents",
-		"/api/activity/agents/ENG-23/1783714439062/run",
 	} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
 		if recorder.Code != http.StatusUnauthorized || recorder.Header().Get("WWW-Authenticate") == "" {
 			t.Fatalf("%s API response = %d, challenge %q", target, recorder.Code, recorder.Header().Get("WWW-Authenticate"))
+		}
+	}
+}
+
+func TestDeprecatedAndMalformedRoutesAreNotFoundWithoutRedirects(t *testing.T) {
+	t.Parallel()
+	handler := testHandler(t)
+	for _, target := range []string{
+		"/activity", "/activity/linear", "/activity/agents", "/agents/run-123",
+		"/home/", "/wire/", "/agents/", "/settings/", "/agents/ENG-23/1783714439062/run/",
+		"/api/activity", "/api/activity/linear", "/api/activity/agents", "/api/agents/run-123",
+		"//wire", "/wire/../home",
+	} {
+		recorder := authenticatedRequest(t, handler, target)
+		if recorder.Code != http.StatusNotFound || recorder.Header().Get("Location") != "" {
+			t.Fatalf("%s response = %d, location %q", target, recorder.Code, recorder.Header().Get("Location"))
 		}
 	}
 }
@@ -247,8 +258,8 @@ func TestLinearLabelSettingsControlNewRunsWithoutDroppingActivity(t *testing.T) 
 		t.Fatalf("disabled trigger response = %d, runs %#v", recorder.Code, runStore.Snapshot())
 	}
 	activityRecorder := httptest.NewRecorder()
-	handler.ServeHTTP(activityRecorder, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
-	var activity activityResponse
+	handler.ServeHTTP(activityRecorder, httptest.NewRequest(http.MethodGet, "/api/home", nil))
+	var activity homeResponse
 	if err := json.NewDecoder(activityRecorder.Body).Decode(&activity); err != nil {
 		t.Fatalf("decode activity: %v", err)
 	}
@@ -294,7 +305,7 @@ func TestAuthenticatedAgentPageServesFrontend(t *testing.T) {
 
 	handler := testHandler(t)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/agents/run-123", nil)
+	request := httptest.NewRequest(http.MethodGet, "/agents/ENG-23/1783714439062/run", nil)
 	request.SetBasicAuth("factory", testViewerPassword)
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -302,49 +313,6 @@ func TestAuthenticatedAgentPageServesFrontend(t *testing.T) {
 	}
 	if got, want := recorder.Body.String(), "<h1>Factory</h1>"; got != want {
 		t.Fatalf("body = %q, want %q", got, want)
-	}
-}
-
-func TestAuthenticatedAgentAPIReturnsObservedRun(t *testing.T) {
-	t.Parallel()
-
-	observer := &testObserver{view: agentrun.AgentView{
-		ID:              "run-123",
-		IssueIdentifier: "ENG-123",
-		State:           agentrun.StateRunning,
-		Live:            true,
-		Windows:         []agentrun.WindowView{{ID: "@1", Name: "principal", Output: "working"}},
-	}}
-	handler := testHandlerWithObserver(t, observer)
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/agents/run-123", nil)
-	request.SetBasicAuth("factory", testViewerPassword)
-	handler.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
-	}
-	var got agentrun.AgentView
-	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil {
-		t.Fatalf("decode view: %v", err)
-	}
-	if got.ID != "run-123" || got.IssueIdentifier != "ENG-123" || len(got.Windows) != 1 {
-		t.Fatalf("view = %#v", got)
-	}
-	if observer.lastID != "run-123" {
-		t.Fatalf("observer ID = %q, want run-123", observer.lastID)
-	}
-}
-
-func TestAuthenticatedAgentAPINotFound(t *testing.T) {
-	t.Parallel()
-
-	handler := testHandlerWithObserver(t, &testObserver{err: agentrun.ErrRunNotFound})
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/agents/run-missing", nil)
-	request.SetBasicAuth("factory", testViewerPassword)
-	handler.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
 	}
 }
 
@@ -377,11 +345,11 @@ func TestLinearWebhookAcceptsAndDeduplicatesSignedDelivery(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/home", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("activity status = %d, want %d", recorder.Code, http.StatusOK)
 	}
-	var got activityResponse
+	var got homeResponse
 	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil {
 		t.Fatalf("decode activity: %v", err)
 	}
@@ -394,7 +362,7 @@ func TestLinearWebhookAcceptsAndDeduplicatesSignedDelivery(t *testing.T) {
 	}
 }
 
-func TestAuthenticatedLinearActivityPagesRawPayload(t *testing.T) {
+func TestAuthenticatedWirePagesAllSourcesAndReadsLinearPayload(t *testing.T) {
 	t.Parallel()
 
 	handler := testHandler(t)
@@ -408,49 +376,53 @@ func TestAuthenticatedLinearActivityPagesRawPayload(t *testing.T) {
 		t.Fatalf("webhook status = %d, want %d", webhook.Code, http.StatusOK)
 	}
 
-	pageRecorder := authenticatedRequest(t, handler, "/api/activity/linear?page=1&pageSize=25")
-	var page activity.LinearPage
+	pageRecorder := authenticatedRequest(t, handler, "/api/wire?page=1&pageSize=25")
+	var page eventwire.Page
 	if err := json.NewDecoder(pageRecorder.Body).Decode(&page); err != nil {
 		t.Fatalf("decode page: %v", err)
 	}
-	if pageRecorder.Code != http.StatusOK || page.Total != 1 || len(page.Events) != 1 || !page.Events[0].PayloadAvailable {
+	if pageRecorder.Code != http.StatusOK || page.Retained != 1 || page.Matching != 1 || len(page.Records) != 1 {
 		t.Fatalf("page response = %d %#v", pageRecorder.Code, page)
 	}
-	if len(page.TypeCounts) != 1 || page.TypeCounts[0] != (activity.Count{Label: "Issue", Count: 1}) {
+	if len(page.SourceCounts) != 1 || page.SourceCounts[0] != (eventwire.Count{Label: "linear", Count: 1}) {
+		t.Fatalf("source counts = %#v", page.SourceCounts)
+	}
+	if len(page.TypeCounts) != 1 || page.TypeCounts[0] != (eventwire.Count{Label: "Issue", Count: 1}) {
 		t.Fatalf("type counts = %#v", page.TypeCounts)
 	}
 
-	detailRecorder := authenticatedRequest(t, handler, "/api/activity/linear/"+page.Events[0].ID)
-	var detail activity.EventDetail
+	detailRecorder := authenticatedRequest(t, handler, "/api/wire/"+strconv.FormatUint(page.Records[0].Sequence, 10))
+	var detail wireDetailResponse
 	if err := json.NewDecoder(detailRecorder.Body).Decode(&detail); err != nil {
 		t.Fatalf("decode detail: %v", err)
 	}
-	if detailRecorder.Code != http.StatusOK || !strings.Contains(string(detail.Payload), "winery roadmap") {
+	if detailRecorder.Code != http.StatusOK || !detail.PayloadAvailable || !strings.Contains(string(detail.Payload), "winery roadmap") {
 		t.Fatalf("detail response = %d %#v", detailRecorder.Code, detail)
 	}
 
 	publicRecorder := httptest.NewRecorder()
-	handler.ServeHTTP(publicRecorder, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
+	handler.ServeHTTP(publicRecorder, httptest.NewRequest(http.MethodGet, "/api/home", nil))
 	if publicBody := publicRecorder.Body.String(); strings.Contains(publicBody, "winery roadmap") || strings.Contains(publicBody, "ENG-23") {
 		t.Fatalf("public activity leaked raw payload: %s", publicBody)
 	}
 }
 
-func TestLinearActivityAPIRejectsInvalidPaginationAndEventIDs(t *testing.T) {
+func TestWireAPIRejectsInvalidQueriesAndSequences(t *testing.T) {
 	t.Parallel()
 
 	handler := testHandler(t)
 	for _, target := range []string{
-		"/api/activity/linear?page=0",
-		"/api/activity/linear?pageSize=101",
-		"/api/activity/linear/not-a-hash",
+		"/api/wire?page=0",
+		"/api/wire?pageSize=101",
+		"/api/wire?source=unknown",
+		"/api/wire?type=%20Issue",
 	} {
 		recorder := authenticatedRequest(t, handler, target)
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("%s status = %d, want %d", target, recorder.Code, http.StatusBadRequest)
 		}
 	}
-	recorder := authenticatedRequest(t, handler, "/api/activity/linear/"+strings.Repeat("a", 64))
+	recorder := authenticatedRequest(t, handler, "/api/wire/not-a-sequence")
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("missing event status = %d, want %d", recorder.Code, http.StatusNotFound)
 	}
@@ -473,7 +445,7 @@ func TestAuthenticatedAgentActivityAndReference(t *testing.T) {
 	}
 	observer.view = agentrun.AgentView{ID: run.ID, IssueIdentifier: "ENG-23", State: agentrun.StateRunning, Live: true}
 
-	summaryRecorder := authenticatedRequest(t, handler, "/api/activity/agents")
+	summaryRecorder := authenticatedRequest(t, handler, "/api/agents")
 	var summary agentrun.ActivitySnapshot
 	if err := json.NewDecoder(summaryRecorder.Body).Decode(&summary); err != nil {
 		t.Fatalf("decode summary: %v", err)
@@ -482,7 +454,7 @@ func TestAuthenticatedAgentActivityAndReference(t *testing.T) {
 		t.Fatalf("summary response = %d %#v", summaryRecorder.Code, summary)
 	}
 
-	target := fmt.Sprintf("/api/activity/agents/eng-23/%d/run", testNow.UnixMilli())
+	target := fmt.Sprintf("/api/agents/eng-23/%d/run", testNow.UnixMilli())
 	detailRecorder := authenticatedRequest(t, handler, target)
 	var detail agentrun.AgentView
 	if err := json.NewDecoder(detailRecorder.Body).Decode(&detail); err != nil {
@@ -493,14 +465,14 @@ func TestAuthenticatedAgentActivityAndReference(t *testing.T) {
 	}
 
 	for _, invalidTarget := range []string{
-		"/api/activity/agents/not-an-issue/123/run",
-		"/api/activity/agents/ENG-23/not-a-time/run",
+		"/api/agents/not-an-issue/123/run",
+		"/api/agents/ENG-23/not-a-time/run",
 	} {
-		if recorder := authenticatedRequest(t, handler, invalidTarget); recorder.Code != http.StatusBadRequest {
-			t.Fatalf("%s status = %d, want %d", invalidTarget, recorder.Code, http.StatusBadRequest)
+		if recorder := authenticatedRequest(t, handler, invalidTarget); recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want %d", invalidTarget, recorder.Code, http.StatusNotFound)
 		}
 	}
-	if recorder := authenticatedRequest(t, handler, "/api/activity/agents/ENG-24/"+strconv.FormatInt(testNow.UnixMilli(), 10)+"/run"); recorder.Code != http.StatusNotFound {
+	if recorder := authenticatedRequest(t, handler, "/api/agents/ENG-24/"+strconv.FormatInt(testNow.UnixMilli(), 10)+"/run"); recorder.Code != http.StatusNotFound {
 		t.Fatalf("missing run status = %d, want %d", recorder.Code, http.StatusNotFound)
 	}
 }
@@ -622,7 +594,7 @@ func TestLinearFactoryLabelStartsOneRunPerActiveIssue(t *testing.T) {
 		t.Fatalf("notifications = %d, want 1", got)
 	}
 	activityRecorder := httptest.NewRecorder()
-	handler.ServeHTTP(activityRecorder, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
+	handler.ServeHTTP(activityRecorder, httptest.NewRequest(http.MethodGet, "/api/home", nil))
 	if body := activityRecorder.Body.String(); strings.Contains(body, "ENG-123") || strings.Contains(body, testActorID) {
 		t.Fatalf("public activity leaked private Linear context: %s", body)
 	}
@@ -1080,7 +1052,7 @@ func TestGitHubWebhookPersistsAndDeduplicatesSignedDelivery(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/home", nil))
 	if !strings.Contains(recorder.Body.String(), `"type":"github/check_run"`) {
 		t.Fatalf("activity missing GitHub event: %s", recorder.Body.String())
 	}

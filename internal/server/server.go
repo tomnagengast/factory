@@ -14,6 +14,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"slices"
 	"strconv"
@@ -51,8 +52,6 @@ type EventStore interface {
 	AddStaged(deliveryID string, event activity.Event) (bool, error)
 	StagedPayload(deliveryID string) ([]byte, error)
 	Snapshot() activity.Snapshot
-	LinearPage(page, pageSize int) (activity.LinearPage, error)
-	LinearEvent(id string) (activity.EventDetail, bool, error)
 }
 
 type ProjectSetupController interface {
@@ -215,12 +214,18 @@ type linearPayload struct {
 	} `json:"updatedFrom"`
 }
 
-type activityResponse struct {
+type homeResponse struct {
 	Status         string                  `json:"status"`
 	Total          uint64                  `json:"total"`
 	LastReceivedAt *time.Time              `json:"lastReceivedAt"`
 	Events         []activity.Event        `json:"events"`
 	AgentRuns      agentrun.PublicSnapshot `json:"agentRuns"`
+}
+
+type wireDetailResponse struct {
+	Record           eventwire.Record `json:"record"`
+	PayloadAvailable bool             `json:"payloadAvailable"`
+	Payload          json.RawMessage  `json:"payload,omitempty"`
 }
 
 func New(config Config) (http.Handler, error) {
@@ -299,12 +304,11 @@ func New(config Config) (http.Handler, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", app.healthz)
-	mux.HandleFunc("GET /api/activity", app.activity)
-	mux.Handle("GET /api/activity/linear", app.viewerAuth.API(http.HandlerFunc(app.linearActivity)))
-	mux.Handle("GET /api/activity/linear/{id}", app.viewerAuth.API(http.HandlerFunc(app.linearEvent)))
-	mux.Handle("GET /api/activity/agents", app.viewerAuth.API(http.HandlerFunc(app.agentActivity)))
-	mux.Handle("GET /api/activity/agents/{issue}/{started}/run", app.viewerAuth.API(http.HandlerFunc(app.agentByReference)))
-	mux.Handle("GET /api/agents/{id}", app.viewerAuth.API(http.HandlerFunc(app.agent)))
+	mux.HandleFunc("GET /api/home", app.home)
+	mux.Handle("GET /api/wire", app.viewerAuth.API(http.HandlerFunc(app.wire)))
+	mux.Handle("GET /api/wire/{sequence}", app.viewerAuth.API(http.HandlerFunc(app.wireEvent)))
+	mux.Handle("GET /api/agents", app.viewerAuth.API(http.HandlerFunc(app.agents)))
+	mux.Handle("GET /api/agents/{issue}/{started}/run", app.viewerAuth.API(http.HandlerFunc(app.agentByReference)))
 	mux.Handle("GET /api/settings", app.viewerAuth.API(http.HandlerFunc(app.getSettings)))
 	mux.Handle("PUT /api/settings", app.viewerAuth.API(http.HandlerFunc(app.putSettings)))
 	mux.HandleFunc("POST /api/webhooks/linear", app.linearWebhook)
@@ -313,16 +317,15 @@ func New(config Config) (http.Handler, error) {
 	mux.HandleFunc("GET /auth/google/login", app.viewerAuth.Login)
 	mux.HandleFunc("GET /auth/google/callback", app.viewerAuth.Callback)
 	mux.HandleFunc("GET /auth/logout", app.viewerAuth.Logout)
-	mux.Handle("GET /activity/linear", app.viewerAuth.Page(frontend(config.Web)))
-	mux.Handle("GET /activity/linear/", app.viewerAuth.Page(frontend(config.Web)))
-	mux.Handle("GET /activity/agents", app.viewerAuth.Page(frontend(config.Web)))
-	mux.Handle("GET /activity/agents/", app.viewerAuth.Page(frontend(config.Web)))
-	mux.Handle("GET /agents", app.viewerAuth.Page(frontend(config.Web)))
-	mux.Handle("GET /agents/", app.viewerAuth.Page(frontend(config.Web)))
-	mux.Handle("GET /settings", app.viewerAuth.Page(frontend(config.Web)))
-	mux.Handle("GET /settings/", app.viewerAuth.Page(frontend(config.Web)))
-	mux.Handle("/", frontend(config.Web))
-	return mux, nil
+	page := frontendPage(config.Web)
+	mux.Handle("GET /{$}", page)
+	mux.Handle("GET /home", app.viewerAuth.Page(page))
+	mux.Handle("GET /wire", app.viewerAuth.Page(page))
+	mux.Handle("GET /agents", app.viewerAuth.Page(page))
+	mux.Handle("GET /agents/{issue}/{started}/run", app.viewerAuth.Page(page))
+	mux.Handle("GET /settings", app.viewerAuth.Page(page))
+	mux.Handle("GET /{asset...}", frontendAsset(config.Web))
+	return canonicalPaths(mux), nil
 }
 
 func (s *appServer) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -352,9 +355,9 @@ func cloudflareBeacon(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *appServer) activity(w http.ResponseWriter, _ *http.Request) {
+func (s *appServer) home(w http.ResponseWriter, _ *http.Request) {
 	snapshot := s.activityStore.Snapshot()
-	response := activityResponse{
+	response := homeResponse{
 		Status:    "listening",
 		Total:     snapshot.Total,
 		Events:    snapshot.Events,
@@ -366,7 +369,7 @@ func (s *appServer) activity(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *appServer) linearActivity(w http.ResponseWriter, r *http.Request) {
+func (s *appServer) wire(w http.ResponseWriter, r *http.Request) {
 	page, err := queryInt(r, "page", defaultActivityPage, 1, maxActivityPage)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
@@ -377,7 +380,17 @@ func (s *appServer) linearActivity(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
-	snapshot, err := s.activityStore.LinearPage(page, pageSize)
+	source := eventwire.Source(r.URL.Query().Get("source"))
+	if source != "" && source != eventwire.SourceLinear && source != eventwire.SourceGitHub && source != eventwire.SourceFactory {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	eventType := r.URL.Query().Get("type")
+	if len(eventType) > 256 || eventType != strings.TrimSpace(eventType) {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	snapshot, err := s.events.Query(eventwire.Query{Source: source, Type: eventType, Page: page, PageSize: pageSize})
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
@@ -385,37 +398,49 @@ func (s *appServer) linearActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, snapshot)
 }
 
-func (s *appServer) linearEvent(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if !validEventID(id) {
-		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+func (s *appServer) wireEvent(w http.ResponseWriter, r *http.Request) {
+	sequence, err := strconv.ParseUint(r.PathValue("sequence"), 10, 64)
+	if err != nil || sequence < 1 {
+		http.NotFound(w, r)
 		return
 	}
-	event, found, err := s.activityStore.LinearEvent(id)
-	if err != nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
+	event, found := s.events.Record(sequence)
 	if !found {
-		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		http.NotFound(w, r)
 		return
 	}
-	writeJSON(w, http.StatusOK, event)
+	response := wireDetailResponse{Record: event}
+	if event.Event.Source == eventwire.SourceLinear {
+		deliveryIDs := event.Event.Values(attributeDeliveryID)
+		if len(deliveryIDs) > 0 {
+			payload, err := s.activityStore.StagedPayload(deliveryIDs[0])
+			switch {
+			case err == nil:
+				response.PayloadAvailable = true
+				response.Payload = json.RawMessage(payload)
+			case errors.Is(err, os.ErrNotExist):
+			default:
+				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *appServer) agentActivity(w http.ResponseWriter, _ *http.Request) {
+func (s *appServer) agents(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.runStore.ActivitySnapshot())
 }
 
 func (s *appServer) agentByReference(w http.ResponseWriter, r *http.Request) {
 	issueIdentifier := strings.ToUpper(r.PathValue("issue"))
 	if !agentrun.ValidIssueIdentifier(issueIdentifier) {
-		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		http.NotFound(w, r)
 		return
 	}
 	started, err := strconv.ParseInt(r.PathValue("started"), 10, 64)
 	if err != nil || started < 1 {
-		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		http.NotFound(w, r)
 		return
 	}
 	run, found := s.runStore.FindStarted(issueIdentifier, started)
@@ -424,10 +449,6 @@ func (s *appServer) agentByReference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeAgent(w, r, run.ID)
-}
-
-func (s *appServer) agent(w http.ResponseWriter, r *http.Request) {
-	s.writeAgent(w, r, r.PathValue("id"))
 }
 
 func (s *appServer) writeAgent(w http.ResponseWriter, r *http.Request, id string) {
@@ -880,36 +901,19 @@ func queryInt(r *http.Request, name string, fallback, minimum, maximum int) (int
 	return parsed, nil
 }
 
-func validEventID(value string) bool {
-	if len(value) != sha256.Size*2 {
-		return false
-	}
-	decoded, err := hex.DecodeString(value)
-	return err == nil && len(decoded) == sha256.Size
-}
-
-func frontend(web fs.FS) http.Handler {
-	files := http.FileServerFS(web)
-
+func canonicalPaths(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
-			return
-		}
-
-		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
-		if name == "." {
-			name = "index.html"
-		}
-		if _, err := fs.Stat(web, name); err == nil {
-			files.ServeHTTP(w, r)
-			return
-		}
-		if strings.HasPrefix(name, "api/") {
+		if r.URL.Path != "/" && (strings.HasSuffix(r.URL.Path, "/") || path.Clean(r.URL.Path) != r.URL.Path) {
 			http.NotFound(w, r)
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
 
+func frontendPage(web fs.FS) http.Handler {
+	files := http.FileServerFS(web)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		indexRequest := r.Clone(r.Context())
 		indexURL := *r.URL
 		indexURL.Path = "/"
@@ -918,3 +922,5 @@ func frontend(web fs.FS) http.Handler {
 		files.ServeHTTP(w, indexRequest)
 	})
 }
+
+func frontendAsset(web fs.FS) http.Handler { return http.FileServerFS(web) }
