@@ -65,7 +65,7 @@ func TestGoogleCallbackCreatesSessionForAllowedVerifiedEmail(t *testing.T) {
 	})}
 	auth := testAuthenticator(t, client)
 
-	stateCookie, state := beginLogin(t, auth, "/agents/run-123")
+	stateCookie, state := beginLogin(t, auth, "/agents/ENG-23/1783714439062/run")
 	callback := httptest.NewRecorder()
 	request := httptest.NewRequest(
 		http.MethodGet,
@@ -74,7 +74,7 @@ func TestGoogleCallbackCreatesSessionForAllowedVerifiedEmail(t *testing.T) {
 	)
 	request.AddCookie(stateCookie)
 	auth.Callback(callback, request)
-	if callback.Code != http.StatusFound || callback.Header().Get("Location") != "/agents/run-123" {
+	if callback.Code != http.StatusFound || callback.Header().Get("Location") != "/agents/ENG-23/1783714439062/run" {
 		t.Fatalf("callback = %d, location %q, body %q", callback.Code, callback.Header().Get("Location"), callback.Body.String())
 	}
 	if !responseDeletesCookie(callback, stateCookieName) {
@@ -155,24 +155,27 @@ func TestLoginRejectsExternalReturnURL(t *testing.T) {
 	if err := auth.verify(cookie.Value, &claims); err != nil {
 		t.Fatalf("verify state: %v", err)
 	}
-	if claims.State != state || claims.Next != "/activity" {
+	if claims.State != state || claims.Next != "/home" {
 		t.Fatalf("state claims = %#v", claims)
 	}
 }
 
-func TestLoginAllowsProtectedActivityReturnURLsOnly(t *testing.T) {
+func TestLoginAllowsCanonicalProtectedReturnURLsOnly(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
 		next string
 		want string
 	}{
-		{name: "Linear activity", next: "/activity/linear?page=2", want: "/activity/linear?page=2"},
-		{name: "agent activity", next: "/activity/agents", want: "/activity/agents"},
-		{name: "agent run", next: "/activity/agents/ENG-23/1783714439062/run", want: "/activity/agents/ENG-23/1783714439062/run"},
+		{name: "home", next: "/home", want: "/home"},
+		{name: "wire", next: "/wire?page=2", want: "/wire?page=2"},
+		{name: "agents", next: "/agents", want: "/agents"},
+		{name: "agent run", next: "/agents/ENG-23/1783714439062/run", want: "/agents/ENG-23/1783714439062/run"},
 		{name: "settings", next: "/settings", want: "/settings"},
-		{name: "lookalike", next: "/activity/linear-public", want: "/activity"},
-		{name: "public summary", next: "/activity", want: "/activity"},
+		{name: "lookalike", next: "/wire-public", want: "/home"},
+		{name: "legacy activity", next: "/activity", want: "/home"},
+		{name: "legacy run id", next: "/agents/run-123", want: "/home"},
+		{name: "trailing slash", next: "/wire/", want: "/home"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
