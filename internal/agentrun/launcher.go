@@ -158,7 +158,7 @@ func (l *TmuxLauncher) prepareRemote(ctx context.Context) error {
 	if !repository.IsPrivate {
 		return errors.New("bootstrap GitHub repository is not private")
 	}
-	if repository.DefaultBranchRef != nil && repository.DefaultBranchRef.Name != l.config.BaseBranch {
+	if repository.DefaultBranchRef != nil && repository.DefaultBranchRef.Name != "" && repository.DefaultBranchRef.Name != l.config.BaseBranch {
 		return fmt.Errorf("GitHub default branch is %q, want %q", repository.DefaultBranchRef.Name, l.config.BaseBranch)
 	}
 	return nil
