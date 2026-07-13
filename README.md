@@ -16,7 +16,7 @@ Factory initially launches only for a signed `Issue` `update` webhook where the 
 
 1. The webhook is signature-checked and replay-window checked.
 2. The delivery and a pending run are persisted before the handler returns `200`.
-3. The background manager fetches and fast-forwards the internal clone at `~/.local/share/factory/workspace/network` to its configured upstream. `FACTORY_REPO_PATH` makes this managed clone authoritative for Factory implementation worktrees, the post-merge primary update, and deployment; a Linear project `Local Path` is used only as read-only subsystem-routing evidence. Registered linked worktrees are excluded from the main checkout's dirty check; all other local changes and divergence still fail preparation instead of being overwritten. Before starting a new pending run with no other agent active, Factory removes clean, unlocked worktrees whose branches are already integrated into the fetched upstream as a backstop for interrupted cleanup.
+3. The background manager resolves the Linear project's GitHub Repo and Local Path against the allowlisted repository catalog, then fetches and fast-forwards that repository's isolated internal clone. Registered linked worktrees are excluded from the clone's dirty check; all other local changes and divergence fail preparation instead of being overwritten. Before starting a pending run with no other agent active, Factory removes clean, unlocked worktrees whose branches are already integrated into that repository's fetched upstream as a backstop for interrupted cleanup.
 4. One isolated tmux session named `factory-<issue-lower>` starts on the `factory-agents` tmux socket.
 5. The principal runs `$do TEAM-123` with Codex `gpt-5.6-sol` and high reasoning through gated research, implementation, and the complete ready-for-human-merge predicate. Comment continuations fresh-read the Linear thread and treat only unaddressed human feedback as new scope.
 6. A failed Codex process is resumed, when a thread ID is available, up to three total attempts.
@@ -83,7 +83,7 @@ During the PR green and human-merge loop, a Factory agent waits through the depr
   --wait 60s
 ```
 
-The JSON response and GitHub-specific cursor domain remain unchanged, but the adapter now reads the unified wire. Factory still maintains the old `github-events.json` only as an exact-sequence post-wire rollback projection, never as ingress or dispatch authority. Events are wake signals only; the agent always refreshes authoritative PR, review, check, and merge state with `gh` before acting. While the PR is open, the agent remediates or keeps waiting; Yolo never authorizes a merge. Register or refresh a repository webhook with `bin/network-app github-hook owner/repository` after `refresh-env` and deployment.
+The JSON response and GitHub-specific cursor domain remain unchanged, but the adapter now reads the unified wire. Factory still maintains the old `github-events.json` only as an exact-sequence post-wire rollback projection, never as ingress or dispatch authority. Events are wake signals only; the agent always refreshes authoritative PR, review, check, and merge state with `gh` before acting. While the PR is open, the agent remediates or keeps waiting; Yolo never authorizes a merge. Register or refresh a repository webhook with `~/.local/bin/nags github-hook owner/repository` after `refresh-env` and deployment.
 
 ## Human merge and deployment
 
@@ -156,7 +156,7 @@ HTTP Basic authentication remains available as break-glass access for the protec
 - Username: `factory`
 - Password: `~/.config/network-app/factory-viewer-password.txt`
 
-`bin/network-app refresh-env` reads the Factory-specific OAuth client from `op://Code/GCP the-nags/factory oauth credentials`, preserves or creates the session signing key and 48-character break-glass password, and writes them to the private service environment. It maintains the password in a separate `0600` file for operator use. Agent pane output is redacted against credentials available to the agent before it is returned by the API.
+`~/.local/bin/nags refresh-env` reads the Factory-specific OAuth client from `op://Code/GCP the-nags/factory oauth credentials`, preserves or creates the session signing key and 48-character break-glass password, and writes them to the private service environment. It maintains the password in a separate `0600` file for operator use. Agent pane output is redacted against credentials available to the agent before it is returned by the API.
 
 ## Configuration
 
@@ -171,7 +171,7 @@ The launchd wrapper sources `~/.config/network-app/env`. Factory requires:
 - `FACTORY_SESSION_KEY` for signed browser sessions.
 - `FACTORY_VIEWER_PASSWORD` for break-glass agent inspection.
 
-`bin/network-app refresh-env` reads the API key from `op://Code/Linear API key/credential`, validates it against Linear, derives the trigger actor ID from the authenticated viewer, and writes both values to the private launchd environment. Codex uses `.agents/skills/do/scripts/linear_graphql.py` to call Linear's GraphQL API directly, so the headless workflow does not depend on MCP tool discovery.
+`~/.local/bin/nags refresh-env` reads the API key from `op://Code/Linear API key/credential`, validates it against Linear, derives the trigger actor ID from the authenticated viewer, and writes both values to the private launchd environment. The provider installs its guarded `$do` workflow under `~/.agents/skills/do`, so every allowlisted repository uses the same Linear and human-merge gates without copying provider policy into tenant source.
 
 Optional variables:
 
@@ -180,7 +180,7 @@ Optional variables:
 - `FACTORY_REPO_PATH`, default `~/.local/share/factory/workspace/network`.
 - `FACTORY_TMUX_SOCKET`, default `factory-agents`.
 
-Lifecycle and deployment evidence are deliberately restricted to `tomnagengast/network` on `main`. Setting `FACTORY_REPOSITORY` or `FACTORY_BASE_BRANCH` to another value fails startup until a repository-owned deployment authorization contract is implemented.
+The allowlisted catalog currently routes `tomnagengast/network`, `tomnagengast/notebook`, and `tomnagengast/factory`, all on `main`. Linear project GitHub Repo and Local Path metadata must exactly match the catalog. Unknown, mismatched, or unregistered repositories fail before a run is claimed. Every run persists its repository, path, and base branch through launch, checkpoint, completion, and deployment evidence.
 
 The public activity API exposes only delivery metadata and opaque run state. Linear issue identifiers, raw request bodies, prompts, logs, errors, repository paths, and session names remain private unless the operator authenticates to the dedicated Linear or agent activity routes.
 
@@ -189,9 +189,11 @@ Factory also starts its tmux server with a restricted environment. Agent process
 ## Deploy and verify
 
 ```bash
-bin/network-app refresh-env
-bin/network-app deploy factory --expected-commit "$(git rev-parse HEAD)"
-bin/network-app github-hook tomnagengast/network
+~/.local/bin/nags refresh-env
+~/.local/bin/nags deploy --expected-commit "$(git rev-parse HEAD)"
+~/.local/bin/nags github-hook tomnagengast/network
+~/.local/bin/nags github-hook tomnagengast/notebook
+~/.local/bin/nags github-hook tomnagengast/factory
 curl -fsS https://factory.nags.cloud/api/healthz
 curl -fsS https://factory.nags.cloud/api/activity | jq .agentRuns
 ```
@@ -214,7 +216,7 @@ The local health response, public health response, `current.json`, and `current`
 For a failed release, inspect the failed receipt under `~/.local/share/factory/deployments/failed/` and confirm the previous release recovered. To select a known successful release explicitly:
 
 ```bash
-bin/network-app rollback factory --to <deployment-id>
+~/.local/bin/nags rollback factory --to <deployment-id>
 curl -fsS http://127.0.0.1:8092/api/healthz | jq .
 curl -fsS https://factory.nags.cloud/api/healthz | jq .
 ```

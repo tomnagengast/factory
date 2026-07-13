@@ -85,8 +85,8 @@ func TestAgentStepsSkipLifecycleEventsAndKeepStableIDs(t *testing.T) {
 
 	stream := strings.Join([]string{
 		`{"type":"thread.started","thread_id":"thread-1"}`,
-		`{"type":"item.started","item":{"id":"item-1","type":"file_change","status":"in_progress","changes":[{"path":"apps/factory/main.go"}]}}`,
-		`{"type":"item.completed","item":{"id":"item-1","type":"file_change","status":"completed","changes":[{"path":"apps/factory/main.go"}]}}`,
+		`{"type":"item.started","item":{"id":"item-1","type":"file_change","status":"in_progress","changes":[{"path":"main.go"}]}}`,
+		`{"type":"item.completed","item":{"id":"item-1","type":"file_change","status":"completed","changes":[{"path":"main.go"}]}}`,
 		`{"type":"item.completed","item":{"id":"item-2","type":"agent_message","text":"A concise update for the operator."}}`,
 	}, "\n")
 	redact := func(value string) string { return value }
@@ -96,7 +96,7 @@ func TestAgentStepsSkipLifecycleEventsAndKeepStableIDs(t *testing.T) {
 	if len(first) != 2 {
 		t.Fatalf("steps = %#v", first)
 	}
-	if first[0].Summary != "apps/factory/main.go" || first[0].Status != "completed" || !strings.Contains(first[0].Payload, `"type": "item.completed"`) {
+	if first[0].Summary != "main.go" || first[0].Status != "completed" || !strings.Contains(first[0].Payload, `"type": "item.completed"`) {
 		t.Fatalf("file step = %#v", first[0])
 	}
 	if first[1].Summary != "A concise update for the operator." || first[1].Type != "agent_message" {
