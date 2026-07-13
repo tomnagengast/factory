@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
-	"github.com/tomnagengast/network/apps/factory/internal/eventwire"
-	"github.com/tomnagengast/network/apps/factory/internal/githubhook"
-	"github.com/tomnagengast/network/apps/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/agentrun"
+	"github.com/tomnagengast/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/internal/githubhook"
+	"github.com/tomnagengast/factory/internal/linearhook"
 )
 
 func runAgentCommand(ctx context.Context, args []string) (int, bool) {

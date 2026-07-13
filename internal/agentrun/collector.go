@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tomnagengast/network/apps/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/internal/eventwire"
 )
 
 const collectorStateVersion = 1

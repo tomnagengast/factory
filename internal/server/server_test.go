@@ -20,12 +20,12 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/tomnagengast/network/apps/factory/internal/activity"
-	"github.com/tomnagengast/network/apps/factory/internal/agentrun"
-	"github.com/tomnagengast/network/apps/factory/internal/eventwire"
-	"github.com/tomnagengast/network/apps/factory/internal/githubhook"
-	"github.com/tomnagengast/network/apps/factory/internal/linearhook"
-	"github.com/tomnagengast/network/apps/factory/internal/viewerauth"
+	"github.com/tomnagengast/factory/internal/activity"
+	"github.com/tomnagengast/factory/internal/agentrun"
+	"github.com/tomnagengast/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/internal/githubhook"
+	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/viewerauth"
 )
 
 var testNow = time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC)

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tomnagengast/network/apps/factory/internal/eventwire"
-	"github.com/tomnagengast/network/apps/factory/internal/githubhook"
-	"github.com/tomnagengast/network/apps/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/internal/githubhook"
+	"github.com/tomnagengast/factory/internal/linearhook"
 )
 
 func TestGitHubEventsHelperReturnsMatchingJournalEvents(t *testing.T) {

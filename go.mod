@@ -1,3 +1,3 @@
-module github.com/tomnagengast/network/apps/factory
+module github.com/tomnagengast/factory
 
 go 1.26.5
