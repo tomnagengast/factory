@@ -212,7 +212,8 @@ func TestManagerHonorsConcurrencyLimit(t *testing.T) {
 	}
 	launcher := &fakeLauncher{sessions: make(map[string]bool)}
 	manager := newTestManager(t, store, launcher, t.TempDir(), func() time.Time { return now })
-	manager.maxConcurrent = 1
+	limit := 1
+	manager.maxConcurrent = func() int { return limit }
 	manager.reconcile(context.Background())
 
 	if len(launcher.starts) != 1 {
@@ -220,6 +221,11 @@ func TestManagerHonorsConcurrencyLimit(t *testing.T) {
 	}
 	if got := store.Snapshot().Active; got != 2 {
 		t.Fatalf("active runs = %d, want 2 including one pending", got)
+	}
+	limit = 2
+	manager.reconcile(context.Background())
+	if len(launcher.starts) != 2 {
+		t.Fatalf("starts after limit change = %d, want 2", len(launcher.starts))
 	}
 }
 
@@ -289,7 +295,7 @@ func TestManagerCollectsFinalAgentOutputAndTerminalTransition(t *testing.T) {
 		t.Fatalf("new collector: %v", err)
 	}
 	launcher := &fakeLauncher{sessions: make(map[string]bool), results: make(map[string]ProcessResult)}
-	manager, err := NewManager(store, launcher, collector, fakePullRequestReader{}, permissiveTerminalValidator{now: func() time.Time { return now }}, testLifecycleConfig(), stateRoot, 1, time.Second, time.Minute, slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return now })
+	manager, err := NewManager(store, launcher, collector, fakePullRequestReader{}, permissiveTerminalValidator{now: func() time.Time { return now }}, testLifecycleConfig(), stateRoot, func() int { return 1 }, time.Second, time.Minute, slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -837,7 +843,7 @@ func newTestManager(
 		permissiveTerminalValidator{now: now},
 		testLifecycleConfig(),
 		filepath.Clean(stateRoot),
-		3,
+		func() int { return 3 },
 		time.Second,
 		time.Minute,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -870,7 +876,7 @@ func newTestManagerWithReader(
 		terminal,
 		testLifecycleConfig(),
 		filepath.Clean(stateRoot),
-		3,
+		func() int { return 3 },
 		time.Second,
 		time.Minute,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),

@@ -11,7 +11,40 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/settings"
 )
+
+func TestLoadRunSettingsUsesValidatedSharedStateRoot(t *testing.T) {
+	stateRoot := t.TempDir()
+	runID := "run-test"
+	runDirectory := filepath.Join(stateRoot, "runs", runID)
+	t.Setenv("FACTORY_RUN_ID", runID)
+	t.Setenv("FACTORY_RUN_DIR", runDirectory)
+
+	defaults, err := loadRunSettings(runDirectory)
+	if err != nil {
+		t.Fatalf("load defaults: %v", err)
+	}
+	if defaults.Agents.Principal.Model != "gpt-5.6-sol" {
+		t.Fatalf("default settings = %#v", defaults)
+	}
+	store, err := settings.Open(filepath.Join(stateRoot, "data", "settings.json"), settings.Defaults(3))
+	if err != nil {
+		t.Fatalf("open settings: %v", err)
+	}
+	candidate := store.Snapshot()
+	candidate.Agents.Principal.Model = "gpt-custom"
+	if _, err := store.Update(candidate.Revision, candidate, time.Now()); err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+	loaded, err := loadRunSettings(runDirectory)
+	if err != nil || loaded.Agents.Principal.Model != "gpt-custom" {
+		t.Fatalf("loaded settings = %#v, %v", loaded, err)
+	}
+	if _, err := loadRunSettings(filepath.Join(stateRoot, "other", runID)); err == nil {
+		t.Fatal("invalid run directory was accepted")
+	}
+}
 
 func TestGitHubEventsHelperReturnsMatchingJournalEvents(t *testing.T) {
 	stateRoot := t.TempDir()

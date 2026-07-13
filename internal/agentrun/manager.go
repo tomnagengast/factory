@@ -35,7 +35,7 @@ type Manager struct {
 	terminal      TerminalValidator
 	lifecycle     LifecycleConfig
 	stateRoot     string
-	maxConcurrent int
+	maxConcurrent func() int
 	pollInterval  time.Duration
 	mergeInterval time.Duration
 	logger        *slog.Logger
@@ -51,7 +51,7 @@ func NewManager(
 	terminal TerminalValidator,
 	lifecycle LifecycleConfig,
 	stateRoot string,
-	maxConcurrent int,
+	maxConcurrent func() int,
 	pollInterval time.Duration,
 	mergeInterval time.Duration,
 	logger *slog.Logger,
@@ -78,7 +78,7 @@ func NewManager(
 	if stateRoot == "" {
 		return nil, fmt.Errorf("agent run manager: state root is required")
 	}
-	if maxConcurrent < 1 {
+	if maxConcurrent == nil || maxConcurrent() < 1 {
 		return nil, fmt.Errorf("agent run manager: max concurrency must be positive")
 	}
 	if pollInterval <= 0 {
@@ -149,6 +149,11 @@ func (m *Manager) reconcile(ctx context.Context) {
 	}()
 
 	snapshot := m.store.Snapshot()
+	maxConcurrent := m.maxConcurrent()
+	if maxConcurrent < 1 {
+		m.logger.Error("read agent concurrency", "value", maxConcurrent)
+		return
+	}
 	running := 0
 	for _, run := range snapshot.Runs {
 		switch run.State {
@@ -160,12 +165,12 @@ func (m *Manager) reconcile(ctx context.Context) {
 		}
 	}
 
-	if running >= m.maxConcurrent {
+	if running >= maxConcurrent {
 		return
 	}
 	prepared := false
 	for _, run := range snapshot.Runs {
-		if (run.State != StatePending && run.State != StatePostMergePending) || running >= m.maxConcurrent {
+		if (run.State != StatePending && run.State != StatePostMergePending) || running >= maxConcurrent {
 			continue
 		}
 		if run.NextReconcileAt != nil && m.now().Before(*run.NextReconcileAt) {

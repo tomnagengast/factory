@@ -1405,3 +1405,490 @@ select {
     grid-column: 1 / -1;
   }
 }
+
+.settings-shell {
+  width: min(1280px, 100%);
+}
+
+.settings-hero,
+.settings-loading {
+  padding: clamp(64px, 8vw, 96px) 0 56px;
+}
+
+.settings-intro {
+  max-width: 66ch;
+  margin: 28px 0 0;
+  color: var(--muted);
+  font-size: clamp(1rem, 1.6vw, 1.2rem);
+  line-height: 1.7;
+}
+
+.settings-revision {
+  margin: 48px 0 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-revision > div {
+  min-width: 0;
+  padding: 22px 20px 22px 0;
+}
+
+.settings-revision > div + div {
+  padding-left: 20px;
+  border-left: 1px solid var(--border);
+}
+
+.settings-revision dt,
+.workflow-id,
+.step-heading span,
+.step-number {
+  color: var(--quiet);
+  font: 500 0.64rem/1.4 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settings-revision dd {
+  margin: 8px 0 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-form {
+  display: grid;
+}
+
+.settings-section {
+  padding: 64px 0;
+  border-top: 1px solid var(--border);
+}
+
+.settings-section-heading {
+  max-width: 720px;
+  margin-bottom: 32px;
+}
+
+.settings-section-heading h2,
+.workflow-editor h3,
+.workflow-steps h4 {
+  margin: 0;
+  color: var(--text);
+}
+
+.settings-section-heading h2 {
+  font-size: clamp(1.65rem, 3vw, 2.5rem);
+  font-weight: 500;
+  letter-spacing: -0.04em;
+}
+
+.settings-section-heading p {
+  max-width: 64ch;
+  margin: 14px 0 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.workflow-heading {
+  max-width: none;
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 32px;
+}
+
+.trigger-grid,
+.agent-settings-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.trigger-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.agent-settings-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.settings-group {
+  min-width: 0;
+  margin: 0;
+  padding: 28px;
+  display: grid;
+  align-content: start;
+  gap: 24px;
+  border: 1px solid var(--border);
+}
+
+.settings-group legend {
+  padding: 0 10px 0 0;
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.settings-field {
+  min-width: 0;
+  display: grid;
+  gap: 9px;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.settings-field small,
+.settings-note {
+  color: var(--quiet);
+  font-size: 0.72rem;
+  font-weight: 400;
+  line-height: 1.55;
+}
+
+.settings-note {
+  margin: 0;
+}
+
+.settings-field input,
+.settings-field select,
+.workflow-steps input {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text);
+  background: color-mix(in srgb, var(--page) 70%, transparent);
+  outline: 0;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.settings-field input:hover,
+.settings-field select:hover,
+.workflow-steps input:hover {
+  border-color: color-mix(in srgb, var(--accent) 56%, var(--border));
+}
+
+.settings-field input:focus,
+.settings-field select:focus,
+.workflow-steps input:focus {
+  border-color: var(--accent);
+  background: var(--page);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.settings-field input:read-only {
+  color: var(--quiet);
+  background: transparent;
+}
+
+.settings-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  color: var(--text);
+  font-size: 0.84rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.settings-toggle.compact {
+  align-items: center;
+  font-size: 0.72rem;
+}
+
+.settings-toggle input {
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+}
+
+.settings-toggle:has(input:disabled) {
+  color: var(--quiet);
+  cursor: not-allowed;
+}
+
+.primary-button,
+.secondary-button,
+.text-button,
+.step-actions button {
+  border-radius: 0;
+  cursor: pointer;
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease, transform 120ms ease;
+}
+
+.primary-button,
+.secondary-button {
+  min-height: 44px;
+  padding: 11px 18px;
+  border: 1px solid var(--accent);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.primary-button {
+  color: var(--accent-text);
+  background: var(--accent);
+}
+
+.secondary-button {
+  color: var(--accent-textual);
+  background: transparent;
+}
+
+.text-button,
+.step-actions button {
+  padding: 7px 0;
+  border: 0;
+  color: var(--accent-textual);
+  background: transparent;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.danger-button {
+  color: var(--failed);
+}
+
+.primary-button:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.secondary-button:hover:not(:disabled),
+.text-button:hover:not(:disabled),
+.step-actions button:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text);
+}
+
+.primary-button:active:not(:disabled),
+.secondary-button:active:not(:disabled),
+.text-button:active:not(:disabled),
+.step-actions button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.primary-button:focus-visible,
+.secondary-button:focus-visible,
+.text-button:focus-visible,
+.step-actions button:focus-visible,
+.settings-toggle input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.primary-button:disabled,
+.secondary-button:disabled,
+.text-button:disabled,
+.step-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.workflow-list {
+  display: grid;
+  gap: 20px;
+}
+
+.workflow-editor {
+  padding: clamp(24px, 4vw, 40px);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 80%, var(--page));
+}
+
+.workflow-meta,
+.workflow-actions,
+.step-heading,
+.settings-save,
+.settings-save > div {
+  display: flex;
+  align-items: center;
+}
+
+.workflow-meta,
+.step-heading,
+.settings-save {
+  justify-content: space-between;
+}
+
+.workflow-meta {
+  gap: 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.workflow-editor h3 {
+  margin-top: 8px;
+  font-size: clamp(1.2rem, 2.5vw, 1.75rem);
+  font-weight: 500;
+  letter-spacing: -0.03em;
+}
+
+.workflow-actions {
+  gap: 18px;
+}
+
+.workflow-fields {
+  margin-top: 28px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(180px, 0.5fr);
+  gap: 16px;
+}
+
+.workflow-steps {
+  margin-top: 32px;
+}
+
+.workflow-steps h4 {
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.workflow-steps ol {
+  margin: 14px 0 16px;
+  padding: 0;
+  display: grid;
+  list-style: none;
+}
+
+.workflow-steps li {
+  min-width: 0;
+  padding: 12px 0;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.workflow-steps li:last-child {
+  border-bottom: 1px solid var(--border);
+}
+
+.step-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.capacity-section .settings-field {
+  max-width: 280px;
+}
+
+.settings-save {
+  position: sticky;
+  z-index: 5;
+  bottom: 12px;
+  gap: 24px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--page) 94%, transparent);
+  box-shadow: 0 18px 54px var(--shadow);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.settings-save > div {
+  min-width: 0;
+  gap: 14px;
+}
+
+.settings-save strong {
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.settings-save span {
+  overflow: hidden;
+  color: var(--quiet);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-save.failed strong,
+.settings-save.conflict strong {
+  color: var(--failed);
+}
+
+.settings-save.saved strong {
+  color: var(--accent-textual);
+}
+
+.settings-footer {
+  margin-top: 64px;
+}
+
+@media (max-width: 960px) {
+  .agent-settings-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .settings-revision,
+  .trigger-grid,
+  .workflow-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-revision > div,
+  .settings-revision > div + div {
+    padding: 18px 0;
+    border-left: 0;
+  }
+
+  .settings-revision > div + div {
+    border-top: 1px solid var(--border);
+  }
+
+  .workflow-heading,
+  .workflow-meta,
+  .settings-save,
+  .settings-save > div {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workflow-heading,
+  .workflow-meta,
+  .settings-save {
+    gap: 18px;
+  }
+
+  .workflow-actions {
+    justify-content: space-between;
+  }
+
+  .workflow-steps li {
+    grid-template-columns: 28px minmax(0, 1fr);
+  }
+
+  .step-actions {
+    grid-column: 2;
+    flex-wrap: wrap;
+  }
+
+  .settings-save span {
+    white-space: normal;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .settings-save {
+    background: var(--page);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}

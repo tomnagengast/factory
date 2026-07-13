@@ -21,6 +21,7 @@ import (
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
 	"github.com/tomnagengast/factory/internal/server"
+	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/viewerauth"
 )
 
@@ -114,6 +115,11 @@ func serve(ctx context.Context) error {
 	}
 	stateRoot := filepath.Join(home, ".local", "share", "factory")
 	dataRoot := filepath.Join(stateRoot, "data")
+	maxConcurrentRuns := envInt("FACTORY_MAX_AGENTS", defaultMaxConcurrentRuns)
+	settingsStore, err := settings.Open(filepath.Join(dataRoot, "settings.json"), settings.Defaults(maxConcurrentRuns))
+	if err != nil {
+		return err
+	}
 	activityStore, err := activity.Open(filepath.Join(dataRoot, "linear-activity.json"), activityEventLimit)
 	if err != nil {
 		return err
@@ -261,7 +267,7 @@ func serve(ctx context.Context) error {
 			BaseBranch: baseBranch,
 		},
 		stateRoot,
-		envInt("FACTORY_MAX_AGENTS", defaultMaxConcurrentRuns),
+		func() int { return settingsStore.Snapshot().Runtime.MaxConcurrentRuns },
 		2*time.Second,
 		mergeReconcileInterval,
 		slog.Default(),
@@ -294,6 +300,7 @@ func serve(ctx context.Context) error {
 		RunStore:           runStore,
 		RunNotifier:        manager,
 		AgentObserver:      observer,
+		Settings:           settingsStore,
 		ViewerAuth:         viewerAuth,
 		LinearSecret:       []byte(secret),
 		GitHubSecret:       []byte(githubSecret),

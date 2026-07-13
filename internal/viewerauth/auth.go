@@ -418,6 +418,8 @@ func safeNext(value string) string {
 func protectedPagePath(value string) bool {
 	return value == "/agents" ||
 		strings.HasPrefix(value, "/agents/") ||
+		value == "/settings" ||
+		strings.HasPrefix(value, "/settings/") ||
 		value == "/activity/linear" ||
 		strings.HasPrefix(value, "/activity/linear/") ||
 		value == "/activity/agents" ||

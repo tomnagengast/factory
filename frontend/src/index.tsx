@@ -156,8 +156,62 @@ type AgentView = {
   windows: AgentWindow[];
 };
 
+type TriggerSettings = {
+  enabled: boolean;
+  workflowId: string;
+};
+
+type LinearLabelTriggerSettings = TriggerSettings & {
+  label: string;
+};
+
+type WorkflowSettings = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  runner: "do";
+  steps: string[];
+};
+
+type ProviderSettings = {
+  model: string;
+  effort: string;
+};
+
+type FactorySettings = {
+  schema: number;
+  revision: number;
+  updatedAt?: string;
+  triggers: {
+    linearLabel: LinearLabelTriggerSettings;
+    linearComment: TriggerSettings;
+  };
+  workflows: WorkflowSettings[];
+  agents: {
+    principal: ProviderSettings & { maxAttempts: number };
+    codexChild: ProviderSettings;
+    claudeChild: ProviderSettings;
+  };
+  runtime: {
+    maxConcurrentRuns: number;
+  };
+};
+
+type SettingsSaveResult = {
+  snapshot: FactorySettings;
+  conflict: boolean;
+};
+
+type SettingsSaveState =
+  | "idle"
+  | "dirty"
+  | "saving"
+  | "saved"
+  | "conflict"
+  | "failed";
+
 const refreshIntervalMs = 2000;
-type ActivitySection = "overview" | "linear" | "agents";
+type ActivitySection = "overview" | "linear" | "agents" | "settings";
 
 const activityPageSize = 25;
 const timeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -214,6 +268,36 @@ async function getAgentByReference(
     `/api/activity/agents/${encodeURIComponent(issueIdentifier)}/${encodeURIComponent(startedAt)}/run`,
     "Agent request",
   );
+}
+
+async function getSettings(): Promise<FactorySettings> {
+  return getJSON<FactorySettings>("/api/settings", "Settings request");
+}
+
+async function saveSettings(
+  candidate: FactorySettings,
+): Promise<SettingsSaveResult> {
+  const response = await fetch("/api/settings", {
+    method: "PUT",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(candidate),
+  });
+  if (response.status === 409) {
+    return {
+      snapshot: (await response.json()) as FactorySettings,
+      conflict: true,
+    };
+  }
+  if (!response.ok) {
+    const detail = (await response.text()).trim();
+    throw new Error(detail || `Settings update failed with ${response.status}`);
+  }
+  return {
+    snapshot: (await response.json()) as FactorySettings,
+    conflict: false,
+  };
 }
 
 async function getJSON<T>(url: string, label: string): Promise<T> {
@@ -310,6 +394,13 @@ function ActivityHeader(props: {
           href="/activity/agents"
         >
           Agents
+        </a>
+        <a
+          classList={{ active: props.section === "settings" }}
+          aria-current={props.section === "settings" ? "page" : undefined}
+          href="/settings"
+        >
+          Settings
         </a>
       </nav>
       <div class="listener" aria-live="polite">
@@ -729,6 +820,479 @@ function AgentActivityPage(): JSX.Element {
       </section>
     </main>
   );
+}
+
+function SettingsPage(): JSX.Element {
+  const [settings] = createResource(getSettings);
+
+  onMount(() => {
+    document.title = "Settings | Factory";
+  });
+
+  return (
+    <main class="activity-page settings-page" id="main-content">
+      <section class="activity-shell settings-shell" aria-labelledby="settings-title">
+        <ActivityHeader
+          section="settings"
+          state={resourceState(settings.loading, settings.error)}
+          label={settings.error ? "Settings unavailable" : "Private configuration"}
+        />
+
+        <Show
+          when={settings()}
+          fallback={
+            <div class="settings-loading" aria-live="polite">
+              <p class="section-label">Runtime policy</p>
+              <h1 class="activity-title compact-title" id="settings-title">
+                {settings.error ? "Settings unavailable" : "Opening settings"}
+              </h1>
+              <Show when={settings.error}>
+                <InlineError message="Factory settings could not be loaded." />
+              </Show>
+            </div>
+          }
+        >
+          {(snapshot) => <SettingsEditor initial={snapshot()} />}
+        </Show>
+      </section>
+    </main>
+  );
+}
+
+function SettingsEditor(props: { initial: FactorySettings }): JSX.Element {
+  const [draft, setDraft] = createSignal(cloneSettings(props.initial));
+  const [saveState, setSaveState] = createSignal<SettingsSaveState>("idle");
+  const [message, setMessage] = createSignal("");
+  const enabledWorkflows = (): WorkflowSettings[] =>
+    draft().workflows.filter((workflow) => workflow.enabled);
+
+  function update(mutator: (value: FactorySettings) => void): void {
+    setDraft((current) => {
+      const next = cloneSettings(current);
+      mutator(next);
+      return next;
+    });
+    setSaveState("dirty");
+    setMessage("Unsaved changes");
+  }
+
+  function workflowAssigned(id: string): boolean {
+    const triggers = draft().triggers;
+    return triggers.linearLabel.workflowId === id || triggers.linearComment.workflowId === id;
+  }
+
+  function addWorkflow(): void {
+    update((next) => {
+      const ids = new Set(next.workflows.map((workflow) => workflow.id));
+      let sequence = next.workflows.length + 1;
+      while (ids.has(`workflow-${sequence}`)) {
+        sequence += 1;
+      }
+      next.workflows.push({
+        id: `workflow-${sequence}`,
+        name: `Workflow ${sequence}`,
+        enabled: true,
+        runner: "do",
+        steps: ["Describe the first workflow step"],
+      });
+    });
+  }
+
+  function removeWorkflow(id: string): void {
+    if (workflowAssigned(id) || draft().workflows.length === 1) {
+      return;
+    }
+    update((next) => {
+      next.workflows = next.workflows.filter((workflow) => workflow.id !== id);
+    });
+  }
+
+  function moveStep(workflowIndex: number, stepIndex: number, direction: -1 | 1): void {
+    const target = stepIndex + direction;
+    if (target < 0 || target >= draft().workflows[workflowIndex].steps.length) {
+      return;
+    }
+    update((next) => {
+      const steps = next.workflows[workflowIndex].steps;
+      [steps[stepIndex], steps[target]] = [steps[target], steps[stepIndex]];
+    });
+  }
+
+  async function submit(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    setSaveState("saving");
+    setMessage("Saving revision");
+    try {
+      const result = await saveSettings(draft());
+      setDraft(cloneSettings(result.snapshot));
+      if (result.conflict) {
+        setSaveState("conflict");
+        setMessage("A newer revision was loaded. Review it before saving again.");
+        return;
+      }
+      setSaveState("saved");
+      setMessage(`Revision ${result.snapshot.revision} saved`);
+    } catch (error) {
+      setSaveState("failed");
+      setMessage(error instanceof Error ? error.message : "Settings update failed");
+    }
+  }
+
+  return (
+    <>
+      <div class="settings-hero">
+        <p class="section-label">Runtime policy</p>
+        <h1 class="activity-title compact-title" id="settings-title">
+          Settings
+        </h1>
+        <p class="settings-intro">
+          Change how new Factory runs begin and which provider settings they inherit.
+          Active provider processes keep the snapshot they started with.
+        </p>
+        <dl class="settings-revision">
+          <div>
+            <dt>Revision</dt>
+            <dd>{draft().revision}</dd>
+          </div>
+          <div>
+            <dt>Last updated</dt>
+            <dd>{draft().updatedAt ? formatTime(draft().updatedAt) : "Compiled defaults"}</dd>
+          </div>
+          <div>
+            <dt>Schema</dt>
+            <dd>{draft().schema}</dd>
+          </div>
+        </dl>
+      </div>
+
+      <form class="settings-form" onSubmit={submit}>
+        <section class="settings-section" aria-labelledby="trigger-settings-title">
+          <div class="settings-section-heading">
+            <h2 id="trigger-settings-title">Triggers</h2>
+            <p>External Linear events may start work. GitHub remediation and post-merge checks remain mandatory.</p>
+          </div>
+          <div class="trigger-grid">
+            <fieldset class="settings-group">
+              <legend>Linear label</legend>
+              <Toggle
+                checked={draft().triggers.linearLabel.enabled}
+                label="Start runs when the label is newly applied"
+                onChange={(checked) => update((next) => { next.triggers.linearLabel.enabled = checked; })}
+              />
+              <Field label="Label name" hint="Matched case-insensitively from signed Linear payloads.">
+                <input
+                  required
+                  maxlength={64}
+                  value={draft().triggers.linearLabel.label}
+                  onInput={(event) => update((next) => { next.triggers.linearLabel.label = event.currentTarget.value; })}
+                />
+              </Field>
+              <WorkflowSelect
+                value={draft().triggers.linearLabel.workflowId}
+                workflows={enabledWorkflows()}
+                onChange={(id) => update((next) => { next.triggers.linearLabel.workflowId = id; })}
+              />
+            </fieldset>
+
+            <fieldset class="settings-group">
+              <legend>Human comments</legend>
+              <Toggle
+                checked={draft().triggers.linearComment.enabled}
+                label="Start or resume continuations from eligible comments"
+                onChange={(checked) => update((next) => { next.triggers.linearComment.enabled = checked; })}
+              />
+              <p class="settings-note">
+                Comment events remain in the private journal for active observers even when continuation starts are disabled.
+              </p>
+              <WorkflowSelect
+                value={draft().triggers.linearComment.workflowId}
+                workflows={enabledWorkflows()}
+                onChange={(id) => update((next) => { next.triggers.linearComment.workflowId = id; })}
+              />
+            </fieldset>
+          </div>
+        </section>
+
+        <section class="settings-section" aria-labelledby="workflow-settings-title">
+          <div class="settings-section-heading workflow-heading">
+            <div>
+              <h2 id="workflow-settings-title">Workflows</h2>
+              <p>Ordered declarative steps are added to the fixed, safety-gated `$do` lifecycle.</p>
+            </div>
+            <button
+              class="secondary-button"
+              type="button"
+              disabled={draft().workflows.length >= 8}
+              onClick={addWorkflow}
+            >
+              Add workflow
+            </button>
+          </div>
+          <div class="workflow-list">
+            <For each={draft().workflows}>
+              {(workflow, workflowIndex) => (
+                <article class="workflow-editor" aria-labelledby={`workflow-${workflow.id}`}>
+                  <div class="workflow-meta">
+                    <div>
+                      <span class="workflow-id">{workflow.id}</span>
+                      <h3 id={`workflow-${workflow.id}`}>{workflow.name || "Untitled workflow"}</h3>
+                    </div>
+                    <div class="workflow-actions">
+                      <Toggle
+                        checked={workflow.enabled}
+                        disabled={workflowAssigned(workflow.id)}
+                        label={workflowAssigned(workflow.id) ? "Assigned" : "Enabled"}
+                        compact
+                        onChange={(checked) => update((next) => { next.workflows[workflowIndex()].enabled = checked; })}
+                      />
+                      <button
+                        class="text-button danger-button"
+                        type="button"
+                        disabled={workflowAssigned(workflow.id) || draft().workflows.length === 1}
+                        onClick={() => removeWorkflow(workflow.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                  <div class="workflow-fields">
+                    <Field label="Workflow name">
+                      <input
+                        required
+                        maxlength={80}
+                        value={workflow.name}
+                        onInput={(event) => update((next) => { next.workflows[workflowIndex()].name = event.currentTarget.value; })}
+                      />
+                    </Field>
+                    <Field label="Runner" hint="The executable lifecycle is intentionally fixed.">
+                      <input value="$do" readOnly />
+                    </Field>
+                  </div>
+                  <div class="workflow-steps">
+                    <div class="step-heading">
+                      <h4>Ordered steps</h4>
+                      <span>{workflow.steps.length} / 20</span>
+                    </div>
+                    <ol>
+                      <For each={workflow.steps}>
+                        {(step, stepIndex) => (
+                          <li>
+                            <span class="step-number">{String(stepIndex() + 1).padStart(2, "0")}</span>
+                            <input
+                              aria-label={`Step ${stepIndex() + 1} for ${workflow.name}`}
+                              required
+                              maxlength={240}
+                              value={step}
+                              onInput={(event) => update((next) => { next.workflows[workflowIndex()].steps[stepIndex()] = event.currentTarget.value; })}
+                            />
+                            <div class="step-actions" aria-label={`Reorder step ${stepIndex() + 1}`}>
+                              <button type="button" disabled={stepIndex() === 0} onClick={() => moveStep(workflowIndex(), stepIndex(), -1)}>
+                                Up
+                              </button>
+                              <button type="button" disabled={stepIndex() === workflow.steps.length - 1} onClick={() => moveStep(workflowIndex(), stepIndex(), 1)}>
+                                Down
+                              </button>
+                              <button
+                                type="button"
+                                disabled={workflow.steps.length === 1}
+                                onClick={() => update((next) => { next.workflows[workflowIndex()].steps.splice(stepIndex(), 1); })}
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </li>
+                        )}
+                      </For>
+                    </ol>
+                    <button
+                      class="text-button"
+                      type="button"
+                      disabled={workflow.steps.length >= 20}
+                      onClick={() => update((next) => { next.workflows[workflowIndex()].steps.push("Describe the next workflow step"); })}
+                    >
+                      Add step
+                    </button>
+                  </div>
+                </article>
+              )}
+            </For>
+          </div>
+        </section>
+
+        <section class="settings-section" aria-labelledby="agent-settings-title">
+          <div class="settings-section-heading">
+            <h2 id="agent-settings-title">Agent launches</h2>
+            <p>Model values become direct provider arguments. They are never interpreted by a shell.</p>
+          </div>
+          <div class="agent-settings-grid">
+            <ProviderEditor
+              title="Principal"
+              provider="codex"
+              value={draft().agents.principal}
+              onChange={(value) => update((next) => { next.agents.principal.model = value.model; next.agents.principal.effort = value.effort; })}
+            >
+              <Field label="Attempt limit" hint="Includes resumable provider failures.">
+                <input
+                  type="number"
+                  required
+                  min="1"
+                  max="5"
+                  value={draft().agents.principal.maxAttempts}
+                  onInput={(event) => update((next) => { next.agents.principal.maxAttempts = event.currentTarget.valueAsNumber; })}
+                />
+              </Field>
+            </ProviderEditor>
+            <ProviderEditor
+              title="Codex children"
+              provider="codex"
+              value={draft().agents.codexChild}
+              onChange={(value) => update((next) => { next.agents.codexChild = value; })}
+            />
+            <ProviderEditor
+              title="Claude children"
+              provider="claude"
+              value={draft().agents.claudeChild}
+              onChange={(value) => update((next) => { next.agents.claudeChild = value; })}
+            />
+          </div>
+        </section>
+
+        <section class="settings-section capacity-section" aria-labelledby="capacity-settings-title">
+          <div class="settings-section-heading">
+            <h2 id="capacity-settings-title">Capacity</h2>
+            <p>The manager reads this limit at the start of each reconcile pass and never interrupts active runs.</p>
+          </div>
+          <Field label="Maximum concurrent runs" hint="Allowed range: 1 to 10.">
+            <input
+              type="number"
+              required
+              min="1"
+              max="10"
+              value={draft().runtime.maxConcurrentRuns}
+              onInput={(event) => update((next) => { next.runtime.maxConcurrentRuns = event.currentTarget.valueAsNumber; })}
+            />
+          </Field>
+        </section>
+
+        <div class={`settings-save ${saveState()}`}>
+          <div aria-live="polite" role={saveState() === "failed" ? "alert" : "status"}>
+            <strong>{saveStateLabel(saveState())}</strong>
+            <span>{message() || "No unsaved changes"}</span>
+          </div>
+          <button class="primary-button" type="submit" disabled={saveState() === "saving" || saveState() === "idle" || saveState() === "saved"}>
+            {saveState() === "saving" ? "Saving" : "Save settings"}
+          </button>
+        </div>
+      </form>
+
+      <footer class="activity-footer settings-footer">
+        <span>Routing, secrets, merge authority, and deployment gates stay locked in code.</span>
+        <a class="text-link" href="/activity/agents">View agent runs</a>
+      </footer>
+    </>
+  );
+}
+
+function Field(props: { label: string; hint?: string; children: JSX.Element }): JSX.Element {
+  return (
+    <label class="settings-field">
+      <span>{props.label}</span>
+      {props.children}
+      <Show when={props.hint}>{(hint) => <small>{hint()}</small>}</Show>
+    </label>
+  );
+}
+
+function Toggle(props: {
+  checked: boolean;
+  disabled?: boolean;
+  compact?: boolean;
+  label: string;
+  onChange: (checked: boolean) => void;
+}): JSX.Element {
+  return (
+    <label classList={{ "settings-toggle": true, compact: Boolean(props.compact) }}>
+      <input
+        type="checkbox"
+        checked={props.checked}
+        disabled={props.disabled}
+        onChange={(event) => props.onChange(event.currentTarget.checked)}
+      />
+      <span>{props.label}</span>
+    </label>
+  );
+}
+
+function WorkflowSelect(props: {
+  value: string;
+  workflows: WorkflowSettings[];
+  onChange: (id: string) => void;
+}): JSX.Element {
+  return (
+    <Field label="Workflow" hint="Protected continuation segments use the label workflow.">
+      <select value={props.value} onChange={(event) => props.onChange(event.currentTarget.value)}>
+        <For each={props.workflows}>
+          {(workflow) => <option value={workflow.id}>{workflow.name}</option>}
+        </For>
+      </select>
+    </Field>
+  );
+}
+
+function ProviderEditor(props: {
+  title: string;
+  provider: "codex" | "claude";
+  value: ProviderSettings;
+  onChange: (value: ProviderSettings) => void;
+  children?: JSX.Element;
+}): JSX.Element {
+  const efforts = (): string[] => props.provider === "codex"
+    ? ["low", "medium", "high", "xhigh"]
+    : ["low", "medium", "high", "max"];
+  return (
+    <fieldset class="settings-group provider-editor">
+      <legend>{props.title}</legend>
+      <Field label="Model" hint="Letters, numbers, dots, slashes, colons, underscores, and hyphens.">
+        <input
+          required
+          maxlength={64}
+          pattern="[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}"
+          value={props.value.model}
+          onInput={(event) => props.onChange({ ...props.value, model: event.currentTarget.value })}
+        />
+      </Field>
+      <Field label="Reasoning effort">
+        <select
+          value={props.value.effort}
+          onChange={(event) => props.onChange({ ...props.value, effort: event.currentTarget.value })}
+        >
+          <For each={efforts()}>{(effort) => <option value={effort}>{effort}</option>}</For>
+        </select>
+      </Field>
+      {props.children}
+    </fieldset>
+  );
+}
+
+function cloneSettings(value: FactorySettings): FactorySettings {
+  return structuredClone(value);
+}
+
+function saveStateLabel(state: SettingsSaveState): string {
+  switch (state) {
+    case "dirty":
+      return "Ready to save";
+    case "saving":
+      return "Saving";
+    case "saved":
+      return "Saved";
+    case "conflict":
+      return "Newer revision loaded";
+    case "failed":
+      return "Save failed";
+    default:
+      return "Current revision";
+  }
 }
 
 function ActivityChart(props: {
@@ -1187,6 +1751,9 @@ render(() => {
   }
   if (currentPath === "/activity/agents") {
     return <AgentActivityPage />;
+  }
+  if (currentPath === "/settings") {
+    return <SettingsPage />;
   }
   if (agentActivityRoute) {
     return (

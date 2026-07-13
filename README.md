@@ -175,10 +175,26 @@ The launchd wrapper sources `~/.config/network-app/env`. Factory requires:
 
 Optional variables:
 
-- `FACTORY_MAX_AGENTS`, default `3`.
+- `FACTORY_MAX_AGENTS`, default `3`; seeds the runtime default only until settings are first persisted.
 - `FACTORY_REPO_URL`, default `git@github.com:tomnagengast/network.git`.
 - `FACTORY_REPO_PATH`, default `~/.local/share/factory/workspace/network`.
 - `FACTORY_TMUX_SOCKET`, default `factory-agents`.
+
+### Runtime settings
+
+Authenticated operators can edit runtime policy at `https://factory.nags.cloud/settings`. The private `GET /api/settings` and `PUT /api/settings` endpoints expose the same structured document for automation. Writes require the current revision, use strict validation and same-origin browser checks, and return `409 Conflict` with the latest snapshot when another writer has already advanced the revision.
+
+Factory stores the first successful update at `~/.local/share/factory/data/settings.json` as a versioned `0600` file using fsync and atomic replacement. Until that file exists, compiled defaults preserve the current `Factory` label, comment continuations, full `$do` lifecycle, provider models, high effort, three principal attempts, and three concurrent runs. A present invalid or unknown settings schema stops startup instead of silently resetting policy.
+
+The settings surface controls:
+
+- Whether a newly applied Linear label or eligible human comment starts or resumes work, the label name, and each trigger's workflow assignment.
+- Up to eight enabled `$do` workflows with bounded ordered declarative steps. Protected GitHub remediation and post-merge segments use the label workflow.
+- Principal, Codex child, and Claude child models and effort, plus principal retry count and manager concurrency.
+
+Settings take effect at safe boundaries. Webhook decisions and manager reconcile passes read the latest revision; each principal segment and child process keeps the snapshot used when it launched. Existing provider processes are never restarted by a settings save. Repository routing, paths, secrets, actor identity, executable commands, arbitrary provider flags, human merge authority, exact verified-head checks, deployment source, and completion validation remain locked in code.
+
+If a saved value is valid but undesirable, restore it through the page or API with the current revision. If a manually edited file prevents startup, preserve the invalid file for diagnosis, restore a known-good private copy or deliberately move it aside to return to compiled defaults, then restart and verify both health endpoints before allowing new runs.
 
 The allowlisted catalog currently routes `tomnagengast/network`, `tomnagengast/notebook`, and `tomnagengast/factory`, all on `main`. Linear project GitHub Repo and Local Path metadata must exactly match the catalog. Unknown, mismatched, or unregistered repositories fail before a run is claimed. Every run persists its repository, path, and base branch through launch, checkpoint, completion, and deployment evidence.
 

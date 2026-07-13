@@ -17,6 +17,7 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/settings"
 )
 
 func runAgentCommand(ctx context.Context, args []string) (int, bool) {
@@ -48,6 +49,16 @@ func runPrincipal(ctx context.Context, args []string) int {
 	if flags.Parse(args) != nil || *issue == "" || *repo == "" || *runDirectory == "" || *attemptOffset < 0 {
 		return 2
 	}
+	configuration, err := loadRunSettings(*runDirectory)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	workflow, err := configuration.WorkflowForTrigger(*triggerKind)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	return agentrun.ExecutePrincipal(ctx, agentrun.PrincipalConfig{
 		IssueIdentifier: *issue,
 		TriggerKind:     *triggerKind,
@@ -57,6 +68,8 @@ func runPrincipal(ctx context.Context, args []string) int {
 		Now:             time.Now,
 		Sleep:           sleepContext,
 		AttemptOffset:   *attemptOffset,
+		Provider:        configuration.Agents.Principal,
+		Workflow:        workflow,
 	})
 }
 
@@ -69,15 +82,39 @@ func runChild(ctx context.Context, args []string) int {
 	if flags.Parse(args) != nil || *provider == "" || *repo == "" || *prompt == "" || *outputDirectory == "" {
 		return 2
 	}
+	configuration, err := loadRunSettings(os.Getenv("FACTORY_RUN_DIR"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	providerSettings := configuration.Agents.CodexChild
+	if *provider == "claude" {
+		providerSettings = configuration.Agents.ClaudeChild
+	}
 	return agentrun.ExecuteChild(ctx, agentrun.ChildConfig{
-		Provider:        *provider,
-		RepoPath:        *repo,
-		PromptPath:      *prompt,
-		OutputDirectory: *outputDirectory,
-		CodexPath:       requiredCommand("codex"),
-		ClaudePath:      requiredCommand("claude"),
-		Now:             time.Now,
+		Provider:         *provider,
+		RepoPath:         *repo,
+		PromptPath:       *prompt,
+		OutputDirectory:  *outputDirectory,
+		CodexPath:        requiredCommand("codex"),
+		ClaudePath:       requiredCommand("claude"),
+		Now:              time.Now,
+		ProviderSettings: providerSettings,
 	})
+}
+
+func loadRunSettings(runDirectory string) (settings.Snapshot, error) {
+	runID := os.Getenv("FACTORY_RUN_ID")
+	runDirectory = filepath.Clean(runDirectory)
+	if runID == "" || runDirectory == "." || filepath.Base(runDirectory) != runID || filepath.Base(filepath.Dir(runDirectory)) != "runs" {
+		return settings.Snapshot{}, errors.New("settings: Factory run environment is invalid")
+	}
+	stateRoot := filepath.Dir(filepath.Dir(runDirectory))
+	store, err := settings.Open(filepath.Join(stateRoot, "data", "settings.json"), settings.Defaults(defaultMaxConcurrentRuns))
+	if err != nil {
+		return settings.Snapshot{}, err
+	}
+	return store.Snapshot(), nil
 }
 
 func runAgentHelper(ctx context.Context, args []string) int {
