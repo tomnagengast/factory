@@ -236,7 +236,7 @@ func (r *SystemCompletionEvidence) readRepository(ctx context.Context, run Run, 
 		result.mergeContained = completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, snapshot.MergeCommitOID, receipt.SourceCommit)
 	} else {
 		result.sourceValid = baseValid
-		result.mergeContained = completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, snapshot.MergeCommitOID, strings.TrimSpace(string(originMain)))
+		result.mergeContained = completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, snapshot.MergeCommitOID, strings.TrimSpace(string(head)))
 	}
 
 	remote, err := completionCommand(ctx, r.config.RepoPath, r.config.GitPath, "ls-remote", "--heads", "origin", "refs/heads/"+run.Ready.HeadBranch)
