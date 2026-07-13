@@ -24,20 +24,33 @@ type RepositoryConfig struct {
 	Repository     string
 	RepoURL        string
 	RepoPath       string
+	ManagedRoot    string
 	ProjectPath    string
 	BaseBranch     string
+	Bootstrap      bool
 	ReceiptPath    string
 	PendingReceipt string
 	HealthURL      string
 	SourcePath     string
 }
 
+func (c RepositoryConfig) DeploymentRequired() bool {
+	return c.ReceiptPath != "" && c.PendingReceipt != "" && c.HealthURL != ""
+}
+
 func (c RepositoryConfig) validate() error {
 	if !repositoryPattern.MatchString(c.Repository) || c.App == "" {
 		return errors.New("repository catalog: app and canonical repository are required")
 	}
-	if c.RepoURL == "" || !filepath.IsAbs(c.RepoPath) || !validBranch(c.BaseBranch) {
-		return errors.New("repository catalog: URL, absolute path, and base branch are required")
+	remoteRepository, ok := normalizeGitHubRepository(c.RepoURL)
+	if !ok || !strings.EqualFold(remoteRepository, c.Repository) {
+		return errors.New("repository catalog: URL must match the canonical GitHub repository")
+	}
+	if !filepath.IsAbs(c.RepoPath) || !filepath.IsAbs(c.ManagedRoot) || !validBranch(c.BaseBranch) {
+		return errors.New("repository catalog: absolute managed paths and base branch are required")
+	}
+	if !pathWithin(filepath.Clean(c.ManagedRoot), filepath.Clean(c.RepoPath)) {
+		return errors.New("repository catalog: repository path must stay within its managed root")
 	}
 	if c.ProjectPath == "" {
 		c.ProjectPath = c.RepoPath
@@ -45,8 +58,14 @@ func (c RepositoryConfig) validate() error {
 	if !filepath.IsAbs(c.ProjectPath) {
 		return errors.New("repository catalog: Linear project path must be absolute")
 	}
-	if c.ReceiptPath == "" || c.PendingReceipt == "" || c.HealthURL == "" {
-		return errors.New("repository catalog: receipt and health locations are required")
+	deploymentFields := 0
+	for _, value := range []string{c.ReceiptPath, c.PendingReceipt, c.HealthURL} {
+		if value != "" {
+			deploymentFields++
+		}
+	}
+	if deploymentFields != 0 && deploymentFields != 3 {
+		return errors.New("repository catalog: deployment receipt and health locations must be configured together")
 	}
 	if c.SourcePath != "" && (filepath.IsAbs(c.SourcePath) || strings.HasPrefix(filepath.Clean(c.SourcePath), "..")) {
 		return errors.New("repository catalog: source path must stay within the repository")
@@ -82,6 +101,7 @@ func NewRepositoryCatalog(configs []RepositoryConfig) (*RepositoryCatalog, error
 		}
 		paths[projectPath] = config.Repository
 		config.RepoPath = cleanPath
+		config.ManagedRoot = filepath.Clean(config.ManagedRoot)
 		config.ProjectPath = projectPath
 		catalog.byRepository[config.Repository] = config
 	}
@@ -92,15 +112,15 @@ func (c *RepositoryCatalog) ResolveProject(description string) (RepositoryConfig
 	repositoryMatch := projectRepositoryPattern.FindStringSubmatch(description)
 	pathMatch := projectLocalPathPattern.FindStringSubmatch(description)
 	if len(repositoryMatch) != 2 || len(pathMatch) != 2 {
-		return RepositoryConfig{}, errors.New("repository catalog: Linear project must declare GitHub Repo and Local Path")
+		return RepositoryConfig{}, permanentRouting(errors.New("repository catalog: Linear project must declare GitHub Repo and Local Path"))
 	}
 	config, ok := c.byRepository[repositoryMatch[1]]
 	if !ok {
-		return RepositoryConfig{}, fmt.Errorf("repository catalog: %s is not allowlisted", repositoryMatch[1])
+		return RepositoryConfig{}, permanentRouting(fmt.Errorf("repository catalog: %s is not allowlisted", repositoryMatch[1]))
 	}
 	declaredPath := filepath.Clean(strings.TrimSpace(pathMatch[1]))
 	if declaredPath != config.ProjectPath {
-		return RepositoryConfig{}, fmt.Errorf("repository catalog: path %s does not match allowlisted %s", declaredPath, config.ProjectPath)
+		return RepositoryConfig{}, permanentRouting(fmt.Errorf("repository catalog: path %s does not match allowlisted %s", declaredPath, config.ProjectPath))
 	}
 	return config, nil
 }
@@ -129,7 +149,7 @@ func NewLinearRepositoryResolver(endpoint, apiKey string, client *http.Client, c
 
 func (r *LinearRepositoryResolver) Resolve(ctx context.Context, issueIdentifier string) (RepositoryConfig, error) {
 	if !ValidIssueIdentifier(issueIdentifier) {
-		return RepositoryConfig{}, fmt.Errorf("resolve repository: invalid issue identifier %q", issueIdentifier)
+		return RepositoryConfig{}, permanentRouting(fmt.Errorf("resolve repository: invalid issue identifier %q", issueIdentifier))
 	}
 	payload, err := json.Marshal(map[string]any{
 		"query":     "query FactoryRepository($id: String!) { issue(id: $id) { project { description } } }",
@@ -172,7 +192,34 @@ func (r *LinearRepositoryResolver) Resolve(ctx context.Context, issueIdentifier 
 		return RepositoryConfig{}, fmt.Errorf("resolve repository: Linear: %s", value.Errors[0].Message)
 	}
 	if value.Data.Issue == nil || value.Data.Issue.Project == nil {
-		return RepositoryConfig{}, errors.New("resolve repository: issue has no Linear project")
+		return RepositoryConfig{}, permanentRouting(errors.New("resolve repository: issue has no Linear project"))
 	}
 	return r.catalog.ResolveProject(value.Data.Issue.Project.Description)
+}
+
+type permanentRoutingError struct{ error }
+
+func (permanentRoutingError) Permanent() bool { return true }
+
+func (e permanentRoutingError) Unwrap() error { return e.error }
+
+func permanentRouting(err error) error { return permanentRoutingError{error: err} }
+
+func normalizeGitHubRepository(remote string) (string, bool) {
+	remote = strings.TrimSpace(remote)
+	if value, found := strings.CutPrefix(remote, "git@github.com:"); found {
+		value = strings.TrimSuffix(value, ".git")
+		return value, repositoryPattern.MatchString(value)
+	}
+	parsed, err := url.Parse(remote)
+	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Host, "github.com") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", false
+	}
+	value := strings.TrimSuffix(strings.TrimPrefix(parsed.Path, "/"), ".git")
+	return value, repositoryPattern.MatchString(value)
+}
+
+func pathWithin(root, target string) bool {
+	relative, err := filepath.Rel(root, target)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }

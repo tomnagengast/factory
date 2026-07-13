@@ -140,6 +140,7 @@ func (legacyRepositoryResolver) Resolve(context.Context, string) (agentrun.Repos
 		Repository:     "tomnagengast/network",
 		RepoURL:        "git@github.com:tomnagengast/network.git",
 		RepoPath:       "/tmp/factory-network",
+		ManagedRoot:    "/tmp",
 		ProjectPath:    "/tmp/factory-network",
 		BaseBranch:     "main",
 		ReceiptPath:    "/tmp/factory-receipt",
@@ -696,7 +697,9 @@ func (s *appServer) repositoryTrigger(ctx context.Context, deliveryID, issueIden
 		Repository:      config.Repository,
 		RepositoryURL:   config.RepoURL,
 		RepositoryPath:  config.RepoPath,
+		ManagedRoot:     config.ManagedRoot,
 		BaseBranch:      config.BaseBranch,
+		Bootstrap:       config.Bootstrap,
 	}, nil
 }
 

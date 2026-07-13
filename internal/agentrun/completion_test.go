@@ -176,6 +176,7 @@ func TestAuthenticationFailureClassification(t *testing.T) {
 
 func completeEvidence() staticCompletionEvidence {
 	return staticCompletionEvidence{evidence: CompletionEvidence{
+		DeploymentRequired: true,
 		Deployment:         DeploymentReceipt{Status: "success", DeploymentID: "deploy-1", SourceCommit: "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b"},
 		SourceValid:        true,
 		MergeContained:     true,
@@ -185,6 +186,23 @@ func completeEvidence() staticCompletionEvidence {
 		LinearComplete:     true,
 		ChildrenComplete:   true,
 	}}
+}
+
+func TestCompletionValidatorAcceptsRepositoryOnlyEvidence(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.July, 11, 22, 0, 0, 0, time.UTC)
+	checkpoint := testReadyCheckpoint("run-1", now)
+	evidence := CompletionEvidence{
+		SourceValid: true, MergeContained: true, RemoteBranchAbsent: true,
+		WorktreeAbsent: true, LinearComplete: true, ChildrenComplete: true,
+	}
+	decision := mustCompletionValidator(
+		t, &fakePullRequestReader{snapshot: mergedSnapshot(checkpoint)},
+		staticCompletionEvidence{evidence: evidence}, now,
+	).Validate(context.Background(), Run{IssueIdentifier: "ENG-123", Ready: &checkpoint}, ProcessResult{Status: string(StateSucceeded)})
+	if !decision.Validation.Accepted || decision.State != StateSucceeded {
+		t.Fatalf("decision = %#v", decision)
+	}
 }
 
 func mergedSnapshot(checkpoint ReadyCheckpoint) PullRequestSnapshot {

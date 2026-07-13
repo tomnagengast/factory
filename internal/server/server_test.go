@@ -570,6 +570,78 @@ func TestLinearFactoryLabelStartsOneRunPerActiveIssue(t *testing.T) {
 	}
 }
 
+func TestPermanentRepositoryRoutingFailureDoesNotBlockLaterRun(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	activityStore, err := activity.Open(filepath.Join(directory, "activity.json"), 10)
+	if err != nil {
+		t.Fatalf("open activity store: %v", err)
+	}
+	runStore, err := agentrun.Open(filepath.Join(directory, "agent-runs.json"), 10)
+	if err != nil {
+		t.Fatalf("open run store: %v", err)
+	}
+	githubEvents, err := githubhook.Open(filepath.Join(directory, "github-events.json"), 10)
+	if err != nil {
+		t.Fatalf("open GitHub journal: %v", err)
+	}
+	linearComments, err := linearhook.Open(filepath.Join(directory, "linear-comments.json"), 10)
+	if err != nil {
+		t.Fatalf("open Linear comments: %v", err)
+	}
+	wire := testEventWire(t, githubEvents.Total(), linearComments.Total())
+	handler, err := New(Config{
+		Web:            testWeb(),
+		ActivityStore:  activityStore,
+		RunStore:       runStore,
+		RunNotifier:    &testNotifier{},
+		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
+		Settings:       testSettingsStore(t),
+		ViewerAuth:     testViewerAuth(t),
+		LinearSecret:   testSecret,
+		GitHubSecret:   testGitHubSecret,
+		Events:         wire,
+		GitHubEvents:   githubEvents,
+		LinearComments: linearComments,
+		RepositoryResolver: testRepositoryResolver{
+			"ENG-404": {err: eventwire.Permanent(errors.New("repository is not allowlisted"))},
+			"ENG-123": {config: agentrun.RepositoryConfig{
+				App: "factory", Repository: "tomnagengast/network", RepoURL: "git@github.com:tomnagengast/network.git",
+				RepoPath: "/Users/tom/repos/tomnagengast/network", ProjectPath: "/Users/tom/repos/tomnagengast/network",
+				ManagedRoot: "/Users/tom/repos/tomnagengast", BaseBranch: "main",
+			}},
+		},
+		TriggerActor: testActorID,
+		Now:          func() time.Time { return testNow },
+		Build:        testBuildIdentity(),
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	for _, issue := range []string{"ENG-404", "ENG-123"} {
+		body := fmt.Sprintf(
+			`{"type":"Issue","action":"update","webhookTimestamp":%d,"actor":{"id":"%s"},"data":{"identifier":"%s","labelIds":["label-factory"],"labels":[{"id":"label-factory","name":"Factory"}]},"updatedFrom":{"labelIds":[]}}`,
+			testNow.UnixMilli(), testActorID, issue,
+		)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, signedWebhookRequest(body, "delivery-"+strings.ToLower(issue), testSecret))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want %d", issue, recorder.Code, http.StatusOK)
+		}
+	}
+
+	snapshot := runStore.Snapshot()
+	if snapshot.Total != 1 || snapshot.Runs[0].IssueIdentifier != "ENG-123" {
+		t.Fatalf("runs = %#v", snapshot)
+	}
+	status := wire.Status()
+	if status.Pending != 0 || status.RejectedTotal != 1 || status.LastRejection == nil || status.LastRejection.EventID != "linear:delivery-eng-404" {
+		t.Fatalf("wire status = %#v", status)
+	}
+}
+
 func TestLinearWebhookReplaysStagedPayloadWithoutProviderRedelivery(t *testing.T) {
 	t.Parallel()
 
@@ -1069,6 +1141,21 @@ func testHandler(t *testing.T) http.Handler {
 
 type testNotifier struct {
 	count atomic.Int32
+}
+
+type testRepositoryResolution struct {
+	config agentrun.RepositoryConfig
+	err    error
+}
+
+type testRepositoryResolver map[string]testRepositoryResolution
+
+func (r testRepositoryResolver) Resolve(_ context.Context, issueIdentifier string) (agentrun.RepositoryConfig, error) {
+	resolution, ok := r[issueIdentifier]
+	if !ok {
+		return agentrun.RepositoryConfig{}, errors.New("unexpected issue identifier")
+	}
+	return resolution.config, resolution.err
 }
 
 type flakyActivityStore struct {

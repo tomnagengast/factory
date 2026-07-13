@@ -23,6 +23,7 @@ type SystemCompletionConfig struct {
 	Repository     string
 	RemoteURLs     []string
 	RepoPath       string
+	BaseBranch     string
 	ReceiptPath    string
 	PendingReceipt string
 	HealthURL      string
@@ -35,29 +36,71 @@ type SystemCompletionConfig struct {
 }
 
 type SystemCompletionEvidence struct {
-	config SystemCompletionConfig
+	config             SystemCompletionConfig
+	deploymentRequired bool
 }
 
 func NewSystemCompletionEvidence(config SystemCompletionConfig) (*SystemCompletionEvidence, error) {
 	if config.App == "" {
 		config.App = "factory"
 	}
-	if !repositoryPattern.MatchString(config.Repository) || config.RepoPath == "" || config.ReceiptPath == "" || config.PendingReceipt == "" || config.HealthURL == "" || config.LinearURL == "" {
+	if config.ReceiptPath == "" || config.PendingReceipt == "" || config.HealthURL == "" {
 		return nil, errors.New("completion evidence: repository, paths, and health URL are required")
+	}
+	reader, err := newCompletionEvidence(config)
+	if err != nil {
+		return nil, err
+	}
+	reader.deploymentRequired = true
+	return reader, nil
+}
+
+func NewRepositoryOnlyCompletionEvidence(config SystemCompletionConfig) (*SystemCompletionEvidence, error) {
+	if config.ReceiptPath != "" || config.PendingReceipt != "" || config.HealthURL != "" {
+		return nil, errors.New("repository-only completion evidence must not configure deployment locations")
+	}
+	return newCompletionEvidence(config)
+}
+
+func newCompletionEvidence(config SystemCompletionConfig) (*SystemCompletionEvidence, error) {
+	if !repositoryPattern.MatchString(config.Repository) || config.RepoPath == "" || config.LinearURL == "" {
+		return nil, errors.New("completion evidence: repository and paths are required")
 	}
 	if len(config.RemoteURLs) == 0 || config.GitPath == "" || config.WorktrunkPath == "" || config.LinearAPIKey == "" || config.HTTPClient == nil {
 		return nil, errors.New("completion evidence: git, Worktrunk, Linear, and HTTP clients are required")
+	}
+	if config.BaseBranch == "" {
+		config.BaseBranch = "main"
+	}
+	if !validBranch(config.BaseBranch) {
+		return nil, errors.New("completion evidence: valid base branch is required")
 	}
 	return &SystemCompletionEvidence{config: config}, nil
 }
 
 func (r *SystemCompletionEvidence) ReadCompletionEvidence(ctx context.Context, run Run, snapshot PullRequestSnapshot) (CompletionEvidence, error) {
-	evidence := CompletionEvidence{SafeguardRegression: snapshot.SafeguardRegression}
+	evidence := CompletionEvidence{DeploymentRequired: r.deploymentRequired, SafeguardRegression: snapshot.SafeguardRegression}
 	childrenComplete, err := completedChildResults(run.RunDirectory)
 	if err != nil {
 		return evidence, err
 	}
 	evidence.ChildrenComplete = childrenComplete
+	if r.deploymentRequired {
+		return r.readDeployableCompletion(ctx, run, snapshot, evidence)
+	}
+	repository, err := r.readRepository(ctx, run, snapshot, DeploymentReceipt{})
+	if err != nil {
+		return evidence, err
+	}
+	evidence.SourceValid = repository.sourceValid
+	evidence.MergeContained = repository.mergeContained
+	evidence.RemoteBranchAbsent = repository.remoteBranchAbsent
+	evidence.WorktreeAbsent = repository.worktreeAbsent
+	evidence.LinearComplete, err = r.linearComplete(ctx, run.IssueIdentifier)
+	return evidence, err
+}
+
+func (r *SystemCompletionEvidence) readDeployableCompletion(ctx context.Context, run Run, snapshot PullRequestSnapshot, evidence CompletionEvidence) (CompletionEvidence, error) {
 	if pending, err := readDeploymentReceipt(r.config.PendingReceipt); err == nil && pending.Status == "failed" {
 		checkpointTime := run.Ready.CreatedAt
 		if !run.Ready.ValidatedAt.IsZero() {
@@ -156,11 +199,11 @@ func (r *SystemCompletionEvidence) readRepository(ctx context.Context, run Run, 
 	if err != nil {
 		return result, err
 	}
-	originMain, err := completionCommand(ctx, r.config.RepoPath, r.config.GitPath, "rev-parse", "origin/main")
+	originMain, err := completionCommand(ctx, r.config.RepoPath, r.config.GitPath, "rev-parse", "origin/"+r.config.BaseBranch)
 	if err != nil {
 		return result, err
 	}
-	remoteURL, err := completionCommand(ctx, r.config.RepoPath, r.config.GitPath, "remote", "get-url", "origin")
+	remoteURL, err := completionCommand(ctx, r.config.RepoPath, r.config.GitPath, "config", "--get", "remote.origin.url")
 	if err != nil {
 		return result, err
 	}
@@ -181,15 +224,20 @@ func (r *SystemCompletionEvidence) readRepository(ctx context.Context, run Run, 
 	if !run.Ready.ValidatedAt.IsZero() {
 		checkpointTime = run.Ready.ValidatedAt
 	}
-	result.sourceValid = strings.TrimSpace(string(status)) == "" && strings.TrimSpace(string(branch)) == "main" &&
-		strings.TrimSpace(string(upstream)) == "origin/main" && headOnMain && receiptOnMain &&
-		receipt.Status == "success" && receipt.App == r.config.App && receipt.SourceBranch == "main" &&
-		receipt.SourceTree == receiptTree &&
-		receipt.ContractVersion == LifecycleContractVersion && gitOIDPattern.MatchString(receipt.SourceCommit) && gitOIDPattern.MatchString(receipt.SourceTree) &&
-		sha256Pattern.MatchString(receipt.BinarySHA256) && receipt.DeploymentID != "" && receipt.BuildID != "" &&
-		slices.Contains(r.config.RemoteURLs, strings.TrimSpace(string(remoteURL))) && receipt.SourceRepository == r.config.Repository && !receipt.StartedAt.Before(checkpointTime) &&
-		!receipt.FinishedAt.Before(receipt.StartedAt)
-	result.mergeContained = completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, snapshot.MergeCommitOID, receipt.SourceCommit)
+	baseValid := strings.TrimSpace(string(status)) == "" && strings.TrimSpace(string(branch)) == r.config.BaseBranch &&
+		strings.TrimSpace(string(upstream)) == "origin/"+r.config.BaseBranch && headOnMain &&
+		slices.Contains(r.config.RemoteURLs, strings.TrimSpace(string(remoteURL)))
+	if r.deploymentRequired {
+		result.sourceValid = baseValid && receiptOnMain && receipt.Status == "success" && receipt.App == r.config.App &&
+			receipt.SourceBranch == r.config.BaseBranch && receipt.SourceTree == receiptTree &&
+			receipt.ContractVersion == LifecycleContractVersion && gitOIDPattern.MatchString(receipt.SourceCommit) && gitOIDPattern.MatchString(receipt.SourceTree) &&
+			sha256Pattern.MatchString(receipt.BinarySHA256) && receipt.DeploymentID != "" && receipt.BuildID != "" &&
+			receipt.SourceRepository == r.config.Repository && !receipt.StartedAt.Before(checkpointTime) && !receipt.FinishedAt.Before(receipt.StartedAt)
+		result.mergeContained = completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, snapshot.MergeCommitOID, receipt.SourceCommit)
+	} else {
+		result.sourceValid = baseValid
+		result.mergeContained = completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, snapshot.MergeCommitOID, strings.TrimSpace(string(originMain)))
+	}
 
 	remote, err := completionCommand(ctx, r.config.RepoPath, r.config.GitPath, "ls-remote", "--heads", "origin", "refs/heads/"+run.Ready.HeadBranch)
 	if err != nil {

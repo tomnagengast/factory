@@ -107,6 +107,27 @@ func TestSystemCompletionEvidenceVerifiesDeploymentAfterMainAdvances(t *testing.
 	if !evidence.SourceValid || !evidence.MergeContained || !evidence.HealthMatches || !evidence.RemoteBranchAbsent || !evidence.WorktreeAbsent || !evidence.LinearComplete {
 		t.Fatalf("evidence = %#v", evidence)
 	}
+	if !evidence.DeploymentRequired {
+		t.Fatal("deployable evidence did not require deployment")
+	}
+
+	repositoryOnly, err := NewRepositoryOnlyCompletionEvidence(SystemCompletionConfig{
+		Repository: "tomnagengast/network", RemoteURLs: []string{remote}, RepoPath: repository,
+		BaseBranch: "main", LinearURL: server.URL + "/graphql", GitPath: gitPath,
+		WorktrunkPath: worktrunk, LinearAPIKey: "linear-test", HTTPClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("new repository-only reader: %v", err)
+	}
+	repositoryEvidence, err := repositoryOnly.ReadCompletionEvidence(t.Context(), Run{ID: "run-1", IssueIdentifier: "ENG-123", RunDirectory: filepath.Join(root, "run-1"), Ready: &checkpoint}, PullRequestSnapshot{
+		State: "MERGED", BaseBranch: "main", HeadBranch: checkpoint.HeadBranch, HeadOID: checkpoint.VerifiedHeadOID, MergeCommitOID: commit,
+	})
+	if err != nil {
+		t.Fatalf("read repository-only evidence: %v", err)
+	}
+	if repositoryEvidence.DeploymentRequired || !repositoryEvidence.SourceValid || !repositoryEvidence.MergeContained || !repositoryEvidence.LinearComplete {
+		t.Fatalf("repository-only evidence = %#v", repositoryEvidence)
+	}
 }
 
 func TestCompletedChildResultsRequiresEveryChildSuccess(t *testing.T) {
