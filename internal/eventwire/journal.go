@@ -330,6 +330,10 @@ func (j *Journal) Snapshot() (uint64, uint64, map[string]uint64, []Record) {
 func (j *Journal) Status() Status {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	return j.statusLocked()
+}
+
+func (j *Journal) statusLocked() Status {
 	status := Status{
 		Total: j.state.total, Dispatched: j.state.dispatched,
 		Pending: j.state.total - j.state.dispatched, RejectedTotal: j.state.rejectedTotal,
