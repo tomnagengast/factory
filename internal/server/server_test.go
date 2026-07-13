@@ -163,6 +163,23 @@ func TestDeprecatedAndMalformedRoutesAreNotFoundWithoutRedirects(t *testing.T) {
 	}
 }
 
+func TestMalformedAgentReferencesAreNotFoundBeforeAuthentication(t *testing.T) {
+	t.Parallel()
+	handler := testHandler(t)
+	for _, target := range []string{
+		"/agents/not-an-issue/123/run",
+		"/agents/ENG-23/not-a-time/run",
+		"/api/agents/not-an-issue/123/run",
+		"/api/agents/ENG-23/not-a-time/run",
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+		if recorder.Code != http.StatusNotFound || recorder.Header().Get("Location") != "" {
+			t.Fatalf("%s response = %d, location %q", target, recorder.Code, recorder.Header().Get("Location"))
+		}
+	}
+}
+
 func TestAuthenticatedSettingsPageAndAPI(t *testing.T) {
 	t.Parallel()
 

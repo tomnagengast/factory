@@ -39,8 +39,7 @@ func (j *Journal) Query(query Query) (Page, error) {
 		return Page{}, errors.New("event wire: page size must be positive")
 	}
 
-	_, _, _, retained := j.Snapshot()
-	status := j.Status()
+	status, retained := j.querySnapshot()
 	matching := make([]Record, 0, len(retained))
 	filter := Filter{Source: query.Source, Type: query.Type}
 	for i := len(retained) - 1; i >= 0; i-- {
@@ -49,10 +48,7 @@ func (j *Journal) Query(query Query) (Page, error) {
 		}
 	}
 
-	pageCount := 0
-	if len(matching) > 0 {
-		pageCount = (len(matching) + query.PageSize - 1) / query.PageSize
-	}
+	pageCount := (len(matching) + query.PageSize - 1) / query.PageSize
 	start := len(matching)
 	if query.Page <= pageCount {
 		start = (query.Page - 1) * query.PageSize
@@ -71,6 +67,12 @@ func (j *Journal) Query(query Query) (Page, error) {
 		TypeCounts:   countBy(retained, func(record Record) string { return record.Event.Type }),
 		HourCounts:   countHours(retained),
 	}, nil
+}
+
+func (j *Journal) querySnapshot() (Status, []Record) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.statusLocked(), cloneRecords(j.state.records)
 }
 
 func (j *Journal) Record(sequence uint64) (Record, bool) {

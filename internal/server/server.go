@@ -35,10 +35,10 @@ const (
 	maxLinearWebhookBody  = 1 << 20
 	maxGitHubWebhookBody  = 25 << 20
 	replayWindow          = time.Minute
-	defaultActivityPage   = 1
-	defaultActivityLimit  = 25
-	maxActivityPage       = 1_000_000
-	maxActivityLimit      = 100
+	defaultWirePage       = 1
+	defaultWirePageSize   = 25
+	maxWirePage           = 1_000_000
+	maxWirePageSize       = 100
 	attributeDeliveryID   = "deliveryId"
 	attributeTriggerKind  = "triggerKind"
 	attributeIssue        = "issueIdentifier"
@@ -308,7 +308,7 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("GET /api/wire", app.viewerAuth.API(http.HandlerFunc(app.wire)))
 	mux.Handle("GET /api/wire/{sequence}", app.viewerAuth.API(http.HandlerFunc(app.wireEvent)))
 	mux.Handle("GET /api/agents", app.viewerAuth.API(http.HandlerFunc(app.agents)))
-	mux.Handle("GET /api/agents/{issue}/{started}/run", app.viewerAuth.API(http.HandlerFunc(app.agentByReference)))
+	mux.Handle("GET /api/agents/{issue}/{started}/run", canonicalAgentReference(app.viewerAuth.API(http.HandlerFunc(app.agentByReference))))
 	mux.Handle("GET /api/settings", app.viewerAuth.API(http.HandlerFunc(app.getSettings)))
 	mux.Handle("PUT /api/settings", app.viewerAuth.API(http.HandlerFunc(app.putSettings)))
 	mux.HandleFunc("POST /api/webhooks/linear", app.linearWebhook)
@@ -322,9 +322,9 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("GET /home", app.viewerAuth.Page(page))
 	mux.Handle("GET /wire", app.viewerAuth.Page(page))
 	mux.Handle("GET /agents", app.viewerAuth.Page(page))
-	mux.Handle("GET /agents/{issue}/{started}/run", app.viewerAuth.Page(page))
+	mux.Handle("GET /agents/{issue}/{started}/run", canonicalAgentReference(app.viewerAuth.Page(page)))
 	mux.Handle("GET /settings", app.viewerAuth.Page(page))
-	mux.Handle("GET /{asset...}", frontendAsset(config.Web))
+	mux.Handle("GET /{asset...}", http.FileServerFS(config.Web))
 	return canonicalPaths(mux), nil
 }
 
@@ -370,12 +370,12 @@ func (s *appServer) home(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *appServer) wire(w http.ResponseWriter, r *http.Request) {
-	page, err := queryInt(r, "page", defaultActivityPage, 1, maxActivityPage)
+	page, err := queryInt(r, "page", defaultWirePage, 1, maxWirePage)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
-	pageSize, err := queryInt(r, "pageSize", defaultActivityLimit, 1, maxActivityLimit)
+	pageSize, err := queryInt(r, "pageSize", defaultWirePageSize, 1, maxWirePageSize)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
@@ -414,12 +414,10 @@ func (s *appServer) wireEvent(w http.ResponseWriter, r *http.Request) {
 		deliveryIDs := event.Event.Values(attributeDeliveryID)
 		if len(deliveryIDs) > 0 {
 			payload, err := s.activityStore.StagedPayload(deliveryIDs[0])
-			switch {
-			case err == nil:
+			if err == nil {
 				response.PayloadAvailable = true
 				response.Payload = json.RawMessage(payload)
-			case errors.Is(err, os.ErrNotExist):
-			default:
+			} else if !errors.Is(err, os.ErrNotExist) {
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return
 			}
@@ -911,6 +909,18 @@ func canonicalPaths(next http.Handler) http.Handler {
 	})
 }
 
+func canonicalAgentReference(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		issueIdentifier := strings.ToUpper(r.PathValue("issue"))
+		started, err := strconv.ParseInt(r.PathValue("started"), 10, 64)
+		if !agentrun.ValidIssueIdentifier(issueIdentifier) || err != nil || started < 1 {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func frontendPage(web fs.FS) http.Handler {
 	files := http.FileServerFS(web)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -922,5 +932,3 @@ func frontendPage(web fs.FS) http.Handler {
 		files.ServeHTTP(w, indexRequest)
 	})
 }
-
-func frontendAsset(web fs.FS) http.Handler { return http.FileServerFS(web) }
