@@ -25,6 +25,7 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/viewerauth"
 )
 
@@ -89,6 +90,7 @@ func TestPrivateActivityAndAgentRoutesRequireViewerAuthentication(t *testing.T) 
 	for _, target := range []string{
 		"/agents/run-123",
 		"/agents/run-123/",
+		"/settings",
 		"/activity/linear",
 		"/activity/agents",
 		"/activity/agents/ENG-23/1783714439062/run",
@@ -105,6 +107,7 @@ func TestPrivateActivityAndAgentRoutesRequireViewerAuthentication(t *testing.T) 
 
 	for _, target := range []string{
 		"/api/agents/run-123",
+		"/api/settings",
 		"/api/activity/linear",
 		"/api/activity/linear/" + strings.Repeat("a", 64),
 		"/api/activity/agents",
@@ -115,6 +118,111 @@ func TestPrivateActivityAndAgentRoutesRequireViewerAuthentication(t *testing.T) 
 		if recorder.Code != http.StatusUnauthorized || recorder.Header().Get("WWW-Authenticate") == "" {
 			t.Fatalf("%s API response = %d, challenge %q", target, recorder.Code, recorder.Header().Get("WWW-Authenticate"))
 		}
+	}
+}
+
+func TestAuthenticatedSettingsPageAndAPI(t *testing.T) {
+	t.Parallel()
+
+	handler, _, _, store := testHandlerWithRunsAndSettings(t)
+	page := authenticatedRequest(t, handler, "/settings")
+	if page.Code != http.StatusOK || page.Body.String() != "<h1>Factory</h1>" {
+		t.Fatalf("settings page = %d %q", page.Code, page.Body.String())
+	}
+
+	get := authenticatedRequest(t, handler, "/api/settings")
+	var current settings.Snapshot
+	if err := json.NewDecoder(get.Body).Decode(&current); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if get.Code != http.StatusOK || current.Revision != 0 || current.Triggers.LinearLabel.Label != "Factory" {
+		t.Fatalf("settings response = %d %#v", get.Code, current)
+	}
+
+	current.Triggers.LinearLabel.Label = "Build"
+	put := authenticatedSettingsRequest(t, handler, current, "")
+	var updated settings.Snapshot
+	if err := json.NewDecoder(put.Body).Decode(&updated); err != nil {
+		t.Fatalf("decode updated settings: %v", err)
+	}
+	if put.Code != http.StatusOK || updated.Revision != 1 || updated.Triggers.LinearLabel.Label != "Build" {
+		t.Fatalf("update response = %d %#v", put.Code, updated)
+	}
+	if got := store.Snapshot(); got.Revision != 1 || got.Triggers.LinearLabel.Label != "Build" {
+		t.Fatalf("persisted settings = %#v", got)
+	}
+}
+
+func TestSettingsAPIRejectsUnsafeAndStaleWrites(t *testing.T) {
+	t.Parallel()
+
+	handler, _, _, store := testHandlerWithRunsAndSettings(t)
+	candidate := store.Snapshot()
+
+	crossOrigin := authenticatedSettingsRequest(t, handler, candidate, "https://attacker.example")
+	if crossOrigin.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin status = %d, want %d", crossOrigin.Code, http.StatusForbidden)
+	}
+
+	malformed := httptest.NewRecorder()
+	malformedRequest := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"schema":1,"unknown":true}`))
+	malformedRequest.SetBasicAuth("factory", testViewerPassword)
+	malformedRequest.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(malformed, malformedRequest)
+	if malformed.Code != http.StatusBadRequest {
+		t.Fatalf("unknown-field status = %d, want %d", malformed.Code, http.StatusBadRequest)
+	}
+
+	tooLarge := httptest.NewRecorder()
+	tooLargeRequest := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(strings.Repeat(" ", maxSettingsBody+1)))
+	tooLargeRequest.SetBasicAuth("factory", testViewerPassword)
+	tooLargeRequest.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(tooLarge, tooLargeRequest)
+	if tooLarge.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized status = %d, want %d", tooLarge.Code, http.StatusRequestEntityTooLarge)
+	}
+
+	first := authenticatedSettingsRequest(t, handler, candidate, "")
+	if first.Code != http.StatusOK {
+		t.Fatalf("first update status = %d", first.Code)
+	}
+	stale := authenticatedSettingsRequest(t, handler, candidate, "")
+	var conflict settings.Snapshot
+	if err := json.NewDecoder(stale.Body).Decode(&conflict); err != nil {
+		t.Fatalf("decode conflict: %v", err)
+	}
+	if stale.Code != http.StatusConflict || conflict.Revision != 1 || store.Snapshot().Revision != 1 {
+		t.Fatalf("stale response = %d %#v, state %#v", stale.Code, conflict, store.Snapshot())
+	}
+}
+
+func TestLinearLabelSettingsControlNewRunsWithoutDroppingActivity(t *testing.T) {
+	t.Parallel()
+
+	handler, runStore, _, configuration := testHandlerWithRunsAndSettings(t)
+	candidate := configuration.Snapshot()
+	candidate.Triggers.LinearLabel.Enabled = false
+	if _, err := configuration.Update(candidate.Revision, candidate, testNow); err != nil {
+		t.Fatalf("disable label trigger: %v", err)
+	}
+	body := fmt.Sprintf(
+		`{"type":"Issue","action":"update","webhookTimestamp":%d,"actor":{"id":"%s"},"data":{"identifier":"ENG-123","labelIds":["label-factory"],"labels":[{"id":"label-factory","name":"Factory"}]},"updatedFrom":{"labelIds":[]}}`,
+		testNow.UnixMilli(),
+		testActorID,
+	)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, signedWebhookRequest(body, "disabled-label", testSecret))
+	if recorder.Code != http.StatusOK || runStore.Snapshot().Total != 0 {
+		t.Fatalf("disabled trigger response = %d, runs %#v", recorder.Code, runStore.Snapshot())
+	}
+	activityRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(activityRecorder, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
+	var activity activityResponse
+	if err := json.NewDecoder(activityRecorder.Body).Decode(&activity); err != nil {
+		t.Fatalf("decode activity: %v", err)
+	}
+	if activity.Total != 1 {
+		t.Fatalf("activity total = %d, want 1", activity.Total)
 	}
 }
 
@@ -438,6 +546,7 @@ func TestLinearWebhookReplaysStagedPayloadWithoutProviderRedelivery(t *testing.T
 		RunStore:       runStore,
 		RunNotifier:    notifier,
 		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
+		Settings:       testSettingsStore(t),
 		ViewerAuth:     testViewerAuth(t),
 		LinearSecret:   testSecret,
 		GitHubSecret:   testGitHubSecret,
@@ -931,6 +1040,12 @@ func (n *testNotifier) Notify() {
 
 func testHandlerWithRuns(t *testing.T) (http.Handler, *agentrun.Store, *testNotifier) {
 	t.Helper()
+	handler, runStore, notifier, _ := testHandlerWithRunsAndSettings(t)
+	return handler, runStore, notifier
+}
+
+func testHandlerWithRunsAndSettings(t *testing.T) (http.Handler, *agentrun.Store, *testNotifier, *settings.Store) {
+	t.Helper()
 
 	store, err := activity.Open(filepath.Join(t.TempDir(), "activity.json"), 10)
 	if err != nil {
@@ -941,6 +1056,7 @@ func testHandlerWithRuns(t *testing.T) (http.Handler, *agentrun.Store, *testNoti
 		t.Fatalf("open agent run store: %v", err)
 	}
 	notifier := &testNotifier{}
+	configuration := testSettingsStore(t)
 	githubEvents, err := githubhook.Open(filepath.Join(t.TempDir(), "github-events.json"), 10)
 	if err != nil {
 		t.Fatalf("open GitHub journal: %v", err)
@@ -955,6 +1071,7 @@ func testHandlerWithRuns(t *testing.T) (http.Handler, *agentrun.Store, *testNoti
 		RunStore:       runStore,
 		RunNotifier:    notifier,
 		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
+		Settings:       configuration,
 		ViewerAuth:     testViewerAuth(t),
 		LinearSecret:   testSecret,
 		GitHubSecret:   testGitHubSecret,
@@ -968,7 +1085,7 @@ func testHandlerWithRuns(t *testing.T) (http.Handler, *agentrun.Store, *testNoti
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
-	return handler, runStore, notifier
+	return handler, runStore, notifier, configuration
 }
 
 func testHandlerWithObserver(t *testing.T, observer AgentObserver) http.Handler {
@@ -1001,6 +1118,7 @@ func testHandlerWithObserverAndStore(t *testing.T, observer AgentObserver) (http
 		RunStore:       runStore,
 		RunNotifier:    &testNotifier{},
 		AgentObserver:  observer,
+		Settings:       testSettingsStore(t),
 		ViewerAuth:     testViewerAuth(t),
 		LinearSecret:   testSecret,
 		GitHubSecret:   testGitHubSecret,
@@ -1043,6 +1161,7 @@ func testHandlerWithGitHub(t *testing.T) (http.Handler, string) {
 		RunStore:       runStore,
 		RunNotifier:    &testNotifier{},
 		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
+		Settings:       testSettingsStore(t),
 		ViewerAuth:     testViewerAuth(t),
 		LinearSecret:   testSecret,
 		GitHubSecret:   testGitHubSecret,
@@ -1086,6 +1205,7 @@ func testHandlerWithLinearComments(t *testing.T) (http.Handler, *agentrun.Store,
 		RunStore:       runStore,
 		RunNotifier:    notifier,
 		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
+		Settings:       testSettingsStore(t),
 		ViewerAuth:     testViewerAuth(t),
 		LinearSecret:   testSecret,
 		GitHubSecret:   testGitHubSecret,
@@ -1118,6 +1238,15 @@ func testViewerAuth(t *testing.T) *viewerauth.Authenticator {
 		t.Fatalf("new viewer auth: %v", err)
 	}
 	return auth
+}
+
+func testSettingsStore(t *testing.T) *settings.Store {
+	t.Helper()
+	store, err := settings.Open(filepath.Join(t.TempDir(), "settings.json"), settings.Defaults(3))
+	if err != nil {
+		t.Fatalf("open settings store: %v", err)
+	}
+	return store
 }
 
 func testBuildIdentity() BuildIdentity {
@@ -1156,6 +1285,23 @@ func authenticatedRequest(t *testing.T, handler http.Handler, target string) *ht
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, target, nil)
 	request.SetBasicAuth("factory", testViewerPassword)
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func authenticatedSettingsRequest(t *testing.T, handler http.Handler, candidate settings.Snapshot, origin string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(candidate)
+	if err != nil {
+		t.Fatalf("encode settings: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewReader(body))
+	request.SetBasicAuth("factory", testViewerPassword)
+	request.Header.Set("Content-Type", "application/json")
+	if origin != "" {
+		request.Header.Set("Origin", origin)
+	}
 	handler.ServeHTTP(recorder, request)
 	return recorder
 }

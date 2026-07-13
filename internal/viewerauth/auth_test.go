@@ -170,6 +170,7 @@ func TestLoginAllowsProtectedActivityReturnURLsOnly(t *testing.T) {
 		{name: "Linear activity", next: "/activity/linear?page=2", want: "/activity/linear?page=2"},
 		{name: "agent activity", next: "/activity/agents", want: "/activity/agents"},
 		{name: "agent run", next: "/activity/agents/ENG-23/1783714439062/run", want: "/activity/agents/ENG-23/1783714439062/run"},
+		{name: "settings", next: "/settings", want: "/settings"},
 		{name: "lookalike", next: "/activity/linear-public", want: "/activity"},
 		{name: "public summary", next: "/activity", want: "/activity"},
 	}

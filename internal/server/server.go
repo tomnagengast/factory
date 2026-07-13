@@ -11,7 +11,9 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
+	"net/url"
 	"path"
 	"slices"
 	"strconv"
@@ -23,6 +25,7 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/viewerauth"
 )
 
@@ -30,7 +33,6 @@ const (
 	maxLinearWebhookBody = 1 << 20
 	maxGitHubWebhookBody = 25 << 20
 	replayWindow         = time.Minute
-	triggerLabel         = "Factory"
 	defaultActivityPage  = 1
 	defaultActivityLimit = 25
 	maxActivityPage      = 1_000_000
@@ -38,6 +40,7 @@ const (
 	attributeDeliveryID  = "deliveryId"
 	attributeTriggerKind = "triggerKind"
 	attributeIssue       = "issueIdentifier"
+	maxSettingsBody      = 64 << 10
 )
 
 type EventStore interface {
@@ -78,12 +81,18 @@ type AgentObserver interface {
 	Observe(context.Context, string) (agentrun.AgentView, error)
 }
 
+type SettingsStore interface {
+	Snapshot() settings.Snapshot
+	Update(uint64, settings.Snapshot, time.Time) (settings.Snapshot, error)
+}
+
 type Config struct {
 	Web                fs.FS
 	ActivityStore      EventStore
 	RunStore           RunStore
 	RunNotifier        RunNotifier
 	AgentObserver      AgentObserver
+	Settings           SettingsStore
 	ViewerAuth         *viewerauth.Authenticator
 	LinearSecret       []byte
 	GitHubSecret       []byte
@@ -101,6 +110,7 @@ type appServer struct {
 	runStore           RunStore
 	runNotifier        RunNotifier
 	agentObserver      AgentObserver
+	settings           SettingsStore
 	viewerAuth         *viewerauth.Authenticator
 	linearSecret       []byte
 	githubSecret       []byte
@@ -209,6 +219,9 @@ func New(config Config) (http.Handler, error) {
 	if config.AgentObserver == nil {
 		return nil, errors.New("server: agent observer is required")
 	}
+	if config.Settings == nil {
+		return nil, errors.New("server: settings store is required")
+	}
 	if config.ViewerAuth == nil {
 		return nil, errors.New("server: viewer authenticator is required")
 	}
@@ -230,6 +243,7 @@ func New(config Config) (http.Handler, error) {
 		runStore:           config.RunStore,
 		runNotifier:        config.RunNotifier,
 		agentObserver:      config.AgentObserver,
+		settings:           config.Settings,
 		viewerAuth:         config.ViewerAuth,
 		linearSecret:       config.LinearSecret,
 		githubSecret:       config.GitHubSecret,
@@ -255,6 +269,8 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("GET /api/activity/agents", app.viewerAuth.API(http.HandlerFunc(app.agentActivity)))
 	mux.Handle("GET /api/activity/agents/{issue}/{started}/run", app.viewerAuth.API(http.HandlerFunc(app.agentByReference)))
 	mux.Handle("GET /api/agents/{id}", app.viewerAuth.API(http.HandlerFunc(app.agent)))
+	mux.Handle("GET /api/settings", app.viewerAuth.API(http.HandlerFunc(app.getSettings)))
+	mux.Handle("PUT /api/settings", app.viewerAuth.API(http.HandlerFunc(app.putSettings)))
 	mux.HandleFunc("POST /api/webhooks/linear", app.linearWebhook)
 	mux.HandleFunc("POST /api/webhooks/github", app.githubWebhook)
 	mux.HandleFunc("POST /cdn-cgi/rum", cloudflareBeacon)
@@ -267,6 +283,8 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("GET /activity/agents/", app.viewerAuth.Page(frontend(config.Web)))
 	mux.Handle("GET /agents", app.viewerAuth.Page(frontend(config.Web)))
 	mux.Handle("GET /agents/", app.viewerAuth.Page(frontend(config.Web)))
+	mux.Handle("GET /settings", app.viewerAuth.Page(frontend(config.Web)))
+	mux.Handle("GET /settings/", app.viewerAuth.Page(frontend(config.Web)))
 	mux.Handle("/", frontend(config.Web))
 	return mux, nil
 }
@@ -374,6 +392,68 @@ func (s *appServer) writeAgent(w http.ResponseWriter, r *http.Request, id string
 	writeJSON(w, http.StatusOK, view)
 }
 
+func (s *appServer) getSettings(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.settings.Snapshot())
+}
+
+func (s *appServer) putSettings(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		http.Error(w, http.StatusText(http.StatusUnsupportedMediaType), http.StatusUnsupportedMediaType)
+		return
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSettingsBody))
+	decoder.DisallowUnknownFields()
+	var candidate settings.Snapshot
+	if err := decoder.Decode(&candidate); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	if err := candidate.Validate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	updated, err := s.settings.Update(candidate.Revision, candidate, s.now())
+	if errors.Is(err, settings.ErrRevisionConflict) {
+		writeJSON(w, http.StatusConflict, updated)
+		return
+	}
+	if err != nil {
+		slog.Error("update settings", "error", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func sameOrigin(r *http.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	return err == nil &&
+		(parsed.Scheme == "http" || parsed.Scheme == "https") &&
+		parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" &&
+		strings.EqualFold(parsed.Host, r.Host)
+}
+
 func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxLinearWebhookBody))
 	if err != nil {
@@ -406,9 +486,11 @@ func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
+	configuration := s.settings.Snapshot()
 	wake, hasWake := commentWake(payload, deliveryID, s.triggerActor, now)
-	trigger, hasTrigger := agentTrigger(payload, deliveryID, s.triggerActor)
-	event := linearWireEvent(payload, deliveryID, wake, hasWake, trigger, hasTrigger, now)
+	commentTriggers := hasWake && configuration.Triggers.LinearComment.Enabled
+	trigger, hasTrigger := agentTrigger(payload, deliveryID, s.triggerActor, configuration.Triggers.LinearLabel)
+	event := linearWireEvent(payload, deliveryID, wake, hasWake, commentTriggers, trigger, hasTrigger, now)
 	if err := s.activityStore.StagePayload(deliveryID, body); err != nil {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
@@ -487,6 +569,7 @@ func linearWireEvent(
 	deliveryID string,
 	wake linearhook.Event,
 	hasWake bool,
+	commentTriggers bool,
 	trigger agentrun.Trigger,
 	hasTrigger bool,
 	now time.Time,
@@ -506,8 +589,10 @@ func linearWireEvent(
 	}
 	if hasWake {
 		event = linearhook.ToWire(wake)
-		event.Attributes[attributeTriggerKind] = []string{agentrun.TriggerKindComment}
 		event.Attributes[attributeIssue] = []string{wake.IssueIdentifier}
+		if commentTriggers {
+			event.Attributes[attributeTriggerKind] = []string{agentrun.TriggerKindComment}
+		}
 	}
 	if hasTrigger {
 		event.Attributes[attributeTriggerKind] = []string{trigger.Kind}
@@ -535,16 +620,18 @@ func (s *appServer) dispatchLinear(ctx context.Context, record eventwire.Record)
 				return fmt.Errorf("server: project Linear comment: %w", err)
 			}
 		}
-		trigger, err := s.repositoryTrigger(ctx, deliveryID, event.IssueIdentifier, agentrun.TriggerKindComment)
-		if err != nil {
-			return fmt.Errorf("server: resolve Linear continuation repository: %w", err)
-		}
-		run, created, err := s.runStore.ClaimContinuation(trigger, record.Event.ReceivedAt)
-		if err != nil {
-			return fmt.Errorf("server: claim Linear continuation: %w", err)
-		}
-		if created || (run.State == agentrun.StatePending && run.ResumeCount > 0) {
-			s.runNotifier.Notify()
+		if firstAttribute(record.Event, attributeTriggerKind) == agentrun.TriggerKindComment {
+			trigger, err := s.repositoryTrigger(ctx, deliveryID, event.IssueIdentifier, agentrun.TriggerKindComment)
+			if err != nil {
+				return fmt.Errorf("server: resolve Linear continuation repository: %w", err)
+			}
+			run, created, err := s.runStore.ClaimContinuation(trigger, record.Event.ReceivedAt)
+			if err != nil {
+				return fmt.Errorf("server: claim Linear continuation: %w", err)
+			}
+			if created || (run.State == agentrun.StatePending && run.ResumeCount > 0) {
+				s.runNotifier.Notify()
+			}
 		}
 	}
 
@@ -639,13 +726,13 @@ func firstAttribute(event eventwire.Event, key string) string {
 	return values[0]
 }
 
-func agentTrigger(payload linearPayload, deliveryID, allowedActorID string) (agentrun.Trigger, bool) {
-	if payload.Type != "Issue" || payload.Action != "update" || payload.Actor.ID != allowedActorID {
+func agentTrigger(payload linearPayload, deliveryID, allowedActorID string, trigger settings.LinearLabelTrigger) (agentrun.Trigger, bool) {
+	if !trigger.Enabled || payload.Type != "Issue" || payload.Action != "update" || payload.Actor.ID != allowedActorID {
 		return agentrun.Trigger{}, false
 	}
 	factoryLabelID := ""
 	for _, label := range payload.Data.Labels {
-		if strings.EqualFold(strings.TrimSpace(label.Name), triggerLabel) {
+		if strings.EqualFold(strings.TrimSpace(label.Name), trigger.Label) {
 			factoryLabelID = label.ID
 			break
 		}
