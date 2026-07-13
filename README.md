@@ -16,14 +16,14 @@ Factory initially launches only for a signed `Issue` `update` webhook where the 
 
 1. The webhook is signature-checked and replay-window checked.
 2. The delivery and a pending run are persisted before the handler returns `200`.
-3. The background manager resolves the Linear project's GitHub Repo and Local Path against the allowlisted repository catalog, then fetches and fast-forwards that repository's isolated internal clone. Registered linked worktrees are excluded from the clone's dirty check; all other local changes and divergence fail preparation instead of being overwritten. Before starting a pending run with no other agent active, Factory removes clean, unlocked worktrees whose branches are already integrated into that repository's fetched upstream as a backstop for interrupted cleanup.
+3. The background manager resolves the Linear project's GitHub Repo and Local Path against the allowlisted repository catalog, then prepares that repository's isolated internal clone. Existing checkouts must match the configured managed root, GitHub origin, base branch, and GitHub default branch. A catalog entry may explicitly allow greenfield bootstrap: Factory creates the private GitHub repository when absent, clones through a staging directory, initializes and publishes the configured base branch when the remote is empty, and verifies the final identity before starting an agent. Symlink escapes, files or non-Git directories at the target, mismatched origins, and unexpected branches fail closed. Registered linked worktrees are excluded from the clone's dirty check; all other local changes and divergence fail preparation instead of being overwritten. Before starting a pending run with no other agent active, Factory removes clean, unlocked worktrees whose branches are already integrated into that repository's fetched upstream as a backstop for interrupted cleanup.
 4. One isolated tmux session named `factory-<issue-lower>` starts on the `factory-agents` tmux socket.
 5. The principal runs `$do TEAM-123` with Codex `gpt-5.6-sol` and high reasoning through gated research, implementation, and the complete ready-for-human-merge predicate. Comment continuations fresh-read the Linear thread and treat only unaddressed human feedback as new scope.
 6. A failed Codex process is resumed, when a thread ID is available, up to three total attempts.
 7. After the PR is ready, the principal records the exact locally verified head through `agent checkpoint ready-for-merge` and exits with `FACTORY_RESULT: READY_FOR_HUMAN_MERGE`. Factory validates the contract-v1 checkpoint, parks the run as `awaiting_human_merge`, and closes the tmux segment. This is nonterminal and does not consume an LLM while waiting.
 8. GitHub webhooks wake the parked run immediately. A supervisor sweep also refreshes authoritative GitHub state at least once per minute with a persisted cursor, bounded backoff, and restart-safe schedule. An `OPEN` PR stays parked, a closed-unmerged PR becomes a typed blocker, and only a fresh `MERGED` snapshot with a merge commit starts a new `post-merge` continuation.
 9. The fresh continuation reconstructs the repository, PR, base, head branch, and verified head from durable evidence. It revalidates that the human merged the exact locally verified head and that final checks and feedback still pass, then fast-forwards the clean primary checkout, deploys every applicable changed surface from merged main, verifies health and GitHub's automatic remote-branch deletion, and removes the clean integrated local worktree/branch with Worktrunk.
-10. A terminal intent is accepted only after Factory mechanically validates the authoritative PR, deployment receipt, exact health identity, source checkout, Linear completion, child results, and branch/worktree cleanup. Missing or transient evidence reparks the run; contradictory evidence records the typed rejection instead of falsely declaring success.
+10. A terminal intent is accepted only after Factory mechanically validates the authoritative PR, source checkout, Linear completion, child results, and branch/worktree cleanup. Repositories with a deployment contract also require a successful deployment receipt and exact health identity; repository-only projects do not fabricate those requirements. Missing or transient evidence reparks the run; contradictory evidence records the typed rejection instead of falsely declaring success.
 
 Run state and output live under `~/.local/share/factory/runs/<run-id>/`. Standard output, diagnostics, final messages, prompts, and process results are separate files with private permissions.
 
@@ -66,7 +66,9 @@ Use the source-agnostic helper inside a Factory run to read or wait on the globa
   --wait 60s
 ```
 
-Filters may use `--source linear|github|factory`, `--type`, `--action`, `--subject`, and repeated `--match key=value`. Factory emits `service/started`, `service/heartbeat` every 30 seconds, `service/stopping` during graceful shutdown, each agent-run state, and one compact `agent-record` event per complete JSONL record. `/api/healthz` remains the synchronous current-state probe; lifecycle records provide durable history for monitoring and future remediation.
+Filters may use `--source linear|github|factory`, `--type`, `--action`, `--subject`, and repeated `--match key=value`. Factory emits `service/started`, `service/heartbeat` every 30 seconds, `service/stopping` during graceful shutdown, each agent-run state, and one compact `agent-record` event per complete JSONL record. A permanent routing or policy failure is durably rejected and acknowledged so one bad delivery cannot block later records. Transient provider, transport, and projection failures remain pending for ordered retry. Rejection metadata is encoded as optional fields on the existing version-1 acknowledgment/checkpoint shapes so the prior release can still read the journal during rollback.
+
+`/api/healthz` is the synchronous current-state probe. Its `wire` object reports total, dispatched, pending, rejected-total, and the last rejected event identity without exposing the private rejection reason. Any pending record returns `503` with `status: "degraded"`; a drained wire returns `200` even when historical rejected records exist. Manager launch, service-start publication, and heartbeats wait for startup catch-up to drain, while the HTTP listener remains available to expose degraded recovery state.
 
 ## GitHub event sink
 
@@ -196,7 +198,7 @@ Settings take effect at safe boundaries. Webhook decisions and manager reconcile
 
 If a saved value is valid but undesirable, restore it through the page or API with the current revision. If a manually edited file prevents startup, preserve the invalid file for diagnosis, restore a known-good private copy or deliberately move it aside to return to compiled defaults, then restart and verify both health endpoints before allowing new runs.
 
-The allowlisted catalog currently routes `tomnagengast/network`, `tomnagengast/notebook`, and `tomnagengast/factory`, all on `main`. Linear project GitHub Repo and Local Path metadata must exactly match the catalog. Unknown, mismatched, or unregistered repositories fail before a run is claimed. Every run persists its repository, path, and base branch through launch, checkpoint, completion, and deployment evidence.
+The allowlisted catalog currently routes `tomnagengast/network`, `tomnagengast/notebook`, `tomnagengast/factory`, and `tomnagengast/artifacts`, all on `main`. Network, Notebook, and Factory require deployment receipts and health identity at completion. Artifacts is an explicit private greenfield-bootstrap, repository-only entry rooted at `~/repos/tomnagengast`; it requires merged-main and cleanup evidence without a deployment receipt. Linear project GitHub Repo and Local Path metadata must exactly match the catalog. Unknown, mismatched, or unregistered repositories are durably rejected before a run is claimed. Every run persists its repository, path, managed root, base branch, and bootstrap policy through launch and completion.
 
 The public activity API exposes only delivery metadata and opaque run state. Linear issue identifiers, raw request bodies, prompts, logs, errors, repository paths, and session names remain private unless the operator authenticates to the dedicated Linear or agent activity routes.
 
@@ -210,6 +212,7 @@ Factory also starts its tmux server with a restricted environment. Agent process
 ~/.local/bin/nags github-hook tomnagengast/network
 ~/.local/bin/nags github-hook tomnagengast/notebook
 ~/.local/bin/nags github-hook tomnagengast/factory
+~/.local/bin/nags github-hook tomnagengast/artifacts
 curl -fsS https://factory.nags.cloud/api/healthz
 curl -fsS https://factory.nags.cloud/api/activity | jq .agentRuns
 ```
@@ -228,6 +231,17 @@ find ~/.local/share/factory/deployments -maxdepth 2 -type f -name '*.json' -prin
 ```
 
 The local health response, public health response, `current.json`, and `current` release symlink must agree on commit, tree, build ID, deployment ID, and contract version. A mismatch means the deployment is not verified even when the process is listening.
+
+If health returns `503`, inspect the wire before restarting or deploying again:
+
+```bash
+curl -sS http://127.0.0.1:8092/api/healthz | jq '.status, .wire'
+tail -n 20 ~/.local/share/factory/data/system-events.jsonl
+launchctl print "gui/$(id -u)/com.nags.factory"
+tmux -L factory-agents list-sessions
+```
+
+Pending records indicate a retryable dependency or projection failure and keep manager work gated until ordered catch-up succeeds. A growing rejection count indicates a permanent routing or policy failure that was isolated so later records could continue. Do not delete, truncate, or rewrite `system-events.jsonl`; correct the catalog, project metadata, credentials, or dependency and use a new trigger when appropriate. Factory issue tmux sessions use a separate server and should remain intact across service recovery.
 
 For a failed release, inspect the failed receipt under `~/.local/share/factory/deployments/failed/` and confirm the previous release recovered. To select a known successful release explicitly:
 
