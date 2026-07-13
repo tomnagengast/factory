@@ -1,7 +1,12 @@
 # ENG-33 Implementation Plan: Show All Events on the Wire
-> updated: 2026-07-13T21:59:27Z
+> updated: 2026-07-13T22:07:38Z
 
 Linear: https://linear.app/nags-cloud/issue/ENG-33/show-all-events-on-the-wire
+
+## Current baseline
+
+- Before implementation, the issue branch was synchronized with `origin/main` at `0e48f6b5f81f59a18f51f6f379b907b8cbc87c20` and the plan was revalidated against the merged source.
+- The synchronized baseline adds project onboarding through `activity.Store.StagedPayload`, health/status reporting through `Wire.Status`, and durable permanent-event rejection. ENG-33 must reuse and preserve all three behaviors.
 
 ## Objective
 
@@ -10,8 +15,8 @@ Replace the legacy activity presentation with one canonical, generic wire worksp
 ## Scope boundaries
 
 - Keep `/` as the existing public landing page and `/settings` plus `/api/settings` behavior unchanged.
-- Keep `activity.Store` only for privacy-safe home totals, staged payload persistence, compact delivery projection, and replay-before-ack safety.
-- Do not change event ingestion, dispatch ordering, acknowledgment, journal retention, sidecar formats, trigger policy, repository routing, merge authority, or deployment authority.
+- Keep `activity.Store` only for privacy-safe home totals, staged payload persistence and lookup, project-setup dispatch, compact delivery projection, and replay-before-ack safety.
+- Do not change event ingestion, project-setup dispatch, dispatch ordering, acknowledgment, permanent-event rejection, `Wire.Status`, journal retention, sidecar formats, trigger policy, repository routing, merge authority, or deployment authority.
 - Do not migrate or rewrite existing journal, activity, or payload files.
 - Accept that cached old frontend bundles fail until refreshed. Do not add compatibility routes.
 
@@ -22,18 +27,19 @@ Replace the legacy activity presentation with one canonical, generic wire worksp
 Files: `internal/eventwire/journal.go`, `internal/eventwire/wire.go`, focused eventwire tests.
 
 - Expose a read-only query surface over one cloned `Journal.Snapshot`, rather than reparsing the JSONL journal for every page poll.
-- Return retained records newest first with offset/limit paging, optional exact source and type filters, retained and matching totals, dispatch cursor state, and dynamically derived source, type, and hourly counts.
+- Return retained records newest first with offset/limit paging, optional exact source and type filters, retained and matching totals, the existing `Wire.Status` dispatch/rejection state, and dynamically derived source, type, and hourly counts.
 - Treat source, type, action, subject, attributes, and channels as opaque data. Do not enumerate current source/type values in the query or response construction.
 - Add exact retained-sequence lookup for detail. Return a cloned normalized record and a not-found result when the requested sequence has aged out or never existed.
-- Test ordering, page bounds, filters, dynamic unknown types, counts, snapshot isolation, and sequence lookup.
+- Preserve `Journal.Reject`, rejection persistence/compaction, and `eventwire.Permanent` dispatch isolation unchanged.
+- Test ordering, page bounds, filters, dynamic unknown types, counts, snapshot isolation, sequence lookup, and unchanged status/rejection behavior.
 
 ### 2. Narrow the activity store to active runtime responsibilities
 
 Files: `internal/activity/store.go` and its focused tests.
 
-- Retain `StagePayload`, `AddStaged`, `Add`, privacy-safe `Snapshot`, sidecar ownership/permissions, pruning, and atomic persistence.
+- Retain `StagePayload`, `StagedPayload`, `AddStaged`, `Add`, privacy-safe `Snapshot`, sidecar ownership/permissions, pruning, and atomic persistence.
 - Remove `LinearPage` and presentation-only paging/count helpers.
-- Replace hash-oriented `LinearEvent` presentation lookup with an internal payload lookup keyed by delivery ID for canonical wire detail.
+- Replace hash-oriented `LinearEvent` presentation lookup with an internal payload lookup keyed by delivery ID for canonical wire detail, reusing `StagedPayload` where its current semantics apply rather than introducing a competing sidecar read path.
 - Keep existing state and payload file formats unchanged.
 - Preserve and extend tests for private payload lookup, missing/aged-out payload behavior, pruning, and staged projection durability.
 
@@ -46,8 +52,8 @@ Files: `internal/server/server.go`, `internal/server/server_test.go`, `internal/
 - Register authenticated `/api/agents` and `/api/agents/<issue>/<started>/run` only. Remove `/api/activity*` and `/api/agents/<run-id>` registrations and handlers.
 - Register explicit SPA page handlers for `/home`, `/wire`, `/agents`, `/agents/<issue>/<started>/run`, and `/settings`. Keep `/` landing behavior. Serve only real frontend assets from the final static handler and return `404` for removed, unknown, malformed, and trailing-slash application paths.
 - Protect only exact canonical authenticated page shapes. Change invalid OAuth `next` and logout fallbacks to `/home`; do not recognize legacy destinations.
-- Keep Linear/GitHub dispatch projection before acknowledgment and keep replay/catch-up behavior unchanged.
-- Test public/private boundaries, successful list/detail responses, optional raw Linear payloads, unknown sequences, invalid paging/filter inputs, exact canonical page matching, old-path `404`s, malformed/trailing-slash `404`s, safe-next fallback, and the existing replay safeguard regression.
+- Keep Linear/GitHub dispatch projection before acknowledgment, project-setup enqueue from the staged Linear payload, permanent-failure isolation, and replay/catch-up behavior unchanged.
+- Test public/private boundaries, successful list/detail responses, optional raw Linear payloads, unknown sequences, invalid paging/filter inputs, exact canonical page matching, old-path `404`s, malformed/trailing-slash `404`s, safe-next fallback, the existing project-setup dispatch path, wire rejection/status behavior, and the replay safeguard regression.
 
 ### 4. Rebuild the frontend around canonical navigation and generic wire data
 
