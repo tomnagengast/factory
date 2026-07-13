@@ -58,7 +58,7 @@ Additional `Factory` label applications and eligible human comments are coalesce
 Factory separates public health from authenticated operational detail:
 
 - `/` is the public Factory landing page.
-- `/home` is the authenticated, privacy-safe summary of verified deliveries and agent-run totals.
+- `/home` is the public, privacy-safe summary of verified deliveries and agent-run totals.
 - `/wire` is the authenticated system-event workspace with source and type filters, retained-window charts, 25-event pages, normalized journal records, and available Linear raw-payload inspection.
 - `/agents` is the authenticated run dashboard with issue context, lifecycle phase, ready-checkpoint PR and verified head, authoritative refresh timing, resume counts, deployment receipt identity, and terminal rejection evidence.
 - `/agents/<issue-id>/<started-unix-ms>/run` is the authenticated, read-only loop observer for one started run.
