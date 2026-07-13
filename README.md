@@ -55,16 +55,18 @@ Redundant work is prevented at three layers:
 
 Additional `Factory` label applications and eligible human comments are coalesced while the issue has an active run. After a run becomes terminal, either remove and reapply the label or add a human comment to start another run. The `$do` skill resumes active work when it exists; after an earlier PR is integrated, a comment continuation starts a deterministic focused follow-up branch instead of rewriting completed work.
 
-## Activity views
+## Operator views
 
 Factory separates public health from authenticated operational detail:
 
-- `/activity` is a public, privacy-safe summary of verified deliveries and agent-run totals.
-- `/activity/linear` is an authenticated Linear delivery workspace with retained-window charts, 25-event pages, a scrollable ledger, and raw-payload inspection.
-- `/activity/agents` is an authenticated run dashboard with issue context, lifecycle phase, ready-checkpoint PR and verified head, authoritative refresh timing, resume counts, deployment receipt identity, and terminal rejection evidence.
-- `/activity/agents/<issue-id>/<started-unix-ms>/run` is the authenticated, read-only loop observer for one started run.
+- `/` is the public Factory landing page.
+- `/home` is the authenticated, privacy-safe summary of verified deliveries and agent-run totals.
+- `/wire` is the authenticated system-event workspace with source and type filters, retained-window charts, 25-event pages, normalized journal records, and available Linear raw-payload inspection.
+- `/agents` is the authenticated run dashboard with issue context, lifecycle phase, ready-checkpoint PR and verified head, authoritative refresh timing, resume counts, deployment receipt identity, and terminal rejection evidence.
+- `/agents/<issue-id>/<started-unix-ms>/run` is the authenticated, read-only loop observer for one started run.
+- `/settings` is the authenticated runtime-policy editor.
 
-Validated Linear request bodies are retained prospectively as private `0600` sidecar files beside the bounded activity index. Sidecars age out with their metadata records. Historical records from before payload retention remain listable without a body, and GitHub request bodies are never retained. `/agents/<run-id>` remains available for existing links and for pending runs that do not have a start timestamp yet.
+Validated Linear request bodies are retained prospectively as private `0600` sidecar files beside the bounded activity index. Sidecars age out with their projection records. Historical wire records from before payload retention remain listable without a body, and GitHub request bodies are never retained. Pending runs without a start timestamp appear as non-link rows until the canonical observer reference exists. Deprecated activity URLs, direct run-ID URLs, unknown paths, malformed paths, and trailing-slash variants return `404` without redirects or compatibility aliases.
 
 ## System event wire
 
@@ -168,7 +170,7 @@ tmux -L factory-agents capture-pane -pt factory-team-123:principal
 
 Detach with the configured tmux prefix followed by `d`. Kill only a specific session or window when intervention is necessary. Never use `tmux kill-server`, because it terminates every Factory issue run.
 
-The activity and active agent views poll their APIs every two seconds. Each started activity run links to `https://factory.nags.cloud/activity/agents/<issue-id>/<started-unix-ms>/run`; pending runs and existing bookmarks continue to use `/agents/<run-id>`. Every observer response includes its observation time, current retry attempt, tmux windows, commands, and recent pane output. Agent events appear as collapsed steps; expanding one reveals its redacted raw JSON payload. When tmux exits, the observer reconstructs the complete principal-attempt and child-agent histories from their retained JSONL event files without the live pane limit. Terminal views stop polling after loading this immutable history. Plain terminal output remains available when a pane does not contain structured events. A live session that cannot be observed is reported as an observer error instead of an empty session. The view never accepts terminal input. Use the attach command shown on the page when interactive local control is required.
+The home and active agent views poll their APIs every two seconds. Each started run links to `https://factory.nags.cloud/agents/<issue-id>/<started-unix-ms>/run`; pending runs remain non-link rows. Every observer response includes its observation time, current retry attempt, tmux windows, commands, and recent pane output. Agent events appear as collapsed steps; expanding one reveals its redacted raw JSON payload. When tmux exits, the observer reconstructs the complete principal-attempt and child-agent histories from their retained JSONL event files without the live pane limit. Terminal views stop polling after loading this immutable history. Plain terminal output remains available when a pane does not contain structured events. A live session that cannot be observed is reported as an observer error instead of an empty session. The view never accepts terminal input. Use the attach command shown on the page when interactive local control is required.
 
 Browser navigation uses Google OAuth over HTTPS. Factory accepts only verified Google identities in `FACTORY_GOOGLE_ALLOWED_EMAILS`, keeps the OAuth tokens server-side for the duration of the callback, and issues a signed, secure, host-only session cookie for 24 hours. Visit `/auth/logout` to clear the Factory session.
 
@@ -219,7 +221,7 @@ If a saved value is valid but undesirable, restore it through the page or API wi
 
 The compiled catalog routes `tomnagengast/network`, `tomnagengast/notebook`, `tomnagengast/factory`, and `tomnagengast/artifacts`, all on `main`. Network, Notebook, and Factory require deployment receipts and health identity at completion. Artifacts is an explicit private greenfield-bootstrap, repository-only entry rooted at `~/repos/tomnagengast`; it requires merged-main and cleanup evidence without a deployment receipt. Validated project onboarding records extend this catalog at runtime and survive restart. Linear project GitHub Repo and Local Path metadata must exactly match either a compiled entry or an admitted onboarding record. Unknown, mismatched, or unregistered repositories are durably rejected before a run is claimed. Every run persists its repository, path, managed root, base branch, bootstrap policy, and optional Cloud URL through launch and completion.
 
-The public activity API exposes only delivery metadata and opaque run state. Linear issue identifiers, raw request bodies, prompts, logs, errors, repository paths, and session names remain private unless the operator authenticates to the dedicated Linear or agent activity routes.
+The public health API exposes only service and aggregate wire state. `/api/home` returns privacy-safe delivery metadata and opaque run state, while `/api/wire`, `/api/agents`, canonical run observers, and settings remain authenticated. Linear issue identifiers, raw request bodies, prompts, logs, errors, repository paths, and session names remain private.
 
 Factory also starts its tmux server with a restricted environment. Agent processes receive normal shell/GitHub runtime variables and the dedicated Linear API key, but not the webhook signing secret, Cloudflare token, UniFi key, tunnel token, or 1Password service-account token sourced by the parent service.
 
@@ -233,7 +235,7 @@ Factory also starts its tmux server with a restricted environment. Agent process
 ~/.local/bin/nags github-hook tomnagengast/factory
 ~/.local/bin/nags github-hook tomnagengast/artifacts
 curl -fsS https://factory.nags.cloud/api/healthz
-curl -fsS https://factory.nags.cloud/api/activity | jq .agentRuns
+curl -fsS https://factory.nags.cloud/api/home | jq .agentRuns
 ```
 
 Normal deployment is intentionally refused unless the checkout is clean, on `main`, tracking the official `origin`, and exactly equal to `origin/main` and `--expected-commit`. A detached release checkout may be used only with `--allow-detached` and only when its expected commit is contained in `origin/main`. Deploy and rollback share a fail-closed per-app lock so concurrent post-merge continuations cannot interleave release or receipt state.
