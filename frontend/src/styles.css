@@ -883,7 +883,41 @@ select {
 }
 
 .detail-summary {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.wire-filters {
+  margin-top: 42px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.wire-filters label {
+  display: grid;
+  gap: 9px;
+}
+
+.wire-filters label > span {
+  color: var(--quiet);
+  font: 500 0.62rem/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.wire-filters select {
+  width: 100%;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+}
+
+.wire-filters select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .chart-grid,
@@ -1140,6 +1174,36 @@ select {
   white-space: pre-wrap;
 }
 
+.wire-metadata {
+  margin: 0 0 24px;
+  display: grid;
+  border-top: 1px solid var(--border);
+}
+
+.wire-metadata div {
+  padding: 10px 0;
+  display: grid;
+  grid-template-columns: minmax(100px, 0.4fr) minmax(0, 1fr);
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.wire-metadata dt,
+.wire-metadata dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font: 400 0.66rem/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+.wire-metadata dt {
+  color: var(--quiet);
+  text-transform: uppercase;
+}
+
+.wire-metadata dd {
+  color: var(--text);
+}
+
 .inline-error {
   margin-top: 48px;
   padding: 28px;
@@ -1193,6 +1257,11 @@ select {
 .issue-link {
   font: 600 0.78rem/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace;
   letter-spacing: 0.05em;
+}
+
+.issue-link.pending {
+  color: var(--quiet);
+  cursor: not-allowed;
 }
 
 @media (max-width: 900px) {
@@ -1272,6 +1341,10 @@ select {
   }
 
   .activity-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .wire-filters {
     grid-template-columns: 1fr;
   }
 
