@@ -116,7 +116,6 @@ func TestPrivateCanonicalRoutesRequireViewerAuthentication(t *testing.T) {
 
 	handler := testHandler(t)
 	for _, target := range []string{
-		"/home",
 		"/wire",
 		"/agents",
 		"/agents/ENG-23/1783714439062/run",
@@ -144,6 +143,18 @@ func TestPrivateCanonicalRoutesRequireViewerAuthentication(t *testing.T) {
 		if recorder.Code != http.StatusUnauthorized || recorder.Header().Get("WWW-Authenticate") == "" {
 			t.Fatalf("%s API response = %d, challenge %q", target, recorder.Code, recorder.Header().Get("WWW-Authenticate"))
 		}
+	}
+}
+
+func TestPublicHomePageServesFrontendWithoutAuthentication(t *testing.T) {
+	t.Parallel()
+
+	handler := testHandler(t)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/home", nil))
+
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "<h1>Factory</h1>" {
+		t.Fatalf("home page = %d %q", recorder.Code, recorder.Body.String())
 	}
 }
 

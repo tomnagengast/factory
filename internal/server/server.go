@@ -319,7 +319,7 @@ func New(config Config) (http.Handler, error) {
 	mux.HandleFunc("GET /auth/logout", app.viewerAuth.Logout)
 	page := frontendPage(config.Web)
 	mux.Handle("GET /{$}", page)
-	mux.Handle("GET /home", app.viewerAuth.Page(page))
+	mux.Handle("GET /home", page)
 	mux.Handle("GET /wire", app.viewerAuth.Page(page))
 	mux.Handle("GET /agents", app.viewerAuth.Page(page))
 	mux.Handle("GET /agents/{issue}/{started}/run", canonicalAgentReference(app.viewerAuth.Page(page)))
