@@ -382,7 +382,7 @@ func TestLinearWebhookAcceptsAndDeduplicatesSignedDelivery(t *testing.T) {
 func TestAuthenticatedWirePagesAllSourcesAndReadsLinearPayload(t *testing.T) {
 	t.Parallel()
 
-	handler := testHandler(t)
+	handler, _, _, _, wire := testHandlerWithRunsAndSettingsAndWire(t)
 	body := fmt.Sprintf(
 		`{"type":"Issue","action":"update","webhookTimestamp":%d,"data":{"identifier":"ENG-23","private":"winery roadmap"}}`,
 		testNow.UnixMilli(),
@@ -392,29 +392,47 @@ func TestAuthenticatedWirePagesAllSourcesAndReadsLinearPayload(t *testing.T) {
 	if webhook.Code != http.StatusOK {
 		t.Fatalf("webhook status = %d, want %d", webhook.Code, http.StatusOK)
 	}
+	if _, _, err := wire.Publish(context.Background(), eventwire.Event{
+		ID: "factory:future", Source: eventwire.SourceFactory, Type: "future-kind", Action: "observed", ReceivedAt: testNow.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("publish future event: %v", err)
+	}
 
 	pageRecorder := authenticatedRequest(t, handler, "/api/wire?page=1&pageSize=25")
 	var page eventwire.Page
 	if err := json.NewDecoder(pageRecorder.Body).Decode(&page); err != nil {
 		t.Fatalf("decode page: %v", err)
 	}
-	if pageRecorder.Code != http.StatusOK || page.Retained != 1 || page.Matching != 1 || len(page.Records) != 1 {
+	if pageRecorder.Code != http.StatusOK || page.Retained != 2 || page.Matching != 2 || len(page.Records) != 2 {
 		t.Fatalf("page response = %d %#v", pageRecorder.Code, page)
 	}
-	if len(page.SourceCounts) != 1 || page.SourceCounts[0] != (eventwire.Count{Label: "linear", Count: 1}) {
+	if len(page.SourceCounts) != 2 {
 		t.Fatalf("source counts = %#v", page.SourceCounts)
 	}
-	if len(page.TypeCounts) != 1 || page.TypeCounts[0] != (eventwire.Count{Label: "Issue", Count: 1}) {
+	if len(page.TypeCounts) != 2 {
 		t.Fatalf("type counts = %#v", page.TypeCounts)
 	}
 
-	detailRecorder := authenticatedRequest(t, handler, "/api/wire/"+strconv.FormatUint(page.Records[0].Sequence, 10))
+	linearRecord := page.Records[1]
+	if linearRecord.Event.Source != eventwire.SourceLinear {
+		t.Fatalf("linear record = %#v", linearRecord)
+	}
+	detailRecorder := authenticatedRequest(t, handler, "/api/wire/"+strconv.FormatUint(linearRecord.Sequence, 10))
 	var detail wireDetailResponse
 	if err := json.NewDecoder(detailRecorder.Body).Decode(&detail); err != nil {
 		t.Fatalf("decode detail: %v", err)
 	}
 	if detailRecorder.Code != http.StatusOK || !detail.PayloadAvailable || !strings.Contains(string(detail.Payload), "winery roadmap") {
 		t.Fatalf("detail response = %d %#v", detailRecorder.Code, detail)
+	}
+
+	filteredRecorder := authenticatedRequest(t, handler, "/api/wire?source=factory&type=future-kind")
+	var filtered eventwire.Page
+	if err := json.NewDecoder(filteredRecorder.Body).Decode(&filtered); err != nil {
+		t.Fatalf("decode filtered wire: %v", err)
+	}
+	if filteredRecorder.Code != http.StatusOK || filtered.Matching != 1 || len(filtered.Records) != 1 || filtered.Records[0].Event.Type != "future-kind" {
+		t.Fatalf("filtered wire = %d %#v", filteredRecorder.Code, filtered)
 	}
 
 	publicRecorder := httptest.NewRecorder()
