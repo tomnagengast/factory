@@ -1,0 +1,12 @@
+schema = 1
+app = "factory"
+
+[build]
+command = """export MISE_BUN_VERSION=1.3.11; bun install --cwd frontend --frozen-lockfile && bun run --cwd frontend build && go build -trimpath -ldflags="-s -w -X main.buildCommit=${NETWORK_APP_SOURCE_COMMIT} -X main.buildTree=${NETWORK_APP_SOURCE_TREE} -X main.buildID=${NETWORK_APP_BUILD_ID} -X main.buildDeploymentID=${NETWORK_APP_DEPLOYMENT_ID} -X main.buildContractVersion=${NETWORK_APP_CONTRACT_VERSION}" -o factory ."""
+
+[run]
+command = "./factory serve"
+
+[health]
+path = "/api/healthz"
+identity = true
