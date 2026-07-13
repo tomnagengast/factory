@@ -226,6 +226,38 @@ func TestLinearLabelSettingsControlNewRunsWithoutDroppingActivity(t *testing.T) 
 	}
 }
 
+func TestLinearCommentSettingsKeepJournalWithoutStartingContinuation(t *testing.T) {
+	t.Parallel()
+
+	handler, runStore, notifier, journalPath, configuration := testHandlerWithLinearCommentsAndSettings(t)
+	prior, _, err := runStore.Claim(agentrun.Trigger{
+		DeliveryID: "label-delivery", IssueIdentifier: "ENG-123", Kind: agentrun.TriggerKindLabel,
+	}, testNow.Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("seed prior run: %v", err)
+	}
+	if err := runStore.Finish(prior.ID, agentrun.StateSucceeded, 1, "done", testNow.Add(-time.Second)); err != nil {
+		t.Fatalf("finish prior run: %v", err)
+	}
+	candidate := configuration.Snapshot()
+	candidate.Triggers.LinearComment.Enabled = false
+	if _, err := configuration.Update(candidate.Revision, candidate, testNow); err != nil {
+		t.Fatalf("disable comment trigger: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, signedWebhookRequest(testLinearCommentBody("comment-disabled", "Please continue"), "comment-disabled-delivery", testSecret))
+	if recorder.Code != http.StatusOK || runStore.Snapshot().Total != 1 || runStore.Snapshot().Active != 0 {
+		t.Fatalf("disabled continuation response = %d, runs %#v", recorder.Code, runStore.Snapshot())
+	}
+	if notifier.count.Load() != 0 {
+		t.Fatalf("notifications = %d, want 0", notifier.count.Load())
+	}
+	batch, err := linearhook.Read(journalPath, linearhook.Filter{IssueIdentifier: "ENG-123"}, 0)
+	if err != nil || len(batch.Events) != 1 || batch.Events[0].CommentID != "comment-disabled" {
+		t.Fatalf("comment journal = %#v, %v", batch, err)
+	}
+}
+
 func TestAuthenticatedAgentPageServesFrontend(t *testing.T) {
 	t.Parallel()
 
@@ -1180,6 +1212,12 @@ func testHandlerWithGitHub(t *testing.T) (http.Handler, string) {
 
 func testHandlerWithLinearComments(t *testing.T) (http.Handler, *agentrun.Store, *testNotifier, string) {
 	t.Helper()
+	handler, runStore, notifier, journalPath, _ := testHandlerWithLinearCommentsAndSettings(t)
+	return handler, runStore, notifier, journalPath
+}
+
+func testHandlerWithLinearCommentsAndSettings(t *testing.T) (http.Handler, *agentrun.Store, *testNotifier, string, *settings.Store) {
+	t.Helper()
 	directory := t.TempDir()
 	activityStore, err := activity.Open(filepath.Join(directory, "activity.json"), 10)
 	if err != nil {
@@ -1199,13 +1237,14 @@ func testHandlerWithLinearComments(t *testing.T) (http.Handler, *agentrun.Store,
 		t.Fatalf("open Linear comment journal: %v", err)
 	}
 	notifier := &testNotifier{}
+	configuration := testSettingsStore(t)
 	handler, err := New(Config{
 		Web:            testWeb(),
 		ActivityStore:  activityStore,
 		RunStore:       runStore,
 		RunNotifier:    notifier,
 		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
-		Settings:       testSettingsStore(t),
+		Settings:       configuration,
 		ViewerAuth:     testViewerAuth(t),
 		LinearSecret:   testSecret,
 		GitHubSecret:   testGitHubSecret,
@@ -1219,7 +1258,7 @@ func testHandlerWithLinearComments(t *testing.T) (http.Handler, *agentrun.Store,
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
-	return handler, runStore, notifier, journalPath
+	return handler, runStore, notifier, journalPath, configuration
 }
 
 func testViewerAuth(t *testing.T) *viewerauth.Authenticator {

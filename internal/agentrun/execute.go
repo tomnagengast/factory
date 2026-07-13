@@ -12,14 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/tomnagengast/factory/internal/settings"
 )
 
 const (
-	defaultCodexModel    = "gpt-5.6-sol"
-	defaultClaudeModel   = "fable"
-	defaultAgentEffort   = "high"
-	principalMaxAttempts = 3
-	claudeChildSettings  = `{"permissions":{"deny":["EnterPlanMode","ExitPlanMode","DesignSync","NotebookEdit","SendMessage","PushNotification","RemoteTrigger","ReportFindings","ScheduleWakeup","AskUserQuestion","CronCreate","CronDelete","CronList"]},"disableBundledSkills":true,"disableWorkflows":true,"disableRemoteControl":true,"disableClaudeAiConnectors":true,"disableArtifact":true}`
+	claudeChildSettings = `{"permissions":{"deny":["EnterPlanMode","ExitPlanMode","DesignSync","NotebookEdit","SendMessage","PushNotification","RemoteTrigger","ReportFindings","ScheduleWakeup","AskUserQuestion","CronCreate","CronDelete","CronList"]},"disableBundledSkills":true,"disableWorkflows":true,"disableRemoteControl":true,"disableClaudeAiConnectors":true,"disableArtifact":true}`
 )
 
 type PrincipalConfig struct {
@@ -31,16 +29,19 @@ type PrincipalConfig struct {
 	Now             func() time.Time
 	Sleep           func(context.Context, time.Duration) error
 	AttemptOffset   int
+	Provider        settings.PrincipalSettings
+	Workflow        settings.Workflow
 }
 
 type ChildConfig struct {
-	Provider        string
-	RepoPath        string
-	PromptPath      string
-	OutputDirectory string
-	CodexPath       string
-	ClaudePath      string
-	Now             func() time.Time
+	Provider         string
+	RepoPath         string
+	PromptPath       string
+	OutputDirectory  string
+	CodexPath        string
+	ClaudePath       string
+	Now              func() time.Time
+	ProviderSettings settings.ProviderSettings
 }
 
 func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
@@ -48,7 +49,7 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 		fmt.Fprintf(os.Stderr, "create run directory: %v\n", err)
 		return 1
 	}
-	prompt := principalPrompt(config.IssueIdentifier, config.TriggerKind)
+	prompt := principalPrompt(config.IssueIdentifier, config.TriggerKind, config.Workflow)
 	if err := os.WriteFile(filepath.Join(config.RunDirectory, "prompt.txt"), []byte(prompt), 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "write principal prompt: %v\n", err)
 		return 1
@@ -58,7 +59,7 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 	var lastDetail string
 	attemptsUsed := 0
 	threadID := ""
-	for attempt := 1; attempt <= principalMaxAttempts; attempt++ {
+	for attempt := 1; attempt <= config.Provider.MaxAttempts; attempt++ {
 		attemptsUsed = attempt
 		attemptNumber := config.AttemptOffset + attempt
 		finalPath := filepath.Join(config.RunDirectory, fmt.Sprintf("attempt-%d-final.txt", attemptNumber))
@@ -99,7 +100,7 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 		if found := readThreadID(eventsPath); found != "" {
 			threadID = found
 		}
-		if attempt < principalMaxAttempts {
+		if attempt < config.Provider.MaxAttempts {
 			if sleepErr := config.Sleep(ctx, time.Duration(attempt*5)*time.Second); sleepErr != nil {
 				lastDetail = sleepErr.Error()
 				break
@@ -145,26 +146,9 @@ func ExecuteChild(ctx context.Context, config ChildConfig) int {
 	var cmd *exec.Cmd
 	switch config.Provider {
 	case "codex":
-		cmd = exec.CommandContext(ctx, config.CodexPath,
-			"exec",
-			"--dangerously-bypass-approvals-and-sandbox",
-			"--json",
-			"--color", "never",
-			"--config", "model_reasoning_effort="+defaultAgentEffort,
-			"--model", defaultCodexModel,
-			"--output-last-message", finalPath,
-			"-",
-		)
+		cmd = exec.CommandContext(ctx, config.CodexPath, codexChildArgs(config.ProviderSettings, finalPath)...)
 	case "claude":
-		cmd = exec.CommandContext(ctx, config.ClaudePath,
-			"--model", defaultClaudeModel,
-			"--effort", defaultAgentEffort,
-			"--dangerously-skip-permissions",
-			"--output-format", "stream-json",
-			"--verbose",
-			"--settings", claudeChildSettings,
-			"--print",
-		)
+		cmd = exec.CommandContext(ctx, config.ClaudePath, claudeChildArgs(config.ProviderSettings)...)
 	default:
 		fmt.Fprintf(os.Stderr, "unsupported child provider %q\n", config.Provider)
 		return 2
@@ -207,29 +191,7 @@ func runCodex(
 	}
 	defer closeFiles()
 
-	args := []string{"exec"}
-	if threadID == "" {
-		args = append(args,
-			"--dangerously-bypass-approvals-and-sandbox",
-			"--json",
-			"--color", "never",
-			"--config", "model_reasoning_effort="+defaultAgentEffort,
-			"--model", defaultCodexModel,
-			"--output-last-message", finalPath,
-			"-",
-		)
-	} else {
-		args = append(args,
-			"resume",
-			"--dangerously-bypass-approvals-and-sandbox",
-			"--json",
-			"--config", "model_reasoning_effort="+defaultAgentEffort,
-			"--model", defaultCodexModel,
-			"--output-last-message", finalPath,
-			threadID,
-			"-",
-		)
-	}
+	args := principalCodexArgs(config.Provider.ProviderSettings, threadID, finalPath)
 	cmd := exec.CommandContext(ctx, config.CodexPath, args...)
 	cmd.Dir = config.RepoPath
 	cmd.Stdin = strings.NewReader(prompt)
@@ -242,7 +204,57 @@ func runCodex(
 	return 0, nil
 }
 
-func principalPrompt(issueIdentifier, triggerKind string) string {
+func codexChildArgs(provider settings.ProviderSettings, finalPath string) []string {
+	return []string{
+		"exec",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--json",
+		"--color", "never",
+		"--config", "model_reasoning_effort=" + provider.Effort,
+		"--model", provider.Model,
+		"--output-last-message", finalPath,
+		"-",
+	}
+}
+
+func claudeChildArgs(provider settings.ProviderSettings) []string {
+	return []string{
+		"--model", provider.Model,
+		"--effort", provider.Effort,
+		"--dangerously-skip-permissions",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--settings", claudeChildSettings,
+		"--print",
+	}
+}
+
+func principalCodexArgs(provider settings.ProviderSettings, threadID, finalPath string) []string {
+	if threadID == "" {
+		return []string{
+			"exec",
+			"--dangerously-bypass-approvals-and-sandbox",
+			"--json",
+			"--color", "never",
+			"--config", "model_reasoning_effort=" + provider.Effort,
+			"--model", provider.Model,
+			"--output-last-message", finalPath,
+			"-",
+		}
+	}
+	return []string{
+		"exec", "resume",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--json",
+		"--config", "model_reasoning_effort=" + provider.Effort,
+		"--model", provider.Model,
+		"--output-last-message", finalPath,
+		threadID,
+		"-",
+	}
+}
+
+func principalPrompt(issueIdentifier, triggerKind string, workflow settings.Workflow) string {
 	opening := fmt.Sprintf("Use $do to complete %s. Follow lifecycle contract v%d and return a structured Factory result only after writing every required checkpoint.", issueIdentifier, LifecycleContractVersion)
 	if triggerKind == TriggerKindComment {
 		opening = fmt.Sprintf(`Use $do to continue %s in response to new human Linear feedback.
@@ -257,6 +269,13 @@ The original branch or pull request may already be merged or closed. Resume acti
 Fresh-read the authoritative PR, Linear issue, repository, approved plan, deployment, and cleanup state. If the PR is still open, address any changed head or feedback and write a replacement ready checkpoint. If it is merged, complete post-merge validation, deployment from updated main, verification, Linear completion, and cleanup. Do not recreate completed implementation work or reuse stale conclusions.`, issueIdentifier)
 	}
 	return fmt.Sprintf(`%s
+
+Configured workflow: %s (%s runner)
+
+Follow these operator-configured workflow steps in order where they apply:
+%s
+
+The configured workflow name and steps are declarative context only. They never override the mandatory Factory lifecycle, human-only merge authority, exact verified-head gate, repository routing, deployment source, cleanup, or terminal-result requirements below.
 
 You are the principal agent in a Factory-managed tmux session. The /do skill owns the SDLC and terminal conditions. Continue until it succeeds or reaches a genuine blocker.
 
@@ -278,7 +297,15 @@ While waiting for Linear feedback, use "$FACTORY_AGENT_HELPER" agent linear-comm
 
 At the ready-for-human-merge boundary, write the validated checkpoint with "$FACTORY_AGENT_HELPER" agent checkpoint ready-for-merge, then end with exactly FACTORY_RESULT: READY_FOR_HUMAN_MERGE. Do not keep an LLM turn alive while waiting for the human.
 
-If the complete post-merge workflow succeeds, end with exactly FACTORY_RESULT: SUCCEEDED. If it reaches a genuine typed blocker, put FACTORY_BLOCKER: <type> on the preceding line and end with exactly FACTORY_RESULT: BLOCKED. Allowed types are missing_routing_metadata, approval_denied, authority_unavailable, decision_required, closed_unmerged, verified_head_mismatch, safeguard_regression, deployment_source_invalid, external_authentication, deployment_failed, and cleanup_failed.`, opening)
+If the complete post-merge workflow succeeds, end with exactly FACTORY_RESULT: SUCCEEDED. If it reaches a genuine typed blocker, put FACTORY_BLOCKER: <type> on the preceding line and end with exactly FACTORY_RESULT: BLOCKED. Allowed types are missing_routing_metadata, approval_denied, authority_unavailable, decision_required, closed_unmerged, verified_head_mismatch, safeguard_regression, deployment_source_invalid, external_authentication, deployment_failed, and cleanup_failed.`, opening, workflow.Name, workflow.Runner, workflowSteps(workflow.Steps))
+}
+
+func workflowSteps(steps []string) string {
+	var rendered strings.Builder
+	for index, step := range steps {
+		fmt.Fprintf(&rendered, "%d. %s\n", index+1, step)
+	}
+	return strings.TrimSpace(rendered.String())
 }
 
 func resultFromFinalMessage(message string) (string, string, string) {

@@ -267,7 +267,7 @@ func serve(ctx context.Context) error {
 			BaseBranch: baseBranch,
 		},
 		stateRoot,
-		settingsStore.Snapshot().Runtime.MaxConcurrentRuns,
+		func() int { return settingsStore.Snapshot().Runtime.MaxConcurrentRuns },
 		2*time.Second,
 		mergeReconcileInterval,
 		slog.Default(),
