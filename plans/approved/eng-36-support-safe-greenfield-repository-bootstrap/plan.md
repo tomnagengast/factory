@@ -1,6 +1,6 @@
 # ENG-36 implementation plan: safe greenfield repository bootstrap
 
-> updated: 2026-07-13T20:23:19Z
+> updated: 2026-07-13T20:31:40Z
 
 ## Issue context
 
@@ -16,7 +16,7 @@ The complete evidence is in `plans/planning/eng-36-support-safe-greenfield-repos
 - Non-deployable repositories run and complete without fabricated deployment receipts or health URLs.
 - Permanent dispatch failures are durably rejected and acknowledged without blocking a later valid event.
 - Transient dispatch failures remain pending and make health return a degraded response with wire backlog evidence.
-- Version 1 journals reopen and compact safely after rejection support is added.
+- Version 1 journals reopen and compact safely after rejection support is added, and the current release can reopen a journal written by the new release for rollback.
 - Sequence 6651 is recovered append-only, ENG-34 is claimed, and ENG-36 can be retriggered if its failed webhook is not retried.
 - Existing network, notebook, and factory routing, completion, and deployment remain compatible.
 - The Go suite, race suite, vet, and frozen frontend build pass.
@@ -43,11 +43,11 @@ Existing non-Git directories are rejected, including empty ones. This prevents a
 
 Permanent handler failures become atomic journal rejection-plus-ack records. Transient failures retain the current retry behavior. The error contract is typed so HTTP, rate limit, authentication, disk, and process failures cannot be accidentally dead-lettered.
 
-The journal records the event identity, original sequence, reason, and rejection time. A bounded recent rejection list and lifetime total survive compaction. The original event remains in the retained journal according to normal retention.
+The journal records the event identity, original sequence, reason, and rejection time. A bounded recent rejection list and lifetime total survive compaction. The original event remains in the retained journal according to normal retention. Rejection data is encoded as optional fields on the existing version 1 `ack` record and checkpoint shapes. Go's JSON decoder in the current release ignores those unknown fields while retaining the known acknowledgment, so rollback remains readable. No new checkpoint version or line kind is introduced.
 
 ### Health
 
-`/api/healthz` will include total, dispatched, pending, rejected total, and the last rejection. Any pending record returns HTTP 503 and `status: degraded`; no pending records return HTTP 200 and `status: ok`, even when historical rejections exist.
+`/api/healthz` will include total, dispatched, pending, rejected total, and the last rejection. Any pending record returns HTTP 503 and `status: degraded`; no pending records return HTTP 200 and `status: ok`, even when historical rejections exist. The HTTP listener starts before restart catch-up so this state is observable. The manager, service-started publication, and heartbeat loop remain gated until catch-up succeeds. A bounded recovery loop retries transient catch-up failures without starting agent work; webhook publications continue to fail retryably while the backlog remains.
 
 ### Deployment evidence
 
@@ -75,11 +75,11 @@ Completion evidence gains an explicit `DeploymentRequired` result. Existing syst
 ### Phase 1: Durable failure isolation and health
 
 1. Add typed permanent dispatch errors.
-2. Add append-only rejection records and journal status.
+2. Add append-only rejection metadata to backward-compatible version 1 acknowledgment records and expose journal status.
 3. Continue after permanent errors while retaining transient failures.
-4. Wire health to journal status and return degraded HTTP 503 for backlog.
+4. Start the HTTP listener before catch-up, wire health to journal status, return degraded HTTP 503 for backlog, and start manager work only after catch-up succeeds.
 
-Success: a permanent record is rejected once, a later event dispatches, restart does not replay the rejected record, and a transient record remains pending with degraded health.
+Success: a permanent record is rejected once, a later event dispatches, restart does not replay the rejected record, a transient record remains pending behind an available degraded health response, and no manager run starts before catch-up succeeds.
 
 ### Phase 2: Trusted repository policy and run persistence
 
@@ -123,9 +123,9 @@ Success: Factory is online with truthful healthy status, no wire backlog, Artifa
 
 - Repository creation is limited to exact catalog entries and private visibility.
 - Path checks use both lexical containment and symlink-resolved existing ancestors before mutation.
-- Existing v1 journal files remain readable; no offline migration or journal deletion occurs.
+- Existing v1 journal files remain readable; rejection metadata uses optional fields on existing v1 checkpoint and acknowledgment records, and an old-reader/new-journal test proves rollback compatibility. No offline migration or journal deletion occurs.
 - Existing deployable configs retain current completion behavior. Optional deployment fields are all-or-none.
-- Rollout is one commit-pinned Factory deployment after human merge. The manager and listener start only after catch-up succeeds.
+- Rollout is one commit-pinned Factory deployment after human merge. The listener starts immediately for degraded health visibility; the manager, service-started event, and heartbeats start only after catch-up succeeds.
 - Rollback uses `bin/network-app rollback factory --to <previous-deployment-id>` from the network repository if identity or recovery checks fail. Append-only recovery evidence and any safely created private repository remain available for diagnosis.
 
 ## Post-merge deployment and recovery commands
@@ -167,8 +167,8 @@ After the Artifacts remote exists:
 | --- | --- |
 | Permanent failure does not block later events | Focused eventwire and server tests dispatch permanent-invalid then valid records |
 | Transient failure remains retryable | Eventwire test asserts pending cursor and later catch-up |
-| Journal compatibility and audit | Open a v1 fixture, reject, reopen, compact, and inspect status |
-| Truthful health | Server tests assert HTTP 503 with pending count and HTTP 200 after catch-up |
+| Journal compatibility and audit | Open a v1 fixture, reject, reopen, compact, inspect status, and parse the new journal with a frozen copy of the current v1 reader |
+| Truthful health | Startup and server tests assert HTTP 503 with pending count while manager work is gated, then HTTP 200 and manager start after catch-up |
 | Existing checkout | Launcher integration fixture validates reuse and fast-forward |
 | Existing remote, missing checkout | Launcher integration fixture clones and validates |
 | Greenfield and retry | Fake `gh` plus real local bare Git remote validates create, initial commit, default branch, and second prepare |
