@@ -10,12 +10,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
 const resultFileName = "result.json"
 
 const ResultReadyForMerge = "ready_for_human_merge"
+
+var repositoryPrepareLocks sync.Map
 
 type LauncherConfig struct {
 	Repository    string
@@ -74,6 +77,11 @@ func NewTmuxLauncher(config LauncherConfig) (*TmuxLauncher, error) {
 }
 
 func (l *TmuxLauncher) Prepare(ctx context.Context) error {
+	lockValue, _ := repositoryPrepareLocks.LoadOrStore(filepath.Clean(l.config.RepoPath), &sync.Mutex{})
+	lock := lockValue.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+
 	if err := validateManagedTarget(l.config.ManagedRoot, l.config.RepoPath); err != nil {
 		return err
 	}

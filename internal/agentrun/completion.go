@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -77,23 +78,39 @@ type CompletionEvidenceReader interface {
 }
 
 type RepositoryCompletionEvidence struct {
+	mu      sync.RWMutex
 	readers map[string]CompletionEvidenceReader
 }
 
 func NewRepositoryCompletionEvidence(readers map[string]CompletionEvidenceReader) (*RepositoryCompletionEvidence, error) {
-	if len(readers) == 0 {
-		return nil, errors.New("repository completion evidence: readers are required")
+	evidence := &RepositoryCompletionEvidence{}
+	if err := evidence.Replace(readers); err != nil {
+		return nil, err
 	}
+	return evidence, nil
+}
+
+func (r *RepositoryCompletionEvidence) Replace(readers map[string]CompletionEvidenceReader) error {
+	if len(readers) == 0 {
+		return errors.New("repository completion evidence: readers are required")
+	}
+	next := make(map[string]CompletionEvidenceReader, len(readers))
 	for repository, reader := range readers {
 		if !repositoryPattern.MatchString(repository) || reader == nil {
-			return nil, errors.New("repository completion evidence: valid repository readers are required")
+			return errors.New("repository completion evidence: valid repository readers are required")
 		}
+		next[strings.ToLower(repository)] = reader
 	}
-	return &RepositoryCompletionEvidence{readers: readers}, nil
+	r.mu.Lock()
+	r.readers = next
+	r.mu.Unlock()
+	return nil
 }
 
 func (r *RepositoryCompletionEvidence) ReadCompletionEvidence(ctx context.Context, run Run, snapshot PullRequestSnapshot) (CompletionEvidence, error) {
-	reader := r.readers[run.Repository]
+	r.mu.RLock()
+	reader := r.readers[strings.ToLower(run.Repository)]
+	r.mu.RUnlock()
 	if reader == nil {
 		return CompletionEvidence{}, fmt.Errorf("repository completion evidence: no reader for %s", run.Repository)
 	}

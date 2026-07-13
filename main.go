@@ -20,6 +20,7 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/server"
 	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/viewerauth"
@@ -39,6 +40,8 @@ const (
 	defaultTmuxSocket        = "factory-agents"
 	serviceHeartbeatInterval = 30 * time.Second
 	mergeReconcileInterval   = 60 * time.Second
+	projectSetupRetryPoll    = 15 * time.Second
+	managedGitHubOwner       = "tomnagengast"
 	googleRedirectURL        = "https://factory.nags.cloud/auth/google/callback"
 	viewerUsername           = "factory"
 )
@@ -128,6 +131,10 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	projectSetupStore, err := projectsetup.Open(filepath.Join(dataRoot, "project-setups.json"), time.Now())
+	if err != nil {
+		return err
+	}
 	githubEvents, err := githubhook.Open(filepath.Join(dataRoot, "github-events.json"), githubEventLimit)
 	if err != nil {
 		return err
@@ -164,9 +171,11 @@ func serve(ctx context.Context) error {
 	gitPath := requiredCommand("git")
 	githubPath := requiredCommand("gh")
 	worktrunkPath := requiredCommand("wt")
+	nagsPath := requiredCommand(filepath.Join(home, ".local", "bin", "nags"))
 	tmuxSocket := envOr("FACTORY_TMUX_SOCKET", defaultTmuxSocket)
 	repoPath := envOr("FACTORY_REPO_PATH", filepath.Join(stateRoot, "workspace", "network"))
-	repositoryConfigs := []agentrun.RepositoryConfig{
+	managedRepositoryRoot := filepath.Join(home, "repos", managedGitHubOwner)
+	staticRepositoryConfigs := []agentrun.RepositoryConfig{
 		{
 			App: "network", Repository: "tomnagengast/network",
 			RepoURL:  "git@github.com:tomnagengast/network.git",
@@ -179,9 +188,9 @@ func serve(ctx context.Context) error {
 		{
 			App: "notebook", Repository: "tomnagengast/notebook",
 			RepoURL:        "git@github.com:tomnagengast/notebook.git",
-			RepoPath:       filepath.Join(home, "repos", "tomnagengast", "notebook"),
-			ManagedRoot:    filepath.Join(home, "repos", "tomnagengast"),
-			ProjectPath:    filepath.Join(home, "repos", "tomnagengast", "notebook"),
+			RepoPath:       filepath.Join(managedRepositoryRoot, "notebook"),
+			ManagedRoot:    managedRepositoryRoot,
+			ProjectPath:    filepath.Join(managedRepositoryRoot, "notebook"),
 			BaseBranch:     "main",
 			ReceiptPath:    filepath.Join(home, ".local", "share", "notebook", "deployments", "current.json"),
 			PendingReceipt: filepath.Join(home, ".local", "share", "notebook", "deployments", "pending.json"),
@@ -190,9 +199,9 @@ func serve(ctx context.Context) error {
 		{
 			App: "factory", Repository: "tomnagengast/factory",
 			RepoURL:        "git@github.com:tomnagengast/factory.git",
-			RepoPath:       filepath.Join(home, "repos", "tomnagengast", "factory"),
-			ManagedRoot:    filepath.Join(home, "repos", "tomnagengast"),
-			ProjectPath:    filepath.Join(home, "repos", "tomnagengast", "factory"),
+			RepoPath:       filepath.Join(managedRepositoryRoot, "factory"),
+			ManagedRoot:    managedRepositoryRoot,
+			ProjectPath:    filepath.Join(managedRepositoryRoot, "factory"),
 			BaseBranch:     "main",
 			ReceiptPath:    filepath.Join(stateRoot, "deployments", "current.json"),
 			PendingReceipt: filepath.Join(stateRoot, "deployments", "pending.json"),
@@ -201,12 +210,23 @@ func serve(ctx context.Context) error {
 		{
 			App: "artifacts", Repository: "tomnagengast/artifacts",
 			RepoURL:     "git@github.com:tomnagengast/artifacts.git",
-			RepoPath:    filepath.Join(home, "repos", "tomnagengast", "artifacts"),
-			ManagedRoot: filepath.Join(home, "repos", "tomnagengast"),
-			ProjectPath: filepath.Join(home, "repos", "tomnagengast", "artifacts"),
+			RepoPath:    filepath.Join(managedRepositoryRoot, "artifacts"),
+			ManagedRoot: managedRepositoryRoot,
+			ProjectPath: filepath.Join(managedRepositoryRoot, "artifacts"),
 			BaseBranch:  "main", Bootstrap: true,
 		},
 	}
+	existingRepositories := make([]projectsetup.ExistingRepository, 0, len(staticRepositoryConfigs))
+	for _, config := range staticRepositoryConfigs {
+		existingRepositories = append(existingRepositories, projectsetup.ExistingRepository{
+			Repository: config.Repository, ProjectPath: config.ProjectPath,
+		})
+	}
+	projectParser, err := projectsetup.NewParser(managedGitHubOwner, managedRepositoryRoot, existingRepositories)
+	if err != nil {
+		return err
+	}
+	repositoryConfigs := repositoryConfigsWithSetups(staticRepositoryConfigs, projectSetupStore.Specs())
 	repositoryCatalog, err := agentrun.NewRepositoryCatalog(repositoryConfigs)
 	if err != nil {
 		return err
@@ -220,7 +240,7 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	launcher, err := agentrun.NewTmuxLauncher(agentrun.LauncherConfig{
+	launcherConfig := agentrun.LauncherConfig{
 		Repository:    defaultRepository,
 		RepoURL:       envOr("FACTORY_REPO_URL", defaultRepoURL),
 		RepoPath:      repoPath,
@@ -233,7 +253,8 @@ func serve(ctx context.Context) error {
 		WorktrunkPath: worktrunkPath,
 		TmuxPath:      tmuxPath,
 		TmuxSocket:    tmuxSocket,
-	})
+	}
+	launcher, err := agentrun.NewTmuxLauncher(launcherConfig)
 	if err != nil {
 		return err
 	}
@@ -241,37 +262,28 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	completionReaders := make(map[string]agentrun.CompletionEvidenceReader, len(repositoryConfigs))
-	for _, config := range repositoryConfigs {
-		completionConfig := agentrun.SystemCompletionConfig{
-			App:            config.App,
-			Repository:     config.Repository,
-			RemoteURLs:     repositoryRemoteURLs(config.Repository),
-			RepoPath:       config.RepoPath,
-			BaseBranch:     config.BaseBranch,
-			ReceiptPath:    config.ReceiptPath,
-			PendingReceipt: config.PendingReceipt,
-			HealthURL:      config.HealthURL,
-			SourcePath:     config.SourcePath,
-			LinearURL:      "https://api.linear.app/graphql",
-			GitPath:        gitPath,
-			WorktrunkPath:  worktrunkPath,
-			LinearAPIKey:   linearAPIKey,
-			HTTPClient:     &http.Client{Timeout: 10 * time.Second},
-		}
-		var reader agentrun.CompletionEvidenceReader
-		var readerErr error
-		if config.DeploymentRequired() {
-			reader, readerErr = agentrun.NewSystemCompletionEvidence(completionConfig)
-		} else {
-			reader, readerErr = agentrun.NewRepositoryOnlyCompletionEvidence(completionConfig)
-		}
-		if readerErr != nil {
-			return readerErr
-		}
-		completionReaders[config.Repository] = reader
+	readerOptions := completionReaderOptions{
+		linearURL: "https://api.linear.app/graphql", linearAPIKey: linearAPIKey,
+		gitPath: gitPath, worktrunkPath: worktrunkPath,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+	completionReaders, err := buildCompletionReaders(repositoryConfigs, readerOptions)
+	if err != nil {
+		return err
 	}
 	completionEvidence, err := agentrun.NewRepositoryCompletionEvidence(completionReaders)
+	if err != nil {
+		return err
+	}
+	projectRegistrar := &repositoryRegistrar{
+		staticConfigs: staticRepositoryConfigs, catalog: repositoryCatalog,
+		evidence: completionEvidence, readerOptions: readerOptions,
+	}
+	projectProvisioner := &repositoryProvisioner{launcherConfig: launcherConfig, nagsPath: nagsPath}
+	projectManager, err := projectsetup.NewManager(
+		projectSetupStore, projectParser, projectRegistrar, projectProvisioner,
+		projectSetupRetryPoll, slog.Default(), time.Now,
+	)
 	if err != nil {
 		return err
 	}
@@ -332,6 +344,7 @@ func serve(ctx context.Context) error {
 		LinearComments:     linearComments,
 		TriggerActor:       triggerActorID,
 		RepositoryResolver: repositoryResolver,
+		ProjectSetups:      projectManager,
 		Now:                time.Now,
 		Build: server.BuildIdentity{
 			Commit:          buildCommit,
@@ -360,9 +373,11 @@ func serve(ctx context.Context) error {
 		errCh <- httpServer.ListenAndServe()
 	}()
 	go recoverEventWire(ctx, events, 5*time.Second, func() error {
+		projectManager.Reconcile(ctx)
 		if err := publishServiceEvent(ctx, events, "started", serviceStartedAt, serviceStartedAt); err != nil {
 			return err
 		}
+		go projectManager.Run(ctx)
 		go manager.Run(ctx)
 		go publishServiceHeartbeats(ctx, events, serviceStartedAt, serviceHeartbeatInterval, time.Now)
 		return nil

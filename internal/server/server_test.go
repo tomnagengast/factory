@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/fstest"
@@ -25,6 +26,7 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/viewerauth"
 )
@@ -536,6 +538,62 @@ func TestLinearWebhookRejectsStalePayload(t *testing.T) {
 	}
 }
 
+func TestLinearProjectWebhookEnqueuesSetupFromProtectedPayload(t *testing.T) {
+	t.Parallel()
+	setups := &testProjectSetups{}
+	handler, journalPath := testHandlerWithProjectSetups(t, setups)
+	description := "New app setup.\nGitHub Repo: tomnagengast/cellar\nLocal Path: /Users/tom/repos/tomnagengast/cellar\nCloud URL: https://cellar.nags.cloud"
+	body := fmt.Sprintf(
+		`{"type":"Project","action":"create","webhookTimestamp":%d,"actor":{"id":%q},"data":{"id":"project-cellar","name":"Cellar","description":%q}}`,
+		testNow.UnixMilli(), testActorID, description,
+	)
+	for range 2 {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, signedWebhookRequest(body, "project-delivery", testSecret))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+		}
+	}
+	requests := setups.Requests()
+	if len(requests) != 1 || requests[0] != (projectsetup.Request{
+		ProjectID: "project-cellar", ProjectName: "Cellar", Description: description,
+	}) {
+		t.Fatalf("requests = %#v", requests)
+	}
+	wireData, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatalf("read wire: %v", err)
+	}
+	if strings.Contains(string(wireData), description) || strings.Contains(string(wireData), "/Users/tom/repos") {
+		t.Fatalf("wire leaked project description: %s", wireData)
+	}
+
+	otherActor := strings.Replace(body, testActorID, "other-actor", 1)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, signedWebhookRequest(otherActor, "project-other-actor", testSecret))
+	if recorder.Code != http.StatusOK || len(setups.Requests()) != 1 {
+		t.Fatalf("other actor response = %d, requests = %#v", recorder.Code, setups.Requests())
+	}
+}
+
+func TestHealthzReportsFailedProjectSetupAsDegraded(t *testing.T) {
+	t.Parallel()
+	setups := &testProjectSetups{snapshot: projectsetup.PublicSnapshot{Total: 1, Failed: 1}}
+	handler, _ := testHandlerWithProjectSetups(t, setups)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/healthz", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	var got healthResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Status != "degraded" || got.ProjectSetups.Failed != 1 {
+		t.Fatalf("response = %#v", got)
+	}
+}
+
 func TestLinearFactoryLabelStartsOneRunPerActiveIssue(t *testing.T) {
 	t.Parallel()
 
@@ -612,9 +670,10 @@ func TestPermanentRepositoryRoutingFailureDoesNotBlockLaterRun(t *testing.T) {
 				ManagedRoot: "/Users/tom/repos/tomnagengast", BaseBranch: "main",
 			}},
 		},
-		TriggerActor: testActorID,
-		Now:          func() time.Time { return testNow },
-		Build:        testBuildIdentity(),
+		ProjectSetups: &testProjectSetups{},
+		TriggerActor:  testActorID,
+		Now:           func() time.Time { return testNow },
+		Build:         testBuildIdentity(),
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -686,6 +745,7 @@ func TestLinearWebhookReplaysStagedPayloadWithoutProviderRedelivery(t *testing.T
 		Events:         wire,
 		GitHubEvents:   githubEvents,
 		LinearComments: linearComments,
+		ProjectSetups:  &testProjectSetups{},
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
 		Build:          testBuildIdentity(),
@@ -1143,6 +1203,32 @@ type testNotifier struct {
 	count atomic.Int32
 }
 
+type testProjectSetups struct {
+	mu       sync.Mutex
+	requests []projectsetup.Request
+	snapshot projectsetup.PublicSnapshot
+	err      error
+}
+
+func (s *testProjectSetups) Enqueue(_ context.Context, request projectsetup.Request) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requests = append(s.requests, request)
+	return s.err
+}
+
+func (s *testProjectSetups) PublicSnapshot() projectsetup.PublicSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshot
+}
+
+func (s *testProjectSetups) Requests() []projectsetup.Request {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]projectsetup.Request(nil), s.requests...)
+}
+
 type testRepositoryResolution struct {
 	config agentrun.RepositoryConfig
 	err    error
@@ -1233,6 +1319,7 @@ func testHandlerWithRunsAndSettingsAndWire(t *testing.T) (http.Handler, *agentru
 		Events:         wire,
 		GitHubEvents:   githubEvents,
 		LinearComments: linearComments,
+		ProjectSetups:  &testProjectSetups{},
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
 		Build:          testBuildIdentity(),
@@ -1280,6 +1367,7 @@ func testHandlerWithObserverAndStore(t *testing.T, observer AgentObserver) (http
 		Events:         testEventWire(t, githubEvents.Total(), linearComments.Total()),
 		GitHubEvents:   githubEvents,
 		LinearComments: linearComments,
+		ProjectSetups:  &testProjectSetups{},
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
 		Build:          testBuildIdentity(),
@@ -1323,6 +1411,7 @@ func testHandlerWithGitHub(t *testing.T) (http.Handler, string) {
 		Events:         testEventWire(t, journal.Total(), linearComments.Total()),
 		GitHubEvents:   journal,
 		LinearComments: linearComments,
+		ProjectSetups:  &testProjectSetups{},
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
 		Build:          testBuildIdentity(),
@@ -1374,6 +1463,7 @@ func testHandlerWithLinearCommentsAndSettings(t *testing.T) (http.Handler, *agen
 		Events:         testEventWire(t, githubEvents.Total(), linearComments.Total()),
 		GitHubEvents:   githubEvents,
 		LinearComments: linearComments,
+		ProjectSetups:  &testProjectSetups{},
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
 		Build:          testBuildIdentity(),
@@ -1382,6 +1472,51 @@ func testHandlerWithLinearCommentsAndSettings(t *testing.T) (http.Handler, *agen
 		t.Fatalf("new server: %v", err)
 	}
 	return handler, runStore, notifier, journalPath, configuration
+}
+
+func testHandlerWithProjectSetups(t *testing.T, setups ProjectSetupController) (http.Handler, string) {
+	t.Helper()
+	directory := t.TempDir()
+	activityStore, err := activity.Open(filepath.Join(directory, "activity.json"), 10)
+	if err != nil {
+		t.Fatalf("open activity store: %v", err)
+	}
+	runStore, err := agentrun.Open(filepath.Join(directory, "agent-runs.json"), 10)
+	if err != nil {
+		t.Fatalf("open run store: %v", err)
+	}
+	githubEvents, err := githubhook.Open(filepath.Join(directory, "github-events.json"), 10)
+	if err != nil {
+		t.Fatalf("open GitHub journal: %v", err)
+	}
+	linearComments, err := linearhook.Open(filepath.Join(directory, "linear-comments.json"), 10)
+	if err != nil {
+		t.Fatalf("open Linear comment journal: %v", err)
+	}
+	wirePath := filepath.Join(directory, "system-events.jsonl")
+	journal, err := eventwire.Open(wirePath, 100, map[string]uint64{
+		githubhook.WireChannel: githubEvents.Total(), linearhook.WireChannel: linearComments.Total(),
+	})
+	if err != nil {
+		t.Fatalf("open event wire: %v", err)
+	}
+	wire, err := eventwire.New(journal)
+	if err != nil {
+		t.Fatalf("new event wire: %v", err)
+	}
+	handler, err := New(Config{
+		Web: testWeb(), ActivityStore: activityStore, RunStore: runStore,
+		RunNotifier: &testNotifier{}, AgentObserver: &testObserver{err: agentrun.ErrRunNotFound},
+		Settings: testSettingsStore(t), ViewerAuth: testViewerAuth(t),
+		LinearSecret: testSecret, GitHubSecret: testGitHubSecret,
+		Events: wire, GitHubEvents: githubEvents, LinearComments: linearComments,
+		ProjectSetups: setups, TriggerActor: testActorID,
+		Now: func() time.Time { return testNow }, Build: testBuildIdentity(),
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	return handler, wirePath
 }
 
 func testViewerAuth(t *testing.T) *viewerauth.Authenticator {

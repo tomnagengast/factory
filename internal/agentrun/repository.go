@@ -12,10 +12,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 var (
-	projectRepositoryPattern = regexp.MustCompile("(?m)^GitHub Repo:\\s*https://github\\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\\s*$")
+	projectRepositoryPattern = regexp.MustCompile("(?mi)^GitHub Repo:\\s*(\\S+)\\s*$")
 	projectLocalPathPattern  = regexp.MustCompile("(?m)^Local Path:\\s*(/[^\\r\\n]+)\\s*$")
 )
 
@@ -74,21 +75,31 @@ func (c RepositoryConfig) validate() error {
 }
 
 type RepositoryCatalog struct {
+	mu           sync.RWMutex
 	byRepository map[string]RepositoryConfig
 }
 
 func NewRepositoryCatalog(configs []RepositoryConfig) (*RepositoryCatalog, error) {
-	if len(configs) == 0 {
-		return nil, errors.New("repository catalog: at least one repository is required")
+	catalog := &RepositoryCatalog{}
+	if err := catalog.Replace(configs); err != nil {
+		return nil, err
 	}
-	catalog := &RepositoryCatalog{byRepository: make(map[string]RepositoryConfig, len(configs))}
+	return catalog, nil
+}
+
+func (c *RepositoryCatalog) Replace(configs []RepositoryConfig) error {
+	if len(configs) == 0 {
+		return errors.New("repository catalog: at least one repository is required")
+	}
+	byRepository := make(map[string]RepositoryConfig, len(configs))
 	paths := make(map[string]string, len(configs))
 	for _, config := range configs {
 		if err := config.validate(); err != nil {
-			return nil, err
+			return err
 		}
-		if _, exists := catalog.byRepository[config.Repository]; exists {
-			return nil, fmt.Errorf("repository catalog: duplicate repository %s", config.Repository)
+		repositoryKey := strings.ToLower(config.Repository)
+		if _, exists := byRepository[repositoryKey]; exists {
+			return fmt.Errorf("repository catalog: duplicate repository %s", config.Repository)
 		}
 		cleanPath := filepath.Clean(config.RepoPath)
 		projectPath := config.ProjectPath
@@ -97,32 +108,49 @@ func NewRepositoryCatalog(configs []RepositoryConfig) (*RepositoryCatalog, error
 		}
 		projectPath = filepath.Clean(projectPath)
 		if repository, exists := paths[projectPath]; exists {
-			return nil, fmt.Errorf("repository catalog: %s and %s share %s", repository, config.Repository, projectPath)
+			return fmt.Errorf("repository catalog: %s and %s share %s", repository, config.Repository, projectPath)
 		}
 		paths[projectPath] = config.Repository
 		config.RepoPath = cleanPath
 		config.ManagedRoot = filepath.Clean(config.ManagedRoot)
 		config.ProjectPath = projectPath
-		catalog.byRepository[config.Repository] = config
+		byRepository[repositoryKey] = config
 	}
-	return catalog, nil
+	c.mu.Lock()
+	c.byRepository = byRepository
+	c.mu.Unlock()
+	return nil
 }
 
 func (c *RepositoryCatalog) ResolveProject(description string) (RepositoryConfig, error) {
-	repositoryMatch := projectRepositoryPattern.FindStringSubmatch(description)
-	pathMatch := projectLocalPathPattern.FindStringSubmatch(description)
-	if len(repositoryMatch) != 2 || len(pathMatch) != 2 {
+	repositoryMatches := projectRepositoryPattern.FindAllStringSubmatch(description, -1)
+	pathMatches := projectLocalPathPattern.FindAllStringSubmatch(description, -1)
+	if len(repositoryMatches) != 1 || len(pathMatches) != 1 {
 		return RepositoryConfig{}, permanentRouting(errors.New("repository catalog: Linear project must declare GitHub Repo and Local Path"))
 	}
-	config, ok := c.byRepository[repositoryMatch[1]]
+	repository, ok := normalizeProjectRepository(repositoryMatches[0][1])
 	if !ok {
-		return RepositoryConfig{}, permanentRouting(fmt.Errorf("repository catalog: %s is not allowlisted", repositoryMatch[1]))
+		return RepositoryConfig{}, permanentRouting(errors.New("repository catalog: Linear project GitHub Repo is invalid"))
 	}
-	declaredPath := filepath.Clean(strings.TrimSpace(pathMatch[1]))
+	c.mu.RLock()
+	config, ok := c.byRepository[strings.ToLower(repository)]
+	c.mu.RUnlock()
+	if !ok {
+		return RepositoryConfig{}, permanentRouting(fmt.Errorf("repository catalog: %s is not allowlisted", repository))
+	}
+	declaredPath := filepath.Clean(strings.TrimSpace(pathMatches[0][1]))
 	if declaredPath != config.ProjectPath {
 		return RepositoryConfig{}, permanentRouting(fmt.Errorf("repository catalog: path %s does not match allowlisted %s", declaredPath, config.ProjectPath))
 	}
 	return config, nil
+}
+
+func normalizeProjectRepository(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if repositoryPattern.MatchString(value) {
+		return value, true
+	}
+	return normalizeGitHubRepository(value)
 }
 
 type RepositoryResolver interface {
