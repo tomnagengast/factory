@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -57,6 +58,7 @@ type HealthIdentity struct {
 }
 
 type CompletionEvidence struct {
+	DeploymentRequired            bool
 	Deployment                    DeploymentReceipt
 	Health                        HealthIdentity
 	SourceValid                   bool
@@ -76,23 +78,43 @@ type CompletionEvidenceReader interface {
 }
 
 type RepositoryCompletionEvidence struct {
+	mu      sync.RWMutex
 	readers map[string]CompletionEvidenceReader
 }
 
 func NewRepositoryCompletionEvidence(readers map[string]CompletionEvidenceReader) (*RepositoryCompletionEvidence, error) {
-	if len(readers) == 0 {
-		return nil, errors.New("repository completion evidence: readers are required")
+	evidence := &RepositoryCompletionEvidence{}
+	if err := evidence.Replace(readers); err != nil {
+		return nil, err
 	}
+	return evidence, nil
+}
+
+func (r *RepositoryCompletionEvidence) Replace(readers map[string]CompletionEvidenceReader) error {
+	if len(readers) == 0 {
+		return errors.New("repository completion evidence: readers are required")
+	}
+	next := make(map[string]CompletionEvidenceReader, len(readers))
 	for repository, reader := range readers {
 		if !repositoryPattern.MatchString(repository) || reader == nil {
-			return nil, errors.New("repository completion evidence: valid repository readers are required")
+			return errors.New("repository completion evidence: valid repository readers are required")
 		}
+		key := strings.ToLower(repository)
+		if _, found := next[key]; found {
+			return fmt.Errorf("repository completion evidence: duplicate repository %s", repository)
+		}
+		next[key] = reader
 	}
-	return &RepositoryCompletionEvidence{readers: readers}, nil
+	r.mu.Lock()
+	r.readers = next
+	r.mu.Unlock()
+	return nil
 }
 
 func (r *RepositoryCompletionEvidence) ReadCompletionEvidence(ctx context.Context, run Run, snapshot PullRequestSnapshot) (CompletionEvidence, error) {
-	reader := r.readers[run.Repository]
+	r.mu.RLock()
+	reader := r.readers[strings.ToLower(run.Repository)]
+	r.mu.RUnlock()
 	if reader == nil {
 		return CompletionEvidence{}, fmt.Errorf("repository completion evidence: no reader for %s", run.Repository)
 	}
@@ -317,21 +339,28 @@ func rejectCompletion(decision CompletionDecision, reason string, repark bool) C
 }
 
 func completionProblems(evidence CompletionEvidence) []string {
-	var problems []string
-	checks := []struct {
+	type check struct {
 		ok      bool
 		message string
-	}{
-		{evidence.Deployment.Status == "success", "deployment receipt is not successful"},
-		{evidence.SourceValid, "deployment source is not clean updated main"},
-		{evidence.MergeContained, "deployed commit does not contain the merge"},
-		{evidence.HealthMatches, "running health identity does not match the deployment"},
+	}
+
+	var problems []string
+	var checks []check
+	if evidence.DeploymentRequired {
+		checks = append(checks,
+			check{evidence.Deployment.Status == "success", "deployment receipt is not successful"},
+			check{evidence.HealthMatches, "running health identity does not match the deployment"},
+		)
+	}
+	checks = append(checks, []check{
+		{evidence.SourceValid, "completion source is not clean updated main"},
+		{evidence.MergeContained, "updated main does not contain the merge"},
 		{!evidence.SafeguardRegression, "pull request checks or reviews regressed"},
 		{evidence.RemoteBranchAbsent, "remote issue branch still exists"},
 		{evidence.WorktreeAbsent, "issue worktree still exists"},
 		{evidence.LinearComplete, "Linear issue is not complete"},
 		{evidence.ChildrenComplete, "child work remains incomplete"},
-	}
+	}...)
 	for _, check := range checks {
 		if !check.ok {
 			problems = append(problems, check.message)

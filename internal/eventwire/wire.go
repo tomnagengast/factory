@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 type Handler func(context.Context, Record) error
@@ -19,13 +20,30 @@ type Wire struct {
 	dispatchMu sync.Mutex
 	routesMu   sync.RWMutex
 	routes     []route
+	now        func() time.Time
 }
 
 func New(journal *Journal) (*Wire, error) {
 	if journal == nil {
 		return nil, errors.New("event wire: journal is required")
 	}
-	return &Wire{journal: journal}, nil
+	return &Wire{journal: journal, now: time.Now}, nil
+}
+
+type permanentError struct{ error }
+
+func (permanentError) Permanent() bool { return true }
+
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return permanentError{error: err}
+}
+
+func isPermanent(err error) bool {
+	var classified interface{ Permanent() bool }
+	return errors.As(err, &classified) && classified.Permanent()
 }
 
 func (w *Wire) Handle(filter Filter, handler Handler) error {
@@ -76,6 +94,8 @@ func (w *Wire) CatchUp(ctx context.Context) error {
 	return w.catchUpLocked(ctx)
 }
 
+func (w *Wire) Status() Status { return w.journal.Status() }
+
 func (w *Wire) catchUpLocked(ctx context.Context) error {
 	pending := w.journal.Pending()
 	if len(pending) == 0 {
@@ -96,7 +116,18 @@ func (w *Wire) catchUpLocked(ctx context.Context) error {
 				continue
 			}
 			if err := route.handler(ctx, cloneRecord(record)); err != nil {
-				return fmt.Errorf("event wire: dispatch %s: %w", record.Event.ID, err)
+				wrapped := fmt.Errorf("event wire: dispatch %s: %w", record.Event.ID, err)
+				if !isPermanent(err) {
+					return wrapped
+				}
+				for channel, sequence := range record.ChannelSequences {
+					channelAcks[channel] = max(channelAcks[channel], sequence)
+				}
+				if rejectErr := w.journal.Reject(record, channelAcks, wrapped.Error(), w.now().UTC()); rejectErr != nil {
+					return fmt.Errorf("event wire: reject %s: %w", record.Event.ID, rejectErr)
+				}
+				last = record.Sequence
+				break
 			}
 		}
 		last = record.Sequence

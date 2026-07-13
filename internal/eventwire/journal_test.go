@@ -1,7 +1,9 @@
 package eventwire
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -142,6 +144,89 @@ func TestWireCatchesUpWithoutProviderRedelivery(t *testing.T) {
 	}
 }
 
+func TestWireRejectsPermanentFailureAndContinues(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	journal, err := Open(path, 10, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	wire, err := New(journal)
+	if err != nil {
+		t.Fatalf("new wire: %v", err)
+	}
+	wire.now = func() time.Time { return eventTestNow }
+	calls := make(map[string]int)
+	if err := wire.Handle(Filter{}, func(_ context.Context, record Record) error {
+		calls[record.Event.ID]++
+		if record.Event.ID == "linear:bad" {
+			return Permanent(errors.New("repository is not allowlisted"))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if _, _, err := wire.Publish(context.Background(), testEvent("linear:bad", SourceLinear, "Issue")); err != nil {
+		t.Fatalf("publish rejected event: %v", err)
+	}
+	if _, _, err := wire.Publish(context.Background(), testEvent("linear:good", SourceLinear, "Issue")); err != nil {
+		t.Fatalf("publish later event: %v", err)
+	}
+	status := wire.Status()
+	if status.Total != 2 || status.Dispatched != 2 || status.Pending != 0 || status.RejectedTotal != 1 {
+		t.Fatalf("status = %#v", status)
+	}
+	if status.LastRejection == nil || status.LastRejection.EventID != "linear:bad" || status.LastRejection.RejectedAt != eventTestNow {
+		t.Fatalf("last rejection = %#v", status.LastRejection)
+	}
+
+	reopened, err := Open(path, 10, nil)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	replayed, err := New(reopened)
+	if err != nil {
+		t.Fatalf("new reopened wire: %v", err)
+	}
+	if err := replayed.Handle(Filter{}, func(_ context.Context, record Record) error {
+		calls[record.Event.ID]++
+		return nil
+	}); err != nil {
+		t.Fatalf("handle reopened: %v", err)
+	}
+	if err := replayed.CatchUp(context.Background()); err != nil {
+		t.Fatalf("catch up: %v", err)
+	}
+	if calls["linear:bad"] != 1 || calls["linear:good"] != 1 {
+		t.Fatalf("calls after reopen = %#v", calls)
+	}
+	assertCurrentReaderCompatible(t, path)
+}
+
+func TestWireLeavesTransientFailurePending(t *testing.T) {
+	t.Parallel()
+	journal, err := Open(filepath.Join(t.TempDir(), "events.jsonl"), 10, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	wire, err := New(journal)
+	if err != nil {
+		t.Fatalf("new wire: %v", err)
+	}
+	if err := wire.Handle(Filter{}, func(context.Context, Record) error {
+		return errors.New("Linear rate limited")
+	}); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if _, _, err := wire.Publish(context.Background(), testEvent("linear:retry", SourceLinear, "Issue")); err == nil {
+		t.Fatal("transient publish succeeded")
+	}
+	status := wire.Status()
+	if status.Total != 1 || status.Dispatched != 0 || status.Pending != 1 || status.RejectedTotal != 0 {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
 func TestJournalCompactionRetainsUnacknowledgedRecords(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "events.jsonl")
@@ -171,6 +256,46 @@ func TestJournalCompactionRetainsUnacknowledgedRecords(t *testing.T) {
 	_, _, _, records = journal.Snapshot()
 	if len(records) != 2 || records[0].Sequence != 4 {
 		t.Fatalf("compacted records = %#v", records)
+	}
+}
+
+func assertCurrentReaderCompatible(t *testing.T, path string) {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open current-reader fixture: %v", err)
+	}
+	defer file.Close()
+	type currentDiskLine struct {
+		Kind        string            `json:"kind"`
+		Version     int               `json:"version,omitempty"`
+		Dispatched  uint64            `json:"dispatched,omitempty"`
+		ChannelAcks map[string]uint64 `json:"channelAcks,omitempty"`
+		Record      *Record           `json:"record,omitempty"`
+	}
+	foundCheckpoint := false
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var line currentDiskLine
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			t.Fatalf("current reader decode: %v", err)
+		}
+		switch line.Kind {
+		case "checkpoint":
+			if foundCheckpoint || line.Version != 1 {
+				t.Fatalf("current reader rejected checkpoint: %#v", line)
+			}
+			foundCheckpoint = true
+		case "event", "ack":
+			if !foundCheckpoint {
+				t.Fatalf("current reader saw %s before checkpoint", line.Kind)
+			}
+		default:
+			t.Fatalf("current reader rejected line kind %q", line.Kind)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("current reader scan: %v", err)
 	}
 }
 

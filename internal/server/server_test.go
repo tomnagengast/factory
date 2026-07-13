@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/fstest"
@@ -25,6 +26,7 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/viewerauth"
 )
@@ -50,9 +52,38 @@ func TestHealthz(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	want := healthResponse{Status: "ok", App: "factory", BuildIdentity: testBuildIdentity()}
+	want := healthResponse{Status: "ok", App: "factory", Wire: wireHealthStatus{}, BuildIdentity: testBuildIdentity()}
 	if got != want {
 		t.Fatalf("response = %#v, want %#v", got, want)
+	}
+}
+
+func TestHealthzReportsPendingWireAsDegraded(t *testing.T) {
+	t.Parallel()
+	handler, _, _, _, wire := testHandlerWithRunsAndSettingsAndWire(t)
+	if err := wire.Handle(eventwire.Filter{Source: eventwire.SourceFactory}, func(context.Context, eventwire.Record) error {
+		return errors.New("temporary projection failure")
+	}); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	event := eventwire.Event{
+		ID: "factory:test:pending", Source: eventwire.SourceFactory, Type: "service",
+		Action: "heartbeat", Subject: "factory", ReceivedAt: testNow,
+	}
+	if _, _, err := wire.Publish(context.Background(), event); err == nil {
+		t.Fatal("pending event published without transient error")
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/healthz", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	var got healthResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Status != "degraded" || got.Wire.Pending != 1 || got.Wire.Total != 1 || got.Wire.Dispatched != 0 {
+		t.Fatalf("response = %#v", got)
 	}
 }
 
@@ -507,6 +538,62 @@ func TestLinearWebhookRejectsStalePayload(t *testing.T) {
 	}
 }
 
+func TestLinearProjectWebhookEnqueuesSetupFromProtectedPayload(t *testing.T) {
+	t.Parallel()
+	setups := &testProjectSetups{}
+	handler, journalPath := testHandlerWithProjectSetups(t, setups)
+	description := "New app setup.\nGitHub Repo: tomnagengast/cellar\nLocal Path: /Users/tom/repos/tomnagengast/cellar\nCloud URL: https://cellar.nags.cloud"
+	body := fmt.Sprintf(
+		`{"type":"Project","action":"create","webhookTimestamp":%d,"actor":{"id":%q},"data":{"id":"project-cellar","name":"Cellar","description":%q}}`,
+		testNow.UnixMilli(), testActorID, description,
+	)
+	for range 2 {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, signedWebhookRequest(body, "project-delivery", testSecret))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+		}
+	}
+	requests := setups.Requests()
+	if len(requests) != 1 || requests[0] != (projectsetup.Request{
+		ProjectID: "project-cellar", ProjectName: "Cellar", Description: description,
+	}) {
+		t.Fatalf("requests = %#v", requests)
+	}
+	wireData, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatalf("read wire: %v", err)
+	}
+	if strings.Contains(string(wireData), description) || strings.Contains(string(wireData), "/Users/tom/repos") {
+		t.Fatalf("wire leaked project description: %s", wireData)
+	}
+
+	otherActor := strings.Replace(body, testActorID, "other-actor", 1)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, signedWebhookRequest(otherActor, "project-other-actor", testSecret))
+	if recorder.Code != http.StatusOK || len(setups.Requests()) != 1 {
+		t.Fatalf("other actor response = %d, requests = %#v", recorder.Code, setups.Requests())
+	}
+}
+
+func TestHealthzReportsFailedProjectSetupAsDegraded(t *testing.T) {
+	t.Parallel()
+	setups := &testProjectSetups{snapshot: projectsetup.PublicSnapshot{Total: 1, Failed: 1}}
+	handler, _ := testHandlerWithProjectSetups(t, setups)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/healthz", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	var got healthResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Status != "degraded" || got.ProjectSetups.Failed != 1 {
+		t.Fatalf("response = %#v", got)
+	}
+}
+
 func TestLinearFactoryLabelStartsOneRunPerActiveIssue(t *testing.T) {
 	t.Parallel()
 
@@ -538,6 +625,79 @@ func TestLinearFactoryLabelStartsOneRunPerActiveIssue(t *testing.T) {
 	handler.ServeHTTP(activityRecorder, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
 	if body := activityRecorder.Body.String(); strings.Contains(body, "ENG-123") || strings.Contains(body, testActorID) {
 		t.Fatalf("public activity leaked private Linear context: %s", body)
+	}
+}
+
+func TestPermanentRepositoryRoutingFailureDoesNotBlockLaterRun(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	activityStore, err := activity.Open(filepath.Join(directory, "activity.json"), 10)
+	if err != nil {
+		t.Fatalf("open activity store: %v", err)
+	}
+	runStore, err := agentrun.Open(filepath.Join(directory, "agent-runs.json"), 10)
+	if err != nil {
+		t.Fatalf("open run store: %v", err)
+	}
+	githubEvents, err := githubhook.Open(filepath.Join(directory, "github-events.json"), 10)
+	if err != nil {
+		t.Fatalf("open GitHub journal: %v", err)
+	}
+	linearComments, err := linearhook.Open(filepath.Join(directory, "linear-comments.json"), 10)
+	if err != nil {
+		t.Fatalf("open Linear comments: %v", err)
+	}
+	wire := testEventWire(t, githubEvents.Total(), linearComments.Total())
+	handler, err := New(Config{
+		Web:            testWeb(),
+		ActivityStore:  activityStore,
+		RunStore:       runStore,
+		RunNotifier:    &testNotifier{},
+		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
+		Settings:       testSettingsStore(t),
+		ViewerAuth:     testViewerAuth(t),
+		LinearSecret:   testSecret,
+		GitHubSecret:   testGitHubSecret,
+		Events:         wire,
+		GitHubEvents:   githubEvents,
+		LinearComments: linearComments,
+		RepositoryResolver: testRepositoryResolver{
+			"ENG-404": {err: eventwire.Permanent(errors.New("repository is not allowlisted"))},
+			"ENG-123": {config: agentrun.RepositoryConfig{
+				App: "factory", Repository: "tomnagengast/network", RepoURL: "git@github.com:tomnagengast/network.git",
+				RepoPath: "/Users/tom/repos/tomnagengast/network", ProjectPath: "/Users/tom/repos/tomnagengast/network",
+				ManagedRoot: "/Users/tom/repos/tomnagengast", BaseBranch: "main", CloudURL: "https://network.nags.cloud",
+			}},
+		},
+		ProjectSetups: &testProjectSetups{},
+		TriggerActor:  testActorID,
+		Now:           func() time.Time { return testNow },
+		Build:         testBuildIdentity(),
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	for _, issue := range []string{"ENG-404", "ENG-123"} {
+		body := fmt.Sprintf(
+			`{"type":"Issue","action":"update","webhookTimestamp":%d,"actor":{"id":"%s"},"data":{"identifier":"%s","labelIds":["label-factory"],"labels":[{"id":"label-factory","name":"Factory"}]},"updatedFrom":{"labelIds":[]}}`,
+			testNow.UnixMilli(), testActorID, issue,
+		)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, signedWebhookRequest(body, "delivery-"+strings.ToLower(issue), testSecret))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want %d", issue, recorder.Code, http.StatusOK)
+		}
+	}
+
+	snapshot := runStore.Snapshot()
+	if snapshot.Total != 1 || snapshot.Runs[0].IssueIdentifier != "ENG-123" || snapshot.Runs[0].CloudURL != "https://network.nags.cloud" {
+		t.Fatalf("runs = %#v", snapshot)
+	}
+	status := wire.Status()
+	if status.Pending != 0 || status.RejectedTotal != 1 || status.LastRejection == nil || status.LastRejection.EventID != "linear:delivery-eng-404" {
+		t.Fatalf("wire status = %#v", status)
 	}
 }
 
@@ -585,6 +745,7 @@ func TestLinearWebhookReplaysStagedPayloadWithoutProviderRedelivery(t *testing.T
 		Events:         wire,
 		GitHubEvents:   githubEvents,
 		LinearComments: linearComments,
+		ProjectSetups:  &testProjectSetups{},
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
 		Build:          testBuildIdentity(),
@@ -1042,6 +1203,47 @@ type testNotifier struct {
 	count atomic.Int32
 }
 
+type testProjectSetups struct {
+	mu       sync.Mutex
+	requests []projectsetup.Request
+	snapshot projectsetup.PublicSnapshot
+	err      error
+}
+
+func (s *testProjectSetups) Enqueue(_ context.Context, request projectsetup.Request) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requests = append(s.requests, request)
+	return s.err
+}
+
+func (s *testProjectSetups) PublicSnapshot() projectsetup.PublicSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshot
+}
+
+func (s *testProjectSetups) Requests() []projectsetup.Request {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]projectsetup.Request(nil), s.requests...)
+}
+
+type testRepositoryResolution struct {
+	config agentrun.RepositoryConfig
+	err    error
+}
+
+type testRepositoryResolver map[string]testRepositoryResolution
+
+func (r testRepositoryResolver) Resolve(_ context.Context, issueIdentifier string) (agentrun.RepositoryConfig, error) {
+	resolution, ok := r[issueIdentifier]
+	if !ok {
+		return agentrun.RepositoryConfig{}, errors.New("unexpected issue identifier")
+	}
+	return resolution.config, resolution.err
+}
+
 type flakyActivityStore struct {
 	*activity.Store
 	failNext bool
@@ -1078,6 +1280,12 @@ func testHandlerWithRuns(t *testing.T) (http.Handler, *agentrun.Store, *testNoti
 
 func testHandlerWithRunsAndSettings(t *testing.T) (http.Handler, *agentrun.Store, *testNotifier, *settings.Store) {
 	t.Helper()
+	handler, runStore, notifier, configuration, _ := testHandlerWithRunsAndSettingsAndWire(t)
+	return handler, runStore, notifier, configuration
+}
+
+func testHandlerWithRunsAndSettingsAndWire(t *testing.T) (http.Handler, *agentrun.Store, *testNotifier, *settings.Store, *eventwire.Wire) {
+	t.Helper()
 
 	store, err := activity.Open(filepath.Join(t.TempDir(), "activity.json"), 10)
 	if err != nil {
@@ -1097,6 +1305,7 @@ func testHandlerWithRunsAndSettings(t *testing.T) (http.Handler, *agentrun.Store
 	if err != nil {
 		t.Fatalf("open Linear comment journal: %v", err)
 	}
+	wire := testEventWire(t, githubEvents.Total(), linearComments.Total())
 	handler, err := New(Config{
 		Web:            testWeb(),
 		ActivityStore:  store,
@@ -1107,9 +1316,10 @@ func testHandlerWithRunsAndSettings(t *testing.T) (http.Handler, *agentrun.Store
 		ViewerAuth:     testViewerAuth(t),
 		LinearSecret:   testSecret,
 		GitHubSecret:   testGitHubSecret,
-		Events:         testEventWire(t, githubEvents.Total(), linearComments.Total()),
+		Events:         wire,
 		GitHubEvents:   githubEvents,
 		LinearComments: linearComments,
+		ProjectSetups:  &testProjectSetups{},
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
 		Build:          testBuildIdentity(),
@@ -1117,7 +1327,7 @@ func testHandlerWithRunsAndSettings(t *testing.T) (http.Handler, *agentrun.Store
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
-	return handler, runStore, notifier, configuration
+	return handler, runStore, notifier, configuration, wire
 }
 
 func testHandlerWithObserver(t *testing.T, observer AgentObserver) http.Handler {
@@ -1157,6 +1367,7 @@ func testHandlerWithObserverAndStore(t *testing.T, observer AgentObserver) (http
 		Events:         testEventWire(t, githubEvents.Total(), linearComments.Total()),
 		GitHubEvents:   githubEvents,
 		LinearComments: linearComments,
+		ProjectSetups:  &testProjectSetups{},
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
 		Build:          testBuildIdentity(),
@@ -1200,6 +1411,7 @@ func testHandlerWithGitHub(t *testing.T) (http.Handler, string) {
 		Events:         testEventWire(t, journal.Total(), linearComments.Total()),
 		GitHubEvents:   journal,
 		LinearComments: linearComments,
+		ProjectSetups:  &testProjectSetups{},
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
 		Build:          testBuildIdentity(),
@@ -1251,6 +1463,7 @@ func testHandlerWithLinearCommentsAndSettings(t *testing.T) (http.Handler, *agen
 		Events:         testEventWire(t, githubEvents.Total(), linearComments.Total()),
 		GitHubEvents:   githubEvents,
 		LinearComments: linearComments,
+		ProjectSetups:  &testProjectSetups{},
 		TriggerActor:   testActorID,
 		Now:            func() time.Time { return testNow },
 		Build:          testBuildIdentity(),
@@ -1259,6 +1472,51 @@ func testHandlerWithLinearCommentsAndSettings(t *testing.T) (http.Handler, *agen
 		t.Fatalf("new server: %v", err)
 	}
 	return handler, runStore, notifier, journalPath, configuration
+}
+
+func testHandlerWithProjectSetups(t *testing.T, setups ProjectSetupController) (http.Handler, string) {
+	t.Helper()
+	directory := t.TempDir()
+	activityStore, err := activity.Open(filepath.Join(directory, "activity.json"), 10)
+	if err != nil {
+		t.Fatalf("open activity store: %v", err)
+	}
+	runStore, err := agentrun.Open(filepath.Join(directory, "agent-runs.json"), 10)
+	if err != nil {
+		t.Fatalf("open run store: %v", err)
+	}
+	githubEvents, err := githubhook.Open(filepath.Join(directory, "github-events.json"), 10)
+	if err != nil {
+		t.Fatalf("open GitHub journal: %v", err)
+	}
+	linearComments, err := linearhook.Open(filepath.Join(directory, "linear-comments.json"), 10)
+	if err != nil {
+		t.Fatalf("open Linear comment journal: %v", err)
+	}
+	wirePath := filepath.Join(directory, "system-events.jsonl")
+	journal, err := eventwire.Open(wirePath, 100, map[string]uint64{
+		githubhook.WireChannel: githubEvents.Total(), linearhook.WireChannel: linearComments.Total(),
+	})
+	if err != nil {
+		t.Fatalf("open event wire: %v", err)
+	}
+	wire, err := eventwire.New(journal)
+	if err != nil {
+		t.Fatalf("new event wire: %v", err)
+	}
+	handler, err := New(Config{
+		Web: testWeb(), ActivityStore: activityStore, RunStore: runStore,
+		RunNotifier: &testNotifier{}, AgentObserver: &testObserver{err: agentrun.ErrRunNotFound},
+		Settings: testSettingsStore(t), ViewerAuth: testViewerAuth(t),
+		LinearSecret: testSecret, GitHubSecret: testGitHubSecret,
+		Events: wire, GitHubEvents: githubEvents, LinearComments: linearComments,
+		ProjectSetups: setups, TriggerActor: testActorID,
+		Now: func() time.Time { return testNow }, Build: testBuildIdentity(),
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	return handler, wirePath
 }
 
 func testViewerAuth(t *testing.T) *viewerauth.Authenticator {

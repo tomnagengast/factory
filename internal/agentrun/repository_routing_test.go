@@ -28,7 +28,9 @@ func TestRunPersistsResolvedRepositoryIdentity(t *testing.T) {
 		Repository:      "tomnagengast/notebook",
 		RepositoryURL:   "git@github.com:tomnagengast/notebook.git",
 		RepositoryPath:  "/Users/tom/repos/tomnagengast/notebook",
+		ManagedRoot:     "/Users/tom/repos/tomnagengast",
 		BaseBranch:      "main",
+		Bootstrap:       true,
 	}, time.Unix(1, 0))
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
@@ -36,7 +38,7 @@ func TestRunPersistsResolvedRepositoryIdentity(t *testing.T) {
 	if !created {
 		t.Fatal("Claim did not create a run")
 	}
-	if run.Repository != "tomnagengast/notebook" || run.RepositoryPath != "/Users/tom/repos/tomnagengast/notebook" {
+	if run.Repository != "tomnagengast/notebook" || run.RepositoryPath != "/Users/tom/repos/tomnagengast/notebook" || run.ManagedRoot != "/Users/tom/repos/tomnagengast" || !run.Bootstrap {
 		t.Fatalf("run routing = %#v", run)
 	}
 }

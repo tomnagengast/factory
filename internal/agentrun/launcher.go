@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,12 +18,19 @@ const resultFileName = "result.json"
 
 const ResultReadyForMerge = "ready_for_human_merge"
 
+var repositoryPrepareLocks sync.Map
+
 type LauncherConfig struct {
+	Repository    string
 	RepoURL       string
 	RepoPath      string
+	ManagedRoot   string
+	BaseBranch    string
+	Bootstrap     bool
 	StateRoot     string
 	BinaryPath    string
 	GitPath       string
+	GitHubPath    string
 	WorktrunkPath string
 	TmuxPath      string
 	TmuxSocket    string
@@ -56,19 +64,239 @@ func NewTmuxLauncher(config LauncherConfig) (*TmuxLauncher, error) {
 	if config.BinaryPath == "" || config.GitPath == "" || config.WorktrunkPath == "" || config.TmuxPath == "" || config.TmuxSocket == "" {
 		return nil, errors.New("agent launcher: binary, git, worktrunk, tmux, and socket are required")
 	}
+	if config.ManagedRoot == "" {
+		config.ManagedRoot = filepath.Dir(config.RepoPath)
+	}
+	if config.BaseBranch == "" {
+		config.BaseBranch = "main"
+	}
+	if config.Bootstrap && (config.Repository == "" || config.GitHubPath == "") {
+		return nil, errors.New("agent launcher: bootstrap requires repository identity and GitHub CLI")
+	}
 	return &TmuxLauncher{config: config}, nil
 }
 
 func (l *TmuxLauncher) Prepare(ctx context.Context) error {
+	lockValue, _ := repositoryPrepareLocks.LoadOrStore(filepath.Clean(l.config.RepoPath), &sync.Mutex{})
+	lock := lockValue.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if err := validateManagedTarget(l.config.ManagedRoot, l.config.RepoPath); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(l.config.RepoPath), 0o700); err != nil {
 		return fmt.Errorf("create workspace parent: %w", err)
 	}
+	info, err := os.Lstat(l.config.RepoPath)
+	missing := errors.Is(err, os.ErrNotExist)
+	if err != nil && !missing {
+		return fmt.Errorf("inspect agent workspace: %w", err)
+	}
+	if !missing {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("agent workspace path must not be a symbolic link")
+		}
+		if !info.IsDir() {
+			return errors.New("agent workspace path is not a directory")
+		}
+	}
 	gitDirectory := filepath.Join(l.config.RepoPath, ".git")
 	if _, err := os.Stat(gitDirectory); errors.Is(err, os.ErrNotExist) {
-		return runCommand(ctx, "clone agent workspace", "", l.config.GitPath, "clone", l.config.RepoURL, l.config.RepoPath)
+		if !missing {
+			return errors.New("agent workspace exists but is not a Git checkout")
+		}
+		if err := l.prepareRemote(ctx); err != nil {
+			return err
+		}
+		if err := l.cloneWorkspace(ctx); err != nil {
+			return err
+		}
 	} else if err != nil {
 		return fmt.Errorf("inspect agent workspace: %w", err)
 	}
+	if err := validateManagedTarget(l.config.ManagedRoot, l.config.RepoPath); err != nil {
+		return err
+	}
+	if err := l.validateOrigin(ctx); err != nil {
+		return err
+	}
+	if err := l.ensureBaseBranch(ctx); err != nil {
+		return err
+	}
+	if err := l.validateGitHubDefaultBranch(ctx); err != nil {
+		return err
+	}
+	return l.synchronizeWorkspace(ctx)
+}
+
+type githubRepository struct {
+	NameWithOwner    string `json:"nameWithOwner"`
+	IsPrivate        bool   `json:"isPrivate"`
+	DefaultBranchRef *struct {
+		Name string `json:"name"`
+	} `json:"defaultBranchRef"`
+}
+
+func (l *TmuxLauncher) prepareRemote(ctx context.Context) error {
+	if !l.config.Bootstrap {
+		return nil
+	}
+	repository, found, err := l.readGitHubRepository(ctx)
+	if err != nil {
+		return err
+	}
+	if !found {
+		if err := runCommand(ctx, "create GitHub repository", "", l.config.GitHubPath, "repo", "create", l.config.Repository, "--private"); err != nil {
+			if _, exists, readErr := l.readGitHubRepository(ctx); readErr != nil || !exists {
+				return err
+			}
+		}
+		repository, found, err = l.readGitHubRepository(ctx)
+		if err != nil {
+			return fmt.Errorf("verify created GitHub repository: %w", err)
+		}
+		if !found {
+			return errors.New("verify created GitHub repository: repository is still missing")
+		}
+	}
+	if !strings.EqualFold(repository.NameWithOwner, l.config.Repository) {
+		return fmt.Errorf("GitHub repository is %q, want %q", repository.NameWithOwner, l.config.Repository)
+	}
+	if !repository.IsPrivate {
+		return errors.New("bootstrap GitHub repository is not private")
+	}
+	if repository.DefaultBranchRef != nil && repository.DefaultBranchRef.Name != "" && repository.DefaultBranchRef.Name != l.config.BaseBranch {
+		return fmt.Errorf("GitHub default branch is %q, want %q", repository.DefaultBranchRef.Name, l.config.BaseBranch)
+	}
+	return nil
+}
+
+func (l *TmuxLauncher) validateGitHubDefaultBranch(ctx context.Context) error {
+	if l.config.Repository == "" || l.config.GitHubPath == "" {
+		return nil
+	}
+	repository, found, err := l.readGitHubRepository(ctx)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("configured GitHub repository does not exist")
+	}
+	if repository.DefaultBranchRef == nil || repository.DefaultBranchRef.Name != l.config.BaseBranch {
+		return fmt.Errorf("GitHub default branch does not match %s", l.config.BaseBranch)
+	}
+	return nil
+}
+
+func (l *TmuxLauncher) readGitHubRepository(ctx context.Context) (githubRepository, bool, error) {
+	cmd := exec.CommandContext(ctx, l.config.GitHubPath, "repo", "view", l.config.Repository, "--json", "nameWithOwner,isPrivate,defaultBranchRef")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if strings.Contains(strings.ToLower(detail), "could not resolve to a repository") {
+			return githubRepository{}, false, nil
+		}
+		return githubRepository{}, false, fmt.Errorf("inspect GitHub repository: %w: %s", err, detail)
+	}
+	var repository githubRepository
+	if err := json.Unmarshal(output, &repository); err != nil {
+		return githubRepository{}, false, fmt.Errorf("decode GitHub repository: %w", err)
+	}
+	return repository, true, nil
+}
+
+func (l *TmuxLauncher) cloneWorkspace(ctx context.Context) error {
+	parent := filepath.Dir(l.config.RepoPath)
+	staging, err := os.MkdirTemp(parent, ".factory-clone-")
+	if err != nil {
+		return fmt.Errorf("create clone staging directory: %w", err)
+	}
+	defer os.RemoveAll(staging)
+	if err := runCommand(ctx, "clone agent workspace", "", l.config.GitPath, "clone", l.config.RepoURL, staging); err != nil {
+		return err
+	}
+	if err := os.Rename(staging, l.config.RepoPath); err != nil {
+		return fmt.Errorf("install cloned agent workspace: %w", err)
+	}
+	return nil
+}
+
+func (l *TmuxLauncher) validateOrigin(ctx context.Context) error {
+	top, err := commandOutput(ctx, "inspect agent workspace root", l.config.RepoPath, l.config.GitPath, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return err
+	}
+	resolvedTop, err := filepath.EvalSymlinks(strings.TrimSpace(string(top)))
+	if err != nil {
+		return fmt.Errorf("resolve agent workspace root: %w", err)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(l.config.RepoPath)
+	if err != nil {
+		return fmt.Errorf("resolve agent workspace target: %w", err)
+	}
+	if resolvedTop != resolvedTarget {
+		return fmt.Errorf("agent workspace Git top-level is %s, want %s", resolvedTop, resolvedTarget)
+	}
+	remote, err := commandOutput(ctx, "inspect agent workspace origin", l.config.RepoPath, l.config.GitPath, "config", "--get", "remote.origin.url")
+	if err != nil {
+		return err
+	}
+	actual := strings.TrimSpace(string(remote))
+	if l.config.Repository != "" {
+		repository, ok := normalizeGitHubRepository(actual)
+		if !ok || !strings.EqualFold(repository, l.config.Repository) {
+			return fmt.Errorf("agent workspace origin %q does not match %s", actual, l.config.Repository)
+		}
+	} else if filepath.Clean(actual) != filepath.Clean(l.config.RepoURL) {
+		return fmt.Errorf("agent workspace origin %q does not match %q", actual, l.config.RepoURL)
+	}
+	return nil
+}
+
+func (l *TmuxLauncher) ensureBaseBranch(ctx context.Context) error {
+	remoteRef := "refs/remotes/origin/" + l.config.BaseBranch
+	if commandSucceeds(ctx, l.config.RepoPath, l.config.GitPath, "rev-parse", "--verify", "--quiet", remoteRef) {
+		if !commandSucceeds(ctx, l.config.RepoPath, l.config.GitPath, "rev-parse", "--verify", "--quiet", "HEAD") {
+			return runCommand(ctx, "check out agent workspace base", l.config.RepoPath, l.config.GitPath, "switch", "--track", "-c", l.config.BaseBranch, "origin/"+l.config.BaseBranch)
+		}
+		return nil
+	}
+	refs, err := commandOutput(ctx, "inspect agent workspace remote branches", l.config.RepoPath, l.config.GitPath, "for-each-ref", "--format=%(refname)", "refs/remotes/origin")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(refs)) != "" {
+		return fmt.Errorf("agent workspace remote does not contain configured base branch %s", l.config.BaseBranch)
+	}
+	if !l.config.Bootstrap {
+		return fmt.Errorf("agent workspace remote base branch %s does not exist", l.config.BaseBranch)
+	}
+	status, err := commandOutput(ctx, "inspect empty agent workspace", l.config.RepoPath, l.config.GitPath, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(status)) != "" {
+		return errors.New("empty bootstrap checkout has local changes")
+	}
+	if err := runCommand(ctx, "select bootstrap base branch", l.config.RepoPath, l.config.GitPath, "symbolic-ref", "HEAD", "refs/heads/"+l.config.BaseBranch); err != nil {
+		return err
+	}
+	if err := runCommand(ctx, "initialize bootstrap repository", l.config.RepoPath, l.config.GitPath, "-c", "user.name=Factory", "-c", "user.email=factory@nags.cloud", "commit", "--allow-empty", "-m", "Initialize repository"); err != nil {
+		return err
+	}
+	if err := runCommand(ctx, "publish bootstrap base branch", l.config.RepoPath, l.config.GitPath, "push", "-u", "origin", l.config.BaseBranch); err != nil {
+		return err
+	}
+	if err := runCommand(ctx, "set GitHub default branch", "", l.config.GitHubPath, "repo", "edit", l.config.Repository, "--default-branch", l.config.BaseBranch); err != nil {
+		return err
+	}
+	return runCommand(ctx, "fetch initialized agent workspace", l.config.RepoPath, l.config.GitPath, "fetch", "--prune", "origin")
+}
+
+func (l *TmuxLauncher) synchronizeWorkspace(ctx context.Context) error {
 	worktrees, err := l.linkedWorktrees(ctx)
 	if err != nil {
 		return err
@@ -87,7 +315,63 @@ func (l *TmuxLauncher) Prepare(ctx context.Context) error {
 	if err := runCommand(ctx, "fetch agent workspace", l.config.RepoPath, l.config.GitPath, "fetch", "--prune", "origin"); err != nil {
 		return err
 	}
-	return runCommand(ctx, "fast-forward agent workspace", l.config.RepoPath, l.config.GitPath, "merge", "--ff-only", "@{upstream}")
+	branch, err := commandOutput(ctx, "inspect agent workspace branch", l.config.RepoPath, l.config.GitPath, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(branch)) != l.config.BaseBranch {
+		return fmt.Errorf("agent workspace branch is %q, want %q", strings.TrimSpace(string(branch)), l.config.BaseBranch)
+	}
+	upstream, err := commandOutput(ctx, "inspect agent workspace upstream", l.config.RepoPath, l.config.GitPath, "rev-parse", "--abbrev-ref", "@{upstream}")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(upstream)) != "origin/"+l.config.BaseBranch {
+		return fmt.Errorf("agent workspace upstream is %q, want origin/%s", strings.TrimSpace(string(upstream)), l.config.BaseBranch)
+	}
+	return runCommand(ctx, "fast-forward agent workspace", l.config.RepoPath, l.config.GitPath, "merge", "--ff-only", "origin/"+l.config.BaseBranch)
+}
+
+func validateManagedTarget(root, target string) error {
+	if !filepath.IsAbs(root) || !filepath.IsAbs(target) {
+		return errors.New("agent workspace managed root and path must be absolute")
+	}
+	root = filepath.Clean(root)
+	target = filepath.Clean(target)
+	if !pathWithin(root, target) || root == target {
+		return errors.New("agent workspace path must stay below its managed root")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("resolve agent workspace managed root: %w", err)
+	}
+	ancestor := target
+	for {
+		if _, err := os.Lstat(ancestor); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect agent workspace ancestor: %w", err)
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return errors.New("agent workspace has no existing ancestor")
+		}
+		ancestor = parent
+	}
+	resolvedAncestor, err := filepath.EvalSymlinks(ancestor)
+	if err != nil {
+		return fmt.Errorf("resolve agent workspace ancestor: %w", err)
+	}
+	if !pathWithin(resolvedRoot, resolvedAncestor) {
+		return errors.New("agent workspace path escapes its managed root through a symbolic link")
+	}
+	return nil
+}
+
+func commandSucceeds(ctx context.Context, directory, name string, args ...string) bool {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = directory
+	return cmd.Run() == nil
 }
 
 func (l *TmuxLauncher) CleanupWorktrees(ctx context.Context) error {
@@ -230,6 +514,7 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 		"-e", "FACTORY_TRIGGER_KIND=" + run.TriggerKind,
 		"-e", "FACTORY_REPOSITORY=" + run.Repository,
 		"-e", "FACTORY_REPO_PATH=" + launcher.config.RepoPath,
+		"-e", "FACTORY_CLOUD_URL=" + run.CloudURL,
 		"-e", "FACTORY_AGENT_HELPER=" + launcher.config.BinaryPath,
 		launcher.config.BinaryPath,
 		"agent-exec",
@@ -254,6 +539,15 @@ func (l *TmuxLauncher) forRun(run Run) *TmuxLauncher {
 	config := l.config
 	config.RepoURL = run.RepositoryURL
 	config.RepoPath = run.RepositoryPath
+	config.Repository = run.Repository
+	config.ManagedRoot = run.ManagedRoot
+	if config.ManagedRoot == "" {
+		config.ManagedRoot = filepath.Dir(run.RepositoryPath)
+	}
+	if run.BaseBranch != "" {
+		config.BaseBranch = run.BaseBranch
+	}
+	config.Bootstrap = run.Bootstrap
 	return &TmuxLauncher{config: config}
 }
 
