@@ -136,6 +136,20 @@ func (s *Store) AddStaged(deliveryID string, event Event) (bool, error) {
 	return s.add(deliveryID, event, true)
 }
 
+func (s *Store) StagedPayload(deliveryID string) ([]byte, error) {
+	if deliveryID == "" {
+		return nil, errors.New("activity store: delivery ID is required")
+	}
+	payload, err := os.ReadFile(s.payloadPath(eventID(deliveryID)))
+	if err != nil {
+		return nil, fmt.Errorf("activity store: read staged payload: %w", err)
+	}
+	if !json.Valid(payload) {
+		return nil, errors.New("activity store: staged payload is not valid JSON")
+	}
+	return payload, nil
+}
+
 func (s *Store) add(deliveryID string, event Event, payloadAvailable bool) (bool, error) {
 	if deliveryID == "" {
 		return false, errors.New("activity store: delivery ID is required")

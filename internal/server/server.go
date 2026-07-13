@@ -25,31 +25,39 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/viewerauth"
 )
 
 const (
-	maxLinearWebhookBody = 1 << 20
-	maxGitHubWebhookBody = 25 << 20
-	replayWindow         = time.Minute
-	defaultActivityPage  = 1
-	defaultActivityLimit = 25
-	maxActivityPage      = 1_000_000
-	maxActivityLimit     = 100
-	attributeDeliveryID  = "deliveryId"
-	attributeTriggerKind = "triggerKind"
-	attributeIssue       = "issueIdentifier"
-	maxSettingsBody      = 64 << 10
+	maxLinearWebhookBody  = 1 << 20
+	maxGitHubWebhookBody  = 25 << 20
+	replayWindow          = time.Minute
+	defaultActivityPage   = 1
+	defaultActivityLimit  = 25
+	maxActivityPage       = 1_000_000
+	maxActivityLimit      = 100
+	attributeDeliveryID   = "deliveryId"
+	attributeTriggerKind  = "triggerKind"
+	attributeIssue        = "issueIdentifier"
+	attributeProjectSetup = "projectSetup"
+	maxSettingsBody       = 64 << 10
 )
 
 type EventStore interface {
 	Add(deliveryID string, event activity.Event) (bool, error)
 	StagePayload(deliveryID string, payload []byte) error
 	AddStaged(deliveryID string, event activity.Event) (bool, error)
+	StagedPayload(deliveryID string) ([]byte, error)
 	Snapshot() activity.Snapshot
 	LinearPage(page, pageSize int) (activity.LinearPage, error)
 	LinearEvent(id string) (activity.EventDetail, bool, error)
+}
+
+type ProjectSetupController interface {
+	Enqueue(context.Context, projectsetup.Request) error
+	PublicSnapshot() projectsetup.PublicSnapshot
 }
 
 type RunStore interface {
@@ -101,6 +109,7 @@ type Config struct {
 	LinearComments     LinearCommentStore
 	TriggerActor       string
 	RepositoryResolver agentrun.RepositoryResolver
+	ProjectSetups      ProjectSetupController
 	Now                func() time.Time
 	Build              BuildIdentity
 }
@@ -119,6 +128,7 @@ type appServer struct {
 	linearComments     LinearCommentStore
 	triggerActor       string
 	repositoryResolver agentrun.RepositoryResolver
+	projectSetups      ProjectSetupController
 	now                func() time.Time
 	build              BuildIdentity
 }
@@ -150,9 +160,10 @@ func (legacyRepositoryResolver) Resolve(context.Context, string) (agentrun.Repos
 }
 
 type healthResponse struct {
-	Status string           `json:"status"`
-	App    string           `json:"app"`
-	Wire   wireHealthStatus `json:"wire"`
+	Status        string                      `json:"status"`
+	App           string                      `json:"app"`
+	Wire          wireHealthStatus            `json:"wire"`
+	ProjectSetups projectsetup.PublicSnapshot `json:"projectSetups"`
 	BuildIdentity
 }
 
@@ -182,13 +193,15 @@ type linearPayload struct {
 		ID string `json:"id"`
 	} `json:"actor"`
 	Data struct {
-		ID         string   `json:"id"`
-		Body       string   `json:"body"`
-		IssueID    string   `json:"issueId"`
-		ParentID   string   `json:"parentId"`
-		Identifier string   `json:"identifier"`
-		LabelIDs   []string `json:"labelIds"`
-		Labels     []struct {
+		ID          string   `json:"id"`
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Body        string   `json:"body"`
+		IssueID     string   `json:"issueId"`
+		ParentID    string   `json:"parentId"`
+		Identifier  string   `json:"identifier"`
+		LabelIDs    []string `json:"labelIds"`
+		Labels      []struct {
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"labels"`
@@ -247,6 +260,9 @@ func New(config Config) (http.Handler, error) {
 	if config.TriggerActor == "" {
 		return nil, errors.New("server: Linear trigger actor is required")
 	}
+	if config.ProjectSetups == nil {
+		return nil, errors.New("server: project setup controller is required")
+	}
 	if config.Now == nil {
 		return nil, errors.New("server: clock is required")
 	}
@@ -271,6 +287,7 @@ func New(config Config) (http.Handler, error) {
 		linearComments:     config.LinearComments,
 		triggerActor:       config.TriggerActor,
 		repositoryResolver: config.RepositoryResolver,
+		projectSetups:      config.ProjectSetups,
 		now:                config.Now,
 		build:              config.Build,
 	}
@@ -321,9 +338,10 @@ func (s *appServer) healthz(w http.ResponseWriter, _ *http.Request) {
 			Action: status.LastRejection.Action, RejectedAt: status.LastRejection.RejectedAt,
 		}
 	}
-	health := healthResponse{Status: "ok", App: "factory", Wire: wire, BuildIdentity: s.build}
+	setups := s.projectSetups.PublicSnapshot()
+	health := healthResponse{Status: "ok", App: "factory", Wire: wire, ProjectSetups: setups, BuildIdentity: s.build}
 	httpStatus := http.StatusOK
-	if status.Pending > 0 {
+	if status.Pending > 0 || setups.Failed > 0 {
 		health.Status = "degraded"
 		httpStatus = http.StatusServiceUnavailable
 	}
@@ -524,7 +542,8 @@ func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 	wake, hasWake := commentWake(payload, deliveryID, s.triggerActor, now)
 	commentTriggers := hasWake && configuration.Triggers.LinearComment.Enabled
 	trigger, hasTrigger := agentTrigger(payload, deliveryID, s.triggerActor, configuration.Triggers.LinearLabel)
-	event := linearWireEvent(payload, deliveryID, wake, hasWake, commentTriggers, trigger, hasTrigger, now)
+	setupProject := payload.Type == "Project" && (payload.Action == "create" || payload.Action == "update") && payload.Actor.ID == s.triggerActor
+	event := linearWireEvent(payload, deliveryID, wake, hasWake, commentTriggers, trigger, hasTrigger, setupProject, now)
 	if err := s.activityStore.StagePayload(deliveryID, body); err != nil {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
@@ -606,11 +625,15 @@ func linearWireEvent(
 	commentTriggers bool,
 	trigger agentrun.Trigger,
 	hasTrigger bool,
+	setupProject bool,
 	now time.Time,
 ) eventwire.Event {
 	identifier := strings.ToUpper(strings.TrimSpace(payload.Data.Identifier))
 	if identifier == "" {
 		identifier = strings.ToUpper(strings.TrimSpace(payload.Data.Issue.Identifier))
+	}
+	if identifier == "" && payload.Type == "Project" {
+		identifier = strings.TrimSpace(payload.Data.ID)
 	}
 	event := eventwire.Event{
 		ID:         "linear:" + deliveryID,
@@ -632,6 +655,9 @@ func linearWireEvent(
 		event.Attributes[attributeTriggerKind] = []string{trigger.Kind}
 		event.Attributes[attributeIssue] = []string{trigger.IssueIdentifier}
 	}
+	if setupProject {
+		event.Attributes[attributeProjectSetup] = []string{"true"}
+	}
 	return event
 }
 
@@ -646,6 +672,24 @@ func (s *appServer) dispatchLinear(ctx context.Context, record eventwire.Record)
 		ReceivedAt: record.Event.ReceivedAt,
 	}); err != nil {
 		return fmt.Errorf("server: project Linear activity: %w", err)
+	}
+	if firstAttribute(record.Event, attributeProjectSetup) == "true" {
+		payloadBody, err := s.activityStore.StagedPayload(deliveryID)
+		if err != nil {
+			return fmt.Errorf("server: read Linear project payload: %w", err)
+		}
+		var payload linearPayload
+		if err := json.Unmarshal(payloadBody, &payload); err != nil {
+			return fmt.Errorf("server: decode Linear project payload: %w", err)
+		}
+		if payload.Type != record.Event.Type || payload.Action != record.Event.Action || payload.Data.ID != record.Event.Subject {
+			return errors.New("server: normalized Linear project event does not match its staged payload")
+		}
+		if err := s.projectSetups.Enqueue(ctx, projectsetup.Request{
+			ProjectID: payload.Data.ID, ProjectName: payload.Data.Name, Description: payload.Data.Description,
+		}); err != nil {
+			return fmt.Errorf("server: enqueue Linear project setup: %w", err)
+		}
 	}
 
 	if event, ok := linearhook.FromWire(record.Event); ok {
@@ -700,6 +744,7 @@ func (s *appServer) repositoryTrigger(ctx context.Context, deliveryID, issueIden
 		ManagedRoot:     config.ManagedRoot,
 		BaseBranch:      config.BaseBranch,
 		Bootstrap:       config.Bootstrap,
+		CloudURL:        config.CloudURL,
 	}, nil
 }
 
