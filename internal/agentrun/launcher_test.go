@@ -76,7 +76,7 @@ if [ "$1 $2" = "repo view" ]; then
     echo 'Could not resolve to a Repository' >&2
     exit 1
   fi
-  branch=null
+  branch='{"name":""}'
   if %s --git-dir=%q show-ref --verify --quiet refs/heads/main; then branch='{"name":"main"}'; fi
   printf '{"nameWithOwner":"tomnagengast/artifacts","isPrivate":true,"defaultBranchRef":%%s}\n' "$branch"
   exit 0
