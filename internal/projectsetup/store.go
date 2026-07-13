@@ -112,13 +112,23 @@ func (s *Store) RecordIncomplete(request Request, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, entry := range s.state.Entries {
+	for index, entry := range s.state.Entries {
 		if entry.ProjectID != request.ProjectID {
 			continue
 		}
 		if entry.Repository != "" {
 			return permanent(errors.New("project setup: GitHub Repo and Local Path cannot be removed after project setup is admitted"))
 		}
+		if entry.ProjectName == request.ProjectName {
+			return nil
+		}
+		next := cloneDiskState(s.state)
+		next.Entries[index].ProjectName = request.ProjectName
+		next.Entries[index].UpdatedAt = now
+		if err := writeStore(s.path, next); err != nil {
+			return err
+		}
+		s.state = next
 		return nil
 	}
 	entry := Entry{
@@ -200,7 +210,7 @@ func (s *Store) Claim(now time.Time) (Entry, bool, error) {
 	next := cloneDiskState(s.state)
 	for i := range next.Entries {
 		entry := &next.Entries[i]
-		if !entry.Managed || entry.State != StatePending && entry.State != StateFailed {
+		if !entry.Managed || (entry.State != StatePending && entry.State != StateFailed) {
 			continue
 		}
 		if entry.NextAttemptAt != nil && entry.NextAttemptAt.After(now) {
@@ -261,12 +271,12 @@ func (s *Store) updateTerminal(projectID string, state State, detail string, nex
 	return fmt.Errorf("project setup store: project %s not found", projectID)
 }
 
-func (s *Store) Specs() []Spec {
+func (s *Store) RepositorySpecs() []Spec {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	specs := make([]Spec, 0, len(s.state.Entries))
 	for _, entry := range s.state.Entries {
-		if entry.Managed && entry.Repository != "" {
+		if entry.Repository != "" {
 			specs = append(specs, entry.Spec)
 		}
 	}

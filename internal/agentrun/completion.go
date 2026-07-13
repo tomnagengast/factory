@@ -99,7 +99,11 @@ func (r *RepositoryCompletionEvidence) Replace(readers map[string]CompletionEvid
 		if !repositoryPattern.MatchString(repository) || reader == nil {
 			return errors.New("repository completion evidence: valid repository readers are required")
 		}
-		next[strings.ToLower(repository)] = reader
+		key := strings.ToLower(repository)
+		if _, found := next[key]; found {
+			return fmt.Errorf("repository completion evidence: duplicate repository %s", repository)
+		}
+		next[key] = reader
 	}
 	r.mu.Lock()
 	r.readers = next

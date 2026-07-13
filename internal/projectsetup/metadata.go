@@ -13,6 +13,7 @@ var (
 	githubRepositoryLine = regexp.MustCompile(`(?mi)^\s*GitHub Repo\s*:\s*(\S+)\s*$`)
 	localPathLine        = regexp.MustCompile(`(?mi)^\s*Local Path\s*:\s*(.+?)\s*$`)
 	cloudURLLine         = regexp.MustCompile(`(?mi)^\s*(?:Cloud URL|nags\.cloud URL)\s*:\s*(\S+)\s*$`)
+	cloudHostnameLabel   = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
 	repositoryName       = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 )
 
@@ -147,6 +148,23 @@ func (p *Parser) Parse(request Request) (Spec, bool, error) {
 	}, true, nil
 }
 
+func (p *Parser) Validate(spec Spec) error {
+	description := "GitHub Repo: " + spec.Repository + "\nLocal Path: " + spec.LocalPath
+	if spec.CloudURL != "" {
+		description += "\nCloud URL: " + spec.CloudURL
+	}
+	parsed, complete, err := p.Parse(Request{
+		ProjectID: spec.ProjectID, ProjectName: spec.ProjectName, Description: description,
+	})
+	if err != nil {
+		return err
+	}
+	if !complete || parsed != spec {
+		return permanent(errors.New("project setup: persisted repository metadata does not match current Factory policy"))
+	}
+	return nil
+}
+
 func uniqueLine(pattern *regexp.Regexp, description, label string) (string, bool, error) {
 	matches := pattern.FindAllStringSubmatch(description, -1)
 	if len(matches) == 0 {
@@ -182,7 +200,8 @@ func normalizeCloudURL(value string) (string, error) {
 		return "", errors.New("project setup: Cloud URL must be an HTTPS nags.cloud URL")
 	}
 	host := strings.ToLower(parsed.Hostname())
-	if !strings.HasSuffix(host, ".nags.cloud") || host == "nags.cloud" || strings.Contains(strings.TrimSuffix(host, ".nags.cloud"), ".") {
+	label := strings.TrimSuffix(host, ".nags.cloud")
+	if label == host || !cloudHostnameLabel.MatchString(label) {
 		return "", errors.New("project setup: Cloud URL must use one <app>.nags.cloud hostname")
 	}
 	if parsed.Path != "" && parsed.Path != "/" {

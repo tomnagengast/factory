@@ -18,6 +18,7 @@ import (
 var (
 	projectRepositoryPattern = regexp.MustCompile("(?mi)^GitHub Repo:\\s*(\\S+)\\s*$")
 	projectLocalPathPattern  = regexp.MustCompile("(?m)^Local Path:\\s*(/[^\\r\\n]+)\\s*$")
+	cloudHostnameLabel       = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
 )
 
 type RepositoryConfig struct {
@@ -164,7 +165,7 @@ func validCloudURL(value string) bool {
 	}
 	host := strings.ToLower(parsed.Hostname())
 	label := strings.TrimSuffix(host, ".nags.cloud")
-	return label != host && label != "" && !strings.Contains(label, ".") && parsed.Hostname() == host
+	return label != host && cloudHostnameLabel.MatchString(label) && parsed.Hostname() == host
 }
 
 type RepositoryResolver interface {

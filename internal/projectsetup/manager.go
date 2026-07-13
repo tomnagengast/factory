@@ -50,7 +50,7 @@ func (m *Manager) Enqueue(_ context.Context, request Request) error {
 	if err != nil {
 		return err
 	}
-	if err := m.registrar.SyncRepositories(m.store.Specs()); err != nil {
+	if err := m.registrar.SyncRepositories(m.store.RepositorySpecs()); err != nil {
 		return err
 	}
 	if needsProvision {
@@ -122,7 +122,7 @@ func (m *Manager) PublicSnapshot() PublicSnapshot {
 
 func retryDelay(attempt int) time.Duration {
 	delay := 15 * time.Second
-	for range max(attempt-1, 0) {
+	for retry := 1; retry < attempt; retry++ {
 		if delay >= 5*time.Minute {
 			return 10 * time.Minute
 		}

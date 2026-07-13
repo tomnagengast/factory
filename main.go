@@ -226,7 +226,16 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	repositoryConfigs := repositoryConfigsWithSetups(staticRepositoryConfigs, projectSetupStore.Specs())
+	projectSpecs := projectSetupStore.RepositorySpecs()
+	for _, spec := range projectSpecs {
+		if err := projectParser.Validate(spec); err != nil {
+			return fmt.Errorf("validate persisted project setup %s: %w", spec.ProjectID, err)
+		}
+	}
+	repositoryConfigs, err := repositoryConfigsWithSetups(staticRepositoryConfigs, projectSpecs)
+	if err != nil {
+		return err
+	}
 	repositoryCatalog, err := agentrun.NewRepositoryCatalog(repositoryConfigs)
 	if err != nil {
 		return err

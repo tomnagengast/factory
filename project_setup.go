@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/tomnagengast/factory/internal/agentrun"
 	"github.com/tomnagengast/factory/internal/projectsetup"
@@ -20,7 +19,10 @@ type repositoryRegistrar struct {
 }
 
 func (r *repositoryRegistrar) SyncRepositories(specs []projectsetup.Spec) error {
-	configs := repositoryConfigsWithSetups(r.staticConfigs, specs)
+	configs, err := repositoryConfigsWithSetups(r.staticConfigs, specs)
+	if err != nil {
+		return err
+	}
 	if _, err := agentrun.NewRepositoryCatalog(configs); err != nil {
 		return err
 	}
@@ -34,11 +36,30 @@ func (r *repositoryRegistrar) SyncRepositories(specs []projectsetup.Spec) error 
 	return r.evidence.Replace(readers)
 }
 
-func repositoryConfigsWithSetups(staticConfigs []agentrun.RepositoryConfig, specs []projectsetup.Spec) []agentrun.RepositoryConfig {
+func repositoryConfigsWithSetups(staticConfigs []agentrun.RepositoryConfig, specs []projectsetup.Spec) ([]agentrun.RepositoryConfig, error) {
 	configs := append([]agentrun.RepositoryConfig(nil), staticConfigs...)
 	for _, spec := range specs {
+		if !spec.Managed {
+			found := false
+			for index := range configs {
+				if !strings.EqualFold(configs[index].Repository, spec.Repository) {
+					continue
+				}
+				if configs[index].ProjectPath != spec.LocalPath {
+					return nil, fmt.Errorf("project setup: persisted path for %s does not match its compiled repository", spec.Repository)
+				}
+				configs[index].CloudURL = spec.CloudURL
+				found = true
+				break
+			}
+			if !found {
+				return nil, fmt.Errorf("project setup: persisted existing repository %s is no longer compiled", spec.Repository)
+			}
+			continue
+		}
+		_, app, _ := strings.Cut(spec.Repository, "/")
 		configs = append(configs, agentrun.RepositoryConfig{
-			App:         strings.TrimPrefix(spec.Repository, "tomnagengast/"),
+			App:         app,
 			Repository:  spec.Repository,
 			RepoURL:     spec.RepoURL,
 			RepoPath:    spec.LocalPath,
@@ -49,7 +70,7 @@ func repositoryConfigsWithSetups(staticConfigs []agentrun.RepositoryConfig, spec
 			CloudURL:    spec.CloudURL,
 		})
 	}
-	return configs
+	return configs, nil
 }
 
 type completionReaderOptions struct {
@@ -123,7 +144,3 @@ func (p *repositoryProvisioner) Provision(ctx context.Context, spec projectsetup
 
 var _ projectsetup.Registrar = (*repositoryRegistrar)(nil)
 var _ projectsetup.Provisioner = (*repositoryProvisioner)(nil)
-
-func projectSetupHTTPClient() *http.Client {
-	return &http.Client{Timeout: 10 * time.Second}
-}
