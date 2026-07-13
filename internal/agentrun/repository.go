@@ -29,6 +29,7 @@ type RepositoryConfig struct {
 	ProjectPath    string
 	BaseBranch     string
 	Bootstrap      bool
+	CloudURL       string
 	ReceiptPath    string
 	PendingReceipt string
 	HealthURL      string
@@ -58,6 +59,9 @@ func (c RepositoryConfig) validate() error {
 	}
 	if !filepath.IsAbs(c.ProjectPath) {
 		return errors.New("repository catalog: Linear project path must be absolute")
+	}
+	if c.CloudURL != "" && !validCloudURL(c.CloudURL) {
+		return errors.New("repository catalog: Cloud URL must be a canonical HTTPS <app>.nags.cloud URL")
 	}
 	deploymentFields := 0
 	for _, value := range []string{c.ReceiptPath, c.PendingReceipt, c.HealthURL} {
@@ -151,6 +155,16 @@ func normalizeProjectRepository(value string) (string, bool) {
 		return value, true
 	}
 	return normalizeGitHubRepository(value)
+}
+
+func validCloudURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Port() != "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	label := strings.TrimSuffix(host, ".nags.cloud")
+	return label != host && label != "" && !strings.Contains(label, ".") && parsed.Hostname() == host
 }
 
 type RepositoryResolver interface {

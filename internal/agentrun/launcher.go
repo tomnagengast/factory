@@ -514,6 +514,7 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 		"-e", "FACTORY_TRIGGER_KIND=" + run.TriggerKind,
 		"-e", "FACTORY_REPOSITORY=" + run.Repository,
 		"-e", "FACTORY_REPO_PATH=" + launcher.config.RepoPath,
+		"-e", "FACTORY_CLOUD_URL=" + run.CloudURL,
 		"-e", "FACTORY_AGENT_HELPER=" + launcher.config.BinaryPath,
 		launcher.config.BinaryPath,
 		"agent-exec",

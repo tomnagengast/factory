@@ -744,6 +744,7 @@ func (s *appServer) repositoryTrigger(ctx context.Context, deliveryID, issueIden
 		ManagedRoot:     config.ManagedRoot,
 		BaseBranch:      config.BaseBranch,
 		Bootstrap:       config.Bootstrap,
+		CloudURL:        config.CloudURL,
 	}, nil
 }
 

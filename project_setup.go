@@ -46,6 +46,7 @@ func repositoryConfigsWithSetups(staticConfigs []agentrun.RepositoryConfig, spec
 			ProjectPath: spec.LocalPath,
 			BaseBranch:  spec.BaseBranch,
 			Bootstrap:   spec.Bootstrap,
+			CloudURL:    spec.CloudURL,
 		})
 	}
 	return configs

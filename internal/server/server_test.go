@@ -667,7 +667,7 @@ func TestPermanentRepositoryRoutingFailureDoesNotBlockLaterRun(t *testing.T) {
 			"ENG-123": {config: agentrun.RepositoryConfig{
 				App: "factory", Repository: "tomnagengast/network", RepoURL: "git@github.com:tomnagengast/network.git",
 				RepoPath: "/Users/tom/repos/tomnagengast/network", ProjectPath: "/Users/tom/repos/tomnagengast/network",
-				ManagedRoot: "/Users/tom/repos/tomnagengast", BaseBranch: "main",
+				ManagedRoot: "/Users/tom/repos/tomnagengast", BaseBranch: "main", CloudURL: "https://network.nags.cloud",
 			}},
 		},
 		ProjectSetups: &testProjectSetups{},
@@ -692,7 +692,7 @@ func TestPermanentRepositoryRoutingFailureDoesNotBlockLaterRun(t *testing.T) {
 	}
 
 	snapshot := runStore.Snapshot()
-	if snapshot.Total != 1 || snapshot.Runs[0].IssueIdentifier != "ENG-123" {
+	if snapshot.Total != 1 || snapshot.Runs[0].IssueIdentifier != "ENG-123" || snapshot.Runs[0].CloudURL != "https://network.nags.cloud" {
 		t.Fatalf("runs = %#v", snapshot)
 	}
 	status := wire.Status()

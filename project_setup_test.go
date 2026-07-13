@@ -19,13 +19,13 @@ func TestRepositoryConfigsWithSetupsPreservesStaticContractsAndAddsBootstrap(t *
 	setups := []projectsetup.Spec{{
 		ProjectID: "project-cellar", ProjectName: "Cellar", Repository: "tomnagengast/cellar",
 		RepoURL: "git@github.com:tomnagengast/cellar.git", LocalPath: filepath.Join(root, "cellar"),
-		ManagedRoot: root, BaseBranch: "main", Bootstrap: true, Managed: true,
+		ManagedRoot: root, CloudURL: "https://cellar.nags.cloud", BaseBranch: "main", Bootstrap: true, Managed: true,
 	}}
 	configs := repositoryConfigsWithSetups(static, setups)
 	if len(configs) != 2 || !configs[0].DeploymentRequired() {
 		t.Fatalf("configs = %#v", configs)
 	}
-	if got := configs[1]; got.App != "cellar" || got.Repository != "tomnagengast/cellar" || got.ProjectPath != filepath.Join(root, "cellar") || !got.Bootstrap || got.DeploymentRequired() {
+	if got := configs[1]; got.App != "cellar" || got.Repository != "tomnagengast/cellar" || got.ProjectPath != filepath.Join(root, "cellar") || got.CloudURL != "https://cellar.nags.cloud" || !got.Bootstrap || got.DeploymentRequired() {
 		t.Fatalf("dynamic config = %#v", got)
 	}
 }
