@@ -79,36 +79,38 @@ type AgentObserver interface {
 }
 
 type Config struct {
-	Web            fs.FS
-	ActivityStore  EventStore
-	RunStore       RunStore
-	RunNotifier    RunNotifier
-	AgentObserver  AgentObserver
-	ViewerAuth     *viewerauth.Authenticator
-	LinearSecret   []byte
-	GitHubSecret   []byte
-	Events         *eventwire.Wire
-	GitHubEvents   GitHubEventStore
-	LinearComments LinearCommentStore
-	TriggerActor   string
-	Now            func() time.Time
-	Build          BuildIdentity
+	Web                fs.FS
+	ActivityStore      EventStore
+	RunStore           RunStore
+	RunNotifier        RunNotifier
+	AgentObserver      AgentObserver
+	ViewerAuth         *viewerauth.Authenticator
+	LinearSecret       []byte
+	GitHubSecret       []byte
+	Events             *eventwire.Wire
+	GitHubEvents       GitHubEventStore
+	LinearComments     LinearCommentStore
+	TriggerActor       string
+	RepositoryResolver agentrun.RepositoryResolver
+	Now                func() time.Time
+	Build              BuildIdentity
 }
 
 type appServer struct {
-	activityStore  EventStore
-	runStore       RunStore
-	runNotifier    RunNotifier
-	agentObserver  AgentObserver
-	viewerAuth     *viewerauth.Authenticator
-	linearSecret   []byte
-	githubSecret   []byte
-	events         *eventwire.Wire
-	githubEvents   GitHubEventStore
-	linearComments LinearCommentStore
-	triggerActor   string
-	now            func() time.Time
-	build          BuildIdentity
+	activityStore      EventStore
+	runStore           RunStore
+	runNotifier        RunNotifier
+	agentObserver      AgentObserver
+	viewerAuth         *viewerauth.Authenticator
+	linearSecret       []byte
+	githubSecret       []byte
+	events             *eventwire.Wire
+	githubEvents       GitHubEventStore
+	linearComments     LinearCommentStore
+	triggerActor       string
+	repositoryResolver agentrun.RepositoryResolver
+	now                func() time.Time
+	build              BuildIdentity
 }
 
 type BuildIdentity struct {
@@ -118,6 +120,22 @@ type BuildIdentity struct {
 	DeploymentID    string    `json:"deploymentId"`
 	ContractVersion string    `json:"contractVersion"`
 	StartedAt       time.Time `json:"startedAt"`
+}
+
+type legacyRepositoryResolver struct{}
+
+func (legacyRepositoryResolver) Resolve(context.Context, string) (agentrun.RepositoryConfig, error) {
+	return agentrun.RepositoryConfig{
+		App:            "network",
+		Repository:     "tomnagengast/network",
+		RepoURL:        "git@github.com:tomnagengast/network.git",
+		RepoPath:       "/tmp/factory-network",
+		ProjectPath:    "/tmp/factory-network",
+		BaseBranch:     "main",
+		ReceiptPath:    "/tmp/factory-receipt",
+		PendingReceipt: "/tmp/factory-pending",
+		HealthURL:      "http://127.0.0.1:8090/healthz",
+	}, nil
 }
 
 type healthResponse struct {
@@ -203,21 +221,25 @@ func New(config Config) (http.Handler, error) {
 	if config.Build.Commit == "" || config.Build.Tree == "" || config.Build.BuildID == "" || config.Build.DeploymentID == "" || config.Build.ContractVersion == "" || config.Build.StartedAt.IsZero() {
 		return nil, errors.New("server: build identity is required")
 	}
+	if config.RepositoryResolver == nil {
+		config.RepositoryResolver = legacyRepositoryResolver{}
+	}
 
 	app := &appServer{
-		activityStore:  config.ActivityStore,
-		runStore:       config.RunStore,
-		runNotifier:    config.RunNotifier,
-		agentObserver:  config.AgentObserver,
-		viewerAuth:     config.ViewerAuth,
-		linearSecret:   config.LinearSecret,
-		githubSecret:   config.GitHubSecret,
-		events:         config.Events,
-		githubEvents:   config.GitHubEvents,
-		linearComments: config.LinearComments,
-		triggerActor:   config.TriggerActor,
-		now:            config.Now,
-		build:          config.Build,
+		activityStore:      config.ActivityStore,
+		runStore:           config.RunStore,
+		runNotifier:        config.RunNotifier,
+		agentObserver:      config.AgentObserver,
+		viewerAuth:         config.ViewerAuth,
+		linearSecret:       config.LinearSecret,
+		githubSecret:       config.GitHubSecret,
+		events:             config.Events,
+		githubEvents:       config.GitHubEvents,
+		linearComments:     config.LinearComments,
+		triggerActor:       config.TriggerActor,
+		repositoryResolver: config.RepositoryResolver,
+		now:                config.Now,
+		build:              config.Build,
 	}
 	if err := app.events.Handle(eventwire.Filter{Source: eventwire.SourceLinear}, app.dispatchLinear); err != nil {
 		return nil, err
@@ -494,7 +516,7 @@ func linearWireEvent(
 	return event
 }
 
-func (s *appServer) dispatchLinear(_ context.Context, record eventwire.Record) error {
+func (s *appServer) dispatchLinear(ctx context.Context, record eventwire.Record) error {
 	deliveryID := firstAttribute(record.Event, attributeDeliveryID)
 	if deliveryID == "" {
 		return errors.New("server: Linear event delivery ID is missing")
@@ -513,11 +535,11 @@ func (s *appServer) dispatchLinear(_ context.Context, record eventwire.Record) e
 				return fmt.Errorf("server: project Linear comment: %w", err)
 			}
 		}
-		run, created, err := s.runStore.ClaimContinuation(agentrun.Trigger{
-			DeliveryID:      deliveryID,
-			IssueIdentifier: event.IssueIdentifier,
-			Kind:            agentrun.TriggerKindComment,
-		}, record.Event.ReceivedAt)
+		trigger, err := s.repositoryTrigger(ctx, deliveryID, event.IssueIdentifier, agentrun.TriggerKindComment)
+		if err != nil {
+			return fmt.Errorf("server: resolve Linear continuation repository: %w", err)
+		}
+		run, created, err := s.runStore.ClaimContinuation(trigger, record.Event.ReceivedAt)
 		if err != nil {
 			return fmt.Errorf("server: claim Linear continuation: %w", err)
 		}
@@ -527,11 +549,11 @@ func (s *appServer) dispatchLinear(_ context.Context, record eventwire.Record) e
 	}
 
 	if firstAttribute(record.Event, attributeTriggerKind) == agentrun.TriggerKindLabel {
-		_, created, err := s.runStore.Claim(agentrun.Trigger{
-			DeliveryID:      deliveryID,
-			IssueIdentifier: firstAttribute(record.Event, attributeIssue),
-			Kind:            agentrun.TriggerKindLabel,
-		}, record.Event.ReceivedAt)
+		trigger, err := s.repositoryTrigger(ctx, deliveryID, firstAttribute(record.Event, attributeIssue), agentrun.TriggerKindLabel)
+		if err != nil {
+			return fmt.Errorf("server: resolve Linear run repository: %w", err)
+		}
+		_, created, err := s.runStore.Claim(trigger, record.Event.ReceivedAt)
 		if err != nil {
 			return fmt.Errorf("server: claim Linear run: %w", err)
 		}
@@ -540,6 +562,22 @@ func (s *appServer) dispatchLinear(_ context.Context, record eventwire.Record) e
 		}
 	}
 	return nil
+}
+
+func (s *appServer) repositoryTrigger(ctx context.Context, deliveryID, issueIdentifier, kind string) (agentrun.Trigger, error) {
+	config, err := s.repositoryResolver.Resolve(ctx, issueIdentifier)
+	if err != nil {
+		return agentrun.Trigger{}, err
+	}
+	return agentrun.Trigger{
+		DeliveryID:      deliveryID,
+		IssueIdentifier: issueIdentifier,
+		Kind:            kind,
+		Repository:      config.Repository,
+		RepositoryURL:   config.RepoURL,
+		RepositoryPath:  config.RepoPath,
+		BaseBranch:      config.BaseBranch,
+	}, nil
 }
 
 func (s *appServer) dispatchGitHub(_ context.Context, record eventwire.Record) error {

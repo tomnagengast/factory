@@ -19,12 +19,14 @@ import (
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type SystemCompletionConfig struct {
+	App            string
 	Repository     string
 	RemoteURLs     []string
 	RepoPath       string
 	ReceiptPath    string
 	PendingReceipt string
 	HealthURL      string
+	SourcePath     string
 	LinearURL      string
 	GitPath        string
 	WorktrunkPath  string
@@ -37,6 +39,9 @@ type SystemCompletionEvidence struct {
 }
 
 func NewSystemCompletionEvidence(config SystemCompletionConfig) (*SystemCompletionEvidence, error) {
+	if config.App == "" {
+		config.App = "factory"
+	}
 	if !repositoryPattern.MatchString(config.Repository) || config.RepoPath == "" || config.ReceiptPath == "" || config.PendingReceipt == "" || config.HealthURL == "" || config.LinearURL == "" {
 		return nil, errors.New("completion evidence: repository, paths, and health URL are required")
 	}
@@ -58,7 +63,7 @@ func (r *SystemCompletionEvidence) ReadCompletionEvidence(ctx context.Context, r
 		if !run.Ready.ValidatedAt.IsZero() {
 			checkpointTime = run.Ready.ValidatedAt
 		}
-		evidence.DeploymentFailed = pending.App == "factory" && pending.ContractVersion == LifecycleContractVersion && !pending.StartedAt.Before(checkpointTime)
+		evidence.DeploymentFailed = pending.App == r.config.App && pending.ContractVersion == LifecycleContractVersion && !pending.StartedAt.Before(checkpointTime)
 	}
 	receipt, err := readDeploymentReceipt(r.config.ReceiptPath)
 	if err != nil {
@@ -164,7 +169,11 @@ func (r *SystemCompletionEvidence) readRepository(ctx context.Context, run Run, 
 	receiptTree := ""
 	if gitOIDPattern.MatchString(receipt.SourceCommit) {
 		receiptOnMain = completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, receipt.SourceCommit, strings.TrimSpace(string(originMain)))
-		if output, treeErr := completionCommand(ctx, r.config.RepoPath, r.config.GitPath, "rev-parse", receipt.SourceCommit+"^{tree}"); treeErr == nil {
+		treeRevision := receipt.SourceCommit + "^{tree}"
+		if r.config.SourcePath != "" {
+			treeRevision = receipt.SourceCommit + ":" + r.config.SourcePath
+		}
+		if output, treeErr := completionCommand(ctx, r.config.RepoPath, r.config.GitPath, "rev-parse", treeRevision); treeErr == nil {
 			receiptTree = strings.TrimSpace(string(output))
 		}
 	}
@@ -174,7 +183,7 @@ func (r *SystemCompletionEvidence) readRepository(ctx context.Context, run Run, 
 	}
 	result.sourceValid = strings.TrimSpace(string(status)) == "" && strings.TrimSpace(string(branch)) == "main" &&
 		strings.TrimSpace(string(upstream)) == "origin/main" && headOnMain && receiptOnMain &&
-		receipt.Status == "success" && receipt.App == "factory" && receipt.SourceBranch == "main" &&
+		receipt.Status == "success" && receipt.App == r.config.App && receipt.SourceBranch == "main" &&
 		receipt.SourceTree == receiptTree &&
 		receipt.ContractVersion == LifecycleContractVersion && gitOIDPattern.MatchString(receipt.SourceCommit) && gitOIDPattern.MatchString(receipt.SourceTree) &&
 		sha256Pattern.MatchString(receipt.BinarySHA256) && receipt.DeploymentID != "" && receipt.BuildID != "" &&

@@ -75,6 +75,30 @@ type CompletionEvidenceReader interface {
 	ReadCompletionEvidence(context.Context, Run, PullRequestSnapshot) (CompletionEvidence, error)
 }
 
+type RepositoryCompletionEvidence struct {
+	readers map[string]CompletionEvidenceReader
+}
+
+func NewRepositoryCompletionEvidence(readers map[string]CompletionEvidenceReader) (*RepositoryCompletionEvidence, error) {
+	if len(readers) == 0 {
+		return nil, errors.New("repository completion evidence: readers are required")
+	}
+	for repository, reader := range readers {
+		if !repositoryPattern.MatchString(repository) || reader == nil {
+			return nil, errors.New("repository completion evidence: valid repository readers are required")
+		}
+	}
+	return &RepositoryCompletionEvidence{readers: readers}, nil
+}
+
+func (r *RepositoryCompletionEvidence) ReadCompletionEvidence(ctx context.Context, run Run, snapshot PullRequestSnapshot) (CompletionEvidence, error) {
+	reader := r.readers[run.Repository]
+	if reader == nil {
+		return CompletionEvidence{}, fmt.Errorf("repository completion evidence: no reader for %s", run.Repository)
+	}
+	return reader.ReadCompletionEvidence(ctx, run, snapshot)
+}
+
 type CompletionValidation struct {
 	Accepted         bool      `json:"accepted"`
 	Intent           string    `json:"intent"`
@@ -207,7 +231,11 @@ func (v *MechanicalCompletionValidator) Validate(ctx context.Context, run Run, r
 }
 
 func (v *MechanicalCompletionValidator) validateBeforePullRequest(ctx context.Context, run Run, decision CompletionDecision, result ProcessResult) CompletionDecision {
-	matches, err := v.discoverer.MatchingIssuePullRequests(ctx, v.repository, run.IssueIdentifier)
+	repository := run.Repository
+	if repository == "" {
+		repository = v.repository
+	}
+	matches, err := v.discoverer.MatchingIssuePullRequests(ctx, repository, run.IssueIdentifier)
 	if err != nil {
 		return rejectCompletion(decision, "discover issue pull requests: "+err.Error(), false)
 	}

@@ -159,6 +159,50 @@ func serve(ctx context.Context) error {
 	worktrunkPath := requiredCommand("wt")
 	tmuxSocket := envOr("FACTORY_TMUX_SOCKET", defaultTmuxSocket)
 	repoPath := envOr("FACTORY_REPO_PATH", filepath.Join(stateRoot, "workspace", "network"))
+	repositoryConfigs := []agentrun.RepositoryConfig{
+		{
+			App: "network", Repository: "tomnagengast/network",
+			RepoURL:  "git@github.com:tomnagengast/network.git",
+			RepoPath: repoPath, ProjectPath: "/Volumes/T9/Repos/tomnagengast/network",
+			BaseBranch: "main", SourcePath: "apps/network",
+			ReceiptPath:    filepath.Join(home, ".local", "share", "network", "deployments", "current.json"),
+			PendingReceipt: filepath.Join(home, ".local", "share", "network", "deployments", "pending.json"),
+			HealthURL:      "http://127.0.0.1:8090/healthz",
+		},
+		{
+			App: "notebook", Repository: "tomnagengast/notebook",
+			RepoURL:        "git@github.com:tomnagengast/notebook.git",
+			RepoPath:       filepath.Join(home, "repos", "tomnagengast", "notebook"),
+			ProjectPath:    filepath.Join(home, "repos", "tomnagengast", "notebook"),
+			BaseBranch:     "main",
+			ReceiptPath:    filepath.Join(home, ".local", "share", "notebook", "deployments", "current.json"),
+			PendingReceipt: filepath.Join(home, ".local", "share", "notebook", "deployments", "pending.json"),
+			HealthURL:      "http://127.0.0.1:8091/healthz",
+		},
+		{
+			App: "factory", Repository: "tomnagengast/factory",
+			RepoURL:        "git@github.com:tomnagengast/factory.git",
+			RepoPath:       filepath.Join(home, "repos", "tomnagengast", "factory"),
+			ProjectPath:    "/Volumes/T9/Repos/tomnagengast/network/apps/factory",
+			BaseBranch:     "main",
+			ReceiptPath:    filepath.Join(stateRoot, "deployments", "current.json"),
+			PendingReceipt: filepath.Join(stateRoot, "deployments", "pending.json"),
+			HealthURL:      "http://127.0.0.1:" + port + "/api/healthz",
+		},
+	}
+	repositoryCatalog, err := agentrun.NewRepositoryCatalog(repositoryConfigs)
+	if err != nil {
+		return err
+	}
+	repositoryResolver, err := agentrun.NewLinearRepositoryResolver(
+		"https://api.linear.app/graphql",
+		linearAPIKey,
+		&http.Client{Timeout: 10 * time.Second},
+		repositoryCatalog,
+	)
+	if err != nil {
+		return err
+	}
 	launcher, err := agentrun.NewTmuxLauncher(agentrun.LauncherConfig{
 		RepoURL:       envOr("FACTORY_REPO_URL", defaultRepoURL),
 		RepoPath:      repoPath,
@@ -176,23 +220,29 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	completionEvidence, err := agentrun.NewSystemCompletionEvidence(agentrun.SystemCompletionConfig{
-		Repository: repository,
-		RemoteURLs: []string{
-			"git@github.com:tomnagengast/network.git",
-			"https://github.com/tomnagengast/network",
-			"https://github.com/tomnagengast/network.git",
-		},
-		RepoPath:       repoPath,
-		ReceiptPath:    filepath.Join(stateRoot, "deployments", "current.json"),
-		PendingReceipt: filepath.Join(stateRoot, "deployments", "pending.json"),
-		HealthURL:      "http://127.0.0.1:" + port + "/api/healthz",
-		LinearURL:      "https://api.linear.app/graphql",
-		GitPath:        gitPath,
-		WorktrunkPath:  worktrunkPath,
-		LinearAPIKey:   linearAPIKey,
-		HTTPClient:     &http.Client{Timeout: 10 * time.Second},
-	})
+	completionReaders := make(map[string]agentrun.CompletionEvidenceReader, len(repositoryConfigs))
+	for _, config := range repositoryConfigs {
+		reader, readerErr := agentrun.NewSystemCompletionEvidence(agentrun.SystemCompletionConfig{
+			App:            config.App,
+			Repository:     config.Repository,
+			RemoteURLs:     repositoryRemoteURLs(config.Repository),
+			RepoPath:       config.RepoPath,
+			ReceiptPath:    config.ReceiptPath,
+			PendingReceipt: config.PendingReceipt,
+			HealthURL:      config.HealthURL,
+			SourcePath:     config.SourcePath,
+			LinearURL:      "https://api.linear.app/graphql",
+			GitPath:        gitPath,
+			WorktrunkPath:  worktrunkPath,
+			LinearAPIKey:   linearAPIKey,
+			HTTPClient:     &http.Client{Timeout: 10 * time.Second},
+		})
+		if readerErr != nil {
+			return readerErr
+		}
+		completionReaders[config.Repository] = reader
+	}
+	completionEvidence, err := agentrun.NewRepositoryCompletionEvidence(completionReaders)
 	if err != nil {
 		return err
 	}
@@ -239,19 +289,20 @@ func serve(ctx context.Context) error {
 	}
 
 	handler, err := server.New(server.Config{
-		Web:            web,
-		ActivityStore:  activityStore,
-		RunStore:       runStore,
-		RunNotifier:    manager,
-		AgentObserver:  observer,
-		ViewerAuth:     viewerAuth,
-		LinearSecret:   []byte(secret),
-		GitHubSecret:   []byte(githubSecret),
-		Events:         events,
-		GitHubEvents:   githubEvents,
-		LinearComments: linearComments,
-		TriggerActor:   triggerActorID,
-		Now:            time.Now,
+		Web:                web,
+		ActivityStore:      activityStore,
+		RunStore:           runStore,
+		RunNotifier:        manager,
+		AgentObserver:      observer,
+		ViewerAuth:         viewerAuth,
+		LinearSecret:       []byte(secret),
+		GitHubSecret:       []byte(githubSecret),
+		Events:             events,
+		GitHubEvents:       githubEvents,
+		LinearComments:     linearComments,
+		TriggerActor:       triggerActorID,
+		RepositoryResolver: repositoryResolver,
+		Now:                time.Now,
 		Build: server.BuildIdentity{
 			Commit:          buildCommit,
 			Tree:            buildTree,
@@ -374,4 +425,12 @@ func splitList(value string) []string {
 		}
 	}
 	return values
+}
+
+func repositoryRemoteURLs(repository string) []string {
+	return []string{
+		"git@github.com:" + repository + ".git",
+		"https://github.com/" + repository,
+		"https://github.com/" + repository + ".git",
+	}
 }

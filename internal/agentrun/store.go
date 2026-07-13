@@ -54,6 +54,10 @@ type Trigger struct {
 	DeliveryID      string
 	IssueIdentifier string
 	Kind            string
+	Repository      string
+	RepositoryURL   string
+	RepositoryPath  string
+	BaseBranch      string
 }
 
 type Transition struct {
@@ -66,6 +70,10 @@ type Transition struct {
 type Run struct {
 	ID                         string                `json:"id"`
 	IssueIdentifier            string                `json:"issueIdentifier"`
+	Repository                 string                `json:"repository,omitempty"`
+	RepositoryURL              string                `json:"repositoryUrl,omitempty"`
+	RepositoryPath             string                `json:"repositoryPath,omitempty"`
+	BaseBranch                 string                `json:"baseBranch,omitempty"`
 	TriggerKind                string                `json:"triggerKind"`
 	DeliveryIDs                []string              `json:"deliveryIds"`
 	State                      State                 `json:"state"`
@@ -251,6 +259,10 @@ func (s *Store) claim(trigger Trigger, now time.Time, requireHistory bool) (Run,
 	run := Run{
 		ID:              id,
 		IssueIdentifier: trigger.IssueIdentifier,
+		Repository:      trigger.Repository,
+		RepositoryURL:   trigger.RepositoryURL,
+		RepositoryPath:  trigger.RepositoryPath,
+		BaseBranch:      trigger.BaseBranch,
 		TriggerKind:     trigger.Kind,
 		DeliveryIDs:     []string{trigger.DeliveryID},
 		State:           StatePending,

@@ -171,7 +171,7 @@ func (m *Manager) reconcile(ctx context.Context) {
 		if run.NextReconcileAt != nil && m.now().Before(*run.NextReconcileAt) {
 			continue
 		}
-		if !prepared {
+		if run.RepositoryPath == "" && !prepared {
 			if err := m.launcher.Prepare(ctx); err != nil {
 				m.logger.Error("prepare agent workspace", "error", err)
 				return
@@ -282,7 +282,7 @@ func (m *Manager) parkReadyRun(ctx context.Context, run Run, result ProcessResul
 		m.logger.Warn("defer ready checkpoint validation", "run_id", run.ID, "error", err)
 		return
 	}
-	checkpoint.Repository = m.lifecycle.Repository
+	checkpoint.Repository = runRepository(run, m.lifecycle).Repository
 	checkpoint.PullRequestUpdatedAt = snapshot.UpdatedAt
 	now := m.now()
 	switch snapshot.State {
@@ -351,16 +351,24 @@ func (m *Manager) validateCheckpoint(run Run, checkpoint ReadyCheckpoint) error 
 	if err := checkpoint.Validate(); err != nil {
 		return err
 	}
-	if !strings.EqualFold(checkpoint.Repository, m.lifecycle.Repository) {
-		return fmt.Errorf("repository is %q, want configured repository %q", checkpoint.Repository, m.lifecycle.Repository)
+	lifecycle := runRepository(run, m.lifecycle)
+	if !strings.EqualFold(checkpoint.Repository, lifecycle.Repository) {
+		return fmt.Errorf("repository is %q, want configured repository %q", checkpoint.Repository, lifecycle.Repository)
 	}
-	if checkpoint.BaseBranch != m.lifecycle.BaseBranch {
-		return fmt.Errorf("base branch is %q, want configured base %q", checkpoint.BaseBranch, m.lifecycle.BaseBranch)
+	if checkpoint.BaseBranch != lifecycle.BaseBranch {
+		return fmt.Errorf("base branch is %q, want configured base %q", checkpoint.BaseBranch, lifecycle.BaseBranch)
 	}
 	if run.SegmentStartedAt == nil || checkpoint.CreatedAt.Before(*run.SegmentStartedAt) {
 		return errors.New("checkpoint predates the current lifecycle segment")
 	}
 	return nil
+}
+
+func runRepository(run Run, fallback LifecycleConfig) LifecycleConfig {
+	if run.Repository == "" || run.BaseBranch == "" {
+		return fallback
+	}
+	return LifecycleConfig{Repository: run.Repository, BaseBranch: run.BaseBranch}
 }
 
 func validateMergedSnapshot(checkpoint ReadyCheckpoint, snapshot PullRequestSnapshot) error {

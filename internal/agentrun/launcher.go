@@ -202,6 +202,15 @@ func (l *TmuxLauncher) worktreeIntegrated(ctx context.Context, worktree linkedWo
 }
 
 func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirectory string) error {
+	launcher := l.forRun(run)
+	if launcher != l {
+		if err := launcher.Prepare(ctx); err != nil {
+			return err
+		}
+		if err := launcher.CleanupWorktrees(ctx); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(runDirectory, 0o700); err != nil {
 		return fmt.Errorf("create run directory: %w", err)
 	}
@@ -209,32 +218,43 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 		return err
 	}
 	args := []string{
-		"-L", l.config.TmuxSocket,
+		"-L", launcher.config.TmuxSocket,
 		"new-session", "-d",
 		"-s", sessionName,
 		"-n", "principal",
-		"-c", l.config.RepoPath,
-		"-e", "FACTORY_TMUX_SOCKET=" + l.config.TmuxSocket,
+		"-c", launcher.config.RepoPath,
+		"-e", "FACTORY_TMUX_SOCKET=" + launcher.config.TmuxSocket,
 		"-e", "FACTORY_TMUX_SESSION=" + sessionName,
 		"-e", "FACTORY_RUN_ID=" + run.ID,
 		"-e", "FACTORY_RUN_DIR=" + runDirectory,
 		"-e", "FACTORY_TRIGGER_KIND=" + run.TriggerKind,
-		"-e", "FACTORY_REPO_PATH=" + l.config.RepoPath,
-		"-e", "FACTORY_AGENT_HELPER=" + l.config.BinaryPath,
-		l.config.BinaryPath,
+		"-e", "FACTORY_REPOSITORY=" + run.Repository,
+		"-e", "FACTORY_REPO_PATH=" + launcher.config.RepoPath,
+		"-e", "FACTORY_AGENT_HELPER=" + launcher.config.BinaryPath,
+		launcher.config.BinaryPath,
 		"agent-exec",
 		"--issue", run.IssueIdentifier,
 		"--trigger-kind", run.TriggerKind,
-		"--repo", l.config.RepoPath,
+		"--repo", launcher.config.RepoPath,
 		"--run-dir", runDirectory,
 		"--attempt-offset", fmt.Sprintf("%d", run.Attempts),
 	}
-	cmd := exec.CommandContext(ctx, l.config.TmuxPath, args...)
+	cmd := exec.CommandContext(ctx, launcher.config.TmuxPath, args...)
 	cmd.Env = agentEnvironment(os.Environ())
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux new-session: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func (l *TmuxLauncher) forRun(run Run) *TmuxLauncher {
+	if run.RepositoryURL == "" || run.RepositoryPath == "" {
+		return l
+	}
+	config := l.config
+	config.RepoURL = run.RepositoryURL
+	config.RepoPath = run.RepositoryPath
+	return &TmuxLauncher{config: config}
 }
 
 func removeLifecycleArtifacts(runDirectory string) error {
