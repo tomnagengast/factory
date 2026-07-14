@@ -42,6 +42,8 @@ const (
 	mergeReconcileInterval   = 60 * time.Second
 	projectSetupRetryPoll    = 15 * time.Second
 	managedGitHubOwner       = "tomnagengast"
+	linearGraphQLURL         = "https://api.linear.app/graphql"
+	providerProjectName      = "Network"
 	googleRedirectURL        = "https://factory.nags.cloud/auth/google/callback"
 	viewerUsername           = "factory"
 )
@@ -216,6 +218,16 @@ func serve(ctx context.Context) error {
 			BaseBranch:  "main", Bootstrap: true,
 		},
 	}
+	var providerRepositoryConfig agentrun.RepositoryConfig
+	for _, config := range staticRepositoryConfigs {
+		if strings.EqualFold(config.Repository, defaultRepository) {
+			providerRepositoryConfig = config
+			break
+		}
+	}
+	if providerRepositoryConfig.Repository == "" {
+		return fmt.Errorf("provider repository %s is not configured", defaultRepository)
+	}
 	existingRepositories := make([]projectsetup.ExistingRepository, 0, len(staticRepositoryConfigs))
 	for _, config := range staticRepositoryConfigs {
 		existingRepositories = append(existingRepositories, projectsetup.ExistingRepository{
@@ -241,7 +253,7 @@ func serve(ctx context.Context) error {
 		return err
 	}
 	repositoryResolver, err := agentrun.NewLinearRepositoryResolver(
-		"https://api.linear.app/graphql",
+		linearGraphQLURL,
 		linearAPIKey,
 		&http.Client{Timeout: 10 * time.Second},
 		repositoryCatalog,
@@ -272,7 +284,7 @@ func serve(ctx context.Context) error {
 		return err
 	}
 	readerOptions := completionReaderOptions{
-		linearURL: "https://api.linear.app/graphql", linearAPIKey: linearAPIKey,
+		linearURL: linearGraphQLURL, linearAPIKey: linearAPIKey,
 		gitPath: gitPath, worktrunkPath: worktrunkPath,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
@@ -287,14 +299,6 @@ func serve(ctx context.Context) error {
 	projectRegistrar := &repositoryRegistrar{
 		staticConfigs: staticRepositoryConfigs, catalog: repositoryCatalog,
 		evidence: completionEvidence, readerOptions: readerOptions,
-	}
-	projectProvisioner := &repositoryProvisioner{launcherConfig: launcherConfig, nagsPath: nagsPath}
-	projectManager, err := projectsetup.NewManager(
-		projectSetupStore, projectParser, projectRegistrar, projectProvisioner,
-		projectSetupRetryPoll, slog.Default(), time.Now,
-	)
-	if err != nil {
-		return err
 	}
 	terminalValidator, err := agentrun.NewMechanicalCompletionValidator(pullRequests, completionEvidence, repository, time.Now)
 	if err != nil {
@@ -316,6 +320,38 @@ func serve(ctx context.Context) error {
 		mergeReconcileInterval,
 		slog.Default(),
 		time.Now,
+	)
+	if err != nil {
+		return err
+	}
+	providerCoordinator, err := projectsetup.NewLinearProviderCoordinator(
+		linearGraphQLURL,
+		linearAPIKey,
+		providerProjectName,
+		[]string{"Factory", "Yolo"},
+		&http.Client{Timeout: 10 * time.Second},
+	)
+	if err != nil {
+		return err
+	}
+	providerStarter, err := newProviderAgentStarter(
+		providerCoordinator,
+		runStore,
+		manager,
+		providerRepositoryConfig,
+		time.Now,
+	)
+	if err != nil {
+		return err
+	}
+	projectProvisioner := &repositoryProvisioner{
+		launcherConfig: launcherConfig,
+		nagsPath:       nagsPath,
+		provider:       providerStarter,
+	}
+	projectManager, err := projectsetup.NewManager(
+		projectSetupStore, projectParser, projectRegistrar, projectProvisioner,
+		projectSetupRetryPoll, slog.Default(), time.Now,
 	)
 	if err != nil {
 		return err

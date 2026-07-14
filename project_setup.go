@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tomnagengast/factory/internal/agentrun"
 	"github.com/tomnagengast/factory/internal/projectsetup"
@@ -118,6 +122,7 @@ func buildCompletionReaders(configs []agentrun.RepositoryConfig, options complet
 type repositoryProvisioner struct {
 	launcherConfig agentrun.LauncherConfig
 	nagsPath       string
+	provider       *providerAgentStarter
 }
 
 func (p *repositoryProvisioner) Provision(ctx context.Context, spec projectsetup.Spec) error {
@@ -139,7 +144,81 @@ func (p *repositoryProvisioner) Provision(ctx context.Context, spec projectsetup
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("register GitHub webhook: %w: %s", err, strings.TrimSpace(string(output)))
 	}
+	if spec.CloudURL != "" {
+		if p.provider == nil {
+			return fmt.Errorf("coordinate provider setup: provider starter is not configured")
+		}
+		if err := p.provider.Start(ctx, spec); err != nil {
+			return fmt.Errorf("coordinate provider setup: %w", err)
+		}
+	}
 	return nil
+}
+
+type agentRunNotifier interface {
+	Notify()
+}
+
+type providerAgentStarter struct {
+	coordinator projectsetup.ProviderCoordinator
+	store       *agentrun.Store
+	notifier    agentRunNotifier
+	repository  agentrun.RepositoryConfig
+	now         func() time.Time
+}
+
+func newProviderAgentStarter(
+	coordinator projectsetup.ProviderCoordinator,
+	store *agentrun.Store,
+	notifier agentRunNotifier,
+	repository agentrun.RepositoryConfig,
+	now func() time.Time,
+) (*providerAgentStarter, error) {
+	if coordinator == nil || store == nil || notifier == nil || now == nil {
+		return nil, fmt.Errorf("provider agent starter: coordinator, run store, notifier, and clock are required")
+	}
+	if repository.Repository == "" || repository.RepoURL == "" || !filepath.IsAbs(repository.RepoPath) || !filepath.IsAbs(repository.ManagedRoot) || repository.BaseBranch == "" {
+		return nil, fmt.Errorf("provider agent starter: complete provider repository routing is required")
+	}
+	return &providerAgentStarter{
+		coordinator: coordinator, store: store, notifier: notifier,
+		repository: repository, now: now,
+	}, nil
+}
+
+func (s *providerAgentStarter) Start(ctx context.Context, spec projectsetup.Spec) error {
+	issue, err := s.coordinator.Ensure(ctx, spec)
+	if err != nil {
+		return err
+	}
+	if issue.ID == "" || !agentrun.ValidIssueIdentifier(issue.Identifier) {
+		return fmt.Errorf("provider agent starter: coordinator returned an invalid Linear issue")
+	}
+	config := s.repository
+	_, created, err := s.store.Claim(agentrun.Trigger{
+		DeliveryID:      providerAgentDeliveryID(issue.ID, spec),
+		IssueIdentifier: issue.Identifier,
+		Kind:            agentrun.TriggerKindLabel,
+		Repository:      config.Repository,
+		RepositoryURL:   config.RepoURL,
+		RepositoryPath:  config.RepoPath,
+		ManagedRoot:     config.ManagedRoot,
+		BaseBranch:      config.BaseBranch,
+		Bootstrap:       config.Bootstrap,
+		CloudURL:        config.CloudURL,
+	}, s.now())
+	if err != nil {
+		return fmt.Errorf("provider agent starter: claim run: %w", err)
+	}
+	if created {
+		s.notifier.Notify()
+	}
+	return nil
+}
+
+func providerAgentDeliveryID(issueID string, spec projectsetup.Spec) string {
+	digest := sha256.Sum256([]byte(spec.ProjectID + "\x00" + spec.Repository + "\x00" + spec.CloudURL))
+	return "project-provider:" + issueID + ":" + hex.EncodeToString(digest[:8])
 }
 
 var _ projectsetup.Registrar = (*repositoryRegistrar)(nil)

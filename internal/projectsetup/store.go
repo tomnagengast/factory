@@ -26,13 +26,14 @@ const (
 
 type Entry struct {
 	Spec
-	State         State      `json:"state"`
-	Attempts      int        `json:"attempts"`
-	LastError     string     `json:"lastError,omitempty"`
-	NextAttemptAt *time.Time `json:"nextAttemptAt,omitempty"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	UpdatedAt     time.Time  `json:"updatedAt"`
-	ProvisionedAt *time.Time `json:"provisionedAt,omitempty"`
+	State               State      `json:"state"`
+	Attempts            int        `json:"attempts"`
+	LastError           string     `json:"lastError,omitempty"`
+	NextAttemptAt       *time.Time `json:"nextAttemptAt,omitempty"`
+	CreatedAt           time.Time  `json:"createdAt"`
+	UpdatedAt           time.Time  `json:"updatedAt"`
+	ProvisionedAt       *time.Time `json:"provisionedAt,omitempty"`
+	ProviderCoordinated bool       `json:"providerCoordinated,omitempty"`
 }
 
 type Snapshot struct {
@@ -89,6 +90,14 @@ func Open(path string, now time.Time) (*Store, error) {
 	recovered := false
 	for i := range store.state.Entries {
 		entry := &store.state.Entries[i]
+		if entry.CloudURL != "" && entry.State == StateSucceeded && !entry.ProviderCoordinated {
+			entry.State = StatePending
+			entry.LastError = ""
+			entry.NextAttemptAt = nil
+			entry.ProvisionedAt = nil
+			entry.UpdatedAt = now.UTC()
+			recovered = true
+		}
 		if entry.State == StateRunning {
 			entry.State = StatePending
 			entry.NextAttemptAt = nil
@@ -159,21 +168,28 @@ func (s *Store) Upsert(spec Spec, now time.Time) (bool, error) {
 		if !wasAwaiting && (entry.Repository != spec.Repository || entry.LocalPath != spec.LocalPath) {
 			return false, permanent(errors.New("project setup: repository and local path are immutable after project setup is admitted; create a new Linear project instead"))
 		}
+		providerChanged := spec.CloudURL != "" && entry.CloudURL != spec.CloudURL
 		changed := wasAwaiting || entry.ProjectName != spec.ProjectName || entry.CloudURL != spec.CloudURL
-		needsProvision := spec.Managed && (wasAwaiting || entry.State == StateFailed)
+		repositoryNeedsProvision := spec.Managed && (wasAwaiting || entry.State == StateFailed)
+		providerNeedsProvision := spec.CloudURL != "" && (wasAwaiting || entry.State == StateFailed || providerChanged || !entry.ProviderCoordinated)
+		needsProvision := repositoryNeedsProvision || providerNeedsProvision
 		entry.Spec = spec
 		entry.UpdatedAt = now
-		if !spec.Managed {
+		if providerChanged {
+			entry.ProviderCoordinated = false
+		}
+		if needsProvision {
+			entry.State = StatePending
+			entry.LastError = ""
+			entry.NextAttemptAt = nil
+		} else if !spec.Managed {
 			entry.State = StateSucceeded
+			entry.ProviderCoordinated = true
 			entry.LastError = ""
 			entry.NextAttemptAt = nil
 			if entry.ProvisionedAt == nil {
 				entry.ProvisionedAt = timePointer(now)
 			}
-		} else if needsProvision {
-			entry.State = StatePending
-			entry.LastError = ""
-			entry.NextAttemptAt = nil
 		}
 		if !changed && !needsProvision {
 			return false, nil
@@ -185,21 +201,23 @@ func (s *Store) Upsert(spec Spec, now time.Time) (bool, error) {
 		return needsProvision, nil
 	}
 
+	needsProvision := spec.Managed || spec.CloudURL != ""
 	state := StateSucceeded
 	var provisionedAt *time.Time
-	if spec.Managed {
+	if needsProvision {
 		state = StatePending
 	} else {
 		provisionedAt = timePointer(now)
 	}
 	next.Entries = append(next.Entries, Entry{
 		Spec: spec, State: state, CreatedAt: now, UpdatedAt: now, ProvisionedAt: provisionedAt,
+		ProviderCoordinated: !needsProvision,
 	})
 	if err := writeStore(s.path, next); err != nil {
 		return false, err
 	}
 	s.state = next
-	return spec.Managed, nil
+	return needsProvision, nil
 }
 
 func (s *Store) Claim(now time.Time) (Entry, bool, error) {
@@ -210,7 +228,7 @@ func (s *Store) Claim(now time.Time) (Entry, bool, error) {
 	next := cloneDiskState(s.state)
 	for i := range next.Entries {
 		entry := &next.Entries[i]
-		if !entry.Managed || (entry.State != StatePending && entry.State != StateFailed) {
+		if entry.State != StatePending && entry.State != StateFailed {
 			continue
 		}
 		if entry.NextAttemptAt != nil && entry.NextAttemptAt.After(now) {
@@ -259,6 +277,7 @@ func (s *Store) updateTerminal(projectID string, state State, detail string, nex
 		entry.NextAttemptAt = nil
 		if state == StateSucceeded {
 			entry.ProvisionedAt = timePointer(now)
+			entry.ProviderCoordinated = true
 		} else {
 			entry.NextAttemptAt = timePointer(nextAttemptAt.UTC())
 		}
