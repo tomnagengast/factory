@@ -67,13 +67,15 @@ Observed facts:
 - HTTP starts before `recoverEventWire` completes, so settings mutation is possible while an earlier record is pending (`main.go:406-429`).
 - Event IDs are deduplicated only inside the retained journal window. Durable invocation idempotency cannot depend on wire retention alone (`internal/eventwire/journal.go:144-225`, `internal/eventwire/journal.go:391-410`).
 - Registering one dynamic wire route per rule would make CRUD ordering and partial multi-route failure unsafe. One broad admission route can evaluate one immutable registry snapshot and atomically persist the full outcome.
+- The collector publishes every newly observed `agent-record` and lifecycle event in one `PublishBatch`, while current wire routes run once per record (`internal/agentrun/collector.go:84-123`, `internal/eventwire/wire.go:103-142`). Replacing a growing routing file for each record would turn one ordinary agent-output batch into N serialized full rewrites, fsyncs, and renames.
 
 Proposed durability boundary:
 
 - Add one `CoordinatedWire` around trusted event publication, recovery, generic admission routing, registry mutation, and workflow mutation. Keep the underlying `eventwire.Wire` private after handler registration so no producer or recovery path can bypass the wrapper.
-- Register one broad generic admission handler before the existing Linear and GitHub system handlers.
+- Add one leading batch-admission hook before the existing per-record Linear and GitHub system handlers. It receives the stable contiguous pending prefix selected by the current coordinated operation.
 - `CoordinatedWire.Publish`, `PublishBatch`, and `CatchUp` all acquire the same policy coordinator before entering the wire. The fixed lock order is policy coordinator, wire dispatch mutex, one journal or route mutex, then registry/settings/invocation/Run stores. No store method may publish or call back into the coordinator while holding a store lock.
-- The admission handler runs with the policy coordinator already held and must never reacquire it or synchronously republish. It evaluates all enabled rules against one registry and settings snapshot, then persists and fsyncs one atomic decision update containing the wire event ID and sequence plus every match outcome. Persist an explicit empty decision when no rule matches.
+- The batch-admission hook runs with the policy coordinator already held and must never reacquire it or synchronously republish. For one `Publish`, `PublishBatch`, or `CatchUp`, it evaluates every undecided record in that pending prefix against one registry/settings snapshot and performs one atomic routing-store update containing every match, suppression, rejection, or explicit empty outcome before any source-specific record dispatch.
+- The implementation must never replace the complete routing store once per record in a high-volume wire batch. A bounded append/projection remains an implementation alternative, but it may not reintroduce permanent history, guessed segment sizes, or immortal tombstones.
 - Replays reuse the existing decision and never re-evaluate the event against a later registry revision.
 - Registry/workflow mutations check every pending wire record under the same coordinator. If any pending record lacks a durable admission decision, reject the mutation until catch-up records that decision. This closes the prior review's pending-wire race without freezing policy for records whose decisions are already pinned.
 - Source-specific handlers remain later routes. If a protected Linear or GitHub handler fails after admission, the wire record stays pending, but its generic decision and workflow snapshots are already durable and idempotent.
@@ -90,7 +92,7 @@ Observed facts:
 
 Proposed invocation model:
 
-- Add one private schema-1 bounded routing store using Factory's existing atomic file, fsync, permission, and strict-read conventions. One durable decision atomically records every match or an explicit empty result while the wire record is pending and through the bounded retained audit window.
+- Add one private schema-1 bounded routing store using Factory's existing atomic file, fsync, permission, and strict-read conventions. `ApplyDecisionBatch` replaces the snapshot at most once for the current coordinated pending prefix and atomically records one decision per record, including explicit empty outcomes, through the bounded retained audit window.
 - Compute the idempotency key from `(eventID, ruleID, ruleRevision)`, domain-separated and hashed. Do not use the shared delivery ID or legacy Run coalescing as authority.
 - Each invocation snapshots the event ID/sequence, immutable causation metadata, stable rule ID and per-rule revision, complete matched filter and target policy, complete validated workflow value, settings revision and digest, resolved issue identity, state, timestamps, retry detail, repository route when resolved, and linked Run ID when claimed.
 - Store the complete `settings.Workflow` value, not only `WorkflowID`. A later workflow edit, disable, or delete therefore cannot change admitted executable steps. Provider/model settings remain safe-boundary settings read for each lifecycle segment; ENG-40 pins the workflow, not the entire agent configuration.
@@ -108,7 +110,7 @@ Proposed invocation model:
 Crash-recovery contract:
 
 - A crash before event fsync leaves no event or invocation. After event fsync but before decision fsync, the record remains pending and coordinated catch-up creates exactly one decision under the still-guarded policy snapshot.
-- A routing-store replacement exposes the complete old or new snapshot and fails closed on a malformed complete file. A crash after decision fsync but before a later handler or wire acknowledgment reuses the byte-identical decision. Batch recovery has a decided prefix and undecided suffix, and policy mutation remains blocked until the suffix is decided.
+- A routing-store replacement exposes the complete old or new snapshot and fails closed on a malformed complete file. For the current pending prefix, recovery sees either all new decisions or none, never a partially applied high-volume batch. A crash after decision fsync but before a later handler or wire acknowledgment reuses the byte-identical decisions. Previously decided records may precede the current undecided prefix, and policy mutation remains blocked until one coordinated update decides that whole prefix.
 - A crash after `claiming` but before Run replacement creates the deterministic Run once. A crash during Run replacement exposes the complete old or new projection. A crash after Run durability but before `claimed` links that exact Run, and the manager cannot launch it early.
 - A crash after `claimed` but before notification is recovered by polling. Existing `starting` and `running` reconciliation remains responsible for launcher-boundary recovery.
 - A crash after terminal Run durability but before invocation reflection reflects the same completion evidence and keeps the next same-issue invocation blocked. A crash after reflection but before the Run receipt adds the receipt exactly once. A crash before collector acknowledgment or next promotion retries without admitting a second successor.
@@ -214,7 +216,7 @@ ENG-40 is complete when:
 12. Prior-binary activation is documented as unavailable after any future-source token is observed. Before then, rollback fails closed while pending events, active invocations, or registry-era Runs could be lost or mis-executed.
 13. Unauthenticated, cross-origin, malformed, oversized, invalid, stale, and unroutable mutations fail without changing the last good stores.
 
-Verification will include focused matcher, causation, registry, bounded routing-store retention, scheduler, event-wire, run-store, manager, launcher, settings, server, auth, and proportional rollback tests; self-cycle, A-to-B-to-A, sibling re-match, configurable hop, telemetry/agent/lifecycle matching, restart-stable rate/queue limits, multi-match, and same-issue serialization integration tests; fault injection before and after event append, decision replace, claim intent, Run replacement, claim confirmation, terminal Run write, invocation reflection, Run receipt, and collector acknowledgment; the complete Go test/race/vet suites; frozen Bun install/typecheck/build; authenticated desktop/mobile browser flows; and exact-commit post-merge deployment probes.
+Verification will include focused matcher, causation, registry, bounded routing-store retention, scheduler, event-wire, run-store, manager, launcher, settings, server, auth, and proportional rollback tests; an N-record `PublishBatch` assertion that `ApplyDecisionBatch` performs exactly one routing-store replacement before per-record handlers; self-cycle, A-to-B-to-A, sibling re-match, configurable hop, telemetry/agent/lifecycle matching, restart-stable rate/queue limits, multi-match, and same-issue serialization integration tests; fault injection before and after event batch append, atomic pending-prefix decision replacement, claim intent, Run replacement, claim confirmation, terminal Run write, invocation reflection, Run receipt, and collector acknowledgment; the complete Go test/race/vet suites; frozen Bun install/typecheck/build; authenticated desktop/mobile browser flows; and exact-commit post-merge deployment probes.
 
 After human merge, deploy only the clean updated primary checkout with:
 
@@ -228,6 +230,7 @@ Verify local and public health identity, launchd state, Factory tmux-session sur
 
 - **Closed label/comment/cron kinds:** rejected by the clarified product contract because future event vocabulary would require schema redesign.
 - **One dynamic wire route per rule:** rejected because CRUD order and partial multi-route retries would not provide one atomic admission decision.
+- **One complete routing-store replacement per wire record:** rejected because high-volume collector batches would cause N serialized rewrites and fsyncs. Admission persists one atomic update for the coordinated pending prefix before per-record dispatch.
 - **Store only trigger and workflow IDs on Run:** rejected because both definitions are mutable between admission and launch.
 - **Create one Run directly per match:** rejected because same-issue Runs would collide with the issue-owned tmux, PR, merge, deployment, and cleanup lifecycle.
 - **Keep current active-Run coalescing for generic rules:** rejected because it silently discards distinct workflow intent.
