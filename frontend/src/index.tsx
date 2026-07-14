@@ -310,6 +310,7 @@ type TriggerResponse = {
 };
 
 type TriggerSaveResult = { snapshot: TriggerResponse; conflict: boolean };
+type SubjectFilterMode = "wildcard" | "absent" | "exact";
 
 const refreshIntervalMs = 2000;
 type ActivitySection = "home" | "wire" | "agents" | "triggers" | "settings";
@@ -1095,8 +1096,11 @@ function TriggersEditor(props: { initial: TriggerResponse }): JSX.Element {
       return;
     }
     update((next) => {
-      if (kind === "rule") next.rules = next.rules.filter((rule) => rule.id !== id);
-      else next.schedules = next.schedules.filter((schedule) => schedule.id !== id);
+      if (kind === "rule") {
+        next.rules = next.rules.filter((rule) => rule.id !== id);
+      } else {
+        next.schedules = next.schedules.filter((schedule) => schedule.id !== id);
+      }
     });
     setPendingDelete("");
   }
@@ -1254,7 +1258,7 @@ function TriggersEditor(props: { initial: TriggerResponse }): JSX.Element {
             <span>{message() || "No unsaved changes"}</span>
           </div>
           <button class="primary-button" type="submit" disabled={["idle", "saving", "saved"].includes(saveState())}>
-            {broadConfirmed() ? "Confirm broad scope" : saveState() === "saving" ? "Saving" : "Save registry"}
+            {triggerSaveButtonLabel(saveState(), broadConfirmed())}
           </button>
         </div>
       </form>
@@ -1277,9 +1281,7 @@ function RuleEditor(props: {
   onClone: () => void;
   onRemove: () => void;
 }): JSX.Element {
-  const subjectMode = (): "wildcard" | "absent" | "exact" =>
-    props.rule.filter.subject === undefined ? "wildcard" : props.rule.filter.subject === "" ? "absent" : "exact";
-  const [subjectSelection, setSubjectSelection] = createSignal(subjectMode());
+  const [subjectSelection, setSubjectSelection] = createSignal(subjectFilterMode(props.rule.filter.subject));
   return (
     <article class="trigger-editor" aria-labelledby={`rule-${props.rule.id}`}>
       <header class="trigger-editor-header">
@@ -1316,9 +1318,9 @@ function RuleEditor(props: {
           <Field label="Action"><input maxlength={256} value={props.rule.filter.action ?? ""} onInput={(event) => props.onChange((rule) => { rule.filter.action = optional(event.currentTarget.value); })} /></Field>
           <Field label="Subject mode">
             <select value={subjectSelection()} onChange={(event) => {
-              const mode = event.currentTarget.value as "wildcard" | "absent" | "exact";
+              const mode = event.currentTarget.value as SubjectFilterMode;
               setSubjectSelection(mode);
-              props.onChange((rule) => { rule.filter.subject = mode === "wildcard" ? undefined : mode === "absent" ? "" : "ENG-40"; });
+              props.onChange((rule) => { rule.filter.subject = subjectFilterValue(mode); });
             }}>
               <option value="wildcard">Any subject</option><option value="absent">Subject absent</option><option value="exact">Exact subject</option>
             </select>
@@ -1441,6 +1443,36 @@ function withoutAttribute<T>(values: Record<string, T>, removed: string): Record
 
 function optional(value: string): string | undefined {
   return value === "" ? undefined : value;
+}
+
+function subjectFilterMode(subject: string | undefined): SubjectFilterMode {
+  if (subject === undefined) {
+    return "wildcard";
+  }
+  if (subject === "") {
+    return "absent";
+  }
+  return "exact";
+}
+
+function subjectFilterValue(mode: SubjectFilterMode): string | undefined {
+  if (mode === "wildcard") {
+    return undefined;
+  }
+  if (mode === "absent") {
+    return "";
+  }
+  return "ENG-40";
+}
+
+function triggerSaveButtonLabel(state: SettingsSaveState, broadConfirmed: boolean): string {
+  if (broadConfirmed) {
+    return "Confirm broad scope";
+  }
+  if (state === "saving") {
+    return "Saving";
+  }
+  return "Save registry";
 }
 
 function broadTriggerRule(rule: TriggerRule): boolean {
