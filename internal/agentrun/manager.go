@@ -12,10 +12,14 @@ import (
 type Launcher interface {
 	Prepare(context.Context) error
 	CleanupWorktrees(context.Context) error
-	Start(context.Context, Run, string, string) error
+	Start(context.Context, Run, string, string, StartOptions) error
 	SessionExists(context.Context, string) (bool, error)
 	ReadResult(string) (ProcessResult, error)
 	ReadReadyCheckpoint(string) (ReadyCheckpoint, error)
+}
+
+type StartOptions struct {
+	CleanupWorktrees bool
 }
 
 type RunCollector interface {
@@ -188,7 +192,7 @@ func (m *Manager) reconcile(ctx context.Context) {
 			}
 			prepared = true
 		}
-		if m.start(ctx, run) {
+		if m.start(ctx, run, StartOptions{CleanupWorktrees: running == 0}) {
 			running++
 		}
 	}
@@ -453,14 +457,14 @@ func reconcileDelay(base time.Duration, failures int) time.Duration {
 	return base * time.Duration(1<<failures)
 }
 
-func (m *Manager) start(ctx context.Context, run Run) bool {
+func (m *Manager) start(ctx context.Context, run Run, options StartOptions) bool {
 	sessionName := sessionName(run.IssueIdentifier)
 	runDirectory := runPath(m.stateRoot, run.ID)
 	if err := m.store.MarkStarting(run.ID, sessionName, runDirectory, m.now()); err != nil {
 		m.logger.Error("mark agent starting", "run_id", run.ID, "error", err)
 		return false
 	}
-	if err := m.launcher.Start(ctx, run, sessionName, runDirectory); err != nil {
+	if err := m.launcher.Start(ctx, run, sessionName, runDirectory, options); err != nil {
 		detail := fmt.Sprintf("start tmux session: %v", err)
 		if run.State == StatePostMergePending {
 			now := m.now()

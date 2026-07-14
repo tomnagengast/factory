@@ -485,14 +485,16 @@ func (l *TmuxLauncher) worktreeIntegrated(ctx context.Context, worktree linkedWo
 	return false, fmt.Errorf("inspect worktree integration %s: %w", worktree.branch, err)
 }
 
-func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirectory string) error {
+func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirectory string, options StartOptions) error {
 	launcher := l.forRun(run)
 	if launcher != l {
 		if err := launcher.Prepare(ctx); err != nil {
 			return err
 		}
-		if err := launcher.CleanupWorktrees(ctx); err != nil {
-			return err
+		if options.CleanupWorktrees {
+			if err := launcher.CleanupWorktrees(ctx); err != nil {
+				return err
+			}
 		}
 	}
 	if err := os.MkdirAll(runDirectory, 0o700); err != nil {
