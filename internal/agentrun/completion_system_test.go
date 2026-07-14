@@ -149,7 +149,7 @@ func TestSystemCompletionEvidenceVerifiesDeploymentAfterMainAdvances(t *testing.
 	}
 }
 
-func TestCompletedChildResultsRequiresEveryChildSuccess(t *testing.T) {
+func TestCompletedChildResultsRequiresEveryChildToFinish(t *testing.T) {
 	t.Parallel()
 
 	runDirectory := t.TempDir()
@@ -163,11 +163,23 @@ func TestCompletedChildResultsRequiresEveryChildSuccess(t *testing.T) {
 	if complete, err := completedChildResults(runDirectory); err != nil || complete {
 		t.Fatalf("missing result: complete=%t err=%v", complete, err)
 	}
+	if err := os.WriteFile(filepath.Join(child, resultFileName), []byte("{\n"), 0o600); err != nil {
+		t.Fatalf("write malformed result: %v", err)
+	}
+	if complete, err := completedChildResults(runDirectory); err == nil || complete {
+		t.Fatalf("malformed result: complete=%t err=%v", complete, err)
+	}
+	writeTestJSON(t, filepath.Join(child, resultFileName), ProcessResult{
+		Status: string(StateSucceeded),
+	})
+	if complete, err := completedChildResults(runDirectory); err != nil || complete {
+		t.Fatalf("unfinished result: complete=%t err=%v", complete, err)
+	}
 	writeTestJSON(t, filepath.Join(child, resultFileName), ProcessResult{
 		Status: string(StateFailed), ExitCode: 1, FinishedAt: time.Now().UTC(),
 	})
-	if complete, err := completedChildResults(runDirectory); err != nil || complete {
-		t.Fatalf("failed result: complete=%t err=%v", complete, err)
+	if complete, err := completedChildResults(runDirectory); err != nil || !complete {
+		t.Fatalf("finished failed result: complete=%t err=%v", complete, err)
 	}
 	writeTestJSON(t, filepath.Join(child, resultFileName), ProcessResult{
 		Status: string(StateSucceeded), FinishedAt: time.Now().UTC(),

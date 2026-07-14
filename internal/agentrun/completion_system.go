@@ -164,7 +164,7 @@ func completedChildResults(runDirectory string) (bool, error) {
 		if err := json.Unmarshal(data, &result); err != nil {
 			return false, fmt.Errorf("decode child result %s: %w", entry.Name(), err)
 		}
-		if result.Status != string(StateSucceeded) || result.ExitCode != 0 || result.FinishedAt.IsZero() {
+		if result.FinishedAt.IsZero() {
 			return false, nil
 		}
 	}
