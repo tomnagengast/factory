@@ -36,7 +36,7 @@ func TestPageRedirectsToGoogleLoginAndAPIReturnsUnauthorized(t *testing.T) {
 	auth.API(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("protected API should not run")
 	})).ServeHTTP(api, httptest.NewRequest(http.MethodGet, "/api/agents/run-123", nil))
-	if api.Code != http.StatusUnauthorized || api.Header().Get("WWW-Authenticate") != basicRealm {
+	if api.Code != http.StatusUnauthorized || api.Header().Get("WWW-Authenticate") != "" {
 		t.Fatalf("API response = %d, challenge %q", api.Code, api.Header().Get("WWW-Authenticate"))
 	}
 }
@@ -119,17 +119,20 @@ func TestGoogleCallbackRejectsUnlistedEmail(t *testing.T) {
 	}
 }
 
-func TestBreakGlassBasicAuthenticationStillWorks(t *testing.T) {
+func TestBasicAuthorizationDoesNotAuthenticate(t *testing.T) {
 	t.Parallel()
 	auth := testAuthenticator(t, nil)
 	request := httptest.NewRequest(http.MethodGet, "/agents/run-123", nil)
-	request.SetBasicAuth("factory", "viewer-password")
+	request.Header.Set("Authorization", "Basic ZmFjdG9yeTp2aWV3ZXItcGFzc3dvcmQ=")
 	recorder := httptest.NewRecorder()
-	auth.Page(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
+	auth.Page(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("protected page should not run")
 	})).ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusFound)
+	}
+	if got := recorder.Header().Get("Location"); got != "/auth/google/login?next=%2Fagents%2Frun-123" {
+		t.Fatalf("redirect = %q", got)
 	}
 }
 
@@ -246,8 +249,6 @@ func testAuthenticator(t *testing.T, client *http.Client) *Authenticator {
 		RedirectURL:   "https://factory.example/auth/google/callback",
 		AllowedEmails: []string{"tom@example.com"},
 		SessionKey:    bytes.Repeat([]byte("s"), 32),
-		BasicUsername: "factory",
-		BasicPassword: "viewer-password",
 		HTTPClient:    client,
 		Now:           func() time.Time { return authTestNow },
 		Random:        strings.NewReader(strings.Repeat("r", 64)),

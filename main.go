@@ -45,7 +45,6 @@ const (
 	linearGraphQLURL         = "https://api.linear.app/graphql"
 	providerProjectName      = "Network"
 	googleRedirectURL        = "https://factory.nags.cloud/auth/google/callback"
-	viewerUsername           = "factory"
 )
 
 func main() {
@@ -92,10 +91,6 @@ func serve(ctx context.Context) error {
 	if triggerActorID == "" {
 		return errors.New("LINEAR_TRIGGER_ACTOR_ID is required for agent runs")
 	}
-	viewerPassword := os.Getenv("FACTORY_VIEWER_PASSWORD")
-	if viewerPassword == "" {
-		return errors.New("FACTORY_VIEWER_PASSWORD is required for agent inspection")
-	}
 	googleClientID := os.Getenv("FACTORY_GOOGLE_CLIENT_ID")
 	googleClientSecret := os.Getenv("FACTORY_GOOGLE_CLIENT_SECRET")
 	allowedEmails := splitList(os.Getenv("FACTORY_GOOGLE_ALLOWED_EMAILS"))
@@ -106,8 +101,6 @@ func serve(ctx context.Context) error {
 		RedirectURL:   googleRedirectURL,
 		AllowedEmails: allowedEmails,
 		SessionKey:    []byte(sessionKey),
-		BasicUsername: viewerUsername,
-		BasicPassword: viewerPassword,
 		Now:           time.Now,
 	})
 	if err != nil {
@@ -363,7 +356,6 @@ func serve(ctx context.Context) error {
 		[]string{
 			linearAPIKey,
 			githubSecret,
-			viewerPassword,
 			googleClientSecret,
 			sessionKey,
 			os.Getenv("GITHUB_TOKEN"),

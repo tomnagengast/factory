@@ -174,12 +174,7 @@ The home and active agent views poll their APIs every two seconds. Each started 
 
 Browser navigation uses Google OAuth over HTTPS. Factory accepts only verified Google identities in `FACTORY_GOOGLE_ALLOWED_EMAILS`, keeps the OAuth tokens server-side for the duration of the callback, and issues a signed, secure, host-only session cookie for 24 hours. Visit `/auth/logout` to clear the Factory session.
 
-HTTP Basic authentication remains available as break-glass access for the protected page and API:
-
-- Username: `factory`
-- Password: `~/.config/network-app/factory-viewer-password.txt`
-
-`~/.local/bin/nags refresh-env` reads the Factory-specific OAuth client from `op://Code/GCP the-nags/factory oauth credentials`, preserves or creates the session signing key and 48-character break-glass password, and writes them to the private service environment. It maintains the password in a separate `0600` file for operator use. Agent pane output is redacted against credentials available to the agent before it is returned by the API.
+Google OAuth sessions are the only authentication mechanism for protected pages and APIs. `~/.local/bin/nags refresh-env` reads the Factory-specific OAuth client from `op://Code/GCP the-nags/factory oauth credentials`, preserves or creates the session signing key, and writes them to the private service environment. Agent pane output is redacted against credentials available to the agent before it is returned by the API.
 
 ## Configuration
 
@@ -192,7 +187,6 @@ The launchd wrapper sources `~/.config/network-app/env`. Factory requires:
 - `FACTORY_GOOGLE_CLIENT_ID` and `FACTORY_GOOGLE_CLIENT_SECRET` for Google sign-in.
 - `FACTORY_GOOGLE_ALLOWED_EMAILS`, a comma-separated allowlist of verified Google emails.
 - `FACTORY_SESSION_KEY` for signed browser sessions.
-- `FACTORY_VIEWER_PASSWORD` for break-glass agent inspection.
 
 `~/.local/bin/nags refresh-env` reads the API key from `op://Code/Linear API key/credential`, validates it against Linear, derives the trigger actor ID from the authenticated viewer, and writes both values to the private launchd environment. The provider installs its guarded `$do` workflow under `~/.agents/skills/do`, so every allowlisted repository uses the same Linear and human-merge gates without copying provider policy into tenant source.
 

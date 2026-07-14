@@ -26,7 +26,6 @@ const (
 	userinfoEndpoint      = "https://openidconnect.googleapis.com/v1/userinfo"
 	stateCookieName       = "__Host-factory_oauth_state"
 	sessionCookieName     = "__Host-factory_session"
-	basicRealm            = `Basic realm="Factory agents", charset="UTF-8"`
 	stateLifetime         = 10 * time.Minute
 	sessionLifetime       = 24 * time.Hour
 	maxResponseBytes      = 64 << 10
@@ -39,8 +38,6 @@ type Config struct {
 	RedirectURL   string
 	AllowedEmails []string
 	SessionKey    []byte
-	BasicUsername string
-	BasicPassword string
 	HTTPClient    *http.Client
 	Now           func() time.Time
 	Random        io.Reader
@@ -53,8 +50,6 @@ type Authenticator struct {
 	allowedEmails map[string]struct{}
 	loginHint     string
 	sessionKey    []byte
-	basicUsername []byte
-	basicPassword []byte
 	httpClient    *http.Client
 	now           func() time.Time
 	random        io.Reader
@@ -82,9 +77,6 @@ func New(config Config) (*Authenticator, error) {
 	}
 	if len(config.SessionKey) < sha256.Size {
 		return nil, errors.New("viewer auth: session key must be at least 32 bytes")
-	}
-	if config.BasicUsername == "" || config.BasicPassword == "" {
-		return nil, errors.New("viewer auth: break-glass credentials are required")
 	}
 	if config.Now == nil {
 		return nil, errors.New("viewer auth: clock is required")
@@ -122,8 +114,6 @@ func New(config Config) (*Authenticator, error) {
 		allowedEmails: allowed,
 		loginHint:     loginHint,
 		sessionKey:    append([]byte(nil), config.SessionKey...),
-		basicUsername: []byte(config.BasicUsername),
-		basicPassword: []byte(config.BasicPassword),
 		httpClient:    client,
 		now:           config.Now,
 		random:        random,
@@ -146,7 +136,6 @@ func (a *Authenticator) API(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !a.Authenticated(r) {
 			w.Header().Set("Cache-Control", "no-store")
-			w.Header().Set("WWW-Authenticate", basicRealm)
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
@@ -156,13 +145,7 @@ func (a *Authenticator) API(next http.Handler) http.Handler {
 }
 
 func (a *Authenticator) Authenticated(r *http.Request) bool {
-	if a.validSession(r) {
-		return true
-	}
-	username, password, ok := r.BasicAuth()
-	return ok &&
-		subtle.ConstantTimeCompare([]byte(username), a.basicUsername) == 1 &&
-		subtle.ConstantTimeCompare([]byte(password), a.basicPassword) == 1
+	return a.validSession(r)
 }
 
 func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request) {
