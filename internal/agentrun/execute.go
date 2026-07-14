@@ -121,6 +121,38 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 	return 1
 }
 
+func ReadWorkflowSnapshot(runDirectory, path string) (settings.Workflow, error) {
+	expected := filepath.Join(filepath.Clean(runDirectory), WorkflowSnapshotFileName)
+	if filepath.Clean(path) != expected || !filepath.IsAbs(path) {
+		return settings.Workflow{}, errors.New("pinned workflow path is invalid")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return settings.Workflow{}, fmt.Errorf("read pinned workflow: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		return settings.Workflow{}, errors.New("pinned workflow permissions are invalid")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return settings.Workflow{}, fmt.Errorf("read pinned workflow: %w", err)
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(io.LimitReader(file, 1<<20))
+	decoder.DisallowUnknownFields()
+	var workflow settings.Workflow
+	if err := decoder.Decode(&workflow); err != nil {
+		return settings.Workflow{}, fmt.Errorf("decode pinned workflow: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return settings.Workflow{}, errors.New("decode pinned workflow: trailing content")
+	}
+	if err := workflow.Validate(); err != nil || !workflow.Enabled {
+		return settings.Workflow{}, errors.New("pinned workflow is invalid")
+	}
+	return workflow, nil
+}
+
 func ExecuteChild(ctx context.Context, config ChildConfig) int {
 	if err := os.MkdirAll(config.OutputDirectory, 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "create child output directory: %v\n", err)

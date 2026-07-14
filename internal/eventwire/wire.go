@@ -114,6 +114,15 @@ func (w *Wire) Query(query Query) (Page, error) { return w.journal.Query(query) 
 
 func (w *Wire) Record(sequence uint64) (Record, bool) { return w.journal.Record(sequence) }
 
+func (w *Wire) RetainedEventIDs() map[string]bool {
+	_, _, _, records := w.journal.Snapshot()
+	ids := make(map[string]bool, len(records))
+	for _, record := range records {
+		ids[record.Event.ID] = true
+	}
+	return ids
+}
+
 func (w *Wire) catchUpLocked(ctx context.Context) error {
 	pending := w.journal.Pending()
 	if len(pending) == 0 {

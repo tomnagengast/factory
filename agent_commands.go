@@ -46,6 +46,7 @@ func runPrincipal(ctx context.Context, args []string) int {
 	repo := flags.String("repo", "", "repository path")
 	runDirectory := flags.String("run-dir", "", "run output directory")
 	attemptOffset := flags.Int("attempt-offset", 0, "completed attempts before this lifecycle segment")
+	workflowFile := flags.String("workflow-file", "", "pinned workflow snapshot")
 	if flags.Parse(args) != nil || *issue == "" || *repo == "" || *runDirectory == "" || *attemptOffset < 0 {
 		return 2
 	}
@@ -54,7 +55,12 @@ func runPrincipal(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	workflow, err := configuration.WorkflowForTrigger(*triggerKind)
+	var workflow settings.Workflow
+	if *workflowFile != "" {
+		workflow, err = agentrun.ReadWorkflowSnapshot(*runDirectory, *workflowFile)
+	} else {
+		workflow, err = configuration.WorkflowForTrigger(*triggerKind)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

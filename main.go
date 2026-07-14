@@ -23,6 +23,9 @@ import (
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/server"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/triggerregistry"
+	"github.com/tomnagengast/factory/internal/triggerrouter"
+	"github.com/tomnagengast/factory/internal/triggerscheduler"
 	"github.com/tomnagengast/factory/internal/viewerauth"
 )
 
@@ -145,7 +148,31 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	events, err := eventwire.New(eventJournal)
+	rawEvents, err := eventwire.New(eventJournal)
+	if err != nil {
+		return err
+	}
+	registryStore, err := triggerregistry.Open(
+		filepath.Join(dataRoot, "triggers.json"),
+		triggerregistry.Defaults(settingsStore.Snapshot(), triggerActorID),
+		settingsStore.Snapshot(),
+	)
+	if err != nil {
+		return err
+	}
+	routingStore, err := triggerrouter.Open(filepath.Join(dataRoot, "trigger-routing.jsonl"))
+	if err != nil {
+		return err
+	}
+	events, err := triggerrouter.NewCoordinatedWire(rawEvents, registryStore, settingsStore, routingStore, time.Now)
+	if err != nil {
+		return err
+	}
+	cursorStore, err := triggerscheduler.Open(filepath.Join(dataRoot, "trigger-cursors.json"))
+	if err != nil {
+		return err
+	}
+	scheduler, err := triggerscheduler.New(registryStore, cursorStore, events, slog.Default(), time.Now)
 	if err != nil {
 		return err
 	}
@@ -317,6 +344,13 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	triggerManager, err := triggerrouter.NewManager(routingStore, runStore, repositoryResolver, manager, slog.Default(), time.Now)
+	if err != nil {
+		return err
+	}
+	if err := manager.SetInvocationStartGate(routingStore); err != nil {
+		return err
+	}
 	providerCoordinator, err := projectsetup.NewLinearProviderCoordinator(
 		linearGraphQLURL,
 		linearAPIKey,
@@ -391,6 +425,9 @@ func serve(ctx context.Context) error {
 			ContractVersion: buildContractVersion,
 			StartedAt:       serviceStartedAt,
 		},
+		GenericTriggers: true,
+		TriggerPolicy:   events,
+		ScheduleStatus:  scheduler,
 	})
 	if err != nil {
 		return err
@@ -411,11 +448,16 @@ func serve(ctx context.Context) error {
 	}()
 	go recoverEventWire(ctx, events, 5*time.Second, func() error {
 		projectManager.Reconcile(ctx)
+		if err := triggerManager.Reconcile(ctx); err != nil {
+			return err
+		}
 		if err := publishServiceEvent(ctx, events, "started", serviceStartedAt, serviceStartedAt); err != nil {
 			return err
 		}
 		go projectManager.Run(ctx)
 		go manager.Run(ctx)
+		go triggerManager.Run(ctx, 2*time.Second)
+		go scheduler.Run(ctx, 30*time.Second)
 		go publishServiceHeartbeats(ctx, events, serviceStartedAt, serviceHeartbeatInterval, time.Now)
 		return nil
 	}, slog.Default())
@@ -436,9 +478,13 @@ func serve(ctx context.Context) error {
 	}
 }
 
+type recoverableEventWire interface {
+	CatchUp(context.Context) error
+}
+
 func recoverEventWire(
 	ctx context.Context,
-	events *eventwire.Wire,
+	events recoverableEventWire,
 	retryInterval time.Duration,
 	onReady func() error,
 	logger *slog.Logger,

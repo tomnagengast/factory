@@ -134,3 +134,43 @@ func TestAppendFailureRollsBackWithoutProjectionMutation(t *testing.T) {
 		t.Fatalf("append rollback failed: before=%q after=%q snapshot=%#v", before, after, store.Snapshot())
 	}
 }
+
+func TestPruneRequiresWireEvictionAndTerminalInvocation(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "routing.jsonl")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, registry := testPolicy()
+	registry.Rules = registry.Rules[:1]
+	now := time.Date(2026, 7, 14, 15, 0, 0, 0, time.UTC)
+	records := []eventwire.Record{
+		testRecord("factory:one", 1, eventwire.SourceFactory, now),
+		testRecord("factory:two", 2, eventwire.SourceFactory, now),
+	}
+	decisions, err := store.ApplyDecisionBatch(records, registry, configuration, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID := decisions[0].Outcomes[0].InvocationID
+	if err := store.Prune(map[string]bool{"factory:two": true}); err != nil {
+		t.Fatalf("prune nonterminal: %v", err)
+	}
+	if got := store.Snapshot(); len(got.Decisions) != 2 || len(got.Invocations) != 2 {
+		t.Fatalf("nonterminal projection pruned: %#v", got)
+	}
+	if _, err := store.TransitionInvocation(firstID, StateRejected, "", "operator-rejected", nil, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Prune(map[string]bool{"factory:two": true}); err != nil {
+		t.Fatalf("prune terminal: %v", err)
+	}
+	got := store.Snapshot()
+	if len(got.Decisions) != 1 || got.Decisions[0].EventID != "factory:two" || len(got.Invocations) != 1 {
+		t.Fatalf("pruned projection = %#v", got)
+	}
+	if reopened, err := Open(path); err != nil || len(reopened.Snapshot().Decisions) != 1 {
+		t.Fatalf("reopen: store=%#v err=%v", reopened, err)
+	}
+}

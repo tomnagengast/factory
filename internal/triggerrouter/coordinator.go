@@ -3,6 +3,7 @@ package triggerrouter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -19,6 +20,17 @@ type RegistryStore interface {
 type SettingsStore interface {
 	Snapshot() settings.Snapshot
 }
+
+type registryMutationStore interface {
+	Update(uint64, triggerregistry.Snapshot, settings.Snapshot, time.Time) (triggerregistry.Snapshot, error)
+}
+
+type settingsMutationStore interface {
+	Update(uint64, settings.Snapshot, time.Time) (settings.Snapshot, error)
+}
+
+var ErrPolicyConflict = errors.New("trigger router: coordinated policy conflict")
+var ErrPolicyValidation = errors.New("trigger router: coordinated policy validation")
 
 type CoordinatedWire struct {
 	policy   sync.Mutex
@@ -47,19 +59,30 @@ func (w *CoordinatedWire) Handle(filter eventwire.Filter, handler eventwire.Hand
 func (w *CoordinatedWire) Publish(ctx context.Context, event eventwire.Event) (eventwire.Record, bool, error) {
 	w.policy.Lock()
 	defer w.policy.Unlock()
-	return w.events.Publish(ctx, event)
+	record, added, err := w.events.Publish(ctx, event)
+	if err == nil {
+		err = w.routing.Prune(w.events.RetainedEventIDs())
+	}
+	return record, added, err
 }
 
 func (w *CoordinatedWire) PublishBatch(ctx context.Context, events []eventwire.Event) ([]eventwire.Record, error) {
 	w.policy.Lock()
 	defer w.policy.Unlock()
-	return w.events.PublishBatch(ctx, events)
+	records, err := w.events.PublishBatch(ctx, events)
+	if err == nil {
+		err = w.routing.Prune(w.events.RetainedEventIDs())
+	}
+	return records, err
 }
 
 func (w *CoordinatedWire) CatchUp(ctx context.Context) error {
 	w.policy.Lock()
 	defer w.policy.Unlock()
-	return w.events.CatchUp(ctx)
+	if err := w.events.CatchUp(ctx); err != nil {
+		return err
+	}
+	return w.routing.Prune(w.events.RetainedEventIDs())
 }
 
 func (w *CoordinatedWire) Status() eventwire.Status { return w.events.Status() }
@@ -70,6 +93,39 @@ func (w *CoordinatedWire) Query(query eventwire.Query) (eventwire.Page, error) {
 
 func (w *CoordinatedWire) Record(sequence uint64) (eventwire.Record, bool) {
 	return w.events.Record(sequence)
+}
+
+func (w *CoordinatedWire) RegistrySnapshot() triggerregistry.Snapshot { return w.registry.Snapshot() }
+
+func (w *CoordinatedWire) SettingsSnapshot() settings.Snapshot { return w.settings.Snapshot() }
+
+func (w *CoordinatedWire) RoutingSnapshot() Snapshot { return w.routing.Snapshot() }
+
+func (w *CoordinatedWire) UpdateRegistry(expectedRegistry, expectedSettings uint64, candidate triggerregistry.Snapshot, now time.Time) (triggerregistry.Snapshot, error) {
+	w.policy.Lock()
+	defer w.policy.Unlock()
+	configuration := w.settings.Snapshot()
+	if configuration.Revision != expectedSettings {
+		return w.registry.Snapshot(), ErrPolicyConflict
+	}
+	store, ok := w.registry.(registryMutationStore)
+	if !ok {
+		return w.registry.Snapshot(), errors.New("trigger router: registry is read-only")
+	}
+	return store.Update(expectedRegistry, candidate, configuration, now)
+}
+
+func (w *CoordinatedWire) UpdateSettings(expected uint64, candidate settings.Snapshot, now time.Time) (settings.Snapshot, error) {
+	w.policy.Lock()
+	defer w.policy.Unlock()
+	if err := w.registry.Snapshot().Validate(candidate); err != nil {
+		return w.settings.Snapshot(), fmt.Errorf("%w: %v", ErrPolicyValidation, err)
+	}
+	store, ok := w.settings.(settingsMutationStore)
+	if !ok {
+		return w.settings.Snapshot(), errors.New("trigger router: settings are read-only")
+	}
+	return store.Update(expected, candidate, now)
 }
 
 func (w *CoordinatedWire) admit(_ context.Context, records []eventwire.Record) error {
