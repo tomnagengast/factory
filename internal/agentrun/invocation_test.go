@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/settings"
 )
 
@@ -59,6 +60,9 @@ func TestPinnedWorkflowStrictReadAndRunCausation(t *testing.T) {
 	event := agentRecordEvent(run, "attempt-1-events.jsonl", 0, 10, []byte(`{"type":"assistant"}`))
 	if event.RootEventID != "linear:root" || event.ParentInvocationID != run.InvocationID || event.ParentRunID != run.ID || event.Hop != 2 {
 		t.Fatalf("causation = %#v", event)
+	}
+	if !event.Has(eventwire.AttributeProducer, "agent-collector") || !event.Has(eventwire.AttributeProvenance, "factory") {
+		t.Fatalf("normalized metadata = %#v", event.Attributes)
 	}
 	if err := event.Validate(); err != nil {
 		t.Fatalf("validate caused event: %v", err)

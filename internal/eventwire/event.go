@@ -18,6 +18,12 @@ const (
 )
 
 const (
+	AttributeActorID    = "actorId"
+	AttributeProvenance = "provenance"
+	AttributeProducer   = "producer"
+)
+
+const (
 	maxIDLength        = 256
 	maxFieldLength     = 256
 	maxAttributeCount  = 32

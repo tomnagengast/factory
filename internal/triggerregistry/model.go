@@ -27,8 +27,9 @@ const (
 	MaximumMaxOutstanding = 100
 	DefaultAdmissionsHour = 120
 	MaximumAdmissionsHour = 10_000
-	AttributeActorID      = "actorId"
-	AttributeProvenance   = "provenance"
+	AttributeActorID      = eventwire.AttributeActorID
+	AttributeProvenance   = eventwire.AttributeProvenance
+	AttributeProducer     = eventwire.AttributeProducer
 	AttributeAddedLabel   = "addedLabelName"
 	AttributeIssue        = "issueIdentifier"
 	AttributeScheduleID   = "scheduleId"
@@ -51,6 +52,8 @@ var reservedScheduleAttributes = map[string]bool{
 	AttributeScheduleID:  true,
 	AttributeScheduleRev: true,
 	AttributeScheduledAt: true,
+	AttributeProducer:    true,
+	AttributeProvenance:  true,
 }
 
 type Snapshot struct {

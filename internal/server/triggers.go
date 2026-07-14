@@ -114,13 +114,28 @@ func (s *appServer) triggerResponse() triggerResponse {
 	routing := s.triggerPolicy.RoutingSnapshot()
 	response := triggerResponse{
 		Registry: registry, SettingsRevision: configuration.Revision,
-		Workflows: slices.Clone(configuration.Workflows),
-		Schedules: s.scheduleStatus.Statuses(s.now()),
+		Workflows:       slices.Clone(configuration.Workflows),
+		ObservedSources: []string{},
+		RuleStatus:      []ruleStatus{},
+		Schedules:       slices.Clone(s.scheduleStatus.Statuses(s.now())),
+		Recent:          []invocationSummary{},
 		ProtectedRoutes: []protectedRoute{
 			{ID: "linear-feedback", Name: "Linear feedback continuation", Description: "Resumes the protected lifecycle after human feedback."},
 			{ID: "github-remediation", Name: "GitHub remediation", Description: "Resumes the protected lifecycle for pull request and check changes."},
 			{ID: "post-merge", Name: "Post-merge completion", Description: "Preserves verified-head deployment and cleanup after human merge."},
 		},
+	}
+	if response.Workflows == nil {
+		response.Workflows = []settings.Workflow{}
+	}
+	if response.Schedules == nil {
+		response.Schedules = []triggerscheduler.Status{}
+	}
+	if response.Registry.Rules == nil {
+		response.Registry.Rules = []triggerregistry.Rule{}
+	}
+	if response.Registry.Schedules == nil {
+		response.Registry.Schedules = []triggerregistry.Schedule{}
 	}
 	sources := make(map[string]bool)
 	for _, decision := range routing.Decisions {
@@ -150,18 +165,33 @@ func (s *appServer) triggerResponse() triggerResponse {
 			}
 		}
 	}
-	for index := len(routing.Invocations) - 1; index >= 0 && len(response.Recent) < 50; index-- {
-		invocation := routing.Invocations[index]
-		reason := ""
-		if invocation.State == triggerrouter.StateRejected {
-			reason = invocation.Reason
+	invocations := make(map[string]triggerrouter.Invocation, len(routing.Invocations))
+	for _, invocation := range routing.Invocations {
+		invocations[invocation.ID] = invocation
+	}
+	for decisionIndex := len(routing.Decisions) - 1; decisionIndex >= 0 && len(response.Recent) < 50; decisionIndex-- {
+		decision := routing.Decisions[decisionIndex]
+		for outcomeIndex := len(decision.Outcomes) - 1; outcomeIndex >= 0 && len(response.Recent) < 50; outcomeIndex-- {
+			outcome := decision.Outcomes[outcomeIndex]
+			if outcome.Kind == triggerrouter.OutcomeInvocation {
+				invocation, found := invocations[outcome.InvocationID]
+				if !found {
+					continue
+				}
+				response.Recent = append(response.Recent, invocationSummary{
+					ID: invocation.ID, EventID: invocation.EventID, RuleID: invocation.Rule.ID,
+					RuleRevision: invocation.Rule.Revision, WorkflowID: invocation.Workflow.ID,
+					IssueIdentifier: invocation.IssueIdentifier, State: invocation.State,
+					RunID: invocation.RunID, Reason: invocation.Reason, UpdatedAt: invocation.UpdatedAt,
+				})
+				continue
+			}
+			response.Recent = append(response.Recent, invocationSummary{
+				ID: decision.EventID + ":" + outcome.RuleID, EventID: decision.EventID,
+				RuleID: outcome.RuleID, RuleRevision: outcome.RuleRevision,
+				State: outcome.Kind, Reason: outcome.Reason, UpdatedAt: decision.DecidedAt,
+			})
 		}
-		response.Recent = append(response.Recent, invocationSummary{
-			ID: invocation.ID, EventID: invocation.EventID, RuleID: invocation.Rule.ID,
-			RuleRevision: invocation.Rule.Revision, WorkflowID: invocation.Workflow.ID,
-			IssueIdentifier: invocation.IssueIdentifier, State: invocation.State,
-			RunID: invocation.RunID, Reason: reason, UpdatedAt: invocation.UpdatedAt,
-		})
 	}
 	return response
 }

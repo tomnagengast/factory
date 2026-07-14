@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -56,6 +57,49 @@ func TestTriggerAPIUpdatesRegistryAndReturnsOperationalProjection(t *testing.T) 
 	stale := authenticatedTriggerRequest(t, handler, candidate)
 	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), `"revision":1`) {
 		t.Fatalf("stale status=%d body=%s", stale.Code, stale.Body.String())
+	}
+}
+
+func TestTriggerAPIUsesArraysForEmptyOperationalState(t *testing.T) {
+	t.Parallel()
+	handler, _, _ := testTriggerHandler(t)
+	response := authenticatedRequest(t, handler, "/api/triggers")
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, field := range []string{"workflows", "observedSources", "ruleStatus", "scheduleStatus", "recentInvocations"} {
+		if strings.Contains(response.Body.String(), `"`+field+`":null`) {
+			t.Fatalf("%s must be an array: %s", field, response.Body.String())
+		}
+	}
+}
+
+func TestTriggerAPIIncludesSuppressedRoutingOutcomes(t *testing.T) {
+	t.Parallel()
+	handler, policy, _ := testTriggerHandler(t)
+	candidate := policy.RegistrySnapshot()
+	candidate.Rules = []triggerregistry.Rule{{
+		ID: "bounded", Name: "Bounded", Enabled: true,
+		Filter:     triggerregistry.Filter{Source: eventwire.SourceFactory, Type: "test", Action: "created"},
+		WorkflowID: settings.DefaultWorkflowID,
+		Target:     triggerregistry.TargetPolicy{Kind: triggerregistry.TargetFixedIssue, Value: "ENG-40"},
+		MaxHop:     triggerregistry.DefaultMaxHop, MaxOutstanding: 1,
+		AdmissionsHour: triggerregistry.DefaultAdmissionsHour,
+	}}
+	if response := authenticatedTriggerRequest(t, handler, candidate); response.Code != http.StatusOK {
+		t.Fatalf("PUT status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, id := range []string{"event-1", "event-2"} {
+		if _, _, err := policy.Publish(context.Background(), eventwire.Event{
+			ID: id, Source: eventwire.SourceFactory, Type: "test", Action: "created", ReceivedAt: testNow,
+		}); err != nil {
+			t.Fatalf("publish %s: %v", id, err)
+		}
+	}
+	response := authenticatedRequest(t, handler, "/api/triggers")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"suppressed"`) ||
+		!strings.Contains(response.Body.String(), `"reason":"rule-outstanding-limit"`) {
+		t.Fatalf("GET status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

@@ -3,6 +3,8 @@ package githubhook
 import (
 	"testing"
 	"time"
+
+	"github.com/tomnagengast/factory/internal/eventwire"
 )
 
 func TestParseExtractsPullRequestAndCIMetadata(t *testing.T) {
@@ -77,6 +79,10 @@ func TestParseExtractsPullRequestAndCIMetadata(t *testing.T) {
 			}
 			if event.Repository != "tom/repo" || event.ReceivedAt != now {
 				t.Fatalf("event = %#v", event)
+			}
+			wireEvent := ToWire(event)
+			if !wireEvent.Has(eventwire.AttributeProducer, "github-webhook") || !wireEvent.Has(eventwire.AttributeProvenance, "github") {
+				t.Fatalf("normalized metadata = %#v", wireEvent.Attributes)
 			}
 		})
 	}

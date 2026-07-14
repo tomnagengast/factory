@@ -101,6 +101,9 @@ func TestSchedulerRetriesDeterministicEventWithoutAdvancingOnPublishFailure(t *t
 	if publisher.events[0].ID != want.ID {
 		t.Fatalf("event ID = %q, want %q", publisher.events[0].ID, want.ID)
 	}
+	if !publisher.events[0].Has(eventwire.AttributeProducer, "cron-scheduler") || !publisher.events[0].Has(eventwire.AttributeProvenance, "factory") {
+		t.Fatalf("normalized metadata = %#v", publisher.events[0].Attributes)
+	}
 }
 
 func TestScheduleRevisionBeginsStrictlyAfterEdit(t *testing.T) {

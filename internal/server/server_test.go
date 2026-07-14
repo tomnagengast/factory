@@ -427,6 +427,9 @@ func TestAuthenticatedWirePagesAllSourcesAndReadsLinearPayload(t *testing.T) {
 	if linearRecord.Event.Source != eventwire.SourceLinear {
 		t.Fatalf("linear record = %#v", linearRecord)
 	}
+	if !linearRecord.Event.Has(eventwire.AttributeProducer, "linear-webhook") || !linearRecord.Event.Has(eventwire.AttributeProvenance, "human") {
+		t.Fatalf("linear metadata = %#v", linearRecord.Event.Attributes)
+	}
 	detailRecorder := authenticatedRequest(t, handler, "/api/wire/"+strconv.FormatUint(linearRecord.Sequence, 10))
 	var detail wireDetailResponse
 	if err := json.NewDecoder(detailRecorder.Body).Decode(&detail); err != nil {

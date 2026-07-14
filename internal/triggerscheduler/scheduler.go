@@ -140,13 +140,15 @@ func (s *Scheduler) Statuses(now time.Time) []Status {
 }
 
 func scheduledEvent(schedule triggerregistry.Schedule, scheduledAt, receivedAt time.Time) eventwire.Event {
-	attributes := make(map[string][]string, len(schedule.Attributes)+3)
+	attributes := make(map[string][]string, len(schedule.Attributes)+5)
 	for key, values := range schedule.Attributes {
 		attributes[key] = slices.Clone(values)
 	}
 	attributes[triggerregistry.AttributeScheduleID] = []string{schedule.ID}
 	attributes[triggerregistry.AttributeScheduleRev] = []string{strconv.FormatUint(schedule.Revision, 10)}
 	attributes[triggerregistry.AttributeScheduledAt] = []string{scheduledAt.Format(time.RFC3339)}
+	attributes[eventwire.AttributeProducer] = []string{"cron-scheduler"}
+	attributes[eventwire.AttributeProvenance] = []string{"factory"}
 	digest := sha256.Sum256([]byte("factory-cron-v1\x00" + schedule.ID + "\x00" + strconv.FormatUint(schedule.Revision, 10) + "\x00" + scheduledAt.Format(time.RFC3339Nano)))
 	return eventwire.Event{
 		ID: "factory:cron:" + hex.EncodeToString(digest[:]), Source: eventwire.SourceFactory,
