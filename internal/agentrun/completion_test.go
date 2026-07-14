@@ -51,7 +51,7 @@ func TestCompletionValidatorRequiresCheckpointOrTypedPrePRBlocker(t *testing.T) 
 	}
 	withPullRequest := mustCompletionValidator(t, &fakePullRequestReader{matches: []PullRequestSnapshot{{Number: 8, State: "OPEN"}}}, completeEvidence(), now)
 	matched := withPullRequest.Validate(context.Background(), Run{IssueIdentifier: "ENG-123"}, ProcessResult{Status: string(StateBlocked), Blocker: BlockerAuthorityUnavailable})
-	if matched.Validation.Accepted || !strings.Contains(matched.Detail, "matching issue pull request") {
+	if !matched.Validation.Accepted || matched.State != StateBlocked || !strings.Contains(matched.Detail, "typed pre-checkpoint blocker") {
 		t.Fatalf("matched PR blocker = %#v", matched)
 	}
 }
