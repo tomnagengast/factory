@@ -110,6 +110,69 @@ func (s *Store) Invocation(id string) (Invocation, bool) {
 	return invocation.Clone(), found
 }
 
+func (s *Store) ClaimedInvocation(invocationID, runID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	invocation, found := s.invocations[invocationID]
+	return found && invocation.State == StateClaimed && invocation.RunID == runID
+}
+
+func (s *Store) Prune(retainedEventIDs map[string]bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.poisoned != nil {
+		return fmt.Errorf("trigger router: store is poisoned: %w", s.poisoned)
+	}
+	removeEvents := make(map[string]bool)
+	removeInvocations := make(map[string]bool)
+	for eventID, decision := range s.decisions {
+		if retainedEventIDs[eventID] {
+			continue
+		}
+		terminal := true
+		for _, outcome := range decision.Outcomes {
+			if outcome.Kind != OutcomeInvocation {
+				continue
+			}
+			invocation, found := s.invocations[outcome.InvocationID]
+			if !found || invocation.Nonterminal() {
+				terminal = false
+				break
+			}
+		}
+		if terminal {
+			removeEvents[eventID] = true
+			for _, outcome := range decision.Outcomes {
+				if outcome.Kind == OutcomeInvocation {
+					removeInvocations[outcome.InvocationID] = true
+				}
+			}
+		}
+	}
+	if len(removeEvents) == 0 {
+		return nil
+	}
+	oldDecisions, oldInvocations := s.decisions, s.invocations
+	nextDecisions := make(map[string]Decision, len(s.decisions)-len(removeEvents))
+	for id, decision := range s.decisions {
+		if !removeEvents[id] {
+			nextDecisions[id] = decision
+		}
+	}
+	nextInvocations := make(map[string]Invocation, len(s.invocations)-len(removeInvocations))
+	for id, invocation := range s.invocations {
+		if !removeInvocations[id] {
+			nextInvocations[id] = invocation
+		}
+	}
+	s.decisions, s.invocations = nextDecisions, nextInvocations
+	if err := s.writeCheckpointLocked(); err != nil {
+		s.decisions, s.invocations = oldDecisions, oldInvocations
+		return err
+	}
+	return nil
+}
+
 func (s *Store) TransitionInvocation(id, state, runID, reason string, reflectedAt *time.Time, now time.Time) (Invocation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

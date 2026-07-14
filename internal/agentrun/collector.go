@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -195,7 +196,7 @@ func agentRecordEvent(run Run, file string, offset, length int64, line []byte) e
 		recordType = safeRecordType(header.Type)
 	}
 	idDigest := sha256.Sum256([]byte(run.ID + "\x00" + file + "\x00" + strconv.FormatInt(offset, 10) + "\x00" + digestText))
-	return eventwire.Event{
+	event := eventwire.Event{
 		ID:      "factory:agent-record:" + hex.EncodeToString(idDigest[:]),
 		Source:  eventwire.SourceFactory,
 		Type:    "agent-record",
@@ -210,6 +211,8 @@ func agentRecordEvent(run Run, file string, offset, length int64, line []byte) e
 		},
 		ReceivedAt: time.Now().UTC(),
 	}
+	applyRunCausation(&event, run)
+	return event
 }
 
 func safeRecordType(value string) string {
@@ -229,7 +232,10 @@ func lifecycleEvents(runs []Run) ([]eventwire.Event, []string) {
 	var ids []string
 	for _, run := range runs {
 		for _, transition := range run.Transitions {
-			events = append(events, eventwire.Event{
+			if run.InvocationID != "" && (transition.State == StateSucceeded || transition.State == StateBlocked || transition.State == StateFailed) && run.InvocationReflectedAt == nil {
+				continue
+			}
+			event := eventwire.Event{
 				ID:         "factory:run-transition:" + transition.ID,
 				Source:     eventwire.SourceFactory,
 				Type:       "agent-run",
@@ -237,11 +243,24 @@ func lifecycleEvents(runs []Run) ([]eventwire.Event, []string) {
 				Subject:    run.IssueIdentifier,
 				Attributes: map[string][]string{"runId": {run.ID}, "attempts": {strconv.Itoa(transition.Attempts)}},
 				ReceivedAt: transition.At,
-			})
+			}
+			applyRunCausation(&event, run)
+			events = append(events, event)
 			ids = append(ids, transition.ID)
 		}
 	}
 	return events, ids
+}
+
+func applyRunCausation(event *eventwire.Event, run Run) {
+	if run.InvocationID == "" {
+		return
+	}
+	event.RootEventID = run.InvocationRootEventID
+	event.ParentInvocationID = run.InvocationID
+	event.ParentRunID = run.ID
+	event.Hop = run.InvocationHop
+	event.AncestorRuleIDs = slices.Clone(run.InvocationAncestorRuleIDs)
 }
 
 func lastCompleteOffset(data []byte) int {

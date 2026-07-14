@@ -16,6 +16,8 @@ import (
 
 const resultFileName = "result.json"
 
+const WorkflowSnapshotFileName = "workflow.json"
+
 const ResultReadyForMerge = "ready_for_human_merge"
 
 var repositoryPrepareLocks sync.Map
@@ -503,6 +505,19 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 	if err := removeLifecycleArtifacts(runDirectory); err != nil {
 		return err
 	}
+	workflowPath := ""
+	if run.InvocationID != "" {
+		if run.PinnedWorkflow == nil {
+			return errors.New("start invocation Run: pinned workflow is missing")
+		}
+		if err := run.PinnedWorkflow.Validate(); err != nil {
+			return fmt.Errorf("start invocation Run: invalid pinned workflow: %w", err)
+		}
+		workflowPath = filepath.Join(runDirectory, WorkflowSnapshotFileName)
+		if err := writeJSONFile(workflowPath, run.PinnedWorkflow); err != nil {
+			return fmt.Errorf("write pinned workflow: %w", err)
+		}
+	}
 	args := []string{
 		"-L", launcher.config.TmuxSocket,
 		"new-session", "-d",
@@ -525,6 +540,9 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 		"--repo", launcher.config.RepoPath,
 		"--run-dir", runDirectory,
 		"--attempt-offset", fmt.Sprintf("%d", run.Attempts),
+	}
+	if workflowPath != "" {
+		args = append(args, "--workflow-file", workflowPath)
 	}
 	cmd := exec.CommandContext(ctx, launcher.config.TmuxPath, args...)
 	cmd.Env = agentEnvironment(os.Environ())

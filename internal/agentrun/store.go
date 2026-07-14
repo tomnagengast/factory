@@ -12,6 +12,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/tomnagengast/factory/internal/settings"
 )
 
 const stateVersion = 1
@@ -21,9 +23,13 @@ const (
 	TriggerKindComment   = "linear-comment"
 	TriggerKindGitHub    = "github-update"
 	TriggerKindPostMerge = "post-merge"
+	TriggerKindRule      = "configured-rule"
 )
 
-var issueIdentifierPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[1-9][0-9]*$`)
+var (
+	issueIdentifierPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[1-9][0-9]*$`)
+	runIDPattern           = regexp.MustCompile(`^run-[a-f0-9]{16}$`)
+)
 
 type State string
 
@@ -106,7 +112,27 @@ type Run struct {
 	TerminalIntent             string                `json:"terminalIntent,omitempty"`
 	TerminalRejection          string                `json:"terminalRejection,omitempty"`
 	Completion                 *CompletionValidation `json:"completion,omitempty"`
+	InvocationID               string                `json:"invocationId,omitempty"`
+	InvocationRootEventID      string                `json:"invocationRootEventId,omitempty"`
+	InvocationHop              int                   `json:"invocationHop,omitempty"`
+	InvocationAncestorRuleIDs  []string              `json:"invocationAncestorRuleIds,omitempty"`
+	PinnedWorkflow             *settings.Workflow    `json:"pinnedWorkflow,omitempty"`
+	InvocationReflectedAt      *time.Time            `json:"invocationReflectedAt,omitempty"`
 }
+
+type InvocationClaim struct {
+	RunID           string
+	InvocationID    string
+	EventID         string
+	IssueIdentifier string
+	RootEventID     string
+	Hop             int
+	AncestorRuleIDs []string
+	Workflow        settings.Workflow
+	Repository      RepositoryConfig
+}
+
+var ErrInvocationIssueOwned = errors.New("agent run store: issue already has an active run")
 
 type PublicRun struct {
 	ID                string     `json:"id"`
@@ -206,6 +232,93 @@ func (s *Store) Claim(trigger Trigger, now time.Time) (Run, bool, error) {
 
 func (s *Store) ClaimContinuation(trigger Trigger, now time.Time) (Run, bool, error) {
 	return s.claim(trigger, now, true)
+}
+
+func (s *Store) EnsureInvocationRun(claim InvocationClaim, now time.Time) (Run, bool, error) {
+	if !runIDPattern.MatchString(claim.RunID) || claim.InvocationID == "" || claim.EventID == "" {
+		return Run{}, false, errors.New("agent run store: invocation identity is invalid")
+	}
+	if !ValidIssueIdentifier(claim.IssueIdentifier) {
+		return Run{}, false, fmt.Errorf("agent run store: invalid issue identifier %q", claim.IssueIdentifier)
+	}
+	if claim.RootEventID == "" || claim.Hop < 1 || len(claim.AncestorRuleIDs) != claim.Hop {
+		return Run{}, false, errors.New("agent run store: invocation causation is invalid")
+	}
+	if err := claim.Workflow.Validate(); err != nil || !claim.Workflow.Enabled {
+		return Run{}, false, errors.New("agent run store: pinned workflow is invalid")
+	}
+	if err := claim.Repository.validate(); err != nil {
+		return Run{}, false, err
+	}
+
+	now = now.UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, run := range s.state.Runs {
+		if run.ID == claim.RunID || run.InvocationID == claim.InvocationID {
+			if invocationRunMatches(run, claim) {
+				return cloneRun(run), false, nil
+			}
+			return Run{}, false, errors.New("agent run store: invocation Run identity collision")
+		}
+	}
+	for _, run := range s.state.Runs {
+		if run.IssueIdentifier == claim.IssueIdentifier && run.State.Active() {
+			return Run{}, false, ErrInvocationIssueOwned
+		}
+	}
+	workflow := claim.Workflow
+	workflow.Steps = slices.Clone(claim.Workflow.Steps)
+	run := Run{
+		ID: claim.RunID, IssueIdentifier: claim.IssueIdentifier,
+		Repository: claim.Repository.Repository, RepositoryURL: claim.Repository.RepoURL,
+		RepositoryPath: claim.Repository.RepoPath, ManagedRoot: claim.Repository.ManagedRoot,
+		BaseBranch: claim.Repository.BaseBranch, Bootstrap: claim.Repository.Bootstrap, CloudURL: claim.Repository.CloudURL,
+		TriggerKind: TriggerKindRule, DeliveryIDs: []string{claim.EventID}, State: StatePending,
+		CreatedAt: now, UpdatedAt: now, Transitions: []Transition{newTransition(claim.RunID, StatePending, 0, now)},
+		InvocationID: claim.InvocationID, InvocationRootEventID: claim.RootEventID, InvocationHop: claim.Hop,
+		InvocationAncestorRuleIDs: slices.Clone(claim.AncestorRuleIDs), PinnedWorkflow: &workflow,
+	}
+	next := s.state
+	next.Total++
+	next.Runs = append([]Run{run}, cloneRuns(s.state.Runs)...)
+	next.Runs = prune(next.Runs, s.limit)
+	if err := writeState(s.path, next); err != nil {
+		return Run{}, false, err
+	}
+	s.state = next
+	return cloneRun(run), true, nil
+}
+
+func invocationRunMatches(run Run, claim InvocationClaim) bool {
+	return run.ID == claim.RunID && run.InvocationID == claim.InvocationID && run.IssueIdentifier == claim.IssueIdentifier &&
+		run.InvocationRootEventID == claim.RootEventID && run.InvocationHop == claim.Hop &&
+		slices.Equal(run.InvocationAncestorRuleIDs, claim.AncestorRuleIDs) && run.PinnedWorkflow != nil &&
+		workflowEqual(*run.PinnedWorkflow, claim.Workflow) && run.Repository == claim.Repository.Repository &&
+		run.RepositoryURL == claim.Repository.RepoURL && run.RepositoryPath == claim.Repository.RepoPath &&
+		run.ManagedRoot == claim.Repository.ManagedRoot && run.BaseBranch == claim.Repository.BaseBranch &&
+		run.Bootstrap == claim.Repository.Bootstrap && run.CloudURL == claim.Repository.CloudURL
+}
+
+func workflowEqual(left, right settings.Workflow) bool {
+	return left.ID == right.ID && left.Name == right.Name && left.Enabled == right.Enabled && left.Runner == right.Runner && slices.Equal(left.Steps, right.Steps)
+}
+
+func (s *Store) MarkInvocationReflected(id string, at time.Time) error {
+	return s.update(id, at, func(run *Run) error {
+		if run.InvocationID == "" || run.State.Nonterminal() {
+			return errors.New("cannot reflect a legacy or nonterminal Run")
+		}
+		if run.InvocationReflectedAt != nil {
+			return nil
+		}
+		value := at.UTC()
+		run.InvocationReflectedAt = &value
+		if run.PinnedWorkflow != nil {
+			run.PinnedWorkflow = &settings.Workflow{ID: run.PinnedWorkflow.ID}
+		}
+		return nil
+	})
 }
 
 func (s *Store) claim(trigger Trigger, now time.Time, requireHistory bool) (Run, bool, error) {
@@ -735,6 +848,13 @@ func cloneRun(run Run) Run {
 	run.LastAuthoritativeRefreshAt = cloneTime(run.LastAuthoritativeRefreshAt)
 	run.NextReconcileAt = cloneTime(run.NextReconcileAt)
 	run.Completion = cloneCompletion(run.Completion)
+	run.InvocationAncestorRuleIDs = slices.Clone(run.InvocationAncestorRuleIDs)
+	if run.PinnedWorkflow != nil {
+		workflow := *run.PinnedWorkflow
+		workflow.Steps = slices.Clone(run.PinnedWorkflow.Steps)
+		run.PinnedWorkflow = &workflow
+	}
+	run.InvocationReflectedAt = cloneTime(run.InvocationReflectedAt)
 	return run
 }
 

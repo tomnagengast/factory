@@ -28,6 +28,9 @@ import (
 	"github.com/tomnagengast/factory/internal/linearhook"
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/triggerregistry"
+	"github.com/tomnagengast/factory/internal/triggerrouter"
+	"github.com/tomnagengast/factory/internal/triggerscheduler"
 	"github.com/tomnagengast/factory/internal/viewerauth"
 )
 
@@ -93,6 +96,26 @@ type SettingsStore interface {
 	Update(uint64, settings.Snapshot, time.Time) (settings.Snapshot, error)
 }
 
+type EventWire interface {
+	Handle(eventwire.Filter, eventwire.Handler) error
+	Publish(context.Context, eventwire.Event) (eventwire.Record, bool, error)
+	Status() eventwire.Status
+	Query(eventwire.Query) (eventwire.Page, error)
+	Record(uint64) (eventwire.Record, bool)
+}
+
+type TriggerPolicy interface {
+	RegistrySnapshot() triggerregistry.Snapshot
+	SettingsSnapshot() settings.Snapshot
+	RoutingSnapshot() triggerrouter.Snapshot
+	UpdateRegistry(uint64, uint64, triggerregistry.Snapshot, time.Time) (triggerregistry.Snapshot, error)
+	UpdateSettings(uint64, settings.Snapshot, time.Time) (settings.Snapshot, error)
+}
+
+type ScheduleStatus interface {
+	Statuses(time.Time) []triggerscheduler.Status
+}
+
 type Config struct {
 	Web                fs.FS
 	ActivityStore      EventStore
@@ -103,7 +126,7 @@ type Config struct {
 	ViewerAuth         *viewerauth.Authenticator
 	LinearSecret       []byte
 	GitHubSecret       []byte
-	Events             *eventwire.Wire
+	Events             EventWire
 	GitHubEvents       GitHubEventStore
 	LinearComments     LinearCommentStore
 	TriggerActor       string
@@ -111,6 +134,9 @@ type Config struct {
 	ProjectSetups      ProjectSetupController
 	Now                func() time.Time
 	Build              BuildIdentity
+	GenericTriggers    bool
+	TriggerPolicy      TriggerPolicy
+	ScheduleStatus     ScheduleStatus
 }
 
 type appServer struct {
@@ -122,7 +148,7 @@ type appServer struct {
 	viewerAuth         *viewerauth.Authenticator
 	linearSecret       []byte
 	githubSecret       []byte
-	events             *eventwire.Wire
+	events             EventWire
 	githubEvents       GitHubEventStore
 	linearComments     LinearCommentStore
 	triggerActor       string
@@ -130,6 +156,9 @@ type appServer struct {
 	projectSetups      ProjectSetupController
 	now                func() time.Time
 	build              BuildIdentity
+	genericTriggers    bool
+	triggerPolicy      TriggerPolicy
+	scheduleStatus     ScheduleStatus
 }
 
 type BuildIdentity struct {
@@ -277,6 +306,9 @@ func New(config Config) (http.Handler, error) {
 	if config.RepositoryResolver == nil {
 		config.RepositoryResolver = legacyRepositoryResolver{}
 	}
+	if config.GenericTriggers && (config.TriggerPolicy == nil || config.ScheduleStatus == nil) {
+		return nil, errors.New("server: generic trigger policy and schedule status are required")
+	}
 
 	app := &appServer{
 		activityStore:      config.ActivityStore,
@@ -295,6 +327,9 @@ func New(config Config) (http.Handler, error) {
 		projectSetups:      config.ProjectSetups,
 		now:                config.Now,
 		build:              config.Build,
+		genericTriggers:    config.GenericTriggers,
+		triggerPolicy:      config.TriggerPolicy,
+		scheduleStatus:     config.ScheduleStatus,
 	}
 	if err := app.events.Handle(eventwire.Filter{Source: eventwire.SourceLinear}, app.dispatchLinear); err != nil {
 		return nil, err
@@ -311,6 +346,8 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("GET /api/agents/{issue}/{started}/run", canonicalAgentReference(app.viewerAuth.API(http.HandlerFunc(app.agentByReference))))
 	mux.Handle("GET /api/settings", app.viewerAuth.API(http.HandlerFunc(app.getSettings)))
 	mux.Handle("PUT /api/settings", app.viewerAuth.API(http.HandlerFunc(app.putSettings)))
+	mux.Handle("GET /api/triggers", app.viewerAuth.API(http.HandlerFunc(app.getTriggers)))
+	mux.Handle("PUT /api/triggers", app.viewerAuth.API(http.HandlerFunc(app.putTriggers)))
 	mux.HandleFunc("POST /api/webhooks/linear", app.linearWebhook)
 	mux.HandleFunc("POST /api/webhooks/github", app.githubWebhook)
 	mux.HandleFunc("POST /cdn-cgi/rum", cloudflareBeacon)
@@ -324,6 +361,7 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("GET /agents", app.viewerAuth.Page(page))
 	mux.Handle("GET /agents/{issue}/{started}/run", canonicalAgentReference(app.viewerAuth.Page(page)))
 	mux.Handle("GET /settings", app.viewerAuth.Page(page))
+	mux.Handle("GET /triggers", app.viewerAuth.Page(page))
 	mux.Handle("GET /{asset...}", http.FileServerFS(config.Web))
 	return canonicalPaths(mux), nil
 }
@@ -497,9 +535,18 @@ func (s *appServer) putSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	updated, err := s.settings.Update(candidate.Revision, candidate, s.now())
+	var updated settings.Snapshot
+	if s.triggerPolicy != nil {
+		updated, err = s.triggerPolicy.UpdateSettings(candidate.Revision, candidate, s.now())
+	} else {
+		updated, err = s.settings.Update(candidate.Revision, candidate, s.now())
+	}
 	if errors.Is(err, settings.ErrRevisionConflict) {
 		writeJSON(w, http.StatusConflict, updated)
+		return
+	}
+	if errors.Is(err, triggerrouter.ErrPolicyValidation) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err != nil {
@@ -663,8 +710,23 @@ func linearWireEvent(
 		Attributes: map[string][]string{attributeDeliveryID: {deliveryID}},
 		ReceivedAt: now,
 	}
+	event.Attributes[triggerregistry.AttributeActorID] = []string{payload.Actor.ID}
+	provenance := "human"
+	if linearhook.FactoryAuthored(payload.Data.Body) {
+		provenance = "factory"
+	}
+	event.Attributes[triggerregistry.AttributeProvenance] = []string{provenance}
+	addedLabelIDs, addedLabelNames := addedLabels(payload)
+	if len(addedLabelIDs) > 0 {
+		event.Attributes["addedLabelId"] = addedLabelIDs
+		event.Attributes[triggerregistry.AttributeAddedLabel] = addedLabelNames
+	}
 	if hasWake {
+		metadata := event.Attributes
 		event = linearhook.ToWire(wake)
+		for key, values := range metadata {
+			event.Attributes[key] = values
+		}
 		event.Attributes[attributeIssue] = []string{wake.IssueIdentifier}
 		if commentTriggers {
 			event.Attributes[attributeTriggerKind] = []string{agentrun.TriggerKindComment}
@@ -731,8 +793,7 @@ func (s *appServer) dispatchLinear(ctx context.Context, record eventwire.Record)
 			}
 		}
 	}
-
-	if firstAttribute(record.Event, attributeTriggerKind) == agentrun.TriggerKindLabel {
+	if !s.genericTriggers && firstAttribute(record.Event, attributeTriggerKind) == agentrun.TriggerKindLabel {
 		trigger, err := s.repositoryTrigger(ctx, deliveryID, firstAttribute(record.Event, attributeIssue), agentrun.TriggerKindLabel)
 		if err != nil {
 			return fmt.Errorf("server: resolve Linear run repository: %w", err)
@@ -745,7 +806,33 @@ func (s *appServer) dispatchLinear(ctx context.Context, record eventwire.Record)
 			s.runNotifier.Notify()
 		}
 	}
+
 	return nil
+}
+
+func addedLabels(payload linearPayload) ([]string, []string) {
+	var previous []string
+	if len(payload.UpdatedFrom.LabelIDs) == 0 || json.Unmarshal(payload.UpdatedFrom.LabelIDs, &previous) != nil {
+		return nil, nil
+	}
+	previousSet := make(map[string]bool, len(previous))
+	for _, id := range previous {
+		previousSet[id] = true
+	}
+	current := make(map[string]bool, len(payload.Data.LabelIDs))
+	for _, id := range payload.Data.LabelIDs {
+		current[id] = true
+	}
+	var ids []string
+	var names []string
+	for _, label := range payload.Data.Labels {
+		if label.ID == "" || !current[label.ID] || previousSet[label.ID] {
+			continue
+		}
+		ids = append(ids, label.ID)
+		names = append(names, triggerregistry.CanonicalFold(label.Name))
+	}
+	return ids, names
 }
 
 func (s *appServer) repositoryTrigger(ctx context.Context, deliveryID, issueIdentifier, kind string) (agentrun.Trigger, error) {

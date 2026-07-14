@@ -168,25 +168,11 @@ func (s Snapshot) Validate() error {
 
 	workflows := make(map[string]Workflow, len(s.Workflows))
 	for index, workflow := range s.Workflows {
-		if !identifierPattern.MatchString(workflow.ID) {
-			return fmt.Errorf("settings: workflow %d has an invalid ID", index+1)
+		if err := workflow.Validate(); err != nil {
+			return fmt.Errorf("settings: workflow %d: %w", index+1, err)
 		}
 		if _, duplicate := workflows[workflow.ID]; duplicate {
 			return fmt.Errorf("settings: workflow ID %q is duplicated", workflow.ID)
-		}
-		if !validText(workflow.Name, maxWorkflowNameBytes) {
-			return fmt.Errorf("settings: workflow %q has an invalid name", workflow.ID)
-		}
-		if workflow.Runner != "do" {
-			return fmt.Errorf("settings: workflow %q runner must be do", workflow.ID)
-		}
-		if len(workflow.Steps) == 0 || len(workflow.Steps) > maxWorkflowSteps {
-			return fmt.Errorf("settings: workflow %q must have between 1 and %d steps", workflow.ID, maxWorkflowSteps)
-		}
-		for stepIndex, step := range workflow.Steps {
-			if !validText(step, maxWorkflowStepBytes) {
-				return fmt.Errorf("settings: workflow %q step %d is invalid", workflow.ID, stepIndex+1)
-			}
 		}
 		workflows[workflow.ID] = workflow
 	}
@@ -214,6 +200,27 @@ func (s Snapshot) Validate() error {
 	}
 	if s.Runtime.MaxConcurrentRuns < minConcurrentRuns || s.Runtime.MaxConcurrentRuns > maxConcurrentRuns {
 		return fmt.Errorf("settings: max concurrent runs must be between %d and %d", minConcurrentRuns, maxConcurrentRuns)
+	}
+	return nil
+}
+
+func (w Workflow) Validate() error {
+	if !identifierPattern.MatchString(w.ID) {
+		return errors.New("workflow ID is invalid")
+	}
+	if !validText(w.Name, maxWorkflowNameBytes) {
+		return fmt.Errorf("workflow %q has an invalid name", w.ID)
+	}
+	if w.Runner != "do" {
+		return fmt.Errorf("workflow %q runner must be do", w.ID)
+	}
+	if len(w.Steps) == 0 || len(w.Steps) > maxWorkflowSteps {
+		return fmt.Errorf("workflow %q must have between 1 and %d steps", w.ID, maxWorkflowSteps)
+	}
+	for index, step := range w.Steps {
+		if !validText(step, maxWorkflowStepBytes) {
+			return fmt.Errorf("workflow %q step %d is invalid", w.ID, index+1)
+		}
 	}
 	return nil
 }

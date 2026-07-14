@@ -26,6 +26,10 @@ type RunCollector interface {
 	Collect(context.Context, []Run) error
 }
 
+type InvocationStartGate interface {
+	ClaimedInvocation(invocationID, runID string) bool
+}
+
 type LifecycleConfig struct {
 	Repository string
 	BaseBranch string
@@ -45,6 +49,15 @@ type Manager struct {
 	logger        *slog.Logger
 	now           func() time.Time
 	notify        chan struct{}
+	invocations   InvocationStartGate
+}
+
+func (m *Manager) SetInvocationStartGate(gate InvocationStartGate) error {
+	if gate == nil {
+		return errors.New("agent run manager: invocation start gate is required")
+	}
+	m.invocations = gate
+	return nil
 }
 
 func NewManager(
@@ -178,6 +191,9 @@ func (m *Manager) reconcile(ctx context.Context) {
 			continue
 		}
 		if run.NextReconcileAt != nil && m.now().Before(*run.NextReconcileAt) {
+			continue
+		}
+		if run.InvocationID != "" && (m.invocations == nil || !m.invocations.ClaimedInvocation(run.InvocationID, run.ID)) {
 			continue
 		}
 		if run.RepositoryPath == "" && !prepared {
