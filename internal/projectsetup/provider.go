@@ -43,7 +43,6 @@ type providerWorkspace struct {
 type providerLinearIssue struct {
 	ID          string `json:"id"`
 	Identifier  string `json:"identifier"`
-	Title       string `json:"title"`
 	Description string `json:"description"`
 	Labels      struct {
 		Nodes []struct {
@@ -103,7 +102,7 @@ func (c *LinearProviderCoordinator) Ensure(ctx context.Context, spec Spec) (Prov
 		if err != nil {
 			return ProviderIssue{}, err
 		}
-	} else if err := c.ensureIssue(ctx, &issue, workspace.labelIDs, spec, marker); err != nil {
+	} else if err := c.ensureLabels(ctx, &issue, workspace.labelIDs); err != nil {
 		return ProviderIssue{}, err
 	}
 	if issue.ID == "" || issue.Identifier == "" {
@@ -179,7 +178,7 @@ func (c *LinearProviderCoordinator) findIssue(ctx context.Context, projectID, ma
 	const query = `query ProviderIssues($project: String!, $after: String) {
   project(id: $project) {
     issues(first: 100, after: $after) {
-      nodes { id identifier title description labels { nodes { id name } } }
+      nodes { id identifier description labels { nodes { id name } } }
       pageInfo { hasNextPage endCursor }
     }
   }
@@ -234,7 +233,7 @@ func (c *LinearProviderCoordinator) createIssue(ctx context.Context, workspace p
 	const mutation = `mutation CreateProviderIssue($input: IssueCreateInput!) {
   issueCreate(input: $input) {
     success
-    issue { id identifier title description labels { nodes { id name } } }
+    issue { id identifier description labels { nodes { id name } } }
   }
 }`
 	input := map[string]any{
@@ -259,32 +258,27 @@ func (c *LinearProviderCoordinator) createIssue(ctx context.Context, workspace p
 	return response.Create.Issue, nil
 }
 
-func (c *LinearProviderCoordinator) ensureIssue(ctx context.Context, issue *providerLinearIssue, required []string, spec Spec, marker string) error {
+func (c *LinearProviderCoordinator) ensureLabels(ctx context.Context, issue *providerLinearIssue, required []string) error {
 	labelIDs := make([]string, 0, len(issue.Labels.Nodes)+len(required))
 	for _, label := range issue.Labels.Nodes {
 		if label.ID != "" && !slices.Contains(labelIDs, label.ID) {
 			labelIDs = append(labelIDs, label.ID)
 		}
 	}
-	changed := false
+	missing := false
 	for _, labelID := range required {
 		if !slices.Contains(labelIDs, labelID) {
 			labelIDs = append(labelIDs, labelID)
-			changed = true
+			missing = true
 		}
 	}
-	desiredTitle := providerIssueTitle(spec)
-	desiredDescription := providerIssueDescription(spec, marker)
-	if issue.Title != desiredTitle || issue.Description != desiredDescription {
-		changed = true
-	}
-	if !changed {
+	if !missing {
 		return nil
 	}
-	const mutation = `mutation UpdateProviderIssue($id: String!, $input: IssueUpdateInput!) {
+	const mutation = `mutation LabelProviderIssue($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) {
     success
-    issue { id identifier title description labels { nodes { id name } } }
+    issue { id identifier description labels { nodes { id name } } }
   }
 }`
 	var response struct {
@@ -293,14 +287,12 @@ func (c *LinearProviderCoordinator) ensureIssue(ctx context.Context, issue *prov
 			Issue   providerLinearIssue `json:"issue"`
 		} `json:"issueUpdate"`
 	}
-	variables := map[string]any{"id": issue.ID, "input": map[string]any{
-		"title": desiredTitle, "description": desiredDescription, "labelIds": labelIDs,
-	}}
+	variables := map[string]any{"id": issue.ID, "input": map[string]any{"labelIds": labelIDs}}
 	if err := c.graphQL(ctx, mutation, variables, &response); err != nil {
-		return fmt.Errorf("provider coordinator: update provider issue: %w", err)
+		return fmt.Errorf("provider coordinator: label provider issue: %w", err)
 	}
 	if !response.Update.Success {
-		return errors.New("provider coordinator: Linear did not update the provider issue")
+		return errors.New("provider coordinator: Linear did not label the provider issue")
 	}
 	*issue = response.Update.Issue
 	return nil
