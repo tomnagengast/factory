@@ -3,6 +3,7 @@ package eventwire
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -21,24 +22,32 @@ const (
 	maxFieldLength     = 256
 	maxAttributeCount  = 32
 	maxAttributeValues = 32
+	maxAncestorRules   = 32
 )
 
+var tokenPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
+
 type Event struct {
-	ID         string              `json:"id"`
-	Source     Source              `json:"source"`
-	Type       string              `json:"type"`
-	Action     string              `json:"action"`
-	Subject    string              `json:"subject,omitempty"`
-	Attributes map[string][]string `json:"attributes,omitempty"`
-	Channels   []string            `json:"channels,omitempty"`
-	ReceivedAt time.Time           `json:"receivedAt"`
+	ID                 string              `json:"id"`
+	Source             Source              `json:"source"`
+	Type               string              `json:"type"`
+	Action             string              `json:"action"`
+	Subject            string              `json:"subject,omitempty"`
+	Attributes         map[string][]string `json:"attributes,omitempty"`
+	Channels           []string            `json:"channels,omitempty"`
+	RootEventID        string              `json:"rootEventId,omitempty"`
+	ParentInvocationID string              `json:"parentInvocationId,omitempty"`
+	ParentRunID        string              `json:"parentRunId,omitempty"`
+	Hop                int                 `json:"hop,omitempty"`
+	AncestorRuleIDs    []string            `json:"ancestorRuleIds,omitempty"`
+	ReceivedAt         time.Time           `json:"receivedAt"`
 }
 
 func (e Event) Validate() error {
 	if strings.TrimSpace(e.ID) == "" || len(e.ID) > maxIDLength {
 		return errors.New("event wire: event ID is invalid")
 	}
-	if e.Source != SourceLinear && e.Source != SourceGitHub && e.Source != SourceFactory {
+	if !ValidSource(e.Source) {
 		return fmt.Errorf("event wire: invalid source %q", e.Source)
 	}
 	for name, value := range map[string]string{
@@ -52,6 +61,9 @@ func (e Event) Validate() error {
 	}
 	if e.ReceivedAt.IsZero() {
 		return errors.New("event wire: received time is required")
+	}
+	if err := e.validateCausation(); err != nil {
+		return err
 	}
 	if len(e.Attributes) > maxAttributeCount {
 		return errors.New("event wire: too many attributes")
@@ -72,6 +84,44 @@ func (e Event) Validate() error {
 			return errors.New("event wire: invalid channels")
 		}
 		seenChannels[channel] = true
+	}
+	return nil
+}
+
+func ValidSource(source Source) bool {
+	return tokenPattern.MatchString(string(source))
+}
+
+func (e Event) validateCausation() error {
+	if e.RootEventID != "" && (strings.TrimSpace(e.RootEventID) != e.RootEventID || len(e.RootEventID) > maxIDLength) {
+		return errors.New("event wire: root event ID is invalid")
+	}
+	for _, value := range []string{e.ParentInvocationID, e.ParentRunID} {
+		if value != "" && (strings.TrimSpace(value) != value || len(value) > maxIDLength) {
+			return errors.New("event wire: parent identity is invalid")
+		}
+	}
+	if e.Hop < 0 || e.Hop > maxAncestorRules || len(e.AncestorRuleIDs) != e.Hop {
+		return errors.New("event wire: causal hop is invalid")
+	}
+	seen := make(map[string]bool, len(e.AncestorRuleIDs))
+	for _, id := range e.AncestorRuleIDs {
+		if !tokenPattern.MatchString(id) || seen[id] {
+			return errors.New("event wire: ancestor rule path is invalid")
+		}
+		seen[id] = true
+	}
+	if e.Hop == 0 {
+		if e.RootEventID != "" && e.RootEventID != e.ID {
+			return errors.New("event wire: direct event root is invalid")
+		}
+		if e.ParentInvocationID != "" || e.ParentRunID != "" {
+			return errors.New("event wire: direct event has parent identity")
+		}
+		return nil
+	}
+	if e.RootEventID == "" || e.ParentInvocationID == "" {
+		return errors.New("event wire: derived event causation is incomplete")
 	}
 	return nil
 }
@@ -111,4 +161,11 @@ func (f Filter) Matches(event Event) bool {
 		}
 	}
 	return true
+}
+
+func canonicalEvent(event Event) Event {
+	if event.RootEventID == "" && event.Hop == 0 && event.ParentInvocationID == "" && event.ParentRunID == "" && len(event.AncestorRuleIDs) == 0 {
+		event.RootEventID = event.ID
+	}
+	return event
 }

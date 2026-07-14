@@ -381,7 +381,7 @@ func (s *appServer) wire(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	source := eventwire.Source(r.URL.Query().Get("source"))
-	if source != "" && source != eventwire.SourceLinear && source != eventwire.SourceGitHub && source != eventwire.SourceFactory {
+	if source != "" && !eventwire.ValidSource(source) {
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}

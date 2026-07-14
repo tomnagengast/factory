@@ -154,7 +154,7 @@ func TestEventsHelperFiltersUnifiedJournal(t *testing.T) {
 		t.Fatalf("new wire: %v", err)
 	}
 	for _, event := range []eventwire.Event{
-		{ID: "factory:start", Source: eventwire.SourceFactory, Type: "service", Action: "started", Attributes: map[string][]string{"status": {"ok"}}, ReceivedAt: time.Now()},
+		{ID: "telemetry:start", Source: eventwire.Source("telemetry"), Type: "service", Action: "started", Attributes: map[string][]string{"status": {"ok"}}, ReceivedAt: time.Now()},
 		{ID: "github:delivery", Source: eventwire.SourceGitHub, Type: "ping", Action: "received", ReceivedAt: time.Now()},
 	} {
 		if _, _, err := wire.Publish(context.Background(), event); err != nil {
@@ -165,7 +165,7 @@ func TestEventsHelperFiltersUnifiedJournal(t *testing.T) {
 	if err != nil || len(direct.Events) != 2 {
 		t.Fatalf("direct batch = %#v, %v", direct, err)
 	}
-	filtered, err := eventwire.Read(filepath.Join(stateRoot, "data", "system-events.jsonl"), eventwire.Filter{Source: eventwire.SourceFactory, Type: "service", Attributes: map[string]string{"status": "ok"}}, 0)
+	filtered, err := eventwire.Read(filepath.Join(stateRoot, "data", "system-events.jsonl"), eventwire.Filter{Source: eventwire.Source("telemetry"), Type: "service", Attributes: map[string]string{"status": "ok"}}, 0)
 	if err != nil || len(filtered.Events) != 1 {
 		t.Fatalf("filtered batch = %#v, %v", filtered, err)
 	}
@@ -173,7 +173,7 @@ func TestEventsHelperFiltersUnifiedJournal(t *testing.T) {
 	t.Setenv("FACTORY_RUN_DIR", runDirectory)
 	var output bytes.Buffer
 	code := runEventsHelper(context.Background(), []string{
-		"--source", "factory",
+		"--source", "telemetry",
 		"--type", "service",
 		"--match", "status=ok",
 		"--wait", "0s",
@@ -185,7 +185,7 @@ func TestEventsHelperFiltersUnifiedJournal(t *testing.T) {
 	if err := json.NewDecoder(&output).Decode(&batch); err != nil {
 		t.Fatalf("decode batch: %v", err)
 	}
-	if batch.Cursor != 2 || len(batch.Events) != 1 || batch.Events[0].ID != "factory:start" {
+	if batch.Cursor != 2 || len(batch.Events) != 1 || batch.Events[0].ID != "telemetry:start" {
 		t.Fatalf("batch = %#v", batch)
 	}
 }
