@@ -34,4 +34,8 @@ func TestRepositoryCatalogReplacesRuntimeEntriesAndAcceptsProjectSlug(t *testing
 	if err != nil || resolved.Repository != dynamic.Repository {
 		t.Fatalf("resolve URL = %#v, %v", resolved, err)
 	}
+	resolved, err = catalog.ResolveProject("github repo: tomnagengast/cellar\nLocal path: " + dynamic.ProjectPath)
+	if err != nil || resolved.Repository != dynamic.Repository {
+		t.Fatalf("resolve case-insensitive metadata = %#v, %v", resolved, err)
+	}
 }

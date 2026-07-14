@@ -16,8 +16,8 @@ import (
 )
 
 var (
-	projectRepositoryPattern = regexp.MustCompile("(?mi)^GitHub Repo:\\s*(\\S+)\\s*$")
-	projectLocalPathPattern  = regexp.MustCompile("(?m)^Local Path:\\s*(/[^\\r\\n]+)\\s*$")
+	projectRepositoryPattern = regexp.MustCompile(`(?mi)^\s*GitHub Repo\s*:\s*(\S+)\s*$`)
+	projectLocalPathPattern  = regexp.MustCompile(`(?mi)^\s*Local Path\s*:\s*(/[^\r\n]+?)\s*$`)
 	cloudHostnameLabel       = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
 )
 

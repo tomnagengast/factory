@@ -253,6 +253,15 @@ func (v *MechanicalCompletionValidator) Validate(ctx context.Context, run Run, r
 }
 
 func (v *MechanicalCompletionValidator) validateBeforePullRequest(ctx context.Context, run Run, decision CompletionDecision, result ProcessResult) CompletionDecision {
+	if result.Status == string(StateBlocked) {
+		if _, ok := prePullRequestBlockers[result.Blocker]; ok {
+			decision.Validation.Accepted = true
+			decision.Validation.Reason = "typed pre-checkpoint blocker accepted"
+			decision.Detail = decision.Validation.Reason + ": " + result.Blocker
+			return decision
+		}
+		return rejectCompletion(decision, "blocked intent lacks an allowed pre-checkpoint blocker", false)
+	}
 	repository := run.Repository
 	if repository == "" {
 		repository = v.repository
@@ -263,15 +272,6 @@ func (v *MechanicalCompletionValidator) validateBeforePullRequest(ctx context.Co
 	}
 	if len(matches) > 0 {
 		return rejectCompletion(decision, fmt.Sprintf("found %d matching issue pull request(s) without a validated checkpoint", len(matches)), false)
-	}
-	if result.Status == string(StateBlocked) {
-		if _, ok := prePullRequestBlockers[result.Blocker]; ok {
-			decision.Validation.Accepted = true
-			decision.Validation.Reason = "typed pre-pull-request blocker accepted"
-			decision.Detail = decision.Validation.Reason + ": " + result.Blocker
-			return decision
-		}
-		return rejectCompletion(decision, "blocked intent lacks an allowed pre-pull-request blocker", false)
 	}
 	return rejectCompletion(decision, "success without a manager-validated ready checkpoint is not permitted for this repository", false)
 }
