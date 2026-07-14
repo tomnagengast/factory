@@ -3,6 +3,7 @@ package triggerrouter
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,41 @@ import (
 
 	"github.com/tomnagengast/factory/internal/eventwire"
 )
+
+func TestWorstCaseRetainedDecisionProjectionCompactsAndReopens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routing.jsonl")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 14, 15, 0, 0, 0, time.UTC)
+	for sequence := 1; sequence <= 10_000; sequence++ {
+		eventID := fmt.Sprintf("factory:retained:%05d", sequence)
+		outcomes := make([]Outcome, 32)
+		for rule := range outcomes {
+			outcomes[rule] = Outcome{
+				Kind: OutcomeSuppressed, RuleID: fmt.Sprintf("rule-%02d", rule),
+				RuleRevision: 1, Reason: "global-outstanding-limit",
+			}
+		}
+		store.decisions[eventID] = Decision{
+			EventID: eventID, EventSequence: uint64(sequence), Source: eventwire.SourceFactory,
+			RegistryRevision: 1, SettingsRevision: 1, DecidedAt: now, Outcomes: outcomes,
+		}
+	}
+	started := time.Now()
+	if err := store.writeCheckpointLocked(); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	t.Logf("compacted 10,000 retained events with 32 outcomes each in %s", time.Since(started))
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if snapshot := reopened.Snapshot(); len(snapshot.Decisions) != 10_000 || len(snapshot.Decisions[0].Outcomes) != 32 {
+		t.Fatalf("reopened projection = %d decisions", len(snapshot.Decisions))
+	}
+}
 
 func TestStoreRecoversIncompleteTailButRejectsCompleteOrphan(t *testing.T) {
 	t.Parallel()

@@ -711,6 +711,7 @@ func linearWireEvent(
 		ReceivedAt: now,
 	}
 	event.Attributes[triggerregistry.AttributeActorID] = []string{payload.Actor.ID}
+	event.Attributes[triggerregistry.AttributeProducer] = []string{"linear-webhook"}
 	provenance := "human"
 	if linearhook.FactoryAuthored(payload.Data.Body) {
 		provenance = "factory"

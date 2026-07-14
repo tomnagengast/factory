@@ -203,11 +203,13 @@ func agentRecordEvent(run Run, file string, offset, length int64, line []byte) e
 		Action:  recordType,
 		Subject: run.IssueIdentifier,
 		Attributes: map[string][]string{
-			"runId":  {run.ID},
-			"file":   {file},
-			"offset": {strconv.FormatInt(offset, 10)},
-			"length": {strconv.FormatInt(length, 10)},
-			"sha256": {digestText},
+			"runId":                       {run.ID},
+			"file":                        {file},
+			"offset":                      {strconv.FormatInt(offset, 10)},
+			"length":                      {strconv.FormatInt(length, 10)},
+			"sha256":                      {digestText},
+			eventwire.AttributeProducer:   {"agent-collector"},
+			eventwire.AttributeProvenance: {"factory"},
 		},
 		ReceivedAt: time.Now().UTC(),
 	}
@@ -236,12 +238,15 @@ func lifecycleEvents(runs []Run) ([]eventwire.Event, []string) {
 				continue
 			}
 			event := eventwire.Event{
-				ID:         "factory:run-transition:" + transition.ID,
-				Source:     eventwire.SourceFactory,
-				Type:       "agent-run",
-				Action:     string(transition.State),
-				Subject:    run.IssueIdentifier,
-				Attributes: map[string][]string{"runId": {run.ID}, "attempts": {strconv.Itoa(transition.Attempts)}},
+				ID:      "factory:run-transition:" + transition.ID,
+				Source:  eventwire.SourceFactory,
+				Type:    "agent-run",
+				Action:  string(transition.State),
+				Subject: run.IssueIdentifier,
+				Attributes: map[string][]string{
+					"runId": {run.ID}, "attempts": {strconv.Itoa(transition.Attempts)},
+					eventwire.AttributeProducer: {"agent-collector"}, eventwire.AttributeProvenance: {"factory"},
+				},
 				ReceivedAt: transition.At,
 			}
 			applyRunCausation(&event, run)

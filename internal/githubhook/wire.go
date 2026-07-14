@@ -23,8 +23,10 @@ const (
 
 func ToWire(event Event) eventwire.Event {
 	attributes := map[string][]string{
-		attributeDeliveryID: {event.DeliveryID},
-		attributeRepository: {event.Repository},
+		attributeDeliveryID:           {event.DeliveryID},
+		attributeRepository:           {event.Repository},
+		eventwire.AttributeProducer:   {"github-webhook"},
+		eventwire.AttributeProvenance: {"github"},
 	}
 	for _, number := range event.PullRequests {
 		attributes[attributePullRequest] = append(attributes[attributePullRequest], strconv.Itoa(number))

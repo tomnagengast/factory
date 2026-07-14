@@ -549,12 +549,15 @@ func publishServiceEvent(
 ) error {
 	instance := strconv.Itoa(os.Getpid()) + ":" + strconv.FormatInt(startedAt.UnixNano(), 10)
 	event := eventwire.Event{
-		ID:         "factory:service:" + instance + ":" + action + ":" + strconv.FormatInt(at.UnixNano(), 10),
-		Source:     eventwire.SourceFactory,
-		Type:       "service",
-		Action:     action,
-		Subject:    "factory",
-		Attributes: map[string][]string{"pid": {strconv.Itoa(os.Getpid())}, "startedAt": {startedAt.Format(time.RFC3339Nano)}, "status": {action}},
+		ID:      "factory:service:" + instance + ":" + action + ":" + strconv.FormatInt(at.UnixNano(), 10),
+		Source:  eventwire.SourceFactory,
+		Type:    "service",
+		Action:  action,
+		Subject: "factory",
+		Attributes: map[string][]string{
+			"pid": {strconv.Itoa(os.Getpid())}, "startedAt": {startedAt.Format(time.RFC3339Nano)}, "status": {action},
+			eventwire.AttributeProducer: {"factory-service"}, eventwire.AttributeProvenance: {"factory"},
+		},
 		ReceivedAt: at,
 	}
 	if _, err := publisher.PublishBatch(ctx, []eventwire.Event{event}); err != nil {

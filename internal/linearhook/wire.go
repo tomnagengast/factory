@@ -20,10 +20,12 @@ const (
 
 func ToWire(event Event) eventwire.Event {
 	attributes := map[string][]string{
-		attributeDeliveryID:      {event.DeliveryID},
-		attributeCommentID:       {event.CommentID},
-		attributeIssueID:         {event.IssueID},
-		attributeIssueIdentifier: {event.IssueIdentifier},
+		attributeDeliveryID:           {event.DeliveryID},
+		attributeCommentID:            {event.CommentID},
+		attributeIssueID:              {event.IssueID},
+		attributeIssueIdentifier:      {event.IssueIdentifier},
+		eventwire.AttributeProducer:   {"linear-webhook"},
+		eventwire.AttributeProvenance: {"human"},
 	}
 	addWireAttribute(attributes, attributeParentID, event.ParentID)
 	addWireAttribute(attributes, attributeURL, event.URL)

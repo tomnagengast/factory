@@ -106,7 +106,8 @@ func TestServiceLifecycleEvents(t *testing.T) {
 	actions := map[string]bool{}
 	for _, event := range publisher.events {
 		actions[event.Action] = true
-		if event.Type != "service" || event.Source != eventwire.SourceFactory || event.Attributes["pid"][0] == "" {
+		if event.Type != "service" || event.Source != eventwire.SourceFactory || event.Attributes["pid"][0] == "" ||
+			!event.Has(eventwire.AttributeProducer, "factory-service") || !event.Has(eventwire.AttributeProvenance, "factory") {
 			t.Fatalf("service event = %#v", event)
 		}
 	}
