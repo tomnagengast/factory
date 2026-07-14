@@ -1,8 +1,8 @@
 # Factory agent runner
 
-Factory turns Linear project metadata into a trusted repository workspace, then turns an explicit Linear label application or later human feedback on a previously managed issue into a durable Codex SDLC run.
+Factory turns normalized system events into durable, workflow-pinned Codex SDLC runs inside trusted repository workspaces. Linear labels and later human feedback remain the compiled defaults, while authenticated operators can add exact event rules and cron-produced events without weakening the protected lifecycle.
 
-## Trigger
+## Triggers
 
 Apply the workspace label:
 
@@ -10,7 +10,9 @@ Apply the workspace label:
 Factory
 ```
 
-Factory initially launches only for a signed `Issue` `update` webhook where the configured Linear actor newly added that label. It compares the current label IDs with `updatedFrom.labelIds`, so unrelated issue updates, label removal, and updates where `Factory` was already present do not start agents. After an issue has retained Factory run history, an eligible human `Comment/create` can start a focused continuation as described below.
+The compiled registry initially launches for a signed `Issue` `update` webhook where the configured Linear actor newly added that label. It compares the current label IDs with `updatedFrom.labelIds`, so unrelated issue updates, label removal, and updates where `Factory` was already present do not start agents. After an issue has retained Factory run history, the protected human `Comment/create` continuation behaves as described below.
+
+Authenticated operators manage additional exact rules and cron schedules at `/triggers`. Configured matches are additive: they can create distinct serialized invocations, but they cannot replace or disable contextual feedback, GitHub remediation, post-merge completion, human-only merge authority, exact verified-head deployment, or cleanup gates.
 
 ## Project onboarding
 
@@ -64,6 +66,7 @@ Factory separates public health from authenticated operational detail:
 - `/wire` is the authenticated system-event workspace with source and type filters, retained-window charts, 25-event pages, normalized journal records, and available Linear raw-payload inspection.
 - `/agents` is the authenticated run dashboard with issue context, lifecycle phase, ready-checkpoint PR and verified head, authoritative refresh timing, resume counts, deployment receipt identity, and terminal rejection evidence.
 - `/agents/<issue-id>/<started-unix-ms>/run` is the authenticated, read-only loop observer for one started run.
+- `/triggers` is the authenticated generic event-rule, cron schedule, protected-route, and recent-routing workspace.
 - `/settings` is the authenticated runtime-policy editor.
 
 Validated Linear request bodies are retained prospectively as private `0600` sidecar files beside the bounded activity index. Sidecars age out with their projection records. Historical wire records from before payload retention remain listable without a body, and GitHub request bodies are never retained. Pending runs without a start timestamp appear as non-link rows until the canonical observer reference exists. Deprecated activity URLs, direct run-ID URLs, unknown paths, malformed paths, and trailing-slash variants return `404` without redirects or compatibility aliases.
@@ -86,9 +89,27 @@ Use the source-agnostic helper inside a Factory run to read or wait on the globa
   --wait 60s
 ```
 
-Filters may use `--source linear|github|factory`, `--type`, `--action`, `--subject`, and repeated `--match key=value`. Factory emits `service/started`, `service/heartbeat` every 30 seconds, `service/stopping` during graceful shutdown, each agent-run state, and one compact `agent-record` event per complete JSONL record. A permanent routing or policy failure is durably rejected and acknowledged so one bad delivery cannot block later records. Transient provider, transport, and projection failures remain pending for ordered retry. Rejection metadata is encoded as optional fields on the existing version-1 acknowledgment/checkpoint shapes so the prior release can still read the journal during rollback.
+Filters may use any validated lowercase source token with `--source`, plus `--type`, `--action`, `--subject`, and repeated `--match key=value`. Factory emits `service/started`, `service/heartbeat` every 30 seconds, `service/stopping` during graceful shutdown, each agent-run state, and one compact `agent-record` event per complete JSONL record. Normalized attributes include bounded producer and provenance values. Linear records may also carry actor, canonical issue, and newly added label identity; GitHub records carry bounded repository and pull-request context. A permanent routing or policy failure is durably rejected and acknowledged so one bad delivery cannot block later records. Transient provider, transport, and projection failures remain pending for ordered retry.
 
 `/api/healthz` is the synchronous current-state probe. Its `wire` object reports total, dispatched, pending, rejected-total, and the last rejected event identity without exposing the private rejection reason. Its `projectSetups` object reports awaiting-metadata, pending, running, succeeded, and failed counts without exposing project names, repository paths, or provider errors. A pending wire record or failed project setup returns `503` with `status: "degraded"`; a drained wire returns `200` when project setup has no failures, even when historical rejected records or incomplete project drafts exist. Manager launch, service-start publication, and heartbeats wait for startup catch-up to drain, while the HTTP listener remains available to expose degraded recovery state.
+
+## Generic trigger registry
+
+Every event admitted to the normalized wire is evaluated against every enabled configured rule before protected per-record dispatch. Rule filters are exact over optional source, type, action, nullable subject, and attribute membership. An omitted field is a wildcard; a JSON `null` or omitted subject is a wildcard, an empty subject matches subject absence, and a nonempty subject matches exactly. Attribute entries use AND semantics, while each value is membership-tested against the event's bounded value list. All matching rules fire in stable rule-ID order.
+
+A rule selects one enabled workflow and one Linear issue target policy: the event subject, exactly one named event attribute, or a preflighted fixed issue. Each match pins the complete validated workflow, resolved issue, rule revision, settings digest, and causal identity before promotion. Later workflow or rule edits do not change admitted work. Invocation-owned agent events inherit root event, parent invocation, parent Run, hop, and ancestor rule IDs; only a stable rule already present in that ancestor path is cycle-suppressed. Independent siblings may match the same rule.
+
+Registry limits are 32 rules and 32 schedules. A rule defaults to a four-hop ceiling, 10 outstanding invocations, and 120 admissions per rolling hour; configured maxima are 8 hops, 100 outstanding, and 10,000 hourly admissions. Global nonterminal invocations are capped at 100. Limit, cycle, unavailable-workflow, and invalid-target decisions are durable visible outcomes rather than hidden drops. Each issue promotes its oldest invocation first, while different issues may use normal global concurrency.
+
+Schedules use standard five-field cron plus a separate IANA timezone. They contain optional event subject and bounded context only, never a workflow selector. A due schedule emits a deterministic `factory / cron / due` event, and ordinary rules decide what workflow and target it reaches. On restart Factory publishes only the oldest missed occurrence, records how many later occurrences were skipped, and advances the cursor only after successful wire publication. A new, re-enabled, or materially edited schedule starts strictly after its edit time.
+
+The authenticated `GET /api/triggers` returns the editable registry, enabled workflow choices, observed source suggestions, schedule and rule status, recent admitted/rejected/suppressed outcomes, compatibility evidence, and read-only protected routes. `PUT /api/triggers` requires same-origin JSON, strict bounded decoding, the current registry and settings revisions, whole-snapshot validation, and fixed-target repository preflight. Conflicts return `409` with the authoritative snapshot, and failed writes do not partially mutate policy.
+
+Private state lives in `~/.local/share/factory/data/triggers.json`, `trigger-routing.jsonl`, and `trigger-cursors.json`, all written with `0600` permissions, fsync, and atomic checkpoint or append semantics. An invocation Run receives a contained `workflow.json` snapshot with `0600` permissions. Routing retains one decision per retained wire event, nonterminal invocations even after wire eviction, terminal audit summaries until safe pruning, and rolling UTC rate buckets independently of wire retention. Recovery truncates only an incomplete final routing-log line; complete corruption fails startup closed.
+
+Startup opens and validates every store, registers generic admission before protected handlers, reconciles invocation and Run pairs, drains ordered wire catch-up, reconciles again, and only then enables mutating APIs, cron, promotion, and Run launch. Until that readiness boundary, health remains available but work does not advance.
+
+The legacy label/comment fields remain round-tripped in `settings.json` for compatibility but are no longer edited on `/settings`. Before Factory has observed a source token outside the former `linear`, `github`, and `factory` vocabulary, rollback to the prior binary additionally requires quiescence, zero pending wire records, zero nonterminal trigger invocations or Runs, and valid legacy settings. After any future source token has been durably observed, `legacyRollbackIncompatible` becomes monotonic and prior-binary activation is unavailable. Recovery is then a forward corrective change or a revert commit deployed from current clean merged `main`.
 
 ## GitHub event sink
 
@@ -211,11 +232,10 @@ Factory stores the first successful update at `~/.local/share/factory/data/setti
 
 The settings surface controls:
 
-- Whether a newly applied Linear label or eligible human comment starts or resumes work, the label name, and each trigger's workflow assignment.
-- Up to eight enabled `$do` workflows with bounded ordered declarative steps. Protected GitHub remediation and post-merge segments use the label workflow.
+- Up to eight enabled `$do` workflows with bounded ordered declarative steps. Trigger rules select these workflows, while protected continuation segments keep their original pinned workflow.
 - Principal, Codex child, and Claude child models and effort, plus principal retry count and manager concurrency.
 
-Settings take effect at safe boundaries. Webhook decisions and manager reconcile passes read the latest revision; each principal segment and child process keeps the snapshot used when it launched. Existing provider processes are never restarted by a settings save. Repository routing, paths, secrets, actor identity, executable commands, arbitrary provider flags, human merge authority, exact verified-head checks, deployment source, and completion validation remain locked in code.
+Settings and registry writes share one policy coordinator. A settings update cannot disable or remove a workflow referenced by an enabled rule. Settings take effect at safe boundaries; each admitted invocation and each running provider segment keeps its pinned snapshot. Existing provider processes are never restarted by a settings save. Repository routing, paths, secrets, actor identity, executable commands, arbitrary provider flags, human merge authority, exact verified-head checks, deployment source, and completion validation remain locked in code.
 
 If a saved value is valid but undesirable, restore it through the page or API with the current revision. If a manually edited file prevents startup, preserve the invalid file for diagnosis, restore a known-good private copy or deliberately move it aside to return to compiled defaults, then restart and verify both health endpoints before allowing new runs.
 
@@ -259,11 +279,14 @@ If health returns `503`, inspect the wire before restarting or deploying again:
 curl -sS http://127.0.0.1:8092/api/healthz | jq '.status, .wire, .projectSetups'
 tail -n 20 ~/.local/share/factory/data/system-events.jsonl
 jq . ~/.local/share/factory/data/project-setups.json
+jq . ~/.local/share/factory/data/triggers.json
+tail -n 20 ~/.local/share/factory/data/trigger-routing.jsonl
+jq . ~/.local/share/factory/data/trigger-cursors.json
 launchctl print "gui/$(id -u)/com.nags.factory"
 tmux -L factory-agents list-sessions
 ```
 
-Pending wire records indicate a retryable dependency or projection failure and keep manager work gated until ordered catch-up succeeds. A failed project setup retains its bounded error and next-attempt time in the private setup store and retries with capped backoff. A growing rejection count indicates a permanent routing or policy failure that was isolated so later records could continue. Do not delete, truncate, or rewrite `system-events.jsonl` or `project-setups.json`; correct the project metadata, credentials, local-path conflict, or dependency and send a new project update when appropriate. Factory issue tmux sessions use a separate server and should remain intact across service recovery.
+Pending wire records indicate a retryable dependency or projection failure and keep manager work gated until ordered catch-up succeeds. A failed project setup retains its bounded error and next-attempt time in the private setup store and retries with capped backoff. A growing rejection count indicates a permanent routing or policy failure that was isolated so later records could continue. Do not delete, truncate, or rewrite `system-events.jsonl`, `trigger-routing.jsonl`, `trigger-cursors.json`, or `project-setups.json`; correct the policy, project metadata, credentials, local-path conflict, or dependency and allow normal reconciliation to resume. Factory issue tmux sessions use a separate server and should remain intact across service recovery.
 
 For a failed release, inspect the failed receipt under `~/.local/share/factory/deployments/failed/` and confirm the previous release recovered. To select a known successful release explicitly:
 
