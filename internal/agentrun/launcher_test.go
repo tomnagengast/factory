@@ -272,6 +272,35 @@ func TestTmuxLauncherCleanupRemovesEmptyWorktreeDirectory(t *testing.T) {
 	}
 }
 
+func TestTmuxLauncherStartPreservesWorktreesWhenCleanupIsDisabled(t *testing.T) {
+	t.Parallel()
+
+	fixture := newLauncherFixture(t)
+	integratedPath := addTestWorktree(t, fixture, "active")
+	tmuxPath := filepath.Join(fixture.root, "tmux")
+	if err := os.WriteFile(tmuxPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	fixture.launcher.config.TmuxPath = tmuxPath
+	run := Run{
+		ID:              "run-active",
+		IssueIdentifier: "ENG-123",
+		RepositoryURL:   fixture.launcher.config.RepoURL,
+		RepositoryPath:  fixture.workspacePath,
+		ManagedRoot:     fixture.launcher.config.ManagedRoot,
+		BaseBranch:      "main",
+	}
+	if err := fixture.launcher.Start(context.Background(), run, "factory-eng-123", filepath.Join(fixture.root, "run"), StartOptions{}); err != nil {
+		t.Fatalf("start without cleanup: %v", err)
+	}
+	if _, err := os.Stat(integratedPath); err != nil {
+		t.Fatalf("active worktree was removed: %v", err)
+	}
+	if _, err := os.Stat(fixture.worktrunkLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worktrunk cleanup unexpectedly ran: %v", err)
+	}
+}
+
 func TestTmuxLauncherPropagatesTriggerKind(t *testing.T) {
 	t.Parallel()
 
@@ -305,7 +334,7 @@ func TestTmuxLauncherPropagatesTriggerKind(t *testing.T) {
 			t.Fatalf("seed %s: %v", name, err)
 		}
 	}
-	if err := launcher.Start(context.Background(), run, "factory-eng-123", runDirectory); err != nil {
+	if err := launcher.Start(context.Background(), run, "factory-eng-123", runDirectory, StartOptions{}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	for _, name := range []string{resultFileName, readyCheckpointFileName} {

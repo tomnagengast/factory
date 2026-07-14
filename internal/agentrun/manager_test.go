@@ -21,6 +21,7 @@ type fakeLauncher struct {
 	startErr     error
 	cleanupCalls int
 	starts       []Run
+	startOptions []StartOptions
 	sessions     map[string]bool
 	results      map[string]ProcessResult
 	ready        map[string]ReadyCheckpoint
@@ -73,8 +74,9 @@ func (f *fakeLauncher) CleanupWorktrees(context.Context) error {
 	return f.cleanupErr
 }
 
-func (f *fakeLauncher) Start(_ context.Context, run Run, sessionName, runDirectory string) error {
+func (f *fakeLauncher) Start(_ context.Context, run Run, sessionName, runDirectory string, options StartOptions) error {
 	f.starts = append(f.starts, run)
+	f.startOptions = append(f.startOptions, options)
 	if f.startErr != nil {
 		return f.startErr
 	}
@@ -266,6 +268,9 @@ func TestManagerSkipsWorktreeCleanupWhileRunIsActive(t *testing.T) {
 	}
 	if len(launcher.starts) != 1 || launcher.starts[0].IssueIdentifier != "ENG-124" {
 		t.Fatalf("starts = %#v", launcher.starts)
+	}
+	if launcher.startOptions[0].CleanupWorktrees {
+		t.Fatal("active run allowed startup worktree cleanup")
 	}
 }
 
