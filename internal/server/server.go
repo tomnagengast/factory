@@ -137,6 +137,7 @@ type Config struct {
 	GenericTriggers    bool
 	TriggerPolicy      TriggerPolicy
 	ScheduleStatus     ScheduleStatus
+	Ready              func() bool
 }
 
 type appServer struct {
@@ -159,6 +160,7 @@ type appServer struct {
 	genericTriggers    bool
 	triggerPolicy      TriggerPolicy
 	scheduleStatus     ScheduleStatus
+	ready              func() bool
 }
 
 type BuildIdentity struct {
@@ -306,6 +308,9 @@ func New(config Config) (http.Handler, error) {
 	if config.RepositoryResolver == nil {
 		config.RepositoryResolver = legacyRepositoryResolver{}
 	}
+	if config.Ready == nil {
+		config.Ready = func() bool { return true }
+	}
 	if config.GenericTriggers && (config.TriggerPolicy == nil || config.ScheduleStatus == nil) {
 		return nil, errors.New("server: generic trigger policy and schedule status are required")
 	}
@@ -330,6 +335,7 @@ func New(config Config) (http.Handler, error) {
 		genericTriggers:    config.GenericTriggers,
 		triggerPolicy:      config.TriggerPolicy,
 		scheduleStatus:     config.ScheduleStatus,
+		ready:              config.Ready,
 	}
 	if err := app.events.Handle(eventwire.Filter{Source: eventwire.SourceLinear}, app.dispatchLinear); err != nil {
 		return nil, err
@@ -382,7 +388,7 @@ func (s *appServer) healthz(w http.ResponseWriter, _ *http.Request) {
 	setups := s.projectSetups.PublicSnapshot()
 	health := healthResponse{Status: "ok", App: "factory", Wire: wire, ProjectSetups: setups, BuildIdentity: s.build}
 	httpStatus := http.StatusOK
-	if status.Pending > 0 || setups.Failed > 0 {
+	if !s.ready() || status.Pending > 0 || setups.Failed > 0 {
 		health.Status = "degraded"
 		httpStatus = http.StatusServiceUnavailable
 	}
@@ -506,6 +512,9 @@ func (s *appServer) getSettings(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *appServer) putSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireReady(w) {
+		return
+	}
 	if !sameOrigin(r) {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
@@ -549,6 +558,10 @@ func (s *appServer) putSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if errors.Is(err, triggerrouter.ErrPolicyPending) {
+		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		slog.Error("update settings", "error", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -573,6 +586,9 @@ func sameOrigin(r *http.Request) bool {
 }
 
 func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
+	if !s.requireReady(w) {
+		return
+	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxLinearWebhookBody))
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
@@ -649,6 +665,9 @@ func commentWake(payload linearPayload, deliveryID, allowedActorID string, now t
 }
 
 func (s *appServer) githubWebhook(w http.ResponseWriter, r *http.Request) {
+	if !s.requireReady(w) {
+		return
+	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxGitHubWebhookBody))
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
@@ -681,6 +700,15 @@ func (s *appServer) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *appServer) requireReady(w http.ResponseWriter) bool {
+	if s.ready() {
+		return true
+	}
+	w.Header().Set("Retry-After", "5")
+	http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+	return false
 }
 
 func linearWireEvent(

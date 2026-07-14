@@ -201,3 +201,58 @@ func TestCoordinatedWireRoutesWholeFutureSourceBatchBeforeRecordHandlers(t *test
 		t.Fatalf("handled=%d syncs=%d marks=%d registry=%#v", handled, syncs, registryStore.marks, registryStore.snapshot)
 	}
 }
+
+func TestCoordinatedWireRejectsPolicyMutationUntilPendingAdmissionIsDurable(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	now := time.Date(2026, 7, 14, 15, 0, 0, 0, time.UTC)
+	configuration, defaults := testPolicy()
+	configurationStore, err := settings.Open(filepath.Join(directory, "settings.json"), configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registryStore, err := triggerregistry.Open(filepath.Join(directory, "triggers.json"), defaults, configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing, err := Open(filepath.Join(directory, "routing.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := eventwire.Open(filepath.Join(directory, "events.jsonl"), 20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := eventwire.New(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := NewCoordinatedWire(raw, registryStore, configurationStore, routing, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing.sync = func(*os.File) error { return errors.New("injected routing sync failure") }
+	if _, _, err := wire.Publish(context.Background(), testRecord("factory:pending", 1, eventwire.SourceFactory, now).Event); err == nil {
+		t.Fatal("routing failure was ignored")
+	}
+	candidate := registryStore.Snapshot()
+	candidate.Rules[0].Name = "Edited while pending"
+	if _, err := wire.UpdateRegistry(candidate.Revision, configuration.Revision, candidate, now); !errors.Is(err, ErrPolicyPending) {
+		t.Fatalf("registry update error = %v, want pending admission", err)
+	}
+	settingsCandidate := configurationStore.Snapshot()
+	settingsCandidate.Runtime.MaxConcurrentRuns++
+	if _, err := wire.UpdateSettings(settingsCandidate.Revision, settingsCandidate, now); !errors.Is(err, ErrPolicyPending) {
+		t.Fatalf("settings update error = %v, want pending admission", err)
+	}
+	if registryStore.Snapshot().Revision != 0 || configurationStore.Snapshot().Revision != 0 {
+		t.Fatal("policy changed while an event lacked a durable decision")
+	}
+	routing.sync = func(file *os.File) error { return file.Sync() }
+	if err := wire.CatchUp(context.Background()); err != nil {
+		t.Fatalf("catch up: %v", err)
+	}
+	if _, err := wire.UpdateRegistry(candidate.Revision, configuration.Revision, candidate, now); err != nil {
+		t.Fatalf("registry update after admission: %v", err)
+	}
+}

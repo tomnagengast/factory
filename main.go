@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -344,7 +345,7 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	triggerManager, err := triggerrouter.NewManager(routingStore, runStore, repositoryResolver, manager, slog.Default(), time.Now)
+	triggerManager, err := triggerrouter.NewManager(routingStore, runStore, events, repositoryResolver, manager, slog.Default(), time.Now)
 	if err != nil {
 		return err
 	}
@@ -400,6 +401,7 @@ func serve(ctx context.Context) error {
 		return err
 	}
 
+	var ready atomic.Bool
 	handler, err := server.New(server.Config{
 		Web:                web,
 		ActivityStore:      activityStore,
@@ -428,6 +430,7 @@ func serve(ctx context.Context) error {
 		GenericTriggers: true,
 		TriggerPolicy:   events,
 		ScheduleStatus:  scheduler,
+		Ready:           ready.Load,
 	})
 	if err != nil {
 		return err
@@ -446,7 +449,7 @@ func serve(ctx context.Context) error {
 		slog.Info("factory listening", "address", httpServer.Addr)
 		errCh <- httpServer.ListenAndServe()
 	}()
-	go recoverEventWire(ctx, events, 5*time.Second, func() error {
+	go recoverEventWire(ctx, events, 5*time.Second, triggerManager.ReconcileExisting, func() error {
 		projectManager.Reconcile(ctx)
 		if err := triggerManager.Reconcile(ctx); err != nil {
 			return err
@@ -459,6 +462,7 @@ func serve(ctx context.Context) error {
 		go triggerManager.Run(ctx, 2*time.Second)
 		go scheduler.Run(ctx, 30*time.Second)
 		go publishServiceHeartbeats(ctx, events, serviceStartedAt, serviceHeartbeatInterval, time.Now)
+		ready.Store(true)
 		return nil
 	}, slog.Default())
 
@@ -486,11 +490,15 @@ func recoverEventWire(
 	ctx context.Context,
 	events recoverableEventWire,
 	retryInterval time.Duration,
+	beforeCatchUp func(context.Context) error,
 	onReady func() error,
 	logger *slog.Logger,
 ) {
 	for {
-		err := events.CatchUp(ctx)
+		err := beforeCatchUp(ctx)
+		if err == nil {
+			err = events.CatchUp(ctx)
+		}
 		if err == nil {
 			err = onReady()
 		}

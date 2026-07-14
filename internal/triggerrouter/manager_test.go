@@ -27,6 +27,10 @@ type notifierStub struct{ calls int }
 
 func (s *notifierStub) Notify() { s.calls++ }
 
+type dispatchStub struct{ dispatched uint64 }
+
+func (s dispatchStub) Status() eventwire.Status { return eventwire.Status{Dispatched: s.dispatched} }
+
 func TestManagerSerializesSameIssueAndReflectsTerminalRun(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
@@ -51,7 +55,7 @@ func TestManagerSerializesSameIssueAndReflectsTerminalRun(t *testing.T) {
 	}
 	resolver := &resolverStub{config: testRepository(directory)}
 	notifier := &notifierStub{}
-	manager, err := NewManager(routing, runs, resolver, notifier, slog.Default(), func() time.Time { return clock })
+	manager, err := NewManager(routing, runs, dispatchStub{dispatched: 2}, resolver, notifier, slog.Default(), func() time.Time { return clock })
 	if err != nil {
 		t.Fatalf("manager: %v", err)
 	}
@@ -111,7 +115,7 @@ func TestManagerRejectsPermanentRoutingButRetriesTransientFailure(t *testing.T) 
 			routing, _ := Open(filepath.Join(directory, "routing.jsonl"))
 			_, _ = routing.ApplyDecisionBatch([]eventwire.Record{testRecord("factory:one", 1, eventwire.SourceFactory, now)}, registry, configuration, now)
 			runs, _ := agentrun.Open(filepath.Join(directory, "runs.json"), 100)
-			manager, _ := NewManager(routing, runs, &resolverStub{err: test.err}, &notifierStub{}, slog.Default(), func() time.Time { return now })
+			manager, _ := NewManager(routing, runs, dispatchStub{dispatched: 1}, &resolverStub{err: test.err}, &notifierStub{}, slog.Default(), func() time.Time { return now })
 			if err := manager.Reconcile(context.Background()); err != nil {
 				t.Fatalf("reconcile: %v", err)
 			}
@@ -119,6 +123,38 @@ func TestManagerRejectsPermanentRoutingButRetriesTransientFailure(t *testing.T) 
 				t.Fatalf("state = %q, want %q", got, test.wantState)
 			}
 		})
+	}
+}
+
+func TestManagerWaitsForProtectedDispatchBeforePromotion(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	now := time.Date(2026, 7, 14, 15, 0, 0, 0, time.UTC)
+	configuration, registry := testPolicy()
+	registry.Rules = registry.Rules[:1]
+	routing, _ := Open(filepath.Join(directory, "routing.jsonl"))
+	_, _ = routing.ApplyDecisionBatch([]eventwire.Record{testRecord("factory:one", 1, eventwire.SourceFactory, now)}, registry, configuration, now)
+	runs, _ := agentrun.Open(filepath.Join(directory, "runs.json"), 100)
+	gate := &dispatchStub{}
+	manager, _ := NewManager(routing, runs, gate, &resolverStub{config: testRepository(directory)}, &notifierStub{}, slog.Default(), func() time.Time { return now })
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := routing.Snapshot().Invocations[0].State; got != StateQueued || len(runs.Snapshot().Runs) != 0 {
+		t.Fatalf("promoted before protected dispatch: state=%q runs=%#v", got, runs.Snapshot().Runs)
+	}
+	gate.dispatched = 1
+	if err := manager.ReconcileExisting(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := routing.Snapshot().Invocations[0].State; got != StateQueued {
+		t.Fatalf("startup repair promoted new queued work: state=%q", got)
+	}
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := routing.Snapshot().Invocations[0].State; got != StateClaimed || len(runs.Snapshot().Runs) != 1 {
+		t.Fatalf("did not promote after protected dispatch: state=%q runs=%#v", got, runs.Snapshot().Runs)
 	}
 }
 
