@@ -30,6 +30,7 @@ type settingsMutationStore interface {
 }
 
 var ErrPolicyConflict = errors.New("trigger router: coordinated policy conflict")
+var ErrPolicyPending = errors.New("trigger router: pending event admission")
 var ErrPolicyValidation = errors.New("trigger router: coordinated policy validation")
 
 type CoordinatedWire struct {
@@ -104,6 +105,9 @@ func (w *CoordinatedWire) RoutingSnapshot() Snapshot { return w.routing.Snapshot
 func (w *CoordinatedWire) UpdateRegistry(expectedRegistry, expectedSettings uint64, candidate triggerregistry.Snapshot, now time.Time) (triggerregistry.Snapshot, error) {
 	w.policy.Lock()
 	defer w.policy.Unlock()
+	if !w.pendingDecisionsComplete() {
+		return w.registry.Snapshot(), ErrPolicyPending
+	}
 	configuration := w.settings.Snapshot()
 	if configuration.Revision != expectedSettings {
 		return w.registry.Snapshot(), ErrPolicyConflict
@@ -118,6 +122,9 @@ func (w *CoordinatedWire) UpdateRegistry(expectedRegistry, expectedSettings uint
 func (w *CoordinatedWire) UpdateSettings(expected uint64, candidate settings.Snapshot, now time.Time) (settings.Snapshot, error) {
 	w.policy.Lock()
 	defer w.policy.Unlock()
+	if !w.pendingDecisionsComplete() {
+		return w.settings.Snapshot(), ErrPolicyPending
+	}
 	if err := w.registry.Snapshot().Validate(candidate); err != nil {
 		return w.settings.Snapshot(), fmt.Errorf("%w: %v", ErrPolicyValidation, err)
 	}
@@ -126,6 +133,17 @@ func (w *CoordinatedWire) UpdateSettings(expected uint64, candidate settings.Sna
 		return w.settings.Snapshot(), errors.New("trigger router: settings are read-only")
 	}
 	return store.Update(expected, candidate, now)
+}
+
+func (w *CoordinatedWire) pendingDecisionsComplete() bool {
+	status := w.events.Status()
+	for sequence := status.Dispatched + 1; sequence <= status.Total; sequence++ {
+		record, found := w.events.Record(sequence)
+		if !found || !w.routing.HasDecision(record.Event.ID, record.Sequence) {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *CoordinatedWire) admit(_ context.Context, records []eventwire.Record) error {

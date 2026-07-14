@@ -110,6 +110,13 @@ func (s *Store) Invocation(id string) (Invocation, bool) {
 	return invocation.Clone(), found
 }
 
+func (s *Store) HasDecision(eventID string, sequence uint64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	decision, found := s.decisions[eventID]
+	return found && decision.EventSequence == sequence
+}
+
 func (s *Store) ClaimedInvocation(invocationID, runID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

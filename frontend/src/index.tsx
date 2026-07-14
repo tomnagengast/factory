@@ -1478,7 +1478,8 @@ function triggerSaveButtonLabel(state: SettingsSaveState, broadConfirmed: boolea
 function broadTriggerRule(rule: TriggerRule): boolean {
   const filter = rule.filter;
   return (!filter.source && !filter.type && !filter.action && filter.subject === undefined && Object.keys(filter.attributes ?? {}).length === 0) ||
-    filter.type === "telemetry" || filter.type === "lifecycle" || filter.type === "agent-record" || filter.type === "agent-run";
+    filter.source === "telemetry" || filter.type === "telemetry" || filter.type === "lifecycle" || filter.type === "service" ||
+    filter.type === "agent-record" || filter.type === "agent-run";
 }
 
 function ruleScopeSummary(rule: TriggerRule): string {

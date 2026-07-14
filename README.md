@@ -10,7 +10,7 @@ Apply the workspace label:
 Factory
 ```
 
-The compiled registry initially launches for a signed `Issue` `update` webhook where the configured Linear actor newly added that label. It compares the current label IDs with `updatedFrom.labelIds`, so unrelated issue updates, label removal, and updates where `Factory` was already present do not start agents. After an issue has retained Factory run history, the protected human `Comment/create` continuation behaves as described below.
+The compiled registry initially launches for a signed `Issue` `update` webhook where the configured Linear actor newly added that label. It compares the current label IDs with `updatedFrom.labelIds`, so unrelated issue updates, label removal, and updates where `Factory` was already present do not start agents. After an issue has retained Factory run history, the protected human `Comment/create` continuation behaves as described below. The compiled generic comment rule is also enabled to preserve the legacy configured comment choice, so one eligible comment may both resume protected lifecycle work and enqueue one independent generic invocation; same-issue serialization prevents the two Runs from executing together.
 
 Authenticated operators manage additional exact rules and cron schedules at `/triggers`. Configured matches are additive: they can create distinct serialized invocations, but they cannot replace or disable contextual feedback, GitHub remediation, post-merge completion, human-only merge authority, exact verified-head deployment, or cleanup gates.
 

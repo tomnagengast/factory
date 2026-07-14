@@ -8,26 +8,32 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/agentrun"
+	"github.com/tomnagengast/factory/internal/eventwire"
 )
 
 type RunNotifier interface {
 	Notify()
 }
 
+type EventDispatchGate interface {
+	Status() eventwire.Status
+}
+
 type Manager struct {
 	routing  *Store
 	runs     *agentrun.Store
+	dispatch EventDispatchGate
 	resolver agentrun.RepositoryResolver
 	notifier RunNotifier
 	logger   *slog.Logger
 	now      func() time.Time
 }
 
-func NewManager(routing *Store, runs *agentrun.Store, resolver agentrun.RepositoryResolver, notifier RunNotifier, logger *slog.Logger, now func() time.Time) (*Manager, error) {
-	if routing == nil || runs == nil || resolver == nil || notifier == nil || logger == nil || now == nil {
+func NewManager(routing *Store, runs *agentrun.Store, dispatch EventDispatchGate, resolver agentrun.RepositoryResolver, notifier RunNotifier, logger *slog.Logger, now func() time.Time) (*Manager, error) {
+	if routing == nil || runs == nil || dispatch == nil || resolver == nil || notifier == nil || logger == nil || now == nil {
 		return nil, errors.New("trigger router manager: dependencies are required")
 	}
-	return &Manager{routing: routing, runs: runs, resolver: resolver, notifier: notifier, logger: logger, now: now}, nil
+	return &Manager{routing: routing, runs: runs, dispatch: dispatch, resolver: resolver, notifier: notifier, logger: logger, now: now}, nil
 }
 
 func (m *Manager) Run(ctx context.Context, interval time.Duration) {
@@ -49,6 +55,14 @@ func (m *Manager) Run(ctx context.Context, interval time.Duration) {
 }
 
 func (m *Manager) Reconcile(ctx context.Context) error {
+	return m.reconcile(ctx, true)
+}
+
+func (m *Manager) ReconcileExisting(ctx context.Context) error {
+	return m.reconcile(ctx, false)
+}
+
+func (m *Manager) reconcile(ctx context.Context, includeQueued bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -56,9 +70,10 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 		return err
 	}
 	snapshot := m.routing.Snapshot()
+	dispatched := m.dispatch.Status().Dispatched
 	oldest := make(map[string]Invocation)
 	for _, invocation := range snapshot.Invocations {
-		if !invocation.Nonterminal() {
+		if !invocation.Nonterminal() || invocation.EventSequence > dispatched || (!includeQueued && invocation.State == StateQueued) {
 			continue
 		}
 		if _, found := oldest[invocation.IssueIdentifier]; !found {

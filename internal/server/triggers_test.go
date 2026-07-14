@@ -103,6 +103,37 @@ func TestTriggerAPIIncludesSuppressedRoutingOutcomes(t *testing.T) {
 	}
 }
 
+func TestTriggerMutationWaitsForStartupReadiness(t *testing.T) {
+	t.Parallel()
+	ready := false
+	handler, policy, _ := testTriggerHandlerReady(t, func() bool { return ready })
+	health := httptest.NewRecorder()
+	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/api/healthz", nil))
+	if health.Code != http.StatusServiceUnavailable || !strings.Contains(health.Body.String(), `"status":"degraded"`) {
+		t.Fatalf("not-ready health status=%d body=%s", health.Code, health.Body.String())
+	}
+	response := authenticatedTriggerRequest(t, handler, policy.RegistrySnapshot())
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "5" {
+		t.Fatalf("not-ready PUT status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	ready = true
+	response = authenticatedTriggerRequest(t, handler, policy.RegistrySnapshot())
+	if response.Code != http.StatusOK {
+		t.Fatalf("ready PUT status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestTriggerProjectionHidesTerminalRunDetail(t *testing.T) {
+	t.Parallel()
+	secret := "credential-shaped terminal detail"
+	if got := visibleInvocationReason(triggerrouter.Invocation{State: triggerrouter.StateBlocked, Reason: secret}); got != "" {
+		t.Fatalf("terminal Run detail was visible: %q", got)
+	}
+	if got := visibleInvocationReason(triggerrouter.Invocation{State: triggerrouter.StateRejected, Reason: "repository-routing-rejected"}); got != "repository-routing-rejected" {
+		t.Fatalf("safe routing rejection = %q", got)
+	}
+}
+
 func TestTriggerAPIRejectsCrossOriginAndWorkflowRemoval(t *testing.T) {
 	t.Parallel()
 	handler, policy, configurationStore := testTriggerHandler(t)
@@ -127,6 +158,10 @@ func TestTriggerAPIRejectsCrossOriginAndWorkflowRemoval(t *testing.T) {
 }
 
 func testTriggerHandler(t *testing.T) (http.Handler, *triggerrouter.CoordinatedWire, *settings.Store) {
+	return testTriggerHandlerReady(t, func() bool { return true })
+}
+
+func testTriggerHandlerReady(t *testing.T, ready func() bool) (http.Handler, *triggerrouter.CoordinatedWire, *settings.Store) {
 	t.Helper()
 	directory := t.TempDir()
 	activityStore, _ := activity.Open(filepath.Join(directory, "activity.json"), 10)
@@ -153,6 +188,7 @@ func testTriggerHandler(t *testing.T) (http.Handler, *triggerrouter.CoordinatedW
 		ProjectSetups: &testProjectSetups{}, TriggerActor: testActorID, RepositoryResolver: resolver,
 		Now: func() time.Time { return testNow }, Build: testBuildIdentity(), GenericTriggers: true,
 		TriggerPolicy: policy, ScheduleStatus: scheduleStatusStub{},
+		Ready: ready,
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)

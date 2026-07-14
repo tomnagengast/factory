@@ -60,6 +60,9 @@ func (s *appServer) getTriggers(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *appServer) putTriggers(w http.ResponseWriter, r *http.Request) {
+	if !s.requireReady(w) {
+		return
+	}
 	if !sameOrigin(r) {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
@@ -98,6 +101,10 @@ func (s *appServer) putTriggers(w http.ResponseWriter, r *http.Request) {
 	_, err = s.triggerPolicy.UpdateRegistry(candidate.Revision, configuration.Revision, candidate, s.now())
 	if errors.Is(err, triggerregistry.ErrRevisionConflict) || errors.Is(err, triggerrouter.ErrPolicyConflict) {
 		writeJSON(w, http.StatusConflict, s.triggerResponse())
+		return
+	}
+	if errors.Is(err, triggerrouter.ErrPolicyPending) {
+		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 		return
 	}
 	if err != nil {
@@ -182,7 +189,7 @@ func (s *appServer) triggerResponse() triggerResponse {
 					ID: invocation.ID, EventID: invocation.EventID, RuleID: invocation.Rule.ID,
 					RuleRevision: invocation.Rule.Revision, WorkflowID: invocation.Workflow.ID,
 					IssueIdentifier: invocation.IssueIdentifier, State: invocation.State,
-					RunID: invocation.RunID, Reason: invocation.Reason, UpdatedAt: invocation.UpdatedAt,
+					RunID: invocation.RunID, Reason: visibleInvocationReason(invocation), UpdatedAt: invocation.UpdatedAt,
 				})
 				continue
 			}
@@ -194,4 +201,11 @@ func (s *appServer) triggerResponse() triggerResponse {
 		}
 	}
 	return response
+}
+
+func visibleInvocationReason(invocation triggerrouter.Invocation) string {
+	if invocation.State == triggerrouter.StateRejected {
+		return invocation.Reason
+	}
+	return ""
 }

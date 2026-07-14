@@ -49,7 +49,7 @@ func TestRecoverEventWireGatesRuntimeUntilCatchUp(t *testing.T) {
 	ready := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go recoverEventWire(ctx, wire, time.Millisecond, func() error {
+	go recoverEventWire(ctx, wire, time.Millisecond, func(context.Context) error { return nil }, func() error {
 		if pending := wire.Status().Pending; pending != 0 {
 			t.Errorf("runtime started with %d pending events", pending)
 		}
