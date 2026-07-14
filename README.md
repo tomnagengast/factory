@@ -155,7 +155,7 @@ Review the plan for blocking correctness or security problems. Do not modify fil
 PROMPT
 ```
 
-The helper returns JSON containing the tmux window ID and durable output paths. Codex children use `gpt-5.6-sol` with high reasoning. Claude children use `fable` with high effort and a reduced headless tool configuration. Children inherit the helper, so they can launch their own bounded windows. The principal prefers Claude for reviews, but repeats the same review with a Codex child when the Claude CLI fails because of authentication, usage limits, service availability, or another operational error.
+The helper returns JSON containing the tmux window ID and durable output paths. Codex children use `gpt-5.6-sol` with high reasoning. Claude children use `fable` with high effort and a reduced headless tool configuration. Children inherit the helper, so they can launch their own bounded windows. For every adversarial review round, the principal starts one Claude child and one Codex child with the same prompt before waiting for either. Both usable reviews form one conservative round: either provider's P0/P1 finding requires revision, while one terminal provider failure is retained as evidence and tolerated when the other review is usable. If neither provider returns a usable review after safe retries, the principal stops before implementation with `authority_unavailable`. Factory terminal completion requires every launched child to write a finished result, but a finished nonzero child exit does not by itself make the run incomplete.
 
 ## Inspecting runs
 

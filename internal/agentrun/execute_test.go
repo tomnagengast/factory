@@ -64,9 +64,14 @@ func TestPrincipalPromptGroupsChildAgentsInTmux(t *testing.T) {
 		"linear_graphql.py",
 		"FACTORY_AGENT_HELPER",
 		"linear-comments",
-		"Claude review child exits nonzero",
+		"--provider claude",
 		"--provider codex",
-		"exact same prompt",
+		"exact same rendered prompt",
+		"Spawn both children before waiting",
+		"READY requires both reviews to be ready",
+		"P0/P1 finding or REVISE verdict from either review",
+		"use the other usable review without launching a fallback",
+		"authority_unavailable",
 		"FACTORY_RESULT: SUCCEEDED",
 	} {
 		if !strings.Contains(prompt, expected) {
@@ -75,6 +80,9 @@ func TestPrincipalPromptGroupsChildAgentsInTmux(t *testing.T) {
 	}
 	if strings.Contains(prompt, "GitHub approval") {
 		t.Fatalf("prompt still requires GitHub approval: %s", prompt)
+	}
+	if strings.Contains(prompt, "Use Claude as the first choice") {
+		t.Fatalf("prompt still serializes review providers: %s", prompt)
 	}
 }
 
