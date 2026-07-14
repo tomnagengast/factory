@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -34,8 +36,6 @@ import (
 var testNow = time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC)
 
 const testActorID = "actor-tom"
-
-const testViewerPassword = "viewer-test-password"
 
 func TestHealthz(t *testing.T) {
 	t.Parallel()
@@ -139,8 +139,10 @@ func TestPrivateCanonicalRoutesRequireViewerAuthentication(t *testing.T) {
 		"/api/settings",
 	} {
 		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
-		if recorder.Code != http.StatusUnauthorized || recorder.Header().Get("WWW-Authenticate") == "" {
+		request := httptest.NewRequest(http.MethodGet, target, nil)
+		request.Header.Set("Authorization", "Basic ZmFjdG9yeTp2aWV3ZXItdGVzdC1wYXNzd29yZA==")
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusUnauthorized || recorder.Header().Get("WWW-Authenticate") != "" {
 			t.Fatalf("%s API response = %d, challenge %q", target, recorder.Code, recorder.Header().Get("WWW-Authenticate"))
 		}
 	}
@@ -236,7 +238,7 @@ func TestSettingsAPIRejectsUnsafeAndStaleWrites(t *testing.T) {
 
 	malformed := httptest.NewRecorder()
 	malformedRequest := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"schema":1,"unknown":true}`))
-	malformedRequest.SetBasicAuth("factory", testViewerPassword)
+	malformedRequest.AddCookie(viewerSessionCookie(t, handler))
 	malformedRequest.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(malformed, malformedRequest)
 	if malformed.Code != http.StatusBadRequest {
@@ -245,7 +247,7 @@ func TestSettingsAPIRejectsUnsafeAndStaleWrites(t *testing.T) {
 
 	tooLarge := httptest.NewRecorder()
 	tooLargeRequest := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(strings.Repeat(" ", maxSettingsBody+1)))
-	tooLargeRequest.SetBasicAuth("factory", testViewerPassword)
+	tooLargeRequest.AddCookie(viewerSessionCookie(t, handler))
 	tooLargeRequest.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(tooLarge, tooLargeRequest)
 	if tooLarge.Code != http.StatusRequestEntityTooLarge {
@@ -332,10 +334,7 @@ func TestAuthenticatedAgentPageServesFrontend(t *testing.T) {
 	t.Parallel()
 
 	handler := testHandler(t)
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/agents/ENG-23/1783714439062/run", nil)
-	request.SetBasicAuth("factory", testViewerPassword)
-	handler.ServeHTTP(recorder, request)
+	recorder := authenticatedRequest(t, handler, "/agents/ENG-23/1783714439062/run")
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
 	}
@@ -1545,14 +1544,40 @@ func testViewerAuth(t *testing.T) *viewerauth.Authenticator {
 		RedirectURL:   "https://factory.example/auth/google/callback",
 		AllowedEmails: []string{"tom@example.com"},
 		SessionKey:    bytes.Repeat([]byte("s"), 32),
-		BasicUsername: "factory",
-		BasicPassword: testViewerPassword,
-		Now:           func() time.Time { return testNow },
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			switch request.URL.String() {
+			case "https://oauth2.googleapis.com/token":
+				return testOAuthResponse(`{"access_token":"access-token"}`), nil
+			case "https://openidconnect.googleapis.com/v1/userinfo":
+				if got := request.Header.Get("Authorization"); got != "Bearer access-token" {
+					t.Fatalf("OAuth userinfo authorization = %q", got)
+				}
+				return testOAuthResponse(`{"sub":"google-subject","email":"tom@example.com","email_verified":true}`), nil
+			default:
+				t.Fatalf("unexpected OAuth request: %s", request.URL)
+				return nil, nil
+			}
+		})},
+		Now: func() time.Time { return testNow },
 	})
 	if err != nil {
 		t.Fatalf("new viewer auth: %v", err)
 	}
 	return auth
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func testOAuthResponse(body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
 }
 
 func testSettingsStore(t *testing.T) *settings.Store {
@@ -1599,7 +1624,7 @@ func authenticatedRequest(t *testing.T, handler http.Handler, target string) *ht
 	t.Helper()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, target, nil)
-	request.SetBasicAuth("factory", testViewerPassword)
+	request.AddCookie(viewerSessionCookie(t, handler))
 	handler.ServeHTTP(recorder, request)
 	return recorder
 }
@@ -1612,13 +1637,55 @@ func authenticatedSettingsRequest(t *testing.T, handler http.Handler, candidate 
 	}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewReader(body))
-	request.SetBasicAuth("factory", testViewerPassword)
+	request.AddCookie(viewerSessionCookie(t, handler))
 	request.Header.Set("Content-Type", "application/json")
 	if origin != "" {
 		request.Header.Set("Origin", origin)
 	}
 	handler.ServeHTTP(recorder, request)
 	return recorder
+}
+
+func viewerSessionCookie(t *testing.T, handler http.Handler) *http.Cookie {
+	t.Helper()
+	login := httptest.NewRecorder()
+	handler.ServeHTTP(login, httptest.NewRequest(http.MethodGet, "/auth/google/login?next=%2Fhome", nil))
+	if login.Code != http.StatusFound {
+		t.Fatalf("OAuth login status = %d, body %q", login.Code, login.Body.String())
+	}
+	location, err := url.Parse(login.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse OAuth login redirect: %v", err)
+	}
+	state := location.Query().Get("state")
+	if state == "" {
+		t.Fatal("OAuth login redirect is missing state")
+	}
+	stateCookie := responseCookie(t, login, "__Host-factory_oauth_state")
+
+	callback := httptest.NewRecorder()
+	callbackRequest := httptest.NewRequest(
+		http.MethodGet,
+		"/auth/google/callback?state="+url.QueryEscape(state)+"&code=google-code",
+		nil,
+	)
+	callbackRequest.AddCookie(stateCookie)
+	handler.ServeHTTP(callback, callbackRequest)
+	if callback.Code != http.StatusFound || callback.Header().Get("Location") != "/home" {
+		t.Fatalf("OAuth callback = %d, location %q, body %q", callback.Code, callback.Header().Get("Location"), callback.Body.String())
+	}
+	return responseCookie(t, callback, "__Host-factory_session")
+}
+
+func responseCookie(t *testing.T, recorder *httptest.ResponseRecorder, name string) *http.Cookie {
+	t.Helper()
+	for _, cookie := range recorder.Result().Cookies() {
+		if cookie.Name == name && cookie.MaxAge >= 0 {
+			return cookie
+		}
+	}
+	t.Fatalf("response cookie %q not found", name)
+	return nil
 }
 
 func signedWebhookRequest(body, deliveryID string, secret []byte) *http.Request {
