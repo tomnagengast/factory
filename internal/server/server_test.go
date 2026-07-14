@@ -404,7 +404,7 @@ func TestAuthenticatedWirePagesAllSourcesAndReadsLinearPayload(t *testing.T) {
 		t.Fatalf("webhook status = %d, want %d", webhook.Code, http.StatusOK)
 	}
 	if _, _, err := wire.Publish(context.Background(), eventwire.Event{
-		ID: "factory:future", Source: eventwire.SourceFactory, Type: "future-kind", Action: "observed", ReceivedAt: testNow.Add(time.Second),
+		ID: "telemetry:future", Source: eventwire.Source("telemetry"), Type: "future-kind", Action: "observed", ReceivedAt: testNow.Add(time.Second),
 	}); err != nil {
 		t.Fatalf("publish future event: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestAuthenticatedWirePagesAllSourcesAndReadsLinearPayload(t *testing.T) {
 		t.Fatalf("detail response = %d %#v", detailRecorder.Code, detail)
 	}
 
-	filteredRecorder := authenticatedRequest(t, handler, "/api/wire?source=factory&type=future-kind")
+	filteredRecorder := authenticatedRequest(t, handler, "/api/wire?source=telemetry&type=future-kind")
 	var filtered eventwire.Page
 	if err := json.NewDecoder(filteredRecorder.Body).Decode(&filtered); err != nil {
 		t.Fatalf("decode filtered wire: %v", err)
@@ -460,7 +460,7 @@ func TestWireAPIRejectsInvalidQueriesAndSequences(t *testing.T) {
 	for _, target := range []string{
 		"/api/wire?page=0",
 		"/api/wire?pageSize=101",
-		"/api/wire?source=unknown",
+		"/api/wire?source=Unknown",
 		"/api/wire?type=%20Issue",
 	} {
 		recorder := authenticatedRequest(t, handler, target)

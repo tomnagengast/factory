@@ -10,6 +10,8 @@ import (
 
 type Handler func(context.Context, Record) error
 
+type BatchHandler func(context.Context, []Record) error
+
 type route struct {
 	filter  Filter
 	handler Handler
@@ -20,6 +22,8 @@ type Wire struct {
 	dispatchMu sync.Mutex
 	routesMu   sync.RWMutex
 	routes     []route
+	batchMu    sync.RWMutex
+	batch      []BatchHandler
 	now        func() time.Time
 }
 
@@ -53,6 +57,16 @@ func (w *Wire) Handle(filter Filter, handler Handler) error {
 	w.routesMu.Lock()
 	defer w.routesMu.Unlock()
 	w.routes = append(w.routes, route{filter: filter, handler: handler})
+	return nil
+}
+
+func (w *Wire) HandleBatch(handler BatchHandler) error {
+	if handler == nil {
+		return errors.New("event wire: batch handler is required")
+	}
+	w.batchMu.Lock()
+	defer w.batchMu.Unlock()
+	w.batch = append(w.batch, handler)
 	return nil
 }
 
@@ -106,9 +120,20 @@ func (w *Wire) catchUpLocked(ctx context.Context) error {
 		return nil
 	}
 	_, _, channelAcks, _ := w.journal.Snapshot()
+	w.batchMu.RLock()
+	batchHandlers := append([]BatchHandler(nil), w.batch...)
+	w.batchMu.RUnlock()
 	w.routesMu.RLock()
 	routes := append([]route(nil), w.routes...)
 	w.routesMu.RUnlock()
+	for _, handler := range batchHandlers {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := handler(ctx, cloneRecords(pending)); err != nil {
+			return fmt.Errorf("event wire: batch dispatch: %w", err)
+		}
+	}
 
 	var last uint64
 	for _, record := range pending {

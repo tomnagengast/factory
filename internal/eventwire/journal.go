@@ -158,11 +158,15 @@ func (j *Journal) Add(event Event) (Record, bool, error) {
 }
 
 func (j *Journal) AddBatch(events []Event) ([]Record, error) {
-	for _, event := range events {
+	canonical := make([]Event, len(events))
+	for i, event := range events {
+		event = canonicalEvent(event)
 		if err := event.Validate(); err != nil {
 			return nil, err
 		}
+		canonical[i] = event
 	}
+	events = canonical
 
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -506,6 +510,7 @@ func readJournal(path string, recoverTail bool) (journalState, error) {
 			if !foundCheckpoint || line.Record == nil {
 				return journalState{}, errors.New("event wire: event precedes checkpoint")
 			}
+			line.Record.Event = canonicalEvent(line.Record.Event)
 			if err := line.Record.Event.Validate(); err != nil {
 				return journalState{}, err
 			}
@@ -601,6 +606,7 @@ func Wait(ctx context.Context, read func(uint64) (Batch, error), after uint64, i
 
 func cloneEvent(event Event) Event {
 	event.Channels = slices.Clone(event.Channels)
+	event.AncestorRuleIDs = slices.Clone(event.AncestorRuleIDs)
 	if event.Attributes != nil {
 		attributes := make(map[string][]string, len(event.Attributes))
 		for key, values := range event.Attributes {

@@ -211,7 +211,7 @@ func runEventsHelper(ctx context.Context, args []string, output io.Writer) int {
 		Subject:    strings.TrimSpace(*subject),
 		Attributes: make(map[string]string, len(matches)),
 	}
-	if filter.Source != "" && filter.Source != eventwire.SourceLinear && filter.Source != eventwire.SourceGitHub && filter.Source != eventwire.SourceFactory {
+	if filter.Source != "" && !eventwire.ValidSource(filter.Source) {
 		fmt.Fprintln(os.Stderr, "event wire: invalid source")
 		return 2
 	}
