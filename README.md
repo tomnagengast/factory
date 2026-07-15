@@ -38,7 +38,7 @@ For any admitted project with a Cloud URL, onboarding also creates one marker-ba
 2. The delivery is persisted, the Linear project's GitHub Repo and Local Path are resolved against the current repository catalog, and a pending run is claimed before the handler returns `200`.
 3. The background manager prepares that repository's isolated internal clone. Existing checkouts must match the configured managed root, GitHub origin, base branch, and GitHub default branch. A catalog entry may explicitly allow greenfield bootstrap: Factory creates the private GitHub repository when absent, clones through a staging directory, initializes and publishes the configured base branch when the remote is empty, and verifies the final identity before starting an agent. Symlink escapes, files or non-Git directories at the target, mismatched origins, and unexpected branches fail closed. Registered linked worktrees are excluded from the clone's dirty check; all other local changes and divergence fail preparation instead of being overwritten. Before starting a pending run with no other agent active, Factory removes clean, unlocked worktrees whose branches are already integrated into that repository's fetched upstream as a backstop for interrupted cleanup.
 4. One isolated tmux session named `factory-<issue-lower>` starts on the `factory-agents` tmux socket.
-5. The principal runs `$do TEAM-123` with Codex `gpt-5.6-sol` and high reasoning through gated research, implementation, and the complete ready-for-human-merge predicate. Comment continuations fresh-read the Linear thread and treat only unaddressed human feedback as new scope.
+5. Factory starts the principal with the complete Markdown body and identity of the workflow revision pinned on the Run. The compiled `full-sdlc` workflow drives gated research, dual-provider plan review, implementation, and the complete ready-for-human-merge predicate through Factory-owned helpers. Comment continuations fresh-read the Linear thread and treat only unaddressed human feedback as new scope.
 6. A failed Codex process is resumed, when a thread ID is available, up to three total attempts.
 7. After the PR is ready, the principal records the exact locally verified head through `agent checkpoint ready-for-merge` and exits with `FACTORY_RESULT: READY_FOR_HUMAN_MERGE`. Factory validates the contract-v1 checkpoint, parks the run as `awaiting_human_merge`, and closes the tmux segment. This is nonterminal and does not consume an LLM while waiting.
 8. GitHub webhooks wake the parked run immediately. A supervisor sweep also refreshes authoritative GitHub state at least once per minute with a persisted cursor, bounded backoff, and restart-safe schedule. An `OPEN` PR stays parked, a closed-unmerged PR becomes a typed blocker, and only a fresh `MERGED` snapshot with a merge commit starts a new `post-merge` continuation.
@@ -55,7 +55,7 @@ Redundant work is prevented at three layers:
 - The persistent run store allows only one nonterminal record for an issue, including parked merge waits and post-merge continuations.
 - The deterministic tmux session name is a final process-level lock.
 
-Additional `Factory` label applications and eligible human comments are coalesced while the issue has an active run. After a run becomes terminal, either remove and reapply the label or add a human comment to start another run. The `$do` skill resumes active work when it exists; after an earlier PR is integrated, a comment continuation starts a deterministic focused follow-up branch instead of rewriting completed work.
+Additional `Factory` label applications and eligible human comments are coalesced while the issue has an active run. After a run becomes terminal, either remove and reapply the label or add a human comment to start another run. Active work retains its original workflow pin; after an earlier PR is integrated, a comment continuation pins the currently protected feedback workflow and starts a deterministic focused follow-up branch instead of rewriting completed work.
 
 ## Operator views
 
@@ -66,8 +66,9 @@ Factory separates public health from authenticated operational detail:
 - `/wire` is the authenticated system-event workspace with source and type filters, retained-window charts, 25-event pages, normalized journal records, and available Linear raw-payload inspection.
 - `/agents` is the authenticated run dashboard with issue context, lifecycle phase, ready-checkpoint PR and verified head, authoritative refresh timing, resume counts, deployment receipt identity, and terminal rejection evidence.
 - `/agents/<issue-id>/<started-unix-ms>/run` is the authenticated, read-only loop observer for one started run.
-- `/triggers` is the authenticated generic event-rule, cron schedule, protected-route, and recent-routing workspace.
-- `/settings` is the authenticated runtime-policy editor.
+- `/workflows` is the authenticated Markdown workflow authoring and publication workspace.
+- `/triggers` is the authenticated generic event-rule, cron schedule, protected-route binding, and recent-routing workspace.
+- `/settings` is the authenticated agent-provider and manager-capacity editor.
 
 Validated Linear request bodies are retained prospectively as private `0600` sidecar files beside the bounded activity index. Sidecars age out with their projection records. Historical wire records from before payload retention remain listable without a body, and GitHub request bodies are never retained. Pending runs without a start timestamp appear as non-link rows until the canonical observer reference exists. Deprecated activity URLs, direct run-ID URLs, unknown paths, malformed paths, and trailing-slash variants return `404` without redirects or compatibility aliases.
 
@@ -103,13 +104,29 @@ Registry limits are 32 rules and 32 schedules. A rule defaults to a four-hop cei
 
 Schedules use standard five-field cron plus a separate IANA timezone. They contain optional event subject and bounded context only, never a workflow selector. A due schedule emits a deterministic `factory / cron / due` event, and ordinary rules decide what workflow and target it reaches. On restart Factory publishes only the oldest missed occurrence, records how many later occurrences were skipped, and advances the cursor only after successful wire publication. A new, re-enabled, or materially edited schedule starts strictly after its edit time.
 
-The authenticated `GET /api/triggers` returns the editable registry, enabled workflow choices, observed source suggestions, schedule and rule status, recent admitted/rejected/suppressed outcomes, compatibility evidence, and read-only protected routes. `PUT /api/triggers` requires same-origin JSON, strict bounded decoding, the current registry and settings revisions, whole-snapshot validation, and fixed-target repository preflight. Conflicts return `409` with the authoritative snapshot, and failed writes do not partially mutate policy.
+The authenticated `GET /api/triggers` returns the editable registry, enabled published workflow summaries, observed source suggestions, schedule and rule status, recent admitted/rejected/suppressed outcomes, compatibility evidence, and protected routes. `PUT /api/triggers` requires same-origin JSON, strict bounded decoding, the current registry and policy revisions, whole-snapshot validation, and fixed-target repository preflight. The dedicated `PUT /api/triggers/protected/linear-feedback` repoints the always-enabled feedback route to another enabled published workflow without changing the generic registry. Conflicts return `409` with the authoritative snapshot, and failed writes do not partially mutate policy.
 
 Private state lives in `~/.local/share/factory/data/triggers.json`, `trigger-routing.jsonl`, and `trigger-cursors.json`, all written with `0600` permissions, fsync, and atomic checkpoint or append semantics. An invocation Run receives a contained `workflow.json` snapshot with `0600` permissions. Routing retains one decision per retained wire event, nonterminal invocations even after wire eviction, terminal audit summaries until safe pruning, and rolling UTC rate buckets independently of wire retention. Recovery truncates only an incomplete final routing-log line; complete corruption fails startup closed.
 
 Startup opens and validates every store, registers generic admission before protected handlers, reconciles invocation and Run pairs, drains ordered wire catch-up, reconciles again, and only then enables mutating APIs, cron, promotion, and Run launch. Until that readiness boundary, health remains available but work does not advance.
 
-The legacy label/comment fields remain round-tripped in `settings.json` for compatibility but are no longer edited on `/settings`. Before Factory has observed a source token outside the former `linear`, `github`, and `factory` vocabulary, rollback to the prior binary additionally requires quiescence, zero pending wire records, zero nonterminal trigger invocations or Runs, and valid legacy settings. After any future source token has been durably observed, `legacyRollbackIncompatible` becomes monotonic and prior-binary activation is unavailable. Recovery is then a forward corrective change or a revert commit deployed from current clean merged `main`.
+The legacy label/comment fields remain round-tripped in `settings.json` for compatibility but are no longer edited on `/settings`. Schema-2 migration writes one private `settings.schema1.backup.json`, preserves every legacy workflow and trigger reference, and seeds the protected feedback binding from the former comment workflow. Before the first new-shape workflow admission or fresh feedback continuation, rollback also requires quiescence, zero pending wire records, no nonterminal legacy-shape work, a false `workflowRollbackIncompatible` marker, and a successful read-only `factory workflow-rollback-preflight` against the exact schema-1 backup and retained trigger registry. A schema-2-only registry reference fails preflight even before admission. Once the marker is set, prior-binary activation is unavailable; recovery requires a schema-2-aware release or a forward corrective commit deployed from clean merged `main`.
+
+## Workflow authoring and execution
+
+Published workflows are versioned Markdown documents inside the private schema-2 policy checkpoint. `/workflows` separates authoring from execution: edits autosave to `~/.local/share/factory/data/workflow-drafts.json`, but drafts never enter trigger choices, take the coordinated policy lock, or change an admitted Run. Create starts a disabled server-ID draft. Discard removes only authoring state, and Publish promotes the exact acknowledged draft revision after checking the draft, base workflow, and policy revisions. Published disable or delete is rejected while a live generic rule or protected binding requires the workflow.
+
+The authenticated API mirrors that model:
+
+- `GET /api/workflows` returns published definitions, saved or synthesized editor drafts, draft status, and safe live references.
+- `POST /api/workflow-drafts` creates and persists a disabled starter draft.
+- `PUT` or `DELETE /api/workflow-drafts/{id}` autosaves or discards one exact draft revision.
+- `POST /api/workflow-drafts/{id}/publish` publishes the exact saved draft against its base workflow and policy revisions.
+- `DELETE /api/workflows/{id}` deletes an unreferenced published workflow against exact workflow and policy revisions.
+
+Every fresh admission snapshots the selected published ID, revision, complete Markdown body, digest, rule revision where applicable, and policy revision before promotion. The launcher validates and writes that pin as private `workflow.json`, then places the Markdown verbatim in the principal prompt. Retries, active-run feedback, GitHub remediation, and post-merge segments keep the same pin. Repointing the protected feedback binding affects only later fresh post-terminal continuations. The generic `linear-comment` rule remains independent and may create an additional serialized invocation for the same human event.
+
+The compiled `full-sdlc` document is self-contained and calls `factory agent linear-graphql` with a JSON request on standard input for Linear operations. New Factory Runs do not depend on a provider-installed skill or repository-relative workflow assets. Narrow legacy decoding and the old prompt path remain only for already admitted schema-1 records during the compatibility window.
 
 ## GitHub event sink
 
@@ -130,7 +147,7 @@ The JSON response and GitHub-specific cursor domain remain unchanged, but the ad
 
 ## Human merge and deployment
 
-At the ready checkpoint, `$do` repeats the complete checks, mergeability, review, comment, thread, and Linear feedback snapshot and durably records the locally verified `headRefOid`. The human performs the merge; the principal never calls a merge mutation or enables auto-merge. The LLM exits after writing the checkpoint while Factory owns the durable parked wait. A close/merge webhook only wakes the supervisor, and the periodic authoritative sweep closes the missed-webhook gap. Before deployment, a fresh continuation must prove GitHub reports `MERGED` with a merge commit, the merged head equals the recorded verified head, and the final checks and feedback snapshot still passes. A closed-unmerged, changed, or regressed head becomes a precise blocker. Retries resume at the first incomplete post-merge boundary only after reconstructing and corroborating the verified-head record.
+At the ready checkpoint, the pinned lifecycle workflow repeats the complete checks, mergeability, review, comment, thread, and Linear feedback snapshot and durably records the locally verified `headRefOid`. The human performs the merge; the principal never calls a merge mutation or enables auto-merge. The LLM exits after writing the checkpoint while Factory owns the durable parked wait. A close/merge webhook only wakes the supervisor, and the periodic authoritative sweep closes the missed-webhook gap. Before deployment, a fresh continuation must prove GitHub reports `MERGED` with a merge commit, the merged head equals the recorded verified head, and the final checks and feedback snapshot still passes. A closed-unmerged, changed, or regressed head becomes a precise blocker. Retries resume at the first incomplete post-merge boundary only after reconstructing and corroborating the verified-head record.
 
 After merge, the principal resolves the primary checkout with Worktrunk, refuses to overwrite unrelated changes, fetches/prunes origin, and fast-forwards the default branch. Deployment commands and post-deploy probes come from the issue's approved plan and run from that updated primary checkout, never from the feature worktree. A failed deployment is reported as a post-merge recovery blocker; cleanup does not hide it. The manager's next-run cleanup can still remove a clean integrated worktree as a backstop, so retained worktrees are not guaranteed to persist indefinitely.
 
@@ -209,7 +226,7 @@ The launchd wrapper sources `~/.config/network-app/env`. Factory requires:
 - `FACTORY_GOOGLE_ALLOWED_EMAILS`, a comma-separated allowlist of verified Google emails.
 - `FACTORY_SESSION_KEY` for signed browser sessions.
 
-`~/.local/bin/nags refresh-env` reads the API key from `op://Code/Linear API key/credential`, validates it against Linear, derives the trigger actor ID from the authenticated viewer, and writes both values to the private launchd environment. The provider installs its guarded `$do` workflow under `~/.agents/skills/do`, so every allowlisted repository uses the same Linear and human-merge gates without copying provider policy into tenant source.
+`~/.local/bin/nags refresh-env` reads the API key from `op://Code/Linear API key/credential`, validates it against Linear, derives the trigger actor ID from the authenticated viewer, and writes both values to the private launchd environment. Factory owns its compiled default Markdown workflow, helper commands, prompt envelope, and mechanical terminal validators, so tenant repositories do not carry lifecycle policy.
 
 Optional variables:
 
@@ -220,18 +237,15 @@ Optional variables:
 
 ### Runtime settings
 
-Authenticated operators can edit runtime policy at `https://factory.nags.cloud/settings`. The private `GET /api/settings` and `PUT /api/settings` endpoints expose the same structured document for automation. Writes require the current revision, use strict validation and same-origin browser checks, and return `409 Conflict` with the latest snapshot when another writer has already advanced the revision.
+Authenticated operators edit provider launch policy and manager capacity at `https://factory.nags.cloud/settings`, and author workflows separately at `https://factory.nags.cloud/workflows`. The private `GET /api/settings` and `PUT /api/settings` endpoints expose only the narrow agent/runtime document for automation. Writes require the current policy revision, use strict validation and same-origin browser checks, and return `409 Conflict` with the latest snapshot when another writer has already advanced the revision.
 
-Factory stores the first successful update at `~/.local/share/factory/data/settings.json` as a versioned `0600` file using fsync and atomic replacement. Until that file exists, compiled defaults preserve the current `Factory` label, comment continuations, full `$do` lifecycle, provider models, high effort, three principal attempts, and three concurrent runs. A present invalid or unknown settings schema stops startup instead of silently resetting policy.
+Factory stores the first successful update at `~/.local/share/factory/data/settings.json` as a versioned `0600` file using fsync and atomic replacement. Until that file exists, compiled defaults preserve the current `Factory` label, protected comment continuations, self-contained `full-sdlc` Markdown workflow, provider models, high effort, three principal attempts, and three concurrent runs. A present invalid or unknown settings schema stops startup instead of silently resetting policy.
 
-The settings surface controls:
+The settings surface controls principal, Codex child, and Claude child models and effort, plus principal retry count and manager concurrency. The workflow surface controls up to eight published or never-published workflow IDs, each with a bounded Markdown body and independent draft and published revisions.
 
-- Up to eight enabled `$do` workflows with bounded ordered declarative steps. Trigger rules select these workflows, while protected continuation segments keep their original pinned workflow.
-- Principal, Codex child, and Claude child models and effort, plus principal retry count and manager concurrency.
+Settings, workflow publication, protected-binding changes, and registry writes share one policy coordinator. Draft autosave does not. A settings update cannot overwrite the workflow collection, and publication cannot disable or remove a workflow required by an enabled rule or protected binding. Policy takes effect at safe boundaries; each admitted invocation and each running provider segment keeps its pinned snapshot. Existing provider processes are never restarted by a settings or workflow save. Repository routing, paths, secrets, actor identity, executable commands, arbitrary provider flags, human merge authority, exact verified-head checks, deployment source, and completion validation remain locked in code.
 
-Settings and registry writes share one policy coordinator. A settings update cannot disable or remove a workflow referenced by an enabled rule. Settings take effect at safe boundaries; each admitted invocation and each running provider segment keeps its pinned snapshot. Existing provider processes are never restarted by a settings save. Repository routing, paths, secrets, actor identity, executable commands, arbitrary provider flags, human merge authority, exact verified-head checks, deployment source, and completion validation remain locked in code.
-
-If a saved value is valid but undesirable, restore it through the page or API with the current revision. If a manually edited file prevents startup, preserve the invalid file for diagnosis, restore a known-good private copy or deliberately move it aside to return to compiled defaults, then restart and verify both health endpoints before allowing new runs.
+If a saved value is valid but undesirable, publish a corrected workflow or restore the launch setting through its owning page or API with the current revision. If a manually edited file prevents startup, preserve the invalid file for diagnosis. Do not replace a corrupt draft store with an empty file or restore the schema-1 backup without satisfying the rollback compatibility preflight. Use a schema-2-aware known-good release or forward repair, then restart and verify both health endpoints before allowing new runs.
 
 The compiled catalog routes `tomnagengast/network`, `tomnagengast/notebook`, `tomnagengast/factory`, and `tomnagengast/artifacts`, all on `main`. Network, Notebook, and Factory require deployment receipts and health identity at completion. Artifacts is an explicit private greenfield-bootstrap, repository-only entry rooted at `~/repos/tomnagengast`; it requires merged-main and cleanup evidence without a deployment receipt. Validated project onboarding records extend this catalog at runtime and survive restart. Linear project GitHub Repo and Local Path metadata must exactly match either a compiled entry or an admitted onboarding record. Unknown, mismatched, or unregistered repositories are durably rejected before a run is claimed. Every run persists its repository, path, managed root, base branch, bootstrap policy, and optional Cloud URL through launch and completion.
 
@@ -276,11 +290,25 @@ jq . ~/.local/share/factory/data/project-setups.json
 jq . ~/.local/share/factory/data/triggers.json
 tail -n 20 ~/.local/share/factory/data/trigger-routing.jsonl
 jq . ~/.local/share/factory/data/trigger-cursors.json
+test "$(stat -f '%Lp' ~/.local/share/factory/data/settings.json)" = 600
+test "$(stat -f '%Lp' ~/.local/share/factory/data/settings.schema1.backup.json)" = 600
+test ! -e ~/.local/share/factory/data/workflow-drafts.json || \
+  test "$(stat -f '%Lp' ~/.local/share/factory/data/workflow-drafts.json)" = 600
 launchctl print "gui/$(id -u)/com.nags.factory"
 tmux -L factory-agents list-sessions
 ```
 
 Pending wire records indicate a retryable dependency or projection failure and keep manager work gated until ordered catch-up succeeds. A failed project setup retains its bounded error and next-attempt time in the private setup store and retries with capped backoff. A growing rejection count indicates a permanent routing or policy failure that was isolated so later records could continue. Do not delete, truncate, or rewrite `system-events.jsonl`, `trigger-routing.jsonl`, `trigger-cursors.json`, or `project-setups.json`; correct the policy, project metadata, credentials, local-path conflict, or dependency and allow normal reconciliation to resume. Factory issue tmux sessions use a separate server and should remain intact across service recovery.
+
+If schema-2 startup fails before any new-shape admission, preserve the failed checkpoint and stop Factory before considering a prior release. Prove the service is quiescent, the wire has no pending record, no nonterminal Run or invocation uses a legacy workflow, and `workflowRollbackIncompatible` is false. Then run the read-only compatibility check:
+
+```bash
+factory workflow-rollback-preflight \
+  --settings-backup "$HOME/.local/share/factory/data/settings.schema1.backup.json" \
+  --trigger-registry "$HOME/.local/share/factory/data/triggers.json"
+```
+
+Only a successful preflight permits restoring that exact schema-1 backup and activating a prior verified release. A failure, a true compatibility marker, or any durable new-shape admission requires a schema-2-aware release or forward repair. Never rewrite the retained registry, routing journal, Run records, or backup to make preflight pass. A corrupt `workflow-drafts.json` disables authoring but does not invalidate the last published policy; preserve it and repair draft authoring separately.
 
 For a failed release, inspect the failed receipt under `~/.local/share/factory/deployments/failed/` and confirm the previous release recovered. To select a known successful release explicitly:
 
