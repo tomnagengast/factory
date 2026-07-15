@@ -203,24 +203,24 @@ func TestAuthenticatedSettingsPageAndAPI(t *testing.T) {
 	}
 
 	get := authenticatedRequest(t, handler, "/api/settings")
-	var current settings.Snapshot
+	var current settingsResponse
 	if err := json.NewDecoder(get.Body).Decode(&current); err != nil {
 		t.Fatalf("decode settings: %v", err)
 	}
-	if get.Code != http.StatusOK || current.Revision != 0 || current.Triggers.LinearLabel.Label != "Factory" {
+	if get.Code != http.StatusOK || current.Revision != 0 || current.Agents.Principal.Model != "gpt-5.6-sol" {
 		t.Fatalf("settings response = %d %#v", get.Code, current)
 	}
 
-	current.Triggers.LinearLabel.Label = "Build"
+	current.Runtime.MaxConcurrentRuns = 4
 	put := authenticatedSettingsRequest(t, handler, current, "")
-	var updated settings.Snapshot
+	var updated settingsResponse
 	if err := json.NewDecoder(put.Body).Decode(&updated); err != nil {
 		t.Fatalf("decode updated settings: %v", err)
 	}
-	if put.Code != http.StatusOK || updated.Revision != 1 || updated.Triggers.LinearLabel.Label != "Build" {
+	if put.Code != http.StatusOK || updated.Revision != 1 || updated.Runtime.MaxConcurrentRuns != 4 {
 		t.Fatalf("update response = %d %#v", put.Code, updated)
 	}
-	if got := store.Snapshot(); got.Revision != 1 || got.Triggers.LinearLabel.Label != "Build" {
+	if got := store.Snapshot(); got.Revision != 1 || got.Runtime.MaxConcurrentRuns != 4 || got.Triggers.LinearLabel.Label != "Factory" || len(got.Workflows) != 1 {
 		t.Fatalf("persisted settings = %#v", got)
 	}
 }
@@ -229,7 +229,7 @@ func TestSettingsAPIRejectsUnsafeAndStaleWrites(t *testing.T) {
 	t.Parallel()
 
 	handler, _, _, store := testHandlerWithRunsAndSettings(t)
-	candidate := store.Snapshot()
+	candidate := publicSettings(store.Snapshot())
 
 	crossOrigin := authenticatedSettingsRequest(t, handler, candidate, "https://attacker.example")
 	if crossOrigin.Code != http.StatusForbidden {
@@ -259,7 +259,7 @@ func TestSettingsAPIRejectsUnsafeAndStaleWrites(t *testing.T) {
 		t.Fatalf("first update status = %d", first.Code)
 	}
 	stale := authenticatedSettingsRequest(t, handler, candidate, "")
-	var conflict settings.Snapshot
+	var conflict settingsResponse
 	if err := json.NewDecoder(stale.Body).Decode(&conflict); err != nil {
 		t.Fatalf("decode conflict: %v", err)
 	}
@@ -1638,7 +1638,7 @@ func authenticatedRequest(t *testing.T, handler http.Handler, target string) *ht
 	return recorder
 }
 
-func authenticatedSettingsRequest(t *testing.T, handler http.Handler, candidate settings.Snapshot, origin string) *httptest.ResponseRecorder {
+func authenticatedSettingsRequest(t *testing.T, handler http.Handler, candidate settingsResponse, origin string) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(candidate)
 	if err != nil {

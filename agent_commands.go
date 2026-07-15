@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +20,7 @@ import (
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
 
@@ -34,6 +37,8 @@ func runAgentCommand(ctx context.Context, args []string) (int, bool) {
 		return runChild(ctx, args[1:]), true
 	case "agent":
 		return runAgentHelper(ctx, args[1:]), true
+	case "workflow-rollback-preflight":
+		return runWorkflowRollbackPreflight(args[1:]), true
 	default:
 		fmt.Fprintf(os.Stderr, "unknown Factory command %q\n", args[0])
 		return 2, true
@@ -128,7 +133,7 @@ func loadRunSettings(runDirectory string) (settings.Snapshot, error) {
 
 func runAgentHelper(ctx context.Context, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: factory agent spawn|checkpoint|events|github-events|linear-comments")
+		fmt.Fprintln(os.Stderr, "usage: factory agent spawn|checkpoint|events|github-events|linear-comments|linear-graphql")
 		return 2
 	}
 	switch args[0] {
@@ -142,10 +147,82 @@ func runAgentHelper(ctx context.Context, args []string) int {
 		return runGitHubEventsHelper(ctx, args[1:], os.Stdout)
 	case "linear-comments":
 		return runLinearCommentsHelper(ctx, args[1:], os.Stdout)
+	case "linear-graphql":
+		return runLinearGraphQLHelper(ctx, os.Stdin, os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown Factory agent command %q\n", args[0])
 		return 2
 	}
+}
+
+func runWorkflowRollbackPreflight(args []string) int {
+	flags := flag.NewFlagSet("workflow-rollback-preflight", flag.ContinueOnError)
+	settingsBackup := flags.String("settings-backup", "", "schema-1 settings backup")
+	triggerRegistry := flags.String("trigger-registry", "", "retained trigger registry")
+	if flags.Parse(args) != nil || *settingsBackup == "" || *triggerRegistry == "" || flags.NArg() != 0 {
+		return 2
+	}
+	configuration, err := settings.ReadSchema1Backup(*settingsBackup)
+	if err == nil {
+		_, err = triggerregistry.Read(*triggerRegistry, configuration)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workflow rollback preflight failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(os.Stdout, `{"status":"ready"}`)
+	return 0
+}
+
+func runLinearGraphQLHelper(ctx context.Context, input io.Reader, output io.Writer) int {
+	key := os.Getenv("LINEAR_API_KEY")
+	if key == "" {
+		fmt.Fprintln(os.Stderr, "linear GraphQL: LINEAR_API_KEY is required")
+		return 1
+	}
+	data, err := io.ReadAll(io.LimitReader(input, 1<<20+1))
+	if err != nil || len(data) > 1<<20 {
+		fmt.Fprintln(os.Stderr, "linear GraphQL: request is invalid or too large")
+		return 2
+	}
+	var envelope struct {
+		Query         string          `json:"query"`
+		Variables     json.RawMessage `json:"variables,omitempty"`
+		OperationName string          `json:"operationName,omitempty"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&envelope) != nil || decoder.Decode(&struct{}{}) != io.EOF || envelope.Query == "" || len(envelope.Query) > 512<<10 {
+		fmt.Fprintln(os.Stderr, "linear GraphQL: request is invalid")
+		return 2
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, linearGraphQLURL, bytes.NewReader(data))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "linear GraphQL: create request failed")
+		return 1
+	}
+	request.Header.Set("Authorization", key)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "linear GraphQL: request failed: %v\n", err)
+		return 1
+	}
+	defer response.Body.Close()
+	responseData, err := io.ReadAll(io.LimitReader(response.Body, 4<<20+1))
+	if err != nil || len(responseData) > 4<<20 {
+		fmt.Fprintln(os.Stderr, "linear GraphQL: response is invalid or too large")
+		return 1
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		fmt.Fprintf(os.Stderr, "linear GraphQL: HTTP %d\n", response.StatusCode)
+		return 1
+	}
+	if _, err := output.Write(responseData); err != nil {
+		fmt.Fprintln(os.Stderr, "linear GraphQL: write response failed")
+		return 1
+	}
+	return 0
 }
 
 func runCheckpointHelper(args []string) int {

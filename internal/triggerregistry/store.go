@@ -58,6 +58,29 @@ func Open(path string, defaults Snapshot, configuration settings.Snapshot) (*Sto
 	return store, nil
 }
 
+// Read validates a retained registry without creating directories or changing files.
+func Read(path string, configuration settings.Snapshot) (Snapshot, error) {
+	if path == "" {
+		return Snapshot{}, errors.New("trigger registry: path is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("trigger registry: read: %w", err)
+	}
+	if len(data) > maxRegistryBytes {
+		return Snapshot{}, errors.New("trigger registry: file is too large")
+	}
+	state, err := decode(data)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if err := state.Validate(configuration); err != nil {
+		return Snapshot{}, err
+	}
+	Sort(&state)
+	return state.Clone(), nil
+}
+
 func (s *Store) Snapshot() Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

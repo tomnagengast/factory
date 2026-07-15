@@ -403,7 +403,7 @@ func safeNext(value string) string {
 }
 
 func protectedPagePath(value string) bool {
-	if value == "/home" || value == "/wire" || value == "/agents" || value == "/settings" {
+	if value == "/home" || value == "/wire" || value == "/agents" || value == "/settings" || value == "/triggers" || value == "/workflows" {
 		return true
 	}
 	parts := strings.Split(strings.TrimPrefix(value, "/"), "/")

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/triggerregistry"
 )
 
 func TestLoadRunSettingsUsesValidatedSharedStateRoot(t *testing.T) {
@@ -43,6 +45,59 @@ func TestLoadRunSettingsUsesValidatedSharedStateRoot(t *testing.T) {
 	}
 	if _, err := loadRunSettings(filepath.Join(stateRoot, "other", runID)); err == nil {
 		t.Fatal("invalid run directory was accepted")
+	}
+}
+
+func TestWorkflowRollbackPreflightRejectsSchemaTwoOnlyReferenceWithoutWrites(t *testing.T) {
+	directory := t.TempDir()
+	backupPath := filepath.Join(directory, "settings.schema1.backup.json")
+	registryPath := filepath.Join(directory, "triggers.json")
+	legacy := `{"schema":1,"revision":5,"triggers":{"linearLabel":{"enabled":true,"label":"Factory","workflowId":"full-sdlc"},"linearComment":{"enabled":true,"workflowId":"full-sdlc"}},"workflows":[{"id":"full-sdlc","name":"Full SDLC","enabled":true,"runner":"do","steps":["Research"]}],"agents":{"principal":{"model":"gpt-5.6-sol","effort":"high","maxAttempts":3},"codexChild":{"model":"gpt-5.6-sol","effort":"high"},"claudeChild":{"model":"fable","effort":"high"}},"runtime":{"maxConcurrentRuns":3}}`
+	if err := os.WriteFile(backupPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := settings.ReadSchema1Backup(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := triggerregistry.Defaults(configuration, "human")
+	registry.Rules[0].WorkflowID = "schema-two-only"
+	data, err := json.Marshal(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registryPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backupBefore, _ := os.ReadFile(backupPath)
+	registryBefore, _ := os.ReadFile(registryPath)
+	if code := runWorkflowRollbackPreflight([]string{"--settings-backup", backupPath, "--trigger-registry", registryPath}); code != 1 {
+		t.Fatalf("preflight exit = %d, want 1", code)
+	}
+	backupAfter, _ := os.ReadFile(backupPath)
+	registryAfter, _ := os.ReadFile(registryPath)
+	if !bytes.Equal(backupBefore, backupAfter) || !bytes.Equal(registryBefore, registryAfter) {
+		t.Fatal("rollback preflight modified an input file")
+	}
+
+	registry.Rules[0].WorkflowID = "full-sdlc"
+	data, _ = json.Marshal(registry)
+	if err := os.WriteFile(registryPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := runWorkflowRollbackPreflight([]string{"--settings-backup", backupPath, "--trigger-registry", registryPath}); code != 0 {
+		t.Fatalf("compatible preflight exit = %d, want 0", code)
+	}
+}
+
+func TestLinearGraphQLHelperRejectsMissingKeyAndMalformedInput(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "")
+	if code := runLinearGraphQLHelper(context.Background(), bytes.NewBufferString(`{"query":"{ viewer { id } }"}`), &bytes.Buffer{}); code != 1 {
+		t.Fatalf("missing-key exit = %d", code)
+	}
+	t.Setenv("LINEAR_API_KEY", "test-key")
+	if code := runLinearGraphQLHelper(context.Background(), bytes.NewBufferString(`{"query":""}`), &bytes.Buffer{}); code != 2 {
+		t.Fatalf("invalid-request exit = %d", code)
 	}
 }
 

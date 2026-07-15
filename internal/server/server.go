@@ -97,6 +97,16 @@ type SettingsStore interface {
 	Update(uint64, settings.Snapshot, time.Time) (settings.Snapshot, error)
 }
 
+type WorkflowDraftStore interface {
+	Snapshot() workflow.DraftSnapshot
+	Draft(string) (workflow.Draft, bool)
+	Create(workflow.Draft) (workflow.Draft, error)
+	Save(string, uint64, uint64, workflow.Draft, time.Time) (workflow.Draft, error)
+	Materialize(workflow.Draft, uint64) (workflow.Draft, error)
+	Discard(string, uint64, uint64) error
+	AdvanceBase(string, uint64, uint64, uint64, time.Time) (workflow.Draft, error)
+}
+
 type EventWire interface {
 	Handle(eventwire.Filter, eventwire.Handler) error
 	Publish(context.Context, eventwire.Event) (eventwire.Record, bool, error)
@@ -111,6 +121,10 @@ type TriggerPolicy interface {
 	RoutingSnapshot() triggerrouter.Snapshot
 	UpdateRegistry(uint64, uint64, triggerregistry.Snapshot, time.Time) (triggerregistry.Snapshot, error)
 	UpdateSettings(uint64, settings.Snapshot, time.Time) (settings.Snapshot, error)
+	UpdateAgentSettings(uint64, settings.AgentSettings, settings.RuntimeSettings, time.Time) (settings.Snapshot, error)
+	PublishWorkflow(uint64, uint64, workflow.Definition, time.Time) (settings.Snapshot, error)
+	DeleteWorkflow(uint64, uint64, string, time.Time) (settings.Snapshot, error)
+	UpdateProtectedFeedback(uint64, string, time.Time) (settings.Snapshot, error)
 }
 
 type ScheduleStatus interface {
@@ -124,6 +138,8 @@ type Config struct {
 	RunNotifier        RunNotifier
 	AgentObserver      AgentObserver
 	Settings           SettingsStore
+	WorkflowDrafts     WorkflowDraftStore
+	WorkflowDraftError string
 	ViewerAuth         *viewerauth.Authenticator
 	LinearSecret       []byte
 	GitHubSecret       []byte
@@ -147,6 +163,9 @@ type appServer struct {
 	runNotifier        RunNotifier
 	agentObserver      AgentObserver
 	settings           SettingsStore
+	workflowDrafts     WorkflowDraftStore
+	workflowDraftError string
+	workflowLocks      keyedWorkflowLocks
 	viewerAuth         *viewerauth.Authenticator
 	linearSecret       []byte
 	githubSecret       []byte
@@ -260,6 +279,13 @@ type wireDetailResponse struct {
 	Payload          json.RawMessage  `json:"payload,omitempty"`
 }
 
+type settingsResponse struct {
+	Revision  uint64                   `json:"revision"`
+	UpdatedAt time.Time                `json:"updatedAt,omitempty"`
+	Agents    settings.AgentSettings   `json:"agents"`
+	Runtime   settings.RuntimeSettings `json:"runtime"`
+}
+
 func New(config Config) (http.Handler, error) {
 	if config.ActivityStore == nil {
 		return nil, errors.New("server: activity store is required")
@@ -322,6 +348,9 @@ func New(config Config) (http.Handler, error) {
 		runNotifier:        config.RunNotifier,
 		agentObserver:      config.AgentObserver,
 		settings:           config.Settings,
+		workflowDrafts:     config.WorkflowDrafts,
+		workflowDraftError: config.WorkflowDraftError,
+		workflowLocks:      newKeyedWorkflowLocks(),
 		viewerAuth:         config.ViewerAuth,
 		linearSecret:       config.LinearSecret,
 		githubSecret:       config.GitHubSecret,
@@ -355,6 +384,13 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("PUT /api/settings", app.viewerAuth.API(http.HandlerFunc(app.putSettings)))
 	mux.Handle("GET /api/triggers", app.viewerAuth.API(http.HandlerFunc(app.getTriggers)))
 	mux.Handle("PUT /api/triggers", app.viewerAuth.API(http.HandlerFunc(app.putTriggers)))
+	mux.Handle("PUT /api/triggers/protected/linear-feedback", app.viewerAuth.API(http.HandlerFunc(app.putProtectedFeedback)))
+	mux.Handle("GET /api/workflows", app.viewerAuth.API(http.HandlerFunc(app.getWorkflows)))
+	mux.Handle("POST /api/workflow-drafts", app.viewerAuth.API(http.HandlerFunc(app.postWorkflowDraft)))
+	mux.Handle("PUT /api/workflow-drafts/{id}", app.viewerAuth.API(http.HandlerFunc(app.putWorkflowDraft)))
+	mux.Handle("DELETE /api/workflow-drafts/{id}", app.viewerAuth.API(http.HandlerFunc(app.deleteWorkflowDraft)))
+	mux.Handle("POST /api/workflow-drafts/{id}/publish", app.viewerAuth.API(http.HandlerFunc(app.publishWorkflowDraft)))
+	mux.Handle("DELETE /api/workflows/{id}", app.viewerAuth.API(http.HandlerFunc(app.deleteWorkflow)))
 	mux.HandleFunc("POST /api/webhooks/linear", app.linearWebhook)
 	mux.HandleFunc("POST /api/webhooks/github", app.githubWebhook)
 	mux.HandleFunc("POST /cdn-cgi/rum", cloudflareBeacon)
@@ -369,6 +405,7 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("GET /agents/{issue}/{started}/run", canonicalAgentReference(app.viewerAuth.Page(page)))
 	mux.Handle("GET /settings", app.viewerAuth.Page(page))
 	mux.Handle("GET /triggers", app.viewerAuth.Page(page))
+	mux.Handle("GET /workflows", app.viewerAuth.Page(page))
 	mux.Handle("GET /{asset...}", http.FileServerFS(config.Web))
 	return canonicalPaths(mux), nil
 }
@@ -509,7 +546,7 @@ func (s *appServer) writeAgent(w http.ResponseWriter, r *http.Request, id string
 }
 
 func (s *appServer) getSettings(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.settings.Snapshot())
+	writeJSON(w, http.StatusOK, publicSettings(s.settings.Snapshot()))
 }
 
 func (s *appServer) putSettings(w http.ResponseWriter, r *http.Request) {
@@ -527,7 +564,7 @@ func (s *appServer) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSettingsBody))
 	decoder.DisallowUnknownFields()
-	var candidate settings.Snapshot
+	var candidate settingsResponse
 	if err := decoder.Decode(&candidate); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
@@ -541,18 +578,21 @@ func (s *appServer) putSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
-	if err := candidate.Validate(); err != nil {
+	var updated settings.Snapshot
+	validation := s.settings.Snapshot()
+	validation.Agents = candidate.Agents
+	validation.Runtime = candidate.Runtime
+	if err := validation.Validate(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	var updated settings.Snapshot
 	if s.triggerPolicy != nil {
-		updated, err = s.triggerPolicy.UpdateSettings(candidate.Revision, candidate, s.now())
+		updated, err = s.triggerPolicy.UpdateAgentSettings(candidate.Revision, candidate.Agents, candidate.Runtime, s.now())
 	} else {
-		updated, err = s.settings.Update(candidate.Revision, candidate, s.now())
+		updated, err = s.settings.Update(candidate.Revision, validation, s.now())
 	}
 	if errors.Is(err, settings.ErrRevisionConflict) {
-		writeJSON(w, http.StatusConflict, updated)
+		writeJSON(w, http.StatusConflict, publicSettings(updated))
 		return
 	}
 	if errors.Is(err, triggerrouter.ErrPolicyValidation) {
@@ -568,7 +608,11 @@ func (s *appServer) putSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
+	writeJSON(w, http.StatusOK, publicSettings(updated))
+}
+
+func publicSettings(snapshot settings.Snapshot) settingsResponse {
+	return settingsResponse{Revision: snapshot.Revision, UpdatedAt: snapshot.UpdatedAt, Agents: snapshot.Agents, Runtime: snapshot.Runtime}
 }
 
 func sameOrigin(r *http.Request) bool {
