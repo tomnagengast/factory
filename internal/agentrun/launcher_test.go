@@ -78,7 +78,7 @@ if [ "$1 $2" = "repo view" ]; then
   fi
   branch='{"name":""}'
   if %s --git-dir=%q show-ref --verify --quiet refs/heads/main; then branch='{"name":"main"}'; fi
-	printf '{"nameWithOwner":"tomnagengast/artifacts","isPrivate":true,"defaultBranchRef":%%s,"mergeCommitAllowed":true,"squashMergeAllowed":false,"rebaseMergeAllowed":false,"deleteBranchOnMerge":true}\n' "$branch"
+  printf '{"nameWithOwner":"tomnagengast/artifacts","isPrivate":true,"defaultBranchRef":%%s,"mergeCommitAllowed":true,"squashMergeAllowed":false,"rebaseMergeAllowed":false,"deleteBranchOnMerge":true}\n' "$branch"
   exit 0
 fi
 if [ "$1 $2" = "repo create" ]; then
