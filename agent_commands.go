@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -177,10 +179,144 @@ func runAgentHelper(ctx context.Context, args []string) int {
 		return runLinearCommentsHelper(ctx, args[1:], os.Stdout)
 	case "linear-graphql":
 		return runLinearGraphQLHelper(ctx, os.Stdin, os.Stdout)
+	case "task":
+		return runTaskHelper(ctx, args[1:], os.Stdin, os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown Factory agent command %q\n", args[0])
 		return 2
 	}
+}
+
+type taskHelperRequest struct {
+	Operation      string `json:"operation"`
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+	After          uint64 `json:"after,omitempty"`
+	Revision       uint64 `json:"revision,omitempty"`
+	Body           string `json:"body,omitempty"`
+	ParentID       string `json:"parentId,omitempty"`
+	Label          string `json:"label,omitempty"`
+	URL            string `json:"url,omitempty"`
+	State          string `json:"state,omitempty"`
+	Kind           string `json:"kind,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	ArtifactURL    string `json:"artifactUrl,omitempty"`
+}
+
+func runTaskHelper(ctx context.Context, args []string, input io.Reader, output io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: factory agent task show|messages|activity|comment|reply|link|state|gate open")
+		return 2
+	}
+	operation := args[0]
+	if operation == "gate" {
+		if len(args) < 2 || args[1] != "open" {
+			fmt.Fprintln(os.Stderr, "usage: factory agent task gate open")
+			return 2
+		}
+		operation, args = "gate-open", args[2:]
+	} else {
+		args = args[1:]
+	}
+	flags := flag.NewFlagSet("agent task "+operation, flag.ContinueOnError)
+	after := flags.Uint64("after", 0, "message cursor")
+	revision := flags.Uint64("revision", 0, "task revision cursor")
+	wait := flags.Duration("wait", time.Minute, "maximum activity wait")
+	body := flags.String("body", "", "message body (defaults to stdin)")
+	parent := flags.String("parent", "", "parent message ID")
+	label := flags.String("label", "", "link label")
+	linkURL := flags.String("url", "", "HTTPS link URL")
+	state := flags.String("state", "", "task state")
+	kind := flags.String("kind", "", "gate kind")
+	mode := flags.String("mode", "", "gate mode")
+	artifactURL := flags.String("artifact-url", "", "gate artifact URL")
+	idempotency := flags.String("idempotency-key", "", "stable retry key")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *wait < 0 || *wait > 5*time.Minute {
+		return 2
+	}
+	request := taskHelperRequest{Operation: operation, After: *after, Revision: *revision, Body: *body, ParentID: *parent, Label: *label, URL: *linkURL, State: *state, Kind: *kind, Mode: *mode, ArtifactURL: *artifactURL, IdempotencyKey: *idempotency}
+	if (operation == "comment" || operation == "reply") && request.Body == "" {
+		data, err := io.ReadAll(io.LimitReader(input, 32<<10+1))
+		if err != nil || len(data) > 32<<10 {
+			fmt.Fprintln(os.Stderr, "task helper: message body is invalid or too large")
+			return 2
+		}
+		request.Body = strings.TrimSpace(string(data))
+	}
+	if request.IdempotencyKey == "" && operation != "show" && operation != "messages" && operation != "activity" {
+		data, _ := json.Marshal(request)
+		digest := sha256.Sum256(data)
+		request.IdempotencyKey = fmt.Sprintf("%x", digest[:])
+	}
+	deadline := time.Now().Add(*wait)
+	for {
+		status, err := callTaskHelper(ctx, request, output)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if operation != "activity" || status != http.StatusNoContent || *wait == 0 || !time.Now().Before(deadline) {
+			return 0
+		}
+		timer := time.NewTimer(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 1
+		case <-timer.C:
+		}
+	}
+}
+
+func callTaskHelper(ctx context.Context, payload taskHelperRequest, output io.Writer) (int, error) {
+	endpoint := strings.TrimSpace(os.Getenv("FACTORY_TASK_ENDPOINT"))
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.Path != "/api/agent/task" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Hostname() != "127.0.0.1" {
+		return 0, errors.New("task helper: scoped endpoint is invalid")
+	}
+	capabilityFile := filepath.Clean(os.Getenv("FACTORY_TASK_CAPABILITY_FILE"))
+	runDirectory := filepath.Clean(os.Getenv("FACTORY_RUN_DIR"))
+	if capabilityFile == "." || runDirectory == "." || filepath.Dir(capabilityFile) != runDirectory || filepath.Base(capabilityFile) != agentrun.TaskCapabilityTokenFileName {
+		return 0, errors.New("task helper: scoped capability file is invalid")
+	}
+	data, err := os.ReadFile(capabilityFile)
+	if err != nil {
+		return 0, errors.New("task helper: scoped capability is unreadable")
+	}
+	capability := strings.TrimSpace(string(data))
+	runID := os.Getenv("FACTORY_RUN_ID")
+	if capability == "" || runID == "" {
+		return 0, errors.New("task helper: scoped Run capability is missing")
+	}
+	data, err = json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
+	if err != nil {
+		return 0, err
+	}
+	request.Header.Set("Authorization", "Bearer "+capability)
+	request.Header.Set("X-Factory-Run-ID", runID)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
+	if err != nil {
+		return 0, fmt.Errorf("task helper: request failed: %w", err)
+	}
+	defer response.Body.Close()
+	responseData, err := io.ReadAll(io.LimitReader(response.Body, 2<<20+1))
+	if err != nil || len(responseData) > 2<<20 {
+		return response.StatusCode, errors.New("task helper: response is invalid or too large")
+	}
+	if response.StatusCode == http.StatusNoContent {
+		return response.StatusCode, nil
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return response.StatusCode, fmt.Errorf("task helper: HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(responseData)))
+	}
+	if _, err := output.Write(responseData); err != nil {
+		return response.StatusCode, err
+	}
+	return response.StatusCode, nil
 }
 
 func runWorkflowRollbackPreflight(args []string) int {

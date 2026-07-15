@@ -10,6 +10,7 @@ import (
 	"github.com/tomnagengast/factory/internal/agentrun"
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskcontrol"
 	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/taskstore"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
@@ -21,10 +22,19 @@ var serviceNow = time.Date(2026, 7, 15, 16, 0, 0, 0, time.UTC)
 type enabledControl bool
 
 func (c enabledControl) Enabled(string) bool { return bool(c) }
+func (c enabledControl) Snapshot() taskcontrol.Snapshot {
+	return taskcontrol.Snapshot{Version: 1}
+}
+func (c enabledControl) SetProject(_ uint64, _ string, _ bool, _ time.Time) (taskcontrol.Snapshot, error) {
+	return c.Snapshot(), nil
+}
 
 type projectAuthority struct{ spec projectsetup.Spec }
 
 func (p projectAuthority) ResolveSucceeded(string) (projectsetup.Spec, error) { return p.spec, nil }
+func (p projectAuthority) Choices() []projectsetup.Choice {
+	return []projectsetup.Choice{{ProjectID: p.spec.ProjectID, Repository: p.spec.Repository}}
+}
 
 type fakeMutator struct{ store *taskstore.Store }
 
@@ -46,6 +56,9 @@ type nativeAdmitter struct {
 
 func (a nativeAdmitter) AdmitNative(value triggerrouter.NativeAdmission) (triggerrouter.Invocation, bool, error) {
 	return a.store.AdmitNative(value)
+}
+func (a nativeAdmitter) AdmitNativeContinuation(value triggerrouter.NativeAdmission, eventKey string) (triggerrouter.Invocation, bool, error) {
+	return a.store.AdmitNativeContinuation(value, eventKey)
 }
 
 type reconcileCounter struct{ calls int }

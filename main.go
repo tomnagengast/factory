@@ -368,6 +368,7 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 		WorktrunkPath: worktrunkPath,
 		TmuxPath:      tmuxPath,
 		TmuxSocket:    tmuxSocket,
+		TaskEndpoint:  "http://127.0.0.1:" + strconv.Itoa(options.address.Port) + "/api/agent/task",
 	}
 	launcher, err := agentrun.NewTmuxLauncher(launcherConfig)
 	if err != nil {
@@ -513,6 +514,7 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 		GenericTriggers: true,
 		TriggerPolicy:   events,
 		ScheduleStatus:  scheduler,
+		Tasks:           nativeTaskService,
 		Ready:           ready.Load,
 	})
 	if err != nil {

@@ -213,7 +213,7 @@ func TestAgentEnvironmentExcludesUnrelatedServiceSecrets(t *testing.T) {
 		"LINEAR_WEBHOOK_SECRET=webhook-secret",
 		"CF_API_TOKEN=cloudflare-secret",
 		"OP_SERVICE_ACCOUNT_TOKEN=one-password-secret",
-	})
+	}, true)
 	joined := strings.Join(got, "\n")
 	for _, expected := range []string{"HOME=/Users/test", "PATH=/usr/bin", "LINEAR_API_KEY=linear-secret"} {
 		if !strings.Contains(joined, expected) {
@@ -224,5 +224,12 @@ func TestAgentEnvironmentExcludesUnrelatedServiceSecrets(t *testing.T) {
 		if strings.Contains(joined, secret) {
 			t.Fatalf("environment leaked %s: %v", secret, got)
 		}
+	}
+}
+
+func TestProviderNeutralAgentEnvironmentExcludesLinearKey(t *testing.T) {
+	got := agentEnvironment([]string{"HOME=/Users/test", "LINEAR_API_KEY=linear-secret"}, false)
+	if joined := strings.Join(got, "\n"); strings.Contains(joined, "LINEAR_API_KEY") || !strings.Contains(joined, "HOME=/Users/test") {
+		t.Fatalf("provider-neutral environment = %v", got)
 	}
 }

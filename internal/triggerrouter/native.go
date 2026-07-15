@@ -3,6 +3,7 @@ package triggerrouter
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 
 const nativeTaskStartRuleID = "native-task-start"
 
+var nativeContinuationPattern = regexp.MustCompile(`^(?:message:msg-[a-f0-9]{16}|gate:gate-[a-f0-9]{16}:(?:approved|revision_requested))$`)
+
 type NativeAdmission struct {
 	Task             taskmodel.TaskRef
 	Workflow         workflow.Pinned
@@ -24,6 +27,18 @@ type NativeAdmission struct {
 }
 
 func (s *Store) AdmitNative(admission NativeAdmission) (Invocation, bool, error) {
+	return s.admitNative(admission, "factory:native-start:"+admission.Task.ProviderID, "start")
+}
+
+func (s *Store) AdmitNativeContinuation(admission NativeAdmission, eventKey string) (Invocation, bool, error) {
+	if !nativeContinuationPattern.MatchString(eventKey) {
+		return Invocation{}, false, errors.New("trigger router: native continuation identity is invalid")
+	}
+	eventID := "factory:native-continue:" + admission.Task.ProviderID + ":" + digestStrings(eventKey)[:16]
+	return s.admitNative(admission, eventID, eventKey)
+}
+
+func (s *Store) admitNative(admission NativeAdmission, eventID, invocationKey string) (Invocation, bool, error) {
 	task, err := admission.Task.Normalize()
 	if err != nil || task.Source != taskmodel.SourceFactory {
 		return Invocation{}, false, errors.New("trigger router: native admission task is invalid")
@@ -35,8 +50,7 @@ func (s *Store) AdmitNative(admission NativeAdmission) (Invocation, bool, error)
 	if err != nil || digest != admission.WorkflowDigest {
 		return Invocation{}, false, errors.New("trigger router: native admission workflow digest conflicts")
 	}
-	eventID := "factory:native-start:" + task.ProviderID
-	invocationID := digestStrings("factory-native-invocation-v1", task.OwnershipKey(), admission.WorkflowDigest)
+	invocationID := digestStrings("factory-native-invocation-v1", task.OwnershipKey(), admission.WorkflowDigest, invocationKey)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

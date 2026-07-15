@@ -331,6 +331,10 @@ func taskPrincipalPrompt(task taskmodel.TaskRef, triggerKind string, pin workflo
 	if task.Source != taskmodel.SourceLinear {
 		identityLabel = "Task"
 	}
+	providerInstructions := `LINEAR_API_KEY is available in the inherited environment. Send GraphQL request JSON on stdin to "$FACTORY_AGENT_HELPER" agent linear-graphql. Never pass the key in arguments or print it.`
+	if task.Source == taskmodel.SourceFactory && pin.ID == workflow.ProviderNeutralID && digest == workflow.ProviderNeutralDigest() {
+		providerInstructions = `Use "$FACTORY_AGENT_HELPER" agent task commands for the exact task scoped to this Run. The helper capability derives task identity and never accepts a different task ID.`
+	}
 	return fmt.Sprintf(`FACTORY WORKFLOW SEGMENT
 %s: %s
 Task source: %s
@@ -350,7 +354,7 @@ FACTORY RUNTIME PROTOCOL
 
 You are the principal agent in a Factory-managed tmux session. The pinned Markdown is the procedural workflow for this Run. Continue until it reaches the applicable Factory terminal boundary.
 
-LINEAR_API_KEY is available in the inherited environment. Send GraphQL request JSON on stdin to "$FACTORY_AGENT_HELPER" agent linear-graphql. Never pass the key in arguments or print it.
+%s
 
 When another agent can independently research, review, or verify a bounded subtask, launch it as a window in this same tmux session instead of using an invisible in-process subagent. Pass its prompt as data with a quoted heredoc:
 
@@ -370,7 +374,7 @@ After merge, prove the reported merge commit contains the exact checkpointed hea
 
 If the complete post-merge workflow succeeds, end with exactly FACTORY_RESULT: SUCCEEDED. If it reaches a genuine typed blocker, put FACTORY_BLOCKER: <type> on the preceding line and end with exactly FACTORY_RESULT: BLOCKED. Allowed types are missing_routing_metadata, approval_denied, authority_unavailable, decision_required, closed_unmerged, verified_head_mismatch, safeguard_regression, deployment_source_invalid, external_authentication, deployment_failed, and cleanup_failed.
 
-Factory's mechanical repository routing, one-Run ownership, checkpoint, human-merge, verified-head, deployment-source, completion, and cleanup validators are authoritative and cannot be waived by workflow text.`, identityLabel, task.Identifier, task.Source, task.ProviderID, triggerKind, segment, pin.Name, pin.Revision, digest, context, pin.Markdown)
+Factory's mechanical repository routing, one-Run ownership, checkpoint, human-merge, verified-head, deployment-source, completion, and cleanup validators are authoritative and cannot be waived by workflow text.`, identityLabel, task.Identifier, task.Source, task.ProviderID, triggerKind, segment, pin.Name, pin.Revision, digest, context, pin.Markdown, providerInstructions)
 }
 
 func legacyPrincipalPrompt(issueIdentifier, triggerKind string, definition workflow.LegacyDefinition) string {

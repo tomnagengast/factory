@@ -3,16 +3,19 @@ package agentrun
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
 
@@ -38,6 +41,7 @@ type LauncherConfig struct {
 	WorktrunkPath string
 	TmuxPath      string
 	TmuxSocket    string
+	TaskEndpoint  string
 }
 
 type TmuxLauncher struct {
@@ -604,11 +608,29 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 		"--run-dir", runDirectory,
 		"--attempt-offset", fmt.Sprintf("%d", run.Attempts),
 	}
+	providerNeutral := run.Task.Source == taskmodel.SourceFactory && run.PinnedWorkflowDigest == workflow.ProviderNeutralDigest()
+	if providerNeutral {
+		if launcher.config.TaskEndpoint == "" {
+			return errors.New("start provider-neutral Run: task helper endpoint is missing")
+		}
+		_, err := WriteTaskCapability(runDirectory, run, rand.Reader, time.Now())
+		if err != nil {
+			return fmt.Errorf("write task capability: %w", err)
+		}
+		commandIndex := slices.Index(args, launcher.config.BinaryPath)
+		if commandIndex < 0 {
+			return errors.New("start provider-neutral Run: principal command is missing")
+		}
+		args = slices.Insert(args, commandIndex,
+			"-e", "FACTORY_TASK_ENDPOINT="+launcher.config.TaskEndpoint,
+			"-e", "FACTORY_TASK_CAPABILITY_FILE="+filepath.Join(runDirectory, TaskCapabilityTokenFileName),
+		)
+	}
 	if workflowPath != "" {
 		args = append(args, "--workflow-file", workflowPath)
 	}
 	cmd := exec.CommandContext(ctx, launcher.config.TmuxPath, args...)
-	cmd.Env = agentEnvironment(os.Environ())
+	cmd.Env = agentEnvironment(os.Environ(), !providerNeutral)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux new-session: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -635,7 +657,7 @@ func (l *TmuxLauncher) forRun(run Run) *TmuxLauncher {
 }
 
 func removeLifecycleArtifacts(runDirectory string) error {
-	for _, name := range []string{resultFileName, readyCheckpointFileName} {
+	for _, name := range []string{resultFileName, readyCheckpointFileName, TaskCapabilityFileName, TaskCapabilityTokenFileName} {
 		path := filepath.Join(runDirectory, name)
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove stale lifecycle artifact %s: %w", name, err)
@@ -644,7 +666,7 @@ func removeLifecycleArtifacts(runDirectory string) error {
 	return nil
 }
 
-func agentEnvironment(environ []string) []string {
+func agentEnvironment(environ []string, allowLinear bool) []string {
 	allowed := map[string]bool{
 		"CODEX_HOME":     true,
 		"GITHUB_TOKEN":   true,
@@ -663,7 +685,7 @@ func agentEnvironment(environ []string) []string {
 	filtered := make([]string, 0, len(allowed))
 	for _, entry := range environ {
 		name, _, found := strings.Cut(entry, "=")
-		if found && allowed[name] {
+		if found && allowed[name] && (name != "LINEAR_API_KEY" || allowLinear) {
 			filtered = append(filtered, entry)
 		}
 	}

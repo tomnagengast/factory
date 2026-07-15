@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tomnagengast/factory/internal/taskstore"
 )
 
 var issueIdentifierPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*$`)
@@ -146,6 +148,14 @@ func (a *Authenticator) API(next http.Handler) http.Handler {
 
 func (a *Authenticator) Authenticated(r *http.Request) bool {
 	return a.validSession(r)
+}
+
+func (a *Authenticator) Actor(r *http.Request) (taskstore.Actor, bool) {
+	claims, ok := a.session(r)
+	if !ok {
+		return taskstore.Actor{}, false
+	}
+	return taskstore.Actor{ID: "google:" + claims.Subject + ":" + claims.Email, Kind: taskstore.AuthorHuman}, true
 }
 
 func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request) {
@@ -325,15 +335,21 @@ func (a *Authenticator) doJSON(request *http.Request, target any) error {
 }
 
 func (a *Authenticator) validSession(r *http.Request) bool {
+	_, ok := a.session(r)
+	return ok
+}
+
+func (a *Authenticator) session(r *http.Request) (sessionClaims, bool) {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil {
-		return false
+		return sessionClaims{}, false
 	}
 	var claims sessionClaims
 	if err := a.verify(cookie.Value, &claims); err != nil {
-		return false
+		return sessionClaims{}, false
 	}
-	return claims.Subject != "" && claims.ExpiresAt > a.now().Unix() && a.emailAllowed(claims.Email)
+	claims.Email = strings.ToLower(strings.TrimSpace(claims.Email))
+	return claims, claims.Subject != "" && claims.ExpiresAt > a.now().Unix() && a.emailAllowed(claims.Email)
 }
 
 func (a *Authenticator) emailAllowed(email string) bool {

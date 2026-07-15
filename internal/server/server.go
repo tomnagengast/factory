@@ -28,6 +28,9 @@ import (
 	"github.com/tomnagengast/factory/internal/linearhook"
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskcontrol"
+	"github.com/tomnagengast/factory/internal/taskservice"
+	"github.com/tomnagengast/factory/internal/taskstore"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/triggerrouter"
 	"github.com/tomnagengast/factory/internal/triggerscheduler"
@@ -68,6 +71,7 @@ type RunStore interface {
 	PublicSnapshot() agentrun.PublicSnapshot
 	ActivitySnapshot() agentrun.ActivitySnapshot
 	FindStarted(issueIdentifier string, startedUnixMilli int64) (agentrun.Run, bool)
+	Find(string) (agentrun.Run, bool)
 	SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, cursor uint64, remediation bool, now time.Time) (bool, error)
 }
 
@@ -130,12 +134,28 @@ type ScheduleStatus interface {
 	Statuses(time.Time) []triggerscheduler.Status
 }
 
+type TaskController interface {
+	Projects() []taskservice.ProjectChoice
+	SetProject(uint64, string, bool) (taskcontrol.Snapshot, error)
+	List(string, int) (taskstore.TaskPage, error)
+	Detail(string, uint64, int) (taskservice.Detail, error)
+	Create(context.Context, taskservice.CreateRequest) (taskstore.Result, error)
+	Update(context.Context, taskstore.UpdateCommand) (taskstore.Result, error)
+	Message(context.Context, taskstore.MessageCommand) (taskstore.Result, error)
+	Link(context.Context, taskstore.LinkCommand) (taskstore.Result, error)
+	Gate(context.Context, taskstore.GateCommand) (taskstore.Result, error)
+	Decide(context.Context, taskstore.DecisionCommand) (taskstore.Result, error)
+	State(context.Context, taskstore.StateCommand) (taskstore.Result, error)
+	Start(context.Context, taskservice.StartRequest) (taskservice.StartResult, error)
+}
+
 type ViewerAuthenticator interface {
 	Page(http.Handler) http.Handler
 	API(http.Handler) http.Handler
 	Login(http.ResponseWriter, *http.Request)
 	Callback(http.ResponseWriter, *http.Request)
 	Logout(http.ResponseWriter, *http.Request)
+	Actor(*http.Request) (taskstore.Actor, bool)
 }
 
 type Config struct {
@@ -161,6 +181,7 @@ type Config struct {
 	GenericTriggers    bool
 	TriggerPolicy      TriggerPolicy
 	ScheduleStatus     ScheduleStatus
+	Tasks              TaskController
 	Ready              func() bool
 }
 
@@ -187,6 +208,7 @@ type appServer struct {
 	genericTriggers    bool
 	triggerPolicy      TriggerPolicy
 	scheduleStatus     ScheduleStatus
+	tasks              TaskController
 	ready              func() bool
 }
 
@@ -348,7 +370,6 @@ func New(config Config) (http.Handler, error) {
 	if config.GenericTriggers && (config.TriggerPolicy == nil || config.ScheduleStatus == nil) {
 		return nil, errors.New("server: generic trigger policy and schedule status are required")
 	}
-
 	app := &appServer{
 		activityStore:      config.ActivityStore,
 		runStore:           config.RunStore,
@@ -372,6 +393,7 @@ func New(config Config) (http.Handler, error) {
 		genericTriggers:    config.GenericTriggers,
 		triggerPolicy:      config.TriggerPolicy,
 		scheduleStatus:     config.ScheduleStatus,
+		tasks:              config.Tasks,
 		ready:              config.Ready,
 	}
 	if err := app.events.Handle(eventwire.Filter{Source: eventwire.SourceLinear}, app.dispatchLinear); err != nil {
@@ -382,6 +404,7 @@ func New(config Config) (http.Handler, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", app.healthz)
+	mux.HandleFunc("POST /api/agent/task", app.agentTask)
 	mux.HandleFunc("GET /api/home", app.home)
 	mux.Handle("GET /api/wire", app.viewerAuth.API(http.HandlerFunc(app.wire)))
 	mux.Handle("GET /api/wire/{sequence}", app.viewerAuth.API(http.HandlerFunc(app.wireEvent)))
@@ -393,6 +416,18 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("PUT /api/triggers", app.viewerAuth.API(http.HandlerFunc(app.putTriggers)))
 	mux.Handle("PUT /api/triggers/protected/linear-feedback", app.viewerAuth.API(http.HandlerFunc(app.putProtectedFeedback)))
 	mux.Handle("GET /api/workflows", app.viewerAuth.API(http.HandlerFunc(app.getWorkflows)))
+	mux.Handle("GET /api/tasks", app.viewerAuth.API(http.HandlerFunc(app.getTasks)))
+	mux.Handle("GET /api/task-projects", app.viewerAuth.API(http.HandlerFunc(app.getTaskProjects)))
+	mux.Handle("PUT /api/task-projects/{id}", app.viewerAuth.API(http.HandlerFunc(app.putTaskProject)))
+	mux.Handle("POST /api/tasks", app.viewerAuth.API(http.HandlerFunc(app.postTask)))
+	mux.Handle("GET /api/tasks/{provider}/{id}", app.viewerAuth.API(http.HandlerFunc(app.getTask)))
+	mux.Handle("PATCH /api/tasks/{provider}/{id}", app.viewerAuth.API(http.HandlerFunc(app.patchTask)))
+	mux.Handle("POST /api/tasks/{provider}/{id}/messages", app.viewerAuth.API(http.HandlerFunc(app.postTaskMessage)))
+	mux.Handle("POST /api/tasks/{provider}/{id}/links", app.viewerAuth.API(http.HandlerFunc(app.postTaskLink)))
+	mux.Handle("POST /api/tasks/{provider}/{id}/gates", app.viewerAuth.API(http.HandlerFunc(app.postTaskGate)))
+	mux.Handle("POST /api/tasks/{provider}/{id}/gates/{gateID}/decision", app.viewerAuth.API(http.HandlerFunc(app.postTaskGateDecision)))
+	mux.Handle("POST /api/tasks/{provider}/{id}/state", app.viewerAuth.API(http.HandlerFunc(app.postTaskState)))
+	mux.Handle("POST /api/tasks/{provider}/{id}/start", app.viewerAuth.API(http.HandlerFunc(app.postTaskStart)))
 	mux.Handle("POST /api/workflow-drafts", app.viewerAuth.API(http.HandlerFunc(app.postWorkflowDraft)))
 	mux.Handle("PUT /api/workflow-drafts/{id}", app.viewerAuth.API(http.HandlerFunc(app.putWorkflowDraft)))
 	mux.Handle("DELETE /api/workflow-drafts/{id}", app.viewerAuth.API(http.HandlerFunc(app.deleteWorkflowDraft)))
@@ -409,6 +444,8 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("GET /home", page)
 	mux.Handle("GET /wire", app.viewerAuth.Page(page))
 	mux.Handle("GET /agents", app.viewerAuth.Page(page))
+	mux.Handle("GET /tasks", app.viewerAuth.Page(page))
+	mux.Handle("GET /tasks/{provider}/{id}", app.viewerAuth.Page(page))
 	mux.Handle("GET /agents/{issue}/{started}/run", canonicalAgentReference(app.viewerAuth.Page(page)))
 	mux.Handle("GET /settings", app.viewerAuth.Page(page))
 	mux.Handle("GET /triggers", app.viewerAuth.Page(page))
