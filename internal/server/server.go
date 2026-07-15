@@ -32,6 +32,7 @@ import (
 	"github.com/tomnagengast/factory/internal/triggerrouter"
 	"github.com/tomnagengast/factory/internal/triggerscheduler"
 	"github.com/tomnagengast/factory/internal/viewerauth"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 const (
@@ -64,7 +65,7 @@ type ProjectSetupController interface {
 
 type RunStore interface {
 	Claim(trigger agentrun.Trigger, now time.Time) (agentrun.Run, bool, error)
-	ClaimContinuation(trigger agentrun.Trigger, now time.Time) (agentrun.Run, bool, error)
+	ClaimContinuation(claim agentrun.ContinuationClaim, now time.Time) (agentrun.Run, bool, error)
 	PublicSnapshot() agentrun.PublicSnapshot
 	ActivitySnapshot() agentrun.ActivitySnapshot
 	FindStarted(issueIdentifier string, startedUnixMilli int64) (agentrun.Run, bool)
@@ -620,12 +621,11 @@ func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
-	configuration := s.settings.Snapshot()
 	wake, hasWake := commentWake(payload, deliveryID, s.triggerActor, now)
-	commentTriggers := hasWake && configuration.Triggers.LinearComment.Enabled
+	configuration := s.settings.Snapshot()
 	trigger, hasTrigger := agentTrigger(payload, deliveryID, s.triggerActor, configuration.Triggers.LinearLabel)
 	setupProject := payload.Type == "Project" && (payload.Action == "create" || payload.Action == "update") && payload.Actor.ID == s.triggerActor
-	event := linearWireEvent(payload, deliveryID, wake, hasWake, commentTriggers, trigger, hasTrigger, setupProject, now)
+	event := linearWireEvent(payload, deliveryID, wake, hasWake, trigger, hasTrigger, setupProject, now)
 	if err := s.activityStore.StagePayload(deliveryID, body); err != nil {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
@@ -716,7 +716,6 @@ func linearWireEvent(
 	deliveryID string,
 	wake linearhook.Event,
 	hasWake bool,
-	commentTriggers bool,
 	trigger agentrun.Trigger,
 	hasTrigger bool,
 	setupProject bool,
@@ -757,9 +756,7 @@ func linearWireEvent(
 			event.Attributes[key] = values
 		}
 		event.Attributes[attributeIssue] = []string{wake.IssueIdentifier}
-		if commentTriggers {
-			event.Attributes[attributeTriggerKind] = []string{agentrun.TriggerKindComment}
-		}
+		event.Attributes[attributeTriggerKind] = []string{agentrun.TriggerKindComment}
 	}
 	if hasTrigger {
 		event.Attributes[attributeTriggerKind] = []string{trigger.Kind}
@@ -809,11 +806,31 @@ func (s *appServer) dispatchLinear(ctx context.Context, record eventwire.Record)
 			}
 		}
 		if firstAttribute(record.Event, attributeTriggerKind) == agentrun.TriggerKindComment {
+			configuration := s.settings.Snapshot()
+			definition, err := configuration.WorkflowForTrigger(agentrun.TriggerKindComment)
+			if err != nil {
+				return fmt.Errorf("server: select Linear continuation workflow: %w", err)
+			}
+			pinned := workflow.Pin(definition)
+			digest, err := pinned.Digest()
+			if err != nil {
+				return fmt.Errorf("server: digest Linear continuation workflow: %w", err)
+			}
+			if marker, ok := s.settings.(interface {
+				MarkWorkflowRollbackIncompatible(time.Time) (settings.Snapshot, error)
+			}); ok {
+				configuration, err = marker.MarkWorkflowRollbackIncompatible(record.Event.ReceivedAt)
+				if err != nil {
+					return fmt.Errorf("server: mark workflow rollback boundary: %w", err)
+				}
+			}
 			trigger, err := s.repositoryTrigger(ctx, deliveryID, event.IssueIdentifier, agentrun.TriggerKindComment)
 			if err != nil {
 				return fmt.Errorf("server: resolve Linear continuation repository: %w", err)
 			}
-			run, created, err := s.runStore.ClaimContinuation(trigger, record.Event.ReceivedAt)
+			run, created, err := s.runStore.ClaimContinuation(agentrun.ContinuationClaim{
+				Trigger: trigger, Workflow: pinned, WorkflowDigest: digest, PolicyRevision: configuration.Revision,
+			}, record.Event.ReceivedAt)
 			if err != nil {
 				return fmt.Errorf("server: claim Linear continuation: %w", err)
 			}

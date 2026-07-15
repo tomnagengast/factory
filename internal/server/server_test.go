@@ -298,7 +298,7 @@ func TestLinearLabelSettingsControlNewRunsWithoutDroppingActivity(t *testing.T) 
 	}
 }
 
-func TestLinearCommentSettingsKeepJournalWithoutStartingContinuation(t *testing.T) {
+func TestLinearCommentLegacyDisableCannotDisableProtectedContinuation(t *testing.T) {
 	t.Parallel()
 
 	handler, runStore, notifier, journalPath, configuration := testHandlerWithLinearCommentsAndSettings(t)
@@ -318,11 +318,17 @@ func TestLinearCommentSettingsKeepJournalWithoutStartingContinuation(t *testing.
 	}
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, signedWebhookRequest(testLinearCommentBody("comment-disabled", "Please continue"), "comment-disabled-delivery", testSecret))
-	if recorder.Code != http.StatusOK || runStore.Snapshot().Total != 1 || runStore.Snapshot().Active != 0 {
-		t.Fatalf("disabled continuation response = %d, runs %#v", recorder.Code, runStore.Snapshot())
+	snapshot := runStore.Snapshot()
+	if recorder.Code != http.StatusOK || snapshot.Total != 2 || snapshot.Active != 1 {
+		t.Fatalf("protected continuation response = %d, runs %#v", recorder.Code, snapshot)
 	}
-	if notifier.count.Load() != 0 {
-		t.Fatalf("notifications = %d, want 0", notifier.count.Load())
+	if notifier.count.Load() != 1 {
+		t.Fatalf("notifications = %d, want 1", notifier.count.Load())
+	}
+	continuation := snapshot.Runs[0]
+	if continuation.PinnedWorkflow == nil || continuation.PinnedWorkflow.ID != candidate.ProtectedWorkflows.LinearFeedback.WorkflowID ||
+		continuation.PinnedWorkflowDigest == "" || continuation.PinnedPolicyRevision != configuration.Snapshot().Revision {
+		t.Fatalf("protected continuation pin = %#v", continuation)
 	}
 	batch, err := linearhook.Read(journalPath, linearhook.Filter{IssueIdentifier: "ENG-123"}, 0)
 	if err != nil || len(batch.Events) != 1 || batch.Events[0].CommentID != "comment-disabled" {

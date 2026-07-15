@@ -11,10 +11,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/triggerrouter"
 	"github.com/tomnagengast/factory/internal/triggerscheduler"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 const maxTriggersBody = 1 << 20
@@ -22,7 +22,7 @@ const maxTriggersBody = 1 << 20
 type triggerResponse struct {
 	Registry         triggerregistry.Snapshot  `json:"registry"`
 	SettingsRevision uint64                    `json:"settingsRevision"`
-	Workflows        []settings.Workflow       `json:"workflows"`
+	Workflows        []workflow.Summary        `json:"workflows"`
 	ObservedSources  []string                  `json:"observedSources"`
 	RuleStatus       []ruleStatus              `json:"ruleStatus"`
 	Schedules        []triggerscheduler.Status `json:"scheduleStatus"`
@@ -53,6 +53,9 @@ type protectedRoute struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	WorkflowID  string `json:"workflowId,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	Protected   bool   `json:"protected"`
 }
 
 func (s *appServer) getTriggers(w http.ResponseWriter, _ *http.Request) {
@@ -121,19 +124,19 @@ func (s *appServer) triggerResponse() triggerResponse {
 	routing := s.triggerPolicy.RoutingSnapshot()
 	response := triggerResponse{
 		Registry: registry, SettingsRevision: configuration.Revision,
-		Workflows:       slices.Clone(configuration.Workflows),
+		Workflows:       enabledWorkflowSummaries(configuration.Workflows),
 		ObservedSources: []string{},
 		RuleStatus:      []ruleStatus{},
 		Schedules:       slices.Clone(s.scheduleStatus.Statuses(s.now())),
 		Recent:          []invocationSummary{},
 		ProtectedRoutes: []protectedRoute{
-			{ID: "linear-feedback", Name: "Linear feedback continuation", Description: "Resumes the protected lifecycle after human feedback."},
-			{ID: "github-remediation", Name: "GitHub remediation", Description: "Resumes the protected lifecycle for pull request and check changes."},
-			{ID: "post-merge", Name: "Post-merge completion", Description: "Preserves verified-head deployment and cleanup after human merge."},
+			{ID: "linear-feedback", Name: "Linear feedback continuation", Description: "Resumes the protected lifecycle after human feedback.", WorkflowID: configuration.ProtectedWorkflows.LinearFeedback.WorkflowID, Enabled: true, Protected: true},
+			{ID: "github-remediation", Name: "GitHub remediation", Description: "Resumes the protected lifecycle for pull request and check changes.", Enabled: true, Protected: true},
+			{ID: "post-merge", Name: "Post-merge completion", Description: "Preserves verified-head deployment and cleanup after human merge.", Enabled: true, Protected: true},
 		},
 	}
 	if response.Workflows == nil {
-		response.Workflows = []settings.Workflow{}
+		response.Workflows = []workflow.Summary{}
 	}
 	if response.Schedules == nil {
 		response.Schedules = []triggerscheduler.Status{}
@@ -201,6 +204,16 @@ func (s *appServer) triggerResponse() triggerResponse {
 		}
 	}
 	return response
+}
+
+func enabledWorkflowSummaries(definitions []workflow.Definition) []workflow.Summary {
+	summaries := make([]workflow.Summary, 0, len(definitions))
+	for _, definition := range definitions {
+		if definition.Enabled {
+			summaries = append(summaries, definition.Summary())
+		}
+	}
+	return summaries
 }
 
 func visibleInvocationReason(invocation triggerrouter.Invocation) string {

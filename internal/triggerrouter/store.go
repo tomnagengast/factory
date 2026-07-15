@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/eventwire"
-	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 )
 
@@ -467,7 +466,7 @@ func equalCounts(left, right map[string]int) bool {
 
 func compactTerminalInvocation(invocation *Invocation) {
 	invocation.Rule = triggerregistry.Rule{ID: invocation.Rule.ID, Revision: invocation.Rule.Revision}
-	invocation.Workflow = settings.Workflow{ID: invocation.Workflow.ID}
+	invocation.Workflow = invocation.Workflow.Compact()
 }
 
 func (s *Store) appendOperationLocked(operation diskOperation) error {

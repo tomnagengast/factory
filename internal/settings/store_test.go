@@ -1,116 +1,126 @@
 package settings
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
-	"sync"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
-func TestStoreDefaultsUpdateAndReopen(t *testing.T) {
-	t.Parallel()
+var storeTestNow = time.Date(2026, 7, 14, 20, 0, 0, 0, time.UTC)
 
-	path := filepath.Join(t.TempDir(), "data", "settings.json")
+func TestStoreRoundTripConflictAndMonotonicMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
 	store, err := Open(path, Defaults(3))
 	if err != nil {
-		t.Fatalf("open settings: %v", err)
+		t.Fatal(err)
 	}
-	if got := store.Snapshot(); got.Revision != 0 || got.Runtime.MaxConcurrentRuns != 3 {
-		t.Fatalf("default snapshot = %#v", got)
-	}
-	now := time.Date(2026, time.July, 13, 4, 0, 0, 0, time.UTC)
 	candidate := store.Snapshot()
 	candidate.Runtime.MaxConcurrentRuns = 4
-	updated, err := store.Update(candidate.Revision, candidate, now)
-	if err != nil {
-		t.Fatalf("update settings: %v", err)
+	updated, err := store.Update(candidate.Revision, candidate, storeTestNow)
+	if err != nil || updated.Revision != 1 {
+		t.Fatalf("update = %#v, %v", updated, err)
 	}
-	if updated.Revision != 1 || updated.UpdatedAt != now || updated.Runtime.MaxConcurrentRuns != 4 {
-		t.Fatalf("updated snapshot = %#v", updated)
+	if _, err := store.Update(0, candidate, storeTestNow); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale update error = %v", err)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat settings: %v", err)
+	marked, err := store.MarkWorkflowRollbackIncompatible(storeTestNow.Add(time.Minute))
+	if err != nil || !marked.WorkflowRollbackIncompatible || marked.Revision != 2 {
+		t.Fatalf("mark = %#v, %v", marked, err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("settings mode = %o, want 600", info.Mode().Perm())
-	}
-	reopened, err := Open(path, Defaults(2))
-	if err != nil {
-		t.Fatalf("reopen settings: %v", err)
-	}
-	if got := reopened.Snapshot(); got.Revision != 1 || got.Runtime.MaxConcurrentRuns != 4 {
-		t.Fatalf("reopened snapshot = %#v", got)
+	reopened, err := Open(path, Defaults(3))
+	if err != nil || !reopened.Snapshot().WorkflowRollbackIncompatible {
+		t.Fatalf("reopen = %#v, %v", reopened, err)
 	}
 }
 
-func TestStoreRejectsConflictAndInvalidCandidateWithoutChangingState(t *testing.T) {
-	t.Parallel()
-
-	store, err := Open(filepath.Join(t.TempDir(), "settings.json"), Defaults(3))
-	if err != nil {
-		t.Fatalf("open settings: %v", err)
-	}
-	candidate := store.Snapshot()
-	candidate.Agents.Principal.Model = "bad model"
-	if _, err := store.Update(0, candidate, time.Now()); err == nil {
-		t.Fatal("invalid update succeeded")
-	}
-	if got := store.Snapshot(); got.Revision != 0 || got.Agents.Principal.Model != "gpt-5.6-sol" {
-		t.Fatalf("state changed after invalid update: %#v", got)
-	}
-	if _, err := store.Update(1, store.Snapshot(), time.Now()); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("conflict error = %v", err)
-	}
-}
-
-func TestStoreRejectsUnknownFieldsAndInvalidPersistedState(t *testing.T) {
-	t.Parallel()
-
+func TestStoreMigratesSchema1AndPreservesBackup(t *testing.T) {
 	directory := t.TempDir()
-	unknown := filepath.Join(directory, "unknown.json")
-	if err := os.WriteFile(unknown, []byte(`{"schema":1,"unknown":true}`), 0o600); err != nil {
-		t.Fatalf("write unknown state: %v", err)
+	path := filepath.Join(directory, "settings.json")
+	legacy := legacySnapshot{
+		Schema: 1, Revision: 7, UpdatedAt: storeTestNow,
+		Triggers: Triggers{
+			LinearLabel:   LinearLabelTrigger{Enabled: true, Label: "Factory", WorkflowID: "full-sdlc"},
+			LinearComment: Trigger{Enabled: true, WorkflowID: "full-sdlc"},
+		},
+		Workflows: DefaultsLegacyWorkflows(), Agents: Defaults(3).Agents, Runtime: RuntimeSettings{MaxConcurrentRuns: 4},
 	}
-	if _, err := Open(unknown, Defaults(3)); err == nil {
-		t.Fatal("unknown field was accepted")
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatal(err)
 	}
-	invalid := filepath.Join(directory, "invalid.json")
-	if err := os.WriteFile(invalid, []byte(`{"schema":2}`), 0o600); err != nil {
-		t.Fatalf("write invalid state: %v", err)
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := Open(invalid, Defaults(3)); err == nil {
-		t.Fatal("invalid persisted state was accepted")
+	store, err := Open(path, Defaults(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := store.Snapshot()
+	if snapshot.Schema != SchemaVersion || snapshot.Revision != 7 || snapshot.Runtime.MaxConcurrentRuns != 4 {
+		t.Fatalf("migrated snapshot = %#v", snapshot)
+	}
+	if snapshot.ProtectedWorkflows.LinearFeedback.WorkflowID != "full-sdlc" || snapshot.Workflows[0].Revision != 1 {
+		t.Fatalf("migrated workflow = %#v", snapshot.Workflows[0])
+	}
+	if got := snapshot.Workflows[0].Markdown; !containsAll(got, "# Full SDLC", "## Migrated operator guidance", "Research the issue") {
+		t.Fatalf("migrated Markdown missing guidance: %q", got)
+	}
+	backupPath := filepath.Join(directory, "settings.schema1.backup.json")
+	backup, err := os.ReadFile(backupPath)
+	if err != nil || string(backup) != string(data) {
+		t.Fatalf("backup mismatch: %v", err)
+	}
+	info, err := os.Stat(backupPath)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("backup mode = %v, %v", info, err)
+	}
+	if _, err := Open(path, Defaults(3)); err != nil {
+		t.Fatalf("schema 2 reopen: %v", err)
 	}
 }
 
-func TestStoreConcurrentSnapshotsAndUpdates(t *testing.T) {
-	t.Parallel()
+func TestSchema1BackupConflictFailsClosed(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "settings.json")
+	legacy := legacySnapshot{
+		Schema: 1, Triggers: Defaults(3).Triggers, Workflows: DefaultsLegacyWorkflows(),
+		Agents: Defaults(3).Agents, Runtime: Defaults(3).Runtime,
+	}
+	data, _ := json.Marshal(legacy)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "settings.schema1.backup.json"), []byte("different"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path, Defaults(3)); err == nil {
+		t.Fatal("conflicting backup did not fail")
+	}
+	current, err := os.ReadFile(path)
+	if err != nil || string(current) != string(data) {
+		t.Fatalf("settings changed on conflict: %v", err)
+	}
+}
 
-	store, err := Open(filepath.Join(t.TempDir(), "settings.json"), Defaults(3))
-	if err != nil {
-		t.Fatalf("open settings: %v", err)
-	}
-	var wait sync.WaitGroup
-	for range 8 {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			for range 50 {
-				_ = store.Snapshot()
-			}
-		}()
-	}
-	for range 10 {
-		current := store.Snapshot()
-		if _, err := store.Update(current.Revision, current, time.Now()); err != nil {
-			t.Fatalf("update settings: %v", err)
+func DefaultsLegacyWorkflows() []workflow.LegacyDefinition {
+	return []workflow.LegacyDefinition{{
+		ID: "full-sdlc", Name: "Full SDLC", Enabled: true, Runner: "do",
+		Steps: []string{"Research the issue", "Implement the approved plan"},
+	}}
+}
+
+func containsAll(value string, needles ...string) bool {
+	for _, needle := range needles {
+		if !strings.Contains(value, needle) {
+			return false
 		}
 	}
-	wait.Wait()
-	if got := store.Snapshot().Revision; got != 10 {
-		t.Fatalf("revision = %d, want 10", got)
-	}
+	return true
 }

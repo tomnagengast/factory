@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 func TestStoreCoalescesActiveIssueTriggers(t *testing.T) {
@@ -119,11 +121,11 @@ func TestStoreClaimContinuationIgnoresIssueWithoutHistory(t *testing.T) {
 		t.Fatalf("seed other issue: %v", err)
 	}
 
-	run, created, err := store.ClaimContinuation(Trigger{
+	run, created, err := store.ClaimContinuation(testContinuationClaim(Trigger{
 		DeliveryID:      "comment-1",
 		IssueIdentifier: "ENG-123",
 		Kind:            TriggerKindComment,
-	}, now.Add(time.Second))
+	}), now.Add(time.Second))
 	if err != nil {
 		t.Fatalf("claim continuation: %v", err)
 	}
@@ -152,11 +154,11 @@ func TestStoreClaimContinuationStartsAfterTerminalHistory(t *testing.T) {
 				t.Fatalf("finish prior run: %v", err)
 			}
 
-			continuation, created, err := store.ClaimContinuation(Trigger{
+			continuation, created, err := store.ClaimContinuation(testContinuationClaim(Trigger{
 				DeliveryID:      "comment-1",
 				IssueIdentifier: "ENG-123",
 				Kind:            TriggerKindComment,
-			}, now.Add(2*time.Second))
+			}), now.Add(2*time.Second))
 			if err != nil {
 				t.Fatalf("claim continuation: %v", err)
 			}
@@ -195,7 +197,7 @@ func TestStoreClaimContinuationCoalescesActiveAndDeduplicatesRetry(t *testing.T)
 			}
 
 			trigger := Trigger{DeliveryID: "comment-1", IssueIdentifier: "ENG-123", Kind: TriggerKindComment}
-			coalesced, created, err := store.ClaimContinuation(trigger, now.Add(time.Second))
+			coalesced, created, err := store.ClaimContinuation(testContinuationClaim(trigger), now.Add(time.Second))
 			if err != nil {
 				t.Fatalf("claim active continuation: %v", err)
 			}
@@ -203,7 +205,7 @@ func TestStoreClaimContinuationCoalescesActiveAndDeduplicatesRetry(t *testing.T)
 				t.Fatalf("coalesced = %#v, created=%t", coalesced, created)
 			}
 
-			retried, created, err := store.ClaimContinuation(trigger, now.Add(2*time.Second))
+			retried, created, err := store.ClaimContinuation(testContinuationClaim(trigger), now.Add(2*time.Second))
 			if err != nil {
 				t.Fatalf("retry continuation: %v", err)
 			}
@@ -383,11 +385,11 @@ func TestStoreParksAndCoalescesAwaitingMergeRun(t *testing.T) {
 		t.Fatalf("mark awaiting merge: %v", err)
 	}
 
-	coalesced, created, err := store.ClaimContinuation(Trigger{
+	coalesced, created, err := store.ClaimContinuation(testContinuationClaim(Trigger{
 		DeliveryID:      "comment-1",
 		IssueIdentifier: "ENG-123",
 		Kind:            TriggerKindComment,
-	}, now.Add(time.Second))
+	}), now.Add(time.Second))
 	if err != nil {
 		t.Fatalf("coalesce comment: %v", err)
 	}
@@ -489,4 +491,13 @@ func openTestStore(t *testing.T, limit int) *Store {
 		t.Fatalf("open store: %v", err)
 	}
 	return store
+}
+
+func testContinuationClaim(trigger Trigger) ContinuationClaim {
+	pinned := workflow.Pin(workflow.Default(time.Time{}))
+	digest, err := pinned.Digest()
+	if err != nil {
+		panic(err)
+	}
+	return ContinuationClaim{Trigger: trigger, Workflow: pinned, WorkflowDigest: digest, PolicyRevision: 7}
 }

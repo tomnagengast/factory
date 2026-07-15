@@ -150,6 +150,13 @@ type settingsStub struct{ snapshot settings.Snapshot }
 
 func (s settingsStub) Snapshot() settings.Snapshot { return s.snapshot.Clone() }
 
+func (s settingsStub) MarkWorkflowRollbackIncompatible(now time.Time) (settings.Snapshot, error) {
+	s.snapshot.WorkflowRollbackIncompatible = true
+	s.snapshot.Revision++
+	s.snapshot.UpdatedAt = now.UTC()
+	return s.snapshot.Clone(), nil
+}
+
 func TestCoordinatedWireRoutesWholeFutureSourceBatchBeforeRecordHandlers(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
@@ -245,14 +252,15 @@ func TestCoordinatedWireRejectsPolicyMutationUntilPendingAdmissionIsDurable(t *t
 	if _, err := wire.UpdateSettings(settingsCandidate.Revision, settingsCandidate, now); !errors.Is(err, ErrPolicyPending) {
 		t.Fatalf("settings update error = %v, want pending admission", err)
 	}
-	if registryStore.Snapshot().Revision != 0 || configurationStore.Snapshot().Revision != 0 {
-		t.Fatal("policy changed while an event lacked a durable decision")
+	settingsAfterFailure := configurationStore.Snapshot()
+	if registryStore.Snapshot().Revision != 0 || settingsAfterFailure.Revision != 1 || !settingsAfterFailure.WorkflowRollbackIncompatible {
+		t.Fatalf("unexpected policy state after conservative compatibility mark: registry=%#v settings=%#v", registryStore.Snapshot(), settingsAfterFailure)
 	}
 	routing.sync = func(file *os.File) error { return file.Sync() }
 	if err := wire.CatchUp(context.Background()); err != nil {
 		t.Fatalf("catch up: %v", err)
 	}
-	if _, err := wire.UpdateRegistry(candidate.Revision, configuration.Revision, candidate, now); err != nil {
+	if _, err := wire.UpdateRegistry(candidate.Revision, configurationStore.Snapshot().Revision, candidate, now); err != nil {
 		t.Fatalf("registry update after admission: %v", err)
 	}
 }

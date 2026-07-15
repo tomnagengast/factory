@@ -3,7 +3,6 @@ package triggerrouter
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -14,6 +13,7 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 func (s *Store) ApplyDecisionBatch(records []eventwire.Record, registry triggerregistry.Snapshot, configuration settings.Snapshot, now time.Time) ([]Decision, error) {
@@ -77,7 +77,7 @@ func (s *Store) ApplyDecisionBatch(records []eventwire.Record, registry triggerr
 					outcome.Kind, outcome.Reason = OutcomeRejected, "workflow-unavailable"
 					break
 				}
-				invocation, err := newInvocation(record, rule, workflow, issueIdentifier, now)
+				invocation, err := newInvocation(record, rule, workflow, configuration.Revision, issueIdentifier, now)
 				if err != nil {
 					return nil, err
 				}
@@ -171,12 +171,12 @@ func resolveIssue(target triggerregistry.TargetPolicy, event eventwire.Event) (s
 	return value, nil
 }
 
-func newInvocation(record eventwire.Record, rule triggerregistry.Rule, workflow settings.Workflow, issueIdentifier string, now time.Time) (Invocation, error) {
+func newInvocation(record eventwire.Record, rule triggerregistry.Rule, definition workflow.Definition, policyRevision uint64, issueIdentifier string, now time.Time) (Invocation, error) {
 	id := digestStrings("factory-trigger-invocation-v1", record.Event.ID, rule.ID, fmt.Sprintf("%d", rule.Revision))
-	workflow.Steps = slices.Clone(workflow.Steps)
-	workflowJSON, err := json.Marshal(workflow)
+	pinned := workflow.Pin(definition)
+	digest, err := pinned.Digest()
 	if err != nil {
-		return Invocation{}, fmt.Errorf("trigger router: encode workflow snapshot: %w", err)
+		return Invocation{}, fmt.Errorf("trigger router: digest workflow snapshot: %w", err)
 	}
 	root := record.Event.RootEventID
 	if root == "" {
@@ -185,7 +185,7 @@ func newInvocation(record eventwire.Record, rule triggerregistry.Rule, workflow 
 	ancestors := append(slices.Clone(record.Event.AncestorRuleIDs), rule.ID)
 	return Invocation{
 		ID: id, EventID: record.Event.ID, EventSequence: record.Sequence, Rule: rule.Clone(),
-		Workflow: workflow, WorkflowDigest: digestBytes(workflowJSON), IssueIdentifier: issueIdentifier,
+		Workflow: pinned, WorkflowDigest: digest, PolicyRevision: policyRevision, IssueIdentifier: issueIdentifier,
 		RootEventID: root, ParentInvocationID: record.Event.ParentInvocationID, ParentRunID: record.Event.ParentRunID,
 		Hop: record.Event.Hop + 1, AncestorRuleIDs: ancestors, State: StateQueued, AdmittedAt: now, UpdatedAt: now,
 	}, nil
@@ -198,11 +198,6 @@ func digestStrings(values ...string) string {
 		_, _ = hash.Write([]byte(value))
 	}
 	return hex.EncodeToString(hash.Sum(nil))
-}
-
-func digestBytes(value []byte) string {
-	hash := sha256.Sum256(value)
-	return hex.EncodeToString(hash[:])
 }
 
 func cloneDecisions(decisions []Decision) []Decision {

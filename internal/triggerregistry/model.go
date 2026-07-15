@@ -15,6 +15,7 @@ import (
 	"github.com/tomnagengast/factory/internal/agentrun"
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 const (
@@ -134,7 +135,7 @@ func (s Snapshot) Validate(configuration settings.Snapshot) error {
 	if len(s.Schedules) > MaxSchedules {
 		return fmt.Errorf("trigger registry: schedule count exceeds %d", MaxSchedules)
 	}
-	workflowByID := make(map[string]settings.Workflow, len(configuration.Workflows))
+	workflowByID := make(map[string]workflow.Definition, len(configuration.Workflows))
 	for _, workflow := range configuration.Workflows {
 		workflowByID[workflow.ID] = workflow
 	}
