@@ -210,9 +210,49 @@ Detach with the configured tmux prefix followed by `d`. Kill only a specific ses
 
 The home and active agent views poll their APIs every two seconds. Each started run links to `https://factory.nags.cloud/agents/<issue-id>/<started-unix-ms>/run`; pending runs remain non-link rows. Every observer response includes its observation time, current retry attempt, tmux windows, commands, and recent pane output. Agent events appear as collapsed steps; expanding one reveals its redacted raw JSON payload. When tmux exits, the observer reconstructs the complete principal-attempt and child-agent histories from their retained JSONL event files without the live pane limit. Terminal views stop polling after loading this immutable history. Plain terminal output remains available when a pane does not contain structured events. A live session that cannot be observed is reported as an observer error instead of an empty session. The view never accepts terminal input. Use the attach command shown on the page when interactive local control is required.
 
-Browser navigation uses Google OAuth over HTTPS. Factory accepts only verified Google identities in `FACTORY_GOOGLE_ALLOWED_EMAILS`, keeps the OAuth tokens server-side for the duration of the callback, and issues a signed, secure, host-only session cookie for 24 hours. Visit `/auth/logout` to clear the Factory session.
+Managed browser navigation and any non-loopback standalone bind use Google OAuth over HTTPS. Factory accepts only verified Google identities in `FACTORY_GOOGLE_ALLOWED_EMAILS`, keeps the OAuth tokens server-side for the duration of the callback, and issues a signed, secure, host-only session cookie for 24 hours. Visit `/auth/logout` to clear the Factory session.
 
-Google OAuth sessions are the only authentication mechanism for protected pages and APIs. `~/.local/bin/nags refresh-env` reads the Factory-specific OAuth client from `op://Code/GCP the-nags/factory oauth credentials`, preserves or creates the session signing key, and writes them to the private service environment. Agent pane output is redacted against credentials available to the agent before it is returned by the API.
+An unmanaged loopback `factory start` uses a separate local-machine authorization policy. It accepts protected requests only when the request Host is the exact configured loopback authority and any Origin matches that same HTTP origin. Alternate loopback names, DNS-rebinding authorities, cross-site fetches, and mismatched ports fail closed. This policy is never selected by `factory serve` or a non-loopback bind. `~/.local/bin/nags refresh-env` supplies the managed OAuth configuration. Agent pane output is redacted against credentials available to the agent before it is returned by the API.
+
+## Management CLI and standalone localhost
+
+Build the frontend and binary from the repository root:
+
+```bash
+export MISE_BUN_VERSION=1.3.11
+bun install --cwd frontend --frozen-lockfile
+bun run --cwd frontend build
+go build -o factory .
+```
+
+An unmanaged checkout needs the four application variables `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET`, `LINEAR_API_KEY`, and `LINEAR_TRIGGER_ACTOR_ID`. It does not need the private `nags` provider, launchd artifacts, deployment receipts, Caddy, DNS, or Google OAuth for the default loopback bind. Start stays attached to the terminal and streams normal service output:
+
+```bash
+./factory --help
+./factory --version
+./factory start
+```
+
+From another terminal, inspect or stop the exact recorded process:
+
+```bash
+./factory status
+./factory status --json
+./factory doctor
+./factory doctor --json
+./factory stop
+```
+
+The standalone default is `127.0.0.1:${PORT:-8092}`. `start`, `status`, `stop`, and `doctor` accept `--host` and `--port`. Start flags override `PORT` and the default; later commands use explicit flags, then the private `0600` runtime record, then `PORT` and the default. The foreground server writes `~/.local/share/factory/local-runtime.json` only after acquiring its listener. `stop` signals the recorded PID only after the process, address, start time, and complete health/build identity agree, and the owning process removes only its exact record during shutdown.
+
+A non-loopback `start` never inherits local authorization. It requires the four managed Google variables, `FACTORY_SESSION_KEY`, and an explicit HTTPS `FACTORY_GOOGLE_REDIRECT_URL`. Factory still serves HTTP itself, so the chosen host also needs operator-provided HTTPS termination for browser OAuth; the CLI does not configure public routing or TLS:
+
+```bash
+FACTORY_GOOGLE_REDIRECT_URL=https://factory.example/auth/google/callback \
+  ./factory start --host 0.0.0.0 --port 8092
+```
+
+If any managed marker exists at the fixed plist, wrapper, active release, or receipt path, lifecycle commands classify the installation as managed and never fall back to local trust. Managed `start` validates those artifacts and the successful receipt, then bootstraps or kickstarts only `gui/<uid>/com.nags.factory` and waits for receipt-matched health. Managed `stop` boots out only that job. Address overrides are rejected for managed start/stop, and neither command deploys, refreshes secrets, deletes state, or touches the separate `factory-agents` tmux server.
 
 ## Configuration
 
@@ -257,7 +297,7 @@ Factory also starts its tmux server with a restricted environment. Agent process
 
 ```bash
 ~/.local/bin/nags refresh-env
-~/.local/bin/nags deploy --expected-commit "$(git rev-parse HEAD)"
+bin/network-app deploy factory --expected-commit "$(git rev-parse HEAD)"
 ~/.local/bin/nags github-hook tomnagengast/network
 ~/.local/bin/nags github-hook tomnagengast/notebook
 ~/.local/bin/nags github-hook tomnagengast/factory
@@ -321,7 +361,7 @@ Only a successful preflight permits restoring that exact schema-1 backup and act
 For a failed release, inspect the failed receipt under `~/.local/share/factory/deployments/failed/` and confirm the previous release recovered. To select a known successful release explicitly:
 
 ```bash
-~/.local/bin/nags rollback factory --to <deployment-id>
+bin/network-app rollback factory --to <deployment-id>
 curl -fsS http://127.0.0.1:8092/api/healthz | jq .
 curl -fsS https://factory.nags.cloud/api/healthz | jq .
 ```

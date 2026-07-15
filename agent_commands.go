@@ -30,7 +30,23 @@ func runAgentCommand(ctx context.Context, args []string) (int, bool) {
 	}
 	switch args[0] {
 	case "serve":
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: factory serve")
+			return 2, true
+		}
 		return 0, false
+	case "--help", "-h":
+		return runManagementHelp(args[1:], os.Stdout, os.Stderr), true
+	case "--version", "-v":
+		return runManagementVersion(args[1:], os.Stdout, os.Stderr), true
+	case "start":
+		return runManagementStart(ctx, args[1:], os.Stdout, os.Stderr), true
+	case "status":
+		return runManagementStatus(ctx, args[1:], os.Stdout, os.Stderr), true
+	case "stop":
+		return runManagementStop(ctx, args[1:], os.Stdout, os.Stderr), true
+	case "doctor":
+		return runManagementDoctor(ctx, args[1:], os.Stdout, os.Stderr), true
 	case "agent-exec":
 		return runPrincipal(ctx, args[1:]), true
 	case "child-exec":
