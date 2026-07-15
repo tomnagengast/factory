@@ -15,6 +15,7 @@ import (
 
 const (
 	DefaultID             = "full-sdlc"
+	ProviderNeutralID     = "full-sdlc-provider-neutral"
 	MaxDefinitions        = 8
 	MaxNameBytes          = 80
 	MaxMarkdownBytes      = 128 << 10

@@ -98,14 +98,17 @@ func ResolveCompatibilityIdentity(current TaskRef, legacyIdentifier string) (Tas
 	}
 	legacyIdentifier = strings.TrimSpace(legacyIdentifier)
 	if legacyIdentifier != "" {
-		legacy, err := LegacyLinear(legacyIdentifier)
-		if err != nil {
-			return TaskRef{}, err
+		if !resolved.IsZero() {
+			if !strings.EqualFold(resolved.Identifier, legacyIdentifier) {
+				return TaskRef{}, errors.New("task reference: current and legacy identities conflict")
+			}
+		} else {
+			legacy, err := LegacyLinear(legacyIdentifier)
+			if err != nil {
+				return TaskRef{}, err
+			}
+			resolved = legacy
 		}
-		if !resolved.IsZero() && resolved != legacy {
-			return TaskRef{}, errors.New("task reference: current and legacy identities conflict")
-		}
-		resolved = legacy
 	}
 	if resolved.IsZero() {
 		return TaskRef{}, errors.New("task reference: identity is required")

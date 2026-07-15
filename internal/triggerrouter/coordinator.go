@@ -32,6 +32,10 @@ type settingsMutationStore interface {
 	Update(uint64, settings.Snapshot, time.Time) (settings.Snapshot, error)
 }
 
+type providerNeutralWorkflowStore interface {
+	ReconcileProviderNeutral(uint64, time.Time) (settings.Snapshot, error)
+}
+
 var ErrPolicyConflict = errors.New("trigger router: coordinated policy conflict")
 var ErrPolicyPending = errors.New("trigger router: pending event admission")
 var ErrPolicyValidation = errors.New("trigger router: coordinated policy validation")
@@ -136,6 +140,19 @@ func (w *CoordinatedWire) UpdateSettings(expected uint64, candidate settings.Sna
 		return w.settings.Snapshot(), errors.New("trigger router: settings are read-only")
 	}
 	return store.Update(expected, candidate, now)
+}
+
+func (w *CoordinatedWire) ReconcileProviderNeutral(expected uint64, now time.Time) (settings.Snapshot, error) {
+	w.policy.Lock()
+	defer w.policy.Unlock()
+	if !w.pendingDecisionsComplete() {
+		return w.settings.Snapshot(), ErrPolicyPending
+	}
+	store, ok := w.settings.(providerNeutralWorkflowStore)
+	if !ok {
+		return w.settings.Snapshot(), errors.New("trigger router: settings are read-only")
+	}
+	return store.ReconcileProviderNeutral(expected, now)
 }
 
 func (w *CoordinatedWire) UpdateAgentSettings(expected uint64, agents settings.AgentSettings, runtime settings.RuntimeSettings, now time.Time) (settings.Snapshot, error) {

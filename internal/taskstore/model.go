@@ -113,7 +113,10 @@ type RoutingSnapshot struct {
 	Repository     string    `json:"repository"`
 	RepositoryURL  string    `json:"repositoryUrl"`
 	RepositoryPath string    `json:"repositoryPath"`
+	ManagedRoot    string    `json:"managedRoot"`
 	BaseBranch     string    `json:"baseBranch"`
+	Bootstrap      bool      `json:"bootstrap"`
+	CloudURL       string    `json:"cloudUrl,omitempty"`
 	WorkflowID     string    `json:"workflowId"`
 	WorkflowDigest string    `json:"workflowDigest"`
 	AdmittedAt     time.Time `json:"admittedAt"`
@@ -214,7 +217,7 @@ func (t Task) Validate() error {
 }
 
 func (r RoutingSnapshot) Validate() error {
-	if !projectIDPattern.MatchString(r.ProjectID) || !validText(r.Repository, 256, false) || !validText(r.RepositoryURL, 2048, false) || !validText(r.RepositoryPath, 4096, false) || !validText(r.BaseBranch, 255, false) || !validText(r.WorkflowID, 128, false) || !validText(r.WorkflowDigest, 128, false) || r.AdmittedAt.IsZero() {
+	if !projectIDPattern.MatchString(r.ProjectID) || !validText(r.Repository, 256, false) || !validText(r.RepositoryURL, 2048, false) || !validText(r.RepositoryPath, 4096, false) || !validText(r.ManagedRoot, 4096, false) || !validText(r.BaseBranch, 255, false) || !validText(r.CloudURL, 2048, true) || !validText(r.WorkflowID, 128, false) || !validText(r.WorkflowDigest, 128, false) || r.AdmittedAt.IsZero() {
 		return errors.New("task routing snapshot is invalid")
 	}
 	return nil

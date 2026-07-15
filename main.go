@@ -26,6 +26,8 @@ import (
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/server"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskcontrol"
+	"github.com/tomnagengast/factory/internal/taskservice"
 	"github.com/tomnagengast/factory/internal/taskstore"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/triggerrouter"
@@ -202,6 +204,9 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	if err != nil {
 		return err
 	}
+	if _, err := events.ReconcileProviderNeutral(settingsStore.Snapshot().Revision, time.Now()); err != nil {
+		return fmt.Errorf("reconcile provider-neutral workflow: %w", err)
+	}
 	taskStorePath := filepath.Join(dataRoot, "native-tasks.jsonl")
 	nativeTasks, err := taskstore.Open(taskStorePath)
 	if err != nil {
@@ -219,6 +224,14 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 		_, err := taskDispatcher.Apply(ctx, record)
 		return err
 	}); err != nil {
+		return err
+	}
+	taskCoordinator, err := taskstore.NewCoordinator(nativeTasks, taskStager, events)
+	if err != nil {
+		return err
+	}
+	nativeTaskControl, err := taskcontrol.Open(filepath.Join(dataRoot, "native-task-control.json"))
+	if err != nil {
 		return err
 	}
 	cursorStore, err := triggerscheduler.Open(filepath.Join(dataRoot, "trigger-cursors.json"))
@@ -334,6 +347,14 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	if err != nil {
 		return err
 	}
+	factoryRepositoryResolver, err := agentrun.NewFactoryRepositoryResolver(nativeTasks, repositoryCatalog)
+	if err != nil {
+		return err
+	}
+	taskRepositoryResolver, err := agentrun.NewCompositeTaskRepositoryResolver(repositoryResolver, factoryRepositoryResolver)
+	if err != nil {
+		return err
+	}
 	launcherConfig := agentrun.LauncherConfig{
 		Repository:    defaultRepository,
 		RepoURL:       envOr("FACTORY_REPO_URL", defaultRepoURL),
@@ -397,10 +418,18 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	if err != nil {
 		return err
 	}
-	triggerManager, err := triggerrouter.NewManager(routingStore, runStore, events, repositoryResolver, manager, slog.Default(), time.Now)
+	triggerManager, err := triggerrouter.NewManager(routingStore, runStore, events, taskRepositoryResolver, manager, slog.Default(), time.Now)
 	if err != nil {
 		return err
 	}
+	nativeTaskService, err := taskservice.New(
+		nativeTaskControl, projectSetupStore, repositoryCatalog, nativeTasks, taskCoordinator,
+		events, routingStore, triggerManager, time.Now,
+	)
+	if err != nil {
+		return err
+	}
+	_ = nativeTaskService
 	if err := manager.SetInvocationStartGate(routingStore); err != nil {
 		return err
 	}

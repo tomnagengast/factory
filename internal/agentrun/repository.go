@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/tomnagengast/factory/internal/taskmodel"
+	"github.com/tomnagengast/factory/internal/taskstore"
 )
 
 var (
@@ -152,6 +153,16 @@ func (c *RepositoryCatalog) ResolveProject(description string) (RepositoryConfig
 	return config, nil
 }
 
+func (c *RepositoryCatalog) ResolveRepository(repository string) (RepositoryConfig, error) {
+	c.mu.RLock()
+	config, found := c.byRepository[strings.ToLower(strings.TrimSpace(repository))]
+	c.mu.RUnlock()
+	if !found {
+		return RepositoryConfig{}, permanentRouting(fmt.Errorf("repository catalog: %s is not allowlisted", repository))
+	}
+	return config, nil
+}
+
 func normalizeProjectRepository(value string) (string, bool) {
 	value = strings.TrimSpace(value)
 	if repositoryPattern.MatchString(value) {
@@ -252,6 +263,60 @@ func (r *LinearRepositoryResolver) ResolveTask(ctx context.Context, task taskmod
 		return RepositoryConfig{}, permanentRouting(errors.New("resolve repository: task is not a canonical Linear reference"))
 	}
 	return r.Resolve(ctx, normalized.Identifier)
+}
+
+type FactoryRepositoryResolver struct {
+	tasks   *taskstore.Store
+	catalog *RepositoryCatalog
+}
+
+func NewFactoryRepositoryResolver(tasks *taskstore.Store, catalog *RepositoryCatalog) (*FactoryRepositoryResolver, error) {
+	if tasks == nil || catalog == nil {
+		return nil, errors.New("Factory repository resolver: task store and catalog are required")
+	}
+	return &FactoryRepositoryResolver{tasks: tasks, catalog: catalog}, nil
+}
+
+func (r *FactoryRepositoryResolver) ResolveTask(_ context.Context, ref taskmodel.TaskRef) (RepositoryConfig, error) {
+	ref, err := ref.Normalize()
+	if err != nil || ref.Source != taskmodel.SourceFactory {
+		return RepositoryConfig{}, permanentRouting(errors.New("resolve repository: task is not a canonical Factory reference"))
+	}
+	task, found := r.tasks.Find(ref.ProviderID)
+	if !found || !task.Ref.Equal(ref) || task.Routing == nil {
+		return RepositoryConfig{}, permanentRouting(errors.New("resolve repository: Factory task has no admitted route"))
+	}
+	config, err := r.catalog.ResolveRepository(task.Routing.Repository)
+	if err != nil {
+		return RepositoryConfig{}, err
+	}
+	if config.Repository != task.Routing.Repository || config.RepoURL != task.Routing.RepositoryURL || config.RepoPath != task.Routing.RepositoryPath || config.ManagedRoot != task.Routing.ManagedRoot || config.BaseBranch != task.Routing.BaseBranch || config.Bootstrap != task.Routing.Bootstrap || config.CloudURL != task.Routing.CloudURL {
+		return RepositoryConfig{}, permanentRouting(errors.New("resolve repository: Factory task route no longer matches allowlisted metadata"))
+	}
+	return config, nil
+}
+
+type CompositeTaskRepositoryResolver struct {
+	linear  TaskRepositoryResolver
+	factory TaskRepositoryResolver
+}
+
+func NewCompositeTaskRepositoryResolver(linear, factory TaskRepositoryResolver) (*CompositeTaskRepositoryResolver, error) {
+	if linear == nil || factory == nil {
+		return nil, errors.New("task repository resolver: Linear and Factory resolvers are required")
+	}
+	return &CompositeTaskRepositoryResolver{linear: linear, factory: factory}, nil
+}
+
+func (r *CompositeTaskRepositoryResolver) ResolveTask(ctx context.Context, ref taskmodel.TaskRef) (RepositoryConfig, error) {
+	switch ref.Source {
+	case taskmodel.SourceLinear:
+		return r.linear.ResolveTask(ctx, ref)
+	case taskmodel.SourceFactory:
+		return r.factory.ResolveTask(ctx, ref)
+	default:
+		return RepositoryConfig{}, permanentRouting(errors.New("resolve repository: task provider is unsupported"))
+	}
 }
 
 type permanentRoutingError struct{ error }

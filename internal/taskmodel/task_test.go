@@ -50,6 +50,9 @@ func TestResolveCompatibilityIdentity(t *testing.T) {
 	if _, err := ResolveCompatibilityIdentity(TaskRef{Source: SourceFactory, ProviderID: "task-1", Identifier: "FAC-1"}, "ENG-46"); err == nil {
 		t.Fatal("conflicting current and legacy identities unexpectedly succeeded")
 	}
+	if factory, err := ResolveCompatibilityIdentity(TaskRef{Source: SourceFactory, ProviderID: "task-1", Identifier: "FAC-1"}, "fac-1"); err != nil || factory.Source != SourceFactory {
+		t.Fatalf("Factory compatibility alias = %#v err=%v", factory, err)
+	}
 }
 
 func TestTaskRefOwnershipSeparatesProviders(t *testing.T) {

@@ -75,7 +75,7 @@ func TestStoreNativeTaskLifecycleAndReplay(t *testing.T) {
 		t.Fatalf("decision: task=%#v gate=%#v err=%v", task, gate, err)
 	}
 
-	routing := RoutingSnapshot{ProjectID: task.ProjectID, Repository: "tomnagengast/factory", RepositoryURL: "https://github.com/tomnagengast/factory", RepositoryPath: "/tmp/factory", BaseBranch: "main", WorkflowID: "full-sdlc-provider-neutral", WorkflowDigest: "0123456789abcdef", AdmittedAt: testNow.Add(7 * time.Minute)}
+	routing := RoutingSnapshot{ProjectID: task.ProjectID, Repository: "tomnagengast/factory", RepositoryURL: "https://github.com/tomnagengast/factory", RepositoryPath: "/tmp/factory", ManagedRoot: "/tmp", BaseBranch: "main", WorkflowID: "full-sdlc-provider-neutral", WorkflowDigest: "0123456789abcdef", AdmittedAt: testNow.Add(7 * time.Minute)}
 	task, _, err = store.SetRouting(RoutingCommand{Actor: agentActor, TaskID: task.Ref.ProviderID, ExpectedRevision: task.Revision, Routing: routing, IdempotencyKey: "routing-1"}, routing.AdmittedAt)
 	if err != nil || task.State != StateInProgress || task.Routing == nil {
 		t.Fatalf("routing: task=%#v err=%v", task, err)

@@ -1,0 +1,93 @@
+package triggerrouter
+
+import (
+	"errors"
+	"fmt"
+	"slices"
+	"time"
+
+	"github.com/tomnagengast/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/internal/taskmodel"
+	"github.com/tomnagengast/factory/internal/triggerregistry"
+	"github.com/tomnagengast/factory/internal/workflow"
+)
+
+const nativeTaskStartRuleID = "native-task-start"
+
+type NativeAdmission struct {
+	Task             taskmodel.TaskRef
+	Workflow         workflow.Pinned
+	WorkflowDigest   string
+	PolicyRevision   uint64
+	RegistryRevision uint64
+	AdmittedAt       time.Time
+}
+
+func (s *Store) AdmitNative(admission NativeAdmission) (Invocation, bool, error) {
+	task, err := admission.Task.Normalize()
+	if err != nil || task.Source != taskmodel.SourceFactory {
+		return Invocation{}, false, errors.New("trigger router: native admission task is invalid")
+	}
+	if err := admission.Workflow.Validate(); err != nil || !admission.Workflow.Enabled || !admission.Workflow.Complete() || admission.WorkflowDigest == "" || admission.AdmittedAt.IsZero() {
+		return Invocation{}, false, errors.New("trigger router: native admission workflow is invalid")
+	}
+	digest, err := admission.Workflow.Digest()
+	if err != nil || digest != admission.WorkflowDigest {
+		return Invocation{}, false, errors.New("trigger router: native admission workflow digest conflicts")
+	}
+	eventID := "factory:native-start:" + task.ProviderID
+	invocationID := digestStrings("factory-native-invocation-v1", task.OwnershipKey(), admission.WorkflowDigest)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.poisoned != nil {
+		return Invocation{}, false, fmt.Errorf("trigger router: store is poisoned: %w", s.poisoned)
+	}
+	if decision, found := s.decisions[eventID]; found {
+		if len(decision.Outcomes) != 1 || decision.Outcomes[0].Kind != OutcomeInvocation || decision.Outcomes[0].InvocationID != invocationID {
+			return Invocation{}, false, errors.New("trigger router: native admission identity collision")
+		}
+		invocation, found := s.invocations[invocationID]
+		if !found || !invocation.Task.Equal(task) || invocation.WorkflowDigest != admission.WorkflowDigest {
+			return Invocation{}, false, errors.New("trigger router: native admission durable state conflicts")
+		}
+		return invocation.Clone(), false, nil
+	}
+	eventSequence := uint64(1)
+	for _, decision := range s.decisions {
+		eventSequence = max(eventSequence, decision.EventSequence+1)
+	}
+	rule := triggerregistry.Rule{
+		ID: nativeTaskStartRuleID, Revision: 1, Name: "Native task start", Enabled: true,
+		WorkflowID: admission.Workflow.ID, Target: triggerregistry.TargetPolicy{Provider: taskmodel.SourceFactory, Kind: triggerregistry.TargetEventSubject},
+		MaxHop: triggerregistry.DefaultMaxHop, MaxOutstanding: triggerregistry.DefaultMaxOutstanding, AdmissionsHour: triggerregistry.DefaultAdmissionsHour,
+	}
+	invocation := Invocation{
+		ID: invocationID, EventID: eventID, EventSequence: eventSequence, Rule: rule,
+		Workflow: admission.Workflow.Clone(), WorkflowDigest: admission.WorkflowDigest, PolicyRevision: admission.PolicyRevision,
+		Task: task, IssueIdentifier: task.Identifier, RootEventID: eventID, Hop: 1, AncestorRuleIDs: []string{nativeTaskStartRuleID},
+		State: StateQueued, AdmittedAt: admission.AdmittedAt.UTC(), UpdatedAt: admission.AdmittedAt.UTC(),
+	}
+	decision := Decision{
+		EventID: eventID, EventSequence: eventSequence, Source: eventwire.SourceFactory,
+		RegistryRevision: admission.RegistryRevision, SettingsRevision: admission.PolicyRevision, DecidedAt: admission.AdmittedAt.UTC(),
+		Outcomes: []Outcome{{Kind: OutcomeInvocation, RuleID: rule.ID, RuleRevision: rule.Revision, InvocationID: invocation.ID}},
+	}
+	rate := RateBucket{RuleID: rule.ID, Minute: admission.AdmittedAt.UTC().Truncate(time.Minute), Count: 1}
+	op := diskOperation{Kind: operationDecisionBatch, Decisions: []Decision{decision}, Invocations: []Invocation{invocation}, RateIncrements: []RateBucket{rate}}
+	if err := s.appendOperationLocked(op); err != nil {
+		return Invocation{}, false, err
+	}
+	if err := s.applyOperationLocked(op); err != nil {
+		s.poisoned = err
+		return Invocation{}, false, fmt.Errorf("trigger router: apply native admission: %w", err)
+	}
+	if err := s.compactIfNeededLocked(); err != nil {
+		return Invocation{}, false, err
+	}
+	return invocation.Clone(), true, nil
+}
+
+func NativeInvocationMatches(invocation Invocation, task taskmodel.TaskRef, workflowDigest string) bool {
+	return invocation.Task.Equal(task) && invocation.WorkflowDigest == workflowDigest && invocation.Rule.ID == nativeTaskStartRuleID && slices.Equal(invocation.AncestorRuleIDs, []string{nativeTaskStartRuleID})
+}

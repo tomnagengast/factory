@@ -220,7 +220,7 @@ func TestAuthenticatedSettingsPageAndAPI(t *testing.T) {
 	if put.Code != http.StatusOK || updated.Revision != 1 || updated.Runtime.MaxConcurrentRuns != 4 {
 		t.Fatalf("update response = %d %#v", put.Code, updated)
 	}
-	if got := store.Snapshot(); got.Revision != 1 || got.Runtime.MaxConcurrentRuns != 4 || got.Triggers.LinearLabel.Label != "Factory" || len(got.Workflows) != 1 {
+	if got := store.Snapshot(); got.Revision != 1 || got.Runtime.MaxConcurrentRuns != 4 || got.Triggers.LinearLabel.Label != "Factory" || len(got.Workflows) != 2 {
 		t.Fatalf("persisted settings = %#v", got)
 	}
 }

@@ -51,6 +51,42 @@ type StagedOperation struct {
 	Event       eventwire.Event
 }
 
+func CreateEnvelope(command CreateCommand) CommandEnvelope {
+	return CommandEnvelope{Kind: operationCreate, Create: &command}
+}
+
+func UpdateEnvelope(command UpdateCommand) CommandEnvelope {
+	return CommandEnvelope{Kind: operationUpdate, Update: &command}
+}
+
+func MessageEnvelope(command MessageCommand) CommandEnvelope {
+	return CommandEnvelope{Kind: operationMessage, Message: &command}
+}
+
+func LinkEnvelope(command LinkCommand) CommandEnvelope {
+	return CommandEnvelope{Kind: operationLink, Link: &command}
+}
+
+func GateEnvelope(command GateCommand) CommandEnvelope {
+	return CommandEnvelope{Kind: operationGate, Gate: &command}
+}
+
+func DecisionEnvelope(command DecisionCommand) CommandEnvelope {
+	return CommandEnvelope{Kind: operationDecision, Decision: &command}
+}
+
+func StateEnvelope(command StateCommand) CommandEnvelope {
+	return CommandEnvelope{Kind: operationState, State: &command}
+}
+
+func RoutingEnvelope(command RoutingCommand) CommandEnvelope {
+	return CommandEnvelope{Kind: operationRouting, Routing: &command}
+}
+
+func CompletionEnvelope(command CompletionCommand) CommandEnvelope {
+	return CommandEnvelope{Kind: operationCompletion, Completion: &command}
+}
+
 type Stager struct {
 	directory      string
 	markerDataFile string
