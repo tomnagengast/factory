@@ -177,21 +177,49 @@ type AgentView = {
   windows: AgentWindow[];
 };
 
-type TriggerSettings = {
+type WorkflowSummary = {
+  id: string;
+  revision: number;
+  name: string;
   enabled: boolean;
+};
+
+type WorkflowDefinition = WorkflowSummary & {
+  markdown: string;
+  updatedAt?: string;
+};
+
+type WorkflowDraft = {
   workflowId: string;
+  revision: number;
+  baseWorkflowRevision: number;
+  name: string;
+  enabled: boolean;
+  markdown: string;
+  updatedAt?: string;
 };
 
-type LinearLabelTriggerSettings = TriggerSettings & {
-  label: string;
-};
-
-type WorkflowSettings = {
+type WorkflowReference = {
+  kind: "protected" | "rule";
   id: string;
   name: string;
   enabled: boolean;
-  runner: "do";
-  steps: string[];
+};
+
+type WorkflowDocument = {
+  workflowId: string;
+  published?: WorkflowDefinition;
+  draft: WorkflowDraft;
+  savedDraft: boolean;
+  draftConflict?: boolean;
+  references: WorkflowReference[];
+};
+
+type WorkflowsResponse = {
+  policyRevision: number;
+  draftAvailable: boolean;
+  draftError?: string;
+  workflows: WorkflowDocument[];
 };
 
 type ProviderSettings = {
@@ -200,14 +228,8 @@ type ProviderSettings = {
 };
 
 type FactorySettings = {
-  schema: number;
   revision: number;
   updatedAt?: string;
-  triggers: {
-    linearLabel: LinearLabelTriggerSettings;
-    linearComment: TriggerSettings;
-  };
-  workflows: WorkflowSettings[];
   agents: {
     principal: ProviderSettings & { maxAttempts: number };
     codexChild: ProviderSettings;
@@ -301,19 +323,19 @@ type TriggerInvocation = {
 type TriggerResponse = {
   registry: TriggerRegistry;
   settingsRevision: number;
-  workflows: WorkflowSettings[];
+  workflows: WorkflowSummary[];
   observedSources: string[];
   ruleStatus: TriggerRuleStatus[];
   scheduleStatus: TriggerScheduleStatus[];
   recentInvocations: TriggerInvocation[];
-  protectedRoutes: { id: string; name: string; description: string }[];
+  protectedRoutes: { id: string; name: string; description: string; workflowId?: string; enabled: boolean; protected: boolean }[];
 };
 
 type TriggerSaveResult = { snapshot: TriggerResponse; conflict: boolean };
 type SubjectFilterMode = "wildcard" | "absent" | "exact";
 
 const refreshIntervalMs = 2000;
-type ActivitySection = "home" | "wire" | "agents" | "triggers" | "settings";
+type ActivitySection = "home" | "wire" | "agents" | "workflows" | "triggers" | "settings";
 
 const activityPageSize = 25;
 const timeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -368,6 +390,80 @@ async function getSettings(): Promise<FactorySettings> {
 
 async function getTriggers(): Promise<TriggerResponse> {
   return getJSON<TriggerResponse>("/api/triggers", "Triggers request");
+}
+
+async function getWorkflows(): Promise<WorkflowsResponse> {
+  return getJSON<WorkflowsResponse>("/api/workflows", "Workflows request");
+}
+
+async function createWorkflowDraft(): Promise<WorkflowDraft> {
+  return workflowRequest<WorkflowDraft>("/api/workflow-drafts", "POST");
+}
+
+async function saveWorkflowDraft(draft: WorkflowDraft): Promise<WorkflowDraft> {
+  return workflowRequest<WorkflowDraft>(`/api/workflow-drafts/${encodeURIComponent(draft.workflowId)}`, "PUT", {
+    expectedDraftRevision: draft.revision,
+    expectedWorkflowRevision: draft.baseWorkflowRevision,
+    name: draft.name,
+    enabled: draft.enabled,
+    markdown: draft.markdown,
+  });
+}
+
+async function discardWorkflowDraft(draft: WorkflowDraft): Promise<void> {
+  await workflowRequest<void>(`/api/workflow-drafts/${encodeURIComponent(draft.workflowId)}`, "DELETE", {
+    expectedDraftRevision: draft.revision,
+    expectedWorkflowRevision: draft.baseWorkflowRevision,
+  });
+}
+
+async function publishWorkflowDraft(draft: WorkflowDraft, policyRevision: number): Promise<void> {
+  await workflowRequest<void>(`/api/workflow-drafts/${encodeURIComponent(draft.workflowId)}/publish`, "POST", {
+    expectedDraftRevision: draft.revision,
+    expectedWorkflowRevision: draft.baseWorkflowRevision,
+    expectedPolicyRevision: policyRevision,
+  });
+}
+
+async function deletePublishedWorkflow(document: WorkflowDocument, policyRevision: number): Promise<void> {
+  if (!document.published) return;
+  await workflowRequest<void>(`/api/workflows/${encodeURIComponent(document.workflowId)}`, "DELETE", {
+    expectedWorkflowRevision: document.published.revision,
+    expectedPolicyRevision: policyRevision,
+  });
+}
+
+async function saveProtectedFeedback(snapshot: TriggerResponse, workflowId: string): Promise<TriggerResponse> {
+  return workflowRequest<TriggerResponse>("/api/triggers/protected/linear-feedback", "PUT", {
+    expectedPolicyRevision: snapshot.settingsRevision,
+    workflowId,
+  });
+}
+
+class WorkflowConflict extends Error {
+  constructor(readonly snapshot: WorkflowsResponse) {
+    super("A newer workflow revision is available");
+  }
+}
+
+async function workflowRequest<T>(url: string, method: string, body?: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method,
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (response.status === 409) {
+    throw new WorkflowConflict((await response.json()) as WorkflowsResponse);
+  }
+  if (!response.ok) {
+    const detail = (await response.text()).trim();
+    throw new Error(detail || `Workflow request failed with ${response.status}`);
+  }
+  if (response.status === 204) return undefined as T;
+  const text = await response.text();
+  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 async function saveTriggers(candidate: TriggerRegistry): Promise<TriggerSaveResult> {
@@ -508,6 +604,13 @@ function ActivityHeader(props: {
           href="/agents"
         >
           Agents
+        </a>
+        <a
+          classList={{ active: props.section === "workflows" }}
+          aria-current={props.section === "workflows" ? "page" : undefined}
+          href="/workflows"
+        >
+          Workflows
         </a>
         <a
           classList={{ active: props.section === "triggers" }}
@@ -1036,7 +1139,12 @@ function TriggersEditor(props: { initial: TriggerResponse }): JSX.Element {
   const [message, setMessage] = createSignal("");
   const [pendingDelete, setPendingDelete] = createSignal("");
   const [broadConfirmed, setBroadConfirmed] = createSignal(false);
-  const enabledWorkflows = (): WorkflowSettings[] =>
+  const [protectedWorkflow, setProtectedWorkflow] = createSignal(
+    props.initial.protectedRoutes.find((route) => route.id === "linear-feedback")?.workflowId ?? "",
+  );
+  const [protectedState, setProtectedState] = createSignal<SettingsSaveState>("idle");
+  const [protectedMessage, setProtectedMessage] = createSignal("");
+  const enabledWorkflows = (): WorkflowSummary[] =>
     response().workflows.filter((workflow) => workflow.enabled);
 
   function update(mutator: (registry: TriggerRegistry) => void): void {
@@ -1145,6 +1253,21 @@ function TriggersEditor(props: { initial: TriggerResponse }): JSX.Element {
   const scheduleStatus = (id: string): TriggerScheduleStatus | undefined =>
     response().scheduleStatus.find((status) => status.scheduleId === id);
 
+  async function updateProtectedFeedback(): Promise<void> {
+    setProtectedState("saving");
+    setProtectedMessage("Updating protected policy binding");
+    try {
+      const next = await saveProtectedFeedback(response(), protectedWorkflow());
+      setResponse(structuredClone(next));
+      setProtectedWorkflow(next.protectedRoutes.find((route) => route.id === "linear-feedback")?.workflowId ?? "");
+      setProtectedState("saved");
+      setProtectedMessage(`Policy revision ${next.settingsRevision} saved`);
+    } catch (error) {
+      setProtectedState(error instanceof WorkflowConflict ? "conflict" : "failed");
+      setProtectedMessage(error instanceof Error ? error.message : "Protected binding update failed");
+    }
+  }
+
   return (
     <>
       <div class="settings-hero trigger-hero">
@@ -1222,11 +1345,30 @@ function TriggersEditor(props: { initial: TriggerResponse }): JSX.Element {
         <section class="settings-section protected-section" aria-labelledby="protected-title">
           <div class="settings-section-heading">
             <h2 id="protected-title">Protected lifecycle routes</h2>
-            <p>Configured rules are additive. These routes cannot be changed here.</p>
+            <p>Configured rules are additive. Protected routes stay enabled; the feedback route can select any enabled published workflow.</p>
           </div>
           <div class="protected-route-list">
             <For each={response().protectedRoutes}>
-              {(route) => <article><span>Locked</span><h3>{route.name}</h3><p>{route.description}</p></article>}
+              {(route) => (
+                <article>
+                  <span>Protected · always enabled</span>
+                  <h3>{route.name}</h3>
+                  <p>{route.description}</p>
+                  <Show when={route.id === "linear-feedback"}>
+                    <div class="protected-binding">
+                      <Field label="Workflow">
+                        <select value={protectedWorkflow()} onChange={(event) => { setProtectedWorkflow(event.currentTarget.value); setProtectedState("dirty"); setProtectedMessage("Binding change not saved"); }}>
+                          <For each={enabledWorkflows()}>{(workflow) => <option value={workflow.id}>{workflow.name} · r{workflow.revision}</option>}</For>
+                        </select>
+                      </Field>
+                      <button class="secondary-button" type="button" disabled={["idle", "saving", "saved"].includes(protectedState())} onClick={() => void updateProtectedFeedback()}>
+                        {protectedState() === "saving" ? "Saving" : "Update binding"}
+                      </button>
+                      <small classList={{ failed: ["failed", "conflict"].includes(protectedState()) }} aria-live="polite">{protectedMessage()}</small>
+                    </div>
+                  </Show>
+                </article>
+              )}
             </For>
           </div>
         </section>
@@ -1274,7 +1416,7 @@ function TriggersEditor(props: { initial: TriggerResponse }): JSX.Element {
 function RuleEditor(props: {
   rule: TriggerRule;
   status?: TriggerRuleStatus;
-  workflows: WorkflowSettings[];
+  workflows: WorkflowSummary[];
   observedSources: string[];
   pendingDelete: boolean;
   onChange: (mutator: (rule: TriggerRule) => void) => void;
@@ -1490,7 +1632,7 @@ function ruleScopeSummary(rule: TriggerRule): string {
   return parts.join(" / ");
 }
 
-function validateTriggerDraft(registry: TriggerRegistry, workflows: WorkflowSettings[]): string | undefined {
+function validateTriggerDraft(registry: TriggerRegistry, workflows: WorkflowSummary[]): string | undefined {
   const ids = new Set<string>();
   const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
   const workflowIDs = new Set(workflows.map((workflow) => workflow.id));
@@ -1509,6 +1651,347 @@ function validateTriggerDraft(registry: TriggerRegistry, workflows: WorkflowSett
     if (Object.keys(schedule.attributes ?? {}).some((key) => !key.trim())) return `Schedule ${schedule.id} has an empty context key.`;
   }
   return undefined;
+}
+
+type WorkflowEditorState = "published" | "unpublished" | "dirty" | "saving" | "conflict" | "failed" | "invalid";
+
+function WorkflowsPage(): JSX.Element {
+  const [workflows] = createResource(getWorkflows);
+
+  onMount(() => {
+    document.title = "Workflows | Factory";
+  });
+
+  return (
+    <main class="activity-page settings-page" id="main-content">
+      <section class="activity-shell settings-shell" aria-labelledby="workflows-title">
+        <ActivityHeader
+          section="workflows"
+          state={resourceState(workflows.loading, workflows.error)}
+          label={workflows.error ? "Workflow policy unavailable" : "Markdown workflow policy"}
+        />
+        <Show
+          when={workflows()}
+          fallback={
+            <div class="settings-loading" aria-live="polite">
+              <p class="section-label">Procedural policy</p>
+              <h1 class="activity-title compact-title" id="workflows-title">
+                {workflows.error ? "Workflows unavailable" : "Opening workflows"}
+              </h1>
+              <Show when={workflows.error}><InlineError message="Published workflows could not be loaded." /></Show>
+            </div>
+          }
+        >
+          {(snapshot) => <WorkflowsEditor initial={snapshot()} />}
+        </Show>
+      </section>
+    </main>
+  );
+}
+
+function WorkflowsEditor(props: { initial: WorkflowsResponse }): JSX.Element {
+  const [catalog, setCatalog] = createSignal(structuredClone(props.initial));
+  const [selectedID, setSelectedID] = createSignal(props.initial.workflows[0]?.workflowId ?? "");
+  const initialDocument = props.initial.workflows[0];
+  const [local, setLocal] = createSignal<WorkflowDraft>(structuredClone(initialDocument?.draft ?? {
+    workflowId: "", revision: 0, baseWorkflowRevision: 0, name: "", enabled: false, markdown: "",
+  }));
+  const [editorState, setEditorState] = createSignal<WorkflowEditorState>(workflowDocumentState(initialDocument));
+  const [message, setMessage] = createSignal("Published policy is unchanged");
+  const [localUnacknowledged, setLocalUnacknowledged] = createSignal(false);
+  let saveTimer: number | undefined;
+  let saving = false;
+  let saveQueued = false;
+
+  const selectedDocument = (): WorkflowDocument | undefined =>
+    catalog().workflows.find((document) => document.workflowId === selectedID());
+
+  onMount(() => {
+    const warn = (event: BeforeUnloadEvent): void => {
+      if (!localUnacknowledged()) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    onCleanup(() => {
+      window.removeEventListener("beforeunload", warn);
+      if (saveTimer !== undefined) window.clearTimeout(saveTimer);
+    });
+  });
+
+  function selectWorkflow(id: string): void {
+    if (id === selectedID()) return;
+    if (localUnacknowledged() && !window.confirm("Discard local edits that have not reached the draft store?")) return;
+    const document = catalog().workflows.find((candidate) => candidate.workflowId === id);
+    if (!document) return;
+    if (saveTimer !== undefined) window.clearTimeout(saveTimer);
+    setSelectedID(id);
+    setLocal(structuredClone(document.draft));
+    setLocalUnacknowledged(false);
+    setEditorState(workflowDocumentState(document));
+    setMessage(document.savedDraft ? "Saved draft loaded" : "Editing the published revision");
+  }
+
+  function edit(mutator: (draft: WorkflowDraft) => void): void {
+    setLocal((current) => {
+      const next = structuredClone(current);
+      mutator(next);
+      return next;
+    });
+    setLocalUnacknowledged(true);
+    const problem = validateWorkflowDraft(local());
+    if (problem) {
+      setEditorState("invalid");
+      setMessage(problem);
+      return;
+    }
+    setEditorState("dirty");
+    setMessage("Local edits will autosave shortly");
+    if (saveTimer !== undefined) window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => void autosave(), 700);
+  }
+
+  async function autosave(): Promise<void> {
+    if (saving) {
+      saveQueued = true;
+      return;
+    }
+    const problem = validateWorkflowDraft(local());
+    if (problem) {
+      setEditorState("invalid");
+      setMessage(problem);
+      return;
+    }
+    saving = true;
+    const captured = structuredClone(local());
+    setEditorState("saving");
+    setMessage("Saving private draft");
+    try {
+      const saved = await saveWorkflowDraft(captured);
+      setCatalog((current) => ({
+        ...current,
+        workflows: current.workflows.map((document) => document.workflowId === saved.workflowId
+          ? { ...document, draft: structuredClone(saved), savedDraft: true, draftConflict: false }
+          : document),
+      }));
+      const unchanged = workflowEditableEqual(local(), captured);
+      setLocal((current) => ({ ...current, revision: saved.revision, baseWorkflowRevision: saved.baseWorkflowRevision, updatedAt: saved.updatedAt }));
+      if (unchanged) {
+        setLocalUnacknowledged(false);
+        const published = selectedDocument()?.published;
+        const current = { ...saved };
+        setEditorState(published && workflowPublishedEqual(published, current) ? "published" : "unpublished");
+        setMessage(published && workflowPublishedEqual(published, current) ? "Draft matches the published revision" : "Draft saved · publication required");
+      } else {
+        saveQueued = true;
+      }
+    } catch (error) {
+      if (error instanceof WorkflowConflict) {
+        setCatalog(structuredClone(error.snapshot));
+        setEditorState("conflict");
+        setMessage("A newer server revision exists. Local text has been preserved.");
+      } else {
+        setEditorState("failed");
+        setMessage(error instanceof Error ? error.message : "Draft autosave failed");
+      }
+    } finally {
+      saving = false;
+      if (saveQueued) {
+        saveQueued = false;
+        void autosave();
+      }
+    }
+  }
+
+  async function refresh(preferredID = selectedID()): Promise<void> {
+    const next = await getWorkflows();
+    setCatalog(structuredClone(next));
+    const document = next.workflows.find((candidate) => candidate.workflowId === preferredID) ?? next.workflows[0];
+    setSelectedID(document?.workflowId ?? "");
+    setLocal(structuredClone(document?.draft ?? { workflowId: "", revision: 0, baseWorkflowRevision: 0, name: "", enabled: false, markdown: "" }));
+    setLocalUnacknowledged(false);
+    setEditorState(workflowDocumentState(document));
+  }
+
+  async function createDraft(): Promise<void> {
+    try {
+      const created = await createWorkflowDraft();
+      await refresh(created.workflowId);
+      setMessage("Disabled draft created");
+    } catch (error) {
+      setEditorState("failed");
+      setMessage(error instanceof Error ? error.message : "Workflow creation failed");
+    }
+  }
+
+  async function publish(): Promise<void> {
+    if (localUnacknowledged() || !selectedDocument()?.savedDraft) return;
+    setEditorState("saving");
+    setMessage("Publishing the exact saved draft");
+    try {
+      await publishWorkflowDraft(local(), catalog().policyRevision);
+      await refresh(local().workflowId);
+      setEditorState("published");
+      setMessage("Published for later admissions");
+    } catch (error) {
+      if (error instanceof WorkflowConflict) setCatalog(structuredClone(error.snapshot));
+      setEditorState(error instanceof WorkflowConflict ? "conflict" : "failed");
+      setMessage(error instanceof Error ? error.message : "Workflow publish failed");
+    }
+  }
+
+  async function discard(): Promise<void> {
+    const document = selectedDocument();
+    if (!document) return;
+    if (localUnacknowledged() && !window.confirm("Discard local edits and the saved draft?")) return;
+    try {
+      if (document.savedDraft) await discardWorkflowDraft(local());
+      await refresh(document.workflowId);
+      setMessage(document.published ? "Draft discarded · published revision restored" : "Draft discarded");
+    } catch (error) {
+      if (error instanceof WorkflowConflict) setCatalog(structuredClone(error.snapshot));
+      setEditorState(error instanceof WorkflowConflict ? "conflict" : "failed");
+      setMessage(error instanceof Error ? error.message : "Draft discard failed");
+    }
+  }
+
+  async function duplicateLocal(): Promise<void> {
+    try {
+      const created = await createWorkflowDraft();
+      const copied = await saveWorkflowDraft({ ...created, name: `${local().name} copy`, enabled: false, markdown: local().markdown });
+      await refresh(copied.workflowId);
+      setMessage("Local text duplicated into a disabled draft");
+    } catch (error) {
+      setEditorState("failed");
+      setMessage(error instanceof Error ? error.message : "Workflow duplication failed");
+    }
+  }
+
+  async function deleteWorkflow(): Promise<void> {
+    const document = selectedDocument();
+    if (!document?.published || !window.confirm(`Delete published workflow ${document.published.name}?`)) return;
+    try {
+      await deletePublishedWorkflow(document, catalog().policyRevision);
+      await refresh("");
+      setMessage("Published workflow deleted");
+    } catch (error) {
+      if (error instanceof WorkflowConflict) setCatalog(structuredClone(error.snapshot));
+      setEditorState(error instanceof WorkflowConflict ? "conflict" : "failed");
+      setMessage(error instanceof Error ? error.message : "Workflow deletion failed");
+    }
+  }
+
+  return (
+    <>
+      <div class="settings-hero workflow-hero">
+        <p class="section-label">Procedural policy</p>
+        <h1 class="activity-title compact-title" id="workflows-title">Workflows</h1>
+        <p class="settings-intro">Write procedures as Markdown notes. Drafts autosave privately; only an explicit publish changes later Factory admissions.</p>
+        <dl class="settings-revision workflow-revision">
+          <div><dt>Policy revision</dt><dd>{catalog().policyRevision}</dd></div>
+          <div><dt>Documents</dt><dd>{catalog().workflows.length} / 8</dd></div>
+          <div><dt>Authoring</dt><dd>{catalog().draftAvailable ? "Available" : "Read only"}</dd></div>
+        </dl>
+      </div>
+
+      <Show when={catalog().draftError}><InlineError message={catalog().draftError ?? "Draft store unavailable"} /></Show>
+      <div class="workflow-workspace">
+        <aside class="workflow-index" aria-label="Workflow documents">
+          <div class="workflow-index-heading">
+            <strong>Documents</strong>
+            <button class="text-button" type="button" disabled={!catalog().draftAvailable || catalog().workflows.length >= 8} onClick={() => void createDraft()}>New</button>
+          </div>
+          <For each={catalog().workflows}>
+            {(document) => (
+              <button type="button" classList={{ selected: document.workflowId === selectedID() }} onClick={() => selectWorkflow(document.workflowId)}>
+                <strong>{document.draft.name || document.published?.name || "Untitled"}</strong>
+                <span>{document.published ? `Published r${document.published.revision}` : "Draft only"}</span>
+                <i>{document.draftConflict ? "Conflict" : document.savedDraft ? "Saved draft" : "Published"}</i>
+              </button>
+            )}
+          </For>
+        </aside>
+
+        <Show when={selectedDocument()} fallback={<div class="workflow-empty"><strong>No workflow document</strong><p>Create a disabled draft to begin.</p></div>}>
+          {(document) => (
+            <section class="workflow-note" aria-labelledby="workflow-note-title">
+              <header class="workflow-note-header">
+                <div>
+                  <span class="workflow-id">{document().workflowId}</span>
+                  <h2 id="workflow-note-title">{local().name || "Untitled workflow"}</h2>
+                </div>
+                <Toggle checked={local().enabled} compact label={local().enabled ? "Enabled on publish" : "Disabled on publish"} onChange={(enabled) => edit((draft) => { draft.enabled = enabled; })} />
+              </header>
+              <div class="workflow-note-meta">
+                <Field label="Name"><input maxlength={80} value={local().name} onInput={(event) => edit((draft) => { draft.name = event.currentTarget.value; })} /></Field>
+                <Field label="Stable ID" hint="IDs are server assigned and immutable."><input readOnly value={local().workflowId} /></Field>
+              </div>
+              <label class="workflow-markdown-field">
+                <span>Markdown procedure</span>
+                <textarea spellcheck={false} value={local().markdown} onInput={(event) => edit((draft) => { draft.markdown = event.currentTarget.value; })} />
+                <small>{new TextEncoder().encode(local().markdown).length.toLocaleString()} / 131,072 bytes</small>
+              </label>
+              <Show when={document().references.length > 0}>
+                <div class="workflow-references"><strong>Live references</strong><For each={document().references}>{(reference) => <span>{reference.kind === "protected" ? "Protected" : reference.enabled ? "Enabled rule" : "Disabled rule"} · {reference.name}</span>}</For></div>
+              </Show>
+              <div class={`workflow-editor-status ${editorState()}`}>
+                <div aria-live="polite" role={["failed", "conflict", "invalid"].includes(editorState()) ? "alert" : "status"}>
+                  <strong>{workflowStateLabel(editorState())}</strong><span>{message()}</span>
+                </div>
+                <div class="workflow-note-actions">
+                  <Show when={editorState() === "conflict"}>
+                    <button class="text-button" type="button" onClick={() => void refresh(local().workflowId)}>Reload server</button>
+                    <button class="text-button" type="button" onClick={() => void duplicateLocal()}>Duplicate local text</button>
+                  </Show>
+                  <Show when={editorState() === "failed"}><button class="text-button" type="button" onClick={() => void autosave()}>Retry save</button></Show>
+                  <button class="text-button" type="button" disabled={!catalog().draftAvailable || (!document().savedDraft && !localUnacknowledged())} onClick={() => void discard()}>Discard draft</button>
+                  <button class="text-button danger-button" type="button" disabled={!document().published || document().references.length > 0} onClick={() => void deleteWorkflow()}>Delete published</button>
+                  <button class="primary-button" type="button" disabled={!document().savedDraft || localUnacknowledged() || ["saving", "dirty", "invalid", "conflict", "published"].includes(editorState())} onClick={() => void publish()}>Publish saved draft</button>
+                </div>
+              </div>
+            </section>
+          )}
+        </Show>
+      </div>
+      <footer class="activity-footer settings-footer"><span>Current Runs retain the workflow revision they admitted.</span><a class="text-link" href="/triggers">Manage trigger bindings</a></footer>
+    </>
+  );
+}
+
+function workflowDocumentState(document: WorkflowDocument | undefined): WorkflowEditorState {
+  if (!document) return "published";
+  if (document.draftConflict) return "conflict";
+  if (!document.savedDraft || (document.published && workflowPublishedEqual(document.published, document.draft))) return "published";
+  return "unpublished";
+}
+
+function workflowEditableEqual(left: WorkflowDraft, right: WorkflowDraft): boolean {
+  return left.name === right.name && left.enabled === right.enabled && left.markdown === right.markdown;
+}
+
+function workflowPublishedEqual(published: WorkflowDefinition, draft: WorkflowDraft): boolean {
+  return published.name === draft.name && published.enabled === draft.enabled && published.markdown === draft.markdown;
+}
+
+function validateWorkflowDraft(draft: WorkflowDraft): string | undefined {
+  if (!draft.name || draft.name !== draft.name.trim() || new TextEncoder().encode(draft.name).length > 80) return "Name must be trimmed and at most 80 bytes";
+  const size = new TextEncoder().encode(draft.markdown).length;
+  if (!draft.markdown.trim()) return "Markdown cannot be blank";
+  if (size > 131072) return "Markdown exceeds 131,072 bytes";
+  if (draft.markdown.includes("\0")) return "Markdown cannot contain NUL";
+  return undefined;
+}
+
+function workflowStateLabel(state: WorkflowEditorState): string {
+  switch (state) {
+    case "dirty": return "Local edits";
+    case "saving": return "Saving draft";
+    case "unpublished": return "Unpublished changes";
+    case "conflict": return "Draft conflict";
+    case "failed": return "Autosave failed";
+    case "invalid": return "Validation required";
+    default: return "Published";
+  }
 }
 
 function SettingsPage(): JSX.Element {
@@ -1563,48 +2046,6 @@ function SettingsEditor(props: { initial: FactorySettings }): JSX.Element {
     setMessage("Unsaved changes");
   }
 
-  function workflowAssigned(id: string): boolean {
-    const triggers = draft().triggers;
-    return triggers.linearLabel.workflowId === id || triggers.linearComment.workflowId === id;
-  }
-
-  function addWorkflow(): void {
-    update((next) => {
-      const ids = new Set(next.workflows.map((workflow) => workflow.id));
-      let sequence = next.workflows.length + 1;
-      while (ids.has(`workflow-${sequence}`)) {
-        sequence += 1;
-      }
-      next.workflows.push({
-        id: `workflow-${sequence}`,
-        name: `Workflow ${sequence}`,
-        enabled: true,
-        runner: "do",
-        steps: ["Describe the first workflow step"],
-      });
-    });
-  }
-
-  function removeWorkflow(id: string): void {
-    if (workflowAssigned(id) || draft().workflows.length === 1) {
-      return;
-    }
-    update((next) => {
-      next.workflows = next.workflows.filter((workflow) => workflow.id !== id);
-    });
-  }
-
-  function moveStep(workflowIndex: number, stepIndex: number, direction: -1 | 1): void {
-    const target = stepIndex + direction;
-    if (target < 0 || target >= draft().workflows[workflowIndex].steps.length) {
-      return;
-    }
-    update((next) => {
-      const steps = next.workflows[workflowIndex].steps;
-      [steps[stepIndex], steps[target]] = [steps[target], steps[stepIndex]];
-    });
-  }
-
   async function submit(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     setSaveState("saving");
@@ -1645,10 +2086,7 @@ function SettingsEditor(props: { initial: FactorySettings }): JSX.Element {
             <dt>Last updated</dt>
             <dd>{draft().updatedAt ? formatTime(draft().updatedAt) : "Compiled defaults"}</dd>
           </div>
-          <div>
-            <dt>Schema</dt>
-            <dd>{draft().schema}</dd>
-          </div>
+          <div><dt>Scope</dt><dd>Agents & capacity</dd></div>
         </dl>
       </div>
 
@@ -1661,110 +2099,12 @@ function SettingsEditor(props: { initial: FactorySettings }): JSX.Element {
           <a class="secondary-button settings-route-link" href="/triggers">Open triggers</a>
         </section>
 
-        <section class="settings-section" aria-labelledby="workflow-settings-title">
-          <div class="settings-section-heading workflow-heading">
-            <div>
-              <h2 id="workflow-settings-title">Workflows</h2>
-              <p>Ordered declarative steps are added to the fixed, safety-gated `$do` lifecycle.</p>
-            </div>
-            <button
-              class="secondary-button"
-              type="button"
-              disabled={draft().workflows.length >= 8}
-              onClick={addWorkflow}
-            >
-              Add workflow
-            </button>
+        <section class="settings-section settings-routing-note" aria-labelledby="workflow-settings-title">
+          <div class="settings-section-heading">
+            <h2 id="workflow-settings-title">Workflow authoring has its own workspace</h2>
+            <p>Draft and publish Markdown procedures without mixing executable policy into provider configuration.</p>
           </div>
-          <div class="workflow-list">
-            <For each={draft().workflows}>
-              {(workflow, workflowIndex) => (
-                <article class="workflow-editor" aria-labelledby={`workflow-${workflow.id}`}>
-                  <div class="workflow-meta">
-                    <div>
-                      <span class="workflow-id">{workflow.id}</span>
-                      <h3 id={`workflow-${workflow.id}`}>{workflow.name || "Untitled workflow"}</h3>
-                    </div>
-                    <div class="workflow-actions">
-                      <Toggle
-                        checked={workflow.enabled}
-                        disabled={workflowAssigned(workflow.id)}
-                        label={workflowAssigned(workflow.id) ? "Assigned" : "Enabled"}
-                        compact
-                        onChange={(checked) => update((next) => { next.workflows[workflowIndex()].enabled = checked; })}
-                      />
-                      <button
-                        class="text-button danger-button"
-                        type="button"
-                        disabled={workflowAssigned(workflow.id) || draft().workflows.length === 1}
-                        onClick={() => removeWorkflow(workflow.id)}
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  </div>
-                  <div class="workflow-fields">
-                    <Field label="Workflow name">
-                      <input
-                        required
-                        maxlength={80}
-                        value={workflow.name}
-                        onInput={(event) => update((next) => { next.workflows[workflowIndex()].name = event.currentTarget.value; })}
-                      />
-                    </Field>
-                    <Field label="Runner" hint="The executable lifecycle is intentionally fixed.">
-                      <input value="$do" readOnly />
-                    </Field>
-                  </div>
-                  <div class="workflow-steps">
-                    <div class="step-heading">
-                      <h4>Ordered steps</h4>
-                      <span>{workflow.steps.length} / 20</span>
-                    </div>
-                    <ol>
-                      <For each={workflow.steps}>
-                        {(step, stepIndex) => (
-                          <li>
-                            <span class="step-number">{String(stepIndex() + 1).padStart(2, "0")}</span>
-                            <input
-                              aria-label={`Step ${stepIndex() + 1} for ${workflow.name}`}
-                              required
-                              maxlength={240}
-                              value={step}
-                              onInput={(event) => update((next) => { next.workflows[workflowIndex()].steps[stepIndex()] = event.currentTarget.value; })}
-                            />
-                            <div class="step-actions" aria-label={`Reorder step ${stepIndex() + 1}`}>
-                              <button type="button" disabled={stepIndex() === 0} onClick={() => moveStep(workflowIndex(), stepIndex(), -1)}>
-                                Up
-                              </button>
-                              <button type="button" disabled={stepIndex() === workflow.steps.length - 1} onClick={() => moveStep(workflowIndex(), stepIndex(), 1)}>
-                                Down
-                              </button>
-                              <button
-                                type="button"
-                                disabled={workflow.steps.length === 1}
-                                onClick={() => update((next) => { next.workflows[workflowIndex()].steps.splice(stepIndex(), 1); })}
-                              >
-                                Remove
-                              </button>
-                            </div>
-                          </li>
-                        )}
-                      </For>
-                    </ol>
-                    <button
-                      class="text-button"
-                      type="button"
-                      disabled={workflow.steps.length >= 20}
-                      onClick={() => update((next) => { next.workflows[workflowIndex()].steps.push("Describe the next workflow step"); })}
-                    >
-                      Add step
-                    </button>
-                  </div>
-                </article>
-              )}
-            </For>
-          </div>
+          <a class="secondary-button settings-route-link" href="/workflows">Open workflows</a>
         </section>
 
         <section class="settings-section" aria-labelledby="agent-settings-title">
@@ -2392,6 +2732,9 @@ render(() => {
   }
   if (currentPath === "/settings") {
     return <SettingsPage />;
+  }
+  if (currentPath === "/workflows") {
+    return <WorkflowsPage />;
   }
   if (currentPath === "/triggers") {
     return <TriggersPage />;
