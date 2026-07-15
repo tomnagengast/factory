@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/eventwire"
-	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 const (
@@ -48,8 +48,9 @@ type Invocation struct {
 	EventID            string               `json:"eventId"`
 	EventSequence      uint64               `json:"eventSequence"`
 	Rule               triggerregistry.Rule `json:"rule"`
-	Workflow           settings.Workflow    `json:"workflow"`
+	Workflow           workflow.Pinned      `json:"workflow"`
 	WorkflowDigest     string               `json:"workflowDigest"`
+	PolicyRevision     uint64               `json:"policyRevision"`
 	IssueIdentifier    string               `json:"issueIdentifier"`
 	RootEventID        string               `json:"rootEventId"`
 	ParentInvocationID string               `json:"parentInvocationId,omitempty"`
@@ -86,7 +87,7 @@ func (d Decision) Clone() Decision {
 func (i Invocation) Clone() Invocation {
 	clone := i
 	clone.Rule = i.Rule.Clone()
-	clone.Workflow.Steps = slices.Clone(i.Workflow.Steps)
+	clone.Workflow = i.Workflow.Clone()
 	clone.AncestorRuleIDs = slices.Clone(i.AncestorRuleIDs)
 	if i.ReflectedAt != nil {
 		value := *i.ReflectedAt

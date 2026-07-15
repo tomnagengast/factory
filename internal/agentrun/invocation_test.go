@@ -8,6 +8,7 @@ import (
 
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/settings"
+	workflowpkg "github.com/tomnagengast/factory/internal/workflow"
 )
 
 func TestEnsureInvocationRunIsIdempotentAndRejectsIssueOwner(t *testing.T) {
@@ -38,18 +39,22 @@ func TestPinnedWorkflowStrictReadAndRunCausation(t *testing.T) {
 	if err := os.MkdirAll(runDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	workflow := settings.Defaults(3).Workflows[0]
+	pinned := workflowpkg.Pin(settings.Defaults(3).Workflows[0])
+	digest, err := pinned.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(runDirectory, WorkflowSnapshotFileName)
-	if err := writeJSONFile(path, workflow); err != nil {
+	if err := writeJSONFile(path, workflowpkg.EncodePinnedSnapshot(pinned, digest)); err != nil {
 		t.Fatalf("write workflow: %v", err)
 	}
-	if got, err := ReadWorkflowSnapshot(runDirectory, path); err != nil || !workflowEqual(got, workflow) {
+	if got, gotDigest, err := ReadWorkflowSnapshot(runDirectory, path); err != nil || !workflowEqual(got, pinned) || gotDigest != digest {
 		t.Fatalf("read workflow=%#v err=%v", got, err)
 	}
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadWorkflowSnapshot(runDirectory, path); err == nil {
+	if _, _, err := ReadWorkflowSnapshot(runDirectory, path); err == nil {
 		t.Fatal("insecure workflow permissions were accepted")
 	}
 
@@ -71,10 +76,15 @@ func TestPinnedWorkflowStrictReadAndRunCausation(t *testing.T) {
 
 func testInvocationClaim(directory, runID, invocationID, eventID string) InvocationClaim {
 	root := filepath.Join(directory, "repos")
+	pinned := workflowpkg.Pin(settings.Defaults(3).Workflows[0])
+	digest, err := pinned.Digest()
+	if err != nil {
+		panic(err)
+	}
 	return InvocationClaim{
 		RunID: runID, InvocationID: invocationID, EventID: eventID, IssueIdentifier: "ENG-40",
 		RootEventID: "linear:root", Hop: 1, AncestorRuleIDs: []string{"linear-label"},
-		Workflow: settings.Defaults(3).Workflows[0],
+		Workflow: pinned, WorkflowDigest: digest, PolicyRevision: 5,
 		Repository: RepositoryConfig{
 			App: "factory", Repository: "tomnagengast/factory", RepoURL: "https://github.com/tomnagengast/factory",
 			RepoPath: filepath.Join(root, "factory"), ManagedRoot: root, BaseBranch: "main",

@@ -154,7 +154,8 @@ func (m *Manager) ensureAndClaim(invocation Invocation, repository agentrun.Repo
 		RunID: invocation.RunID, InvocationID: invocation.ID, EventID: invocation.EventID,
 		IssueIdentifier: invocation.IssueIdentifier, RootEventID: invocation.RootEventID,
 		Hop: invocation.Hop, AncestorRuleIDs: invocation.AncestorRuleIDs,
-		Workflow: invocation.Workflow, Repository: repository,
+		Workflow: invocation.Workflow, WorkflowDigest: invocation.WorkflowDigest,
+		PolicyRevision: invocation.PolicyRevision, Repository: repository,
 	}, m.now())
 	if errors.Is(err, agentrun.ErrInvocationIssueOwned) {
 		return nil
@@ -180,7 +181,8 @@ func (m *Manager) reflectOrRecover(ctx context.Context, invocation Invocation) e
 			RunID: invocation.RunID, InvocationID: invocation.ID, EventID: invocation.EventID,
 			IssueIdentifier: invocation.IssueIdentifier, RootEventID: invocation.RootEventID,
 			Hop: invocation.Hop, AncestorRuleIDs: invocation.AncestorRuleIDs,
-			Workflow: invocation.Workflow, Repository: repository,
+			Workflow: invocation.Workflow, WorkflowDigest: invocation.WorkflowDigest,
+			PolicyRevision: invocation.PolicyRevision, Repository: repository,
 		}, m.now())
 		if errors.Is(err, agentrun.ErrInvocationIssueOwned) {
 			return nil

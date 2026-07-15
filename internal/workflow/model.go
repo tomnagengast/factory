@@ -197,8 +197,12 @@ func Digest(definition Definition) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("workflow digest: encode: %w", err)
 	}
+	return digestBytes(data), nil
+}
+
+func digestBytes(data []byte) string {
 	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:])
 }
 
 func PublishedEqual(left, right Definition) bool {

@@ -19,6 +19,7 @@ type RegistryStore interface {
 
 type SettingsStore interface {
 	Snapshot() settings.Snapshot
+	MarkWorkflowRollbackIncompatible(time.Time) (settings.Snapshot, error)
 }
 
 type registryMutationStore interface {
@@ -149,6 +150,13 @@ func (w *CoordinatedWire) pendingDecisionsComplete() bool {
 func (w *CoordinatedWire) admit(_ context.Context, records []eventwire.Record) error {
 	registry := w.registry.Snapshot()
 	configuration := w.settings.Snapshot()
+	if mayAdmitMarkdown(records, registry, configuration) {
+		var err error
+		configuration, err = w.settings.MarkWorkflowRollbackIncompatible(w.now())
+		if err != nil {
+			return err
+		}
+	}
 	for _, record := range records {
 		if record.Event.Source != eventwire.SourceLinear && record.Event.Source != eventwire.SourceGitHub && record.Event.Source != eventwire.SourceFactory {
 			var err error
@@ -161,4 +169,19 @@ func (w *CoordinatedWire) admit(_ context.Context, records []eventwire.Record) e
 	}
 	_, err := w.routing.ApplyDecisionBatch(records, registry, configuration, w.now())
 	return err
+}
+
+func mayAdmitMarkdown(records []eventwire.Record, registry triggerregistry.Snapshot, configuration settings.Snapshot) bool {
+	for _, record := range records {
+		for _, rule := range registry.Rules {
+			if !rule.Enabled || !rule.Filter.Matches(record.Event) {
+				continue
+			}
+			definition, found := configuration.Workflow(rule.WorkflowID)
+			if found && definition.Enabled && definition.Revision > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 func runAgentCommand(ctx context.Context, args []string) (int, bool) {
@@ -55,11 +56,13 @@ func runPrincipal(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	var workflow settings.Workflow
+	var pinned workflow.Pinned
 	if *workflowFile != "" {
-		workflow, err = agentrun.ReadWorkflowSnapshot(*runDirectory, *workflowFile)
+		pinned, _, err = agentrun.ReadWorkflowSnapshot(*runDirectory, *workflowFile)
 	} else {
-		workflow, err = configuration.WorkflowForTrigger(*triggerKind)
+		var definition workflow.Definition
+		definition, err = configuration.WorkflowForTrigger(*triggerKind)
+		pinned = workflow.Pin(definition)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -75,7 +78,7 @@ func runPrincipal(ctx context.Context, args []string) int {
 		Sleep:           sleepContext,
 		AttemptOffset:   *attemptOffset,
 		Provider:        configuration.Agents.Principal,
-		Workflow:        workflow,
+		Workflow:        pinned,
 	})
 }
 

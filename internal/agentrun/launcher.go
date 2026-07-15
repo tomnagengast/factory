@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 const resultFileName = "result.json"
@@ -506,16 +508,22 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 		return err
 	}
 	workflowPath := ""
-	if run.InvocationID != "" {
-		if run.PinnedWorkflow == nil {
-			return errors.New("start invocation Run: pinned workflow is missing")
+	if run.PinnedWorkflow != nil {
+		context := "start Run"
+		if run.InvocationID != "" {
+			context = "start invocation Run"
 		}
-		if err := run.PinnedWorkflow.Validate(); err != nil {
-			return fmt.Errorf("start invocation Run: invalid pinned workflow: %w", err)
+		if err := validatePinnedWorkflow(*run.PinnedWorkflow, run.PinnedWorkflowDigest, run.PinnedPolicyRevision); err != nil {
+			return fmt.Errorf("%s: invalid pinned workflow: %w", context, err)
 		}
 		workflowPath = filepath.Join(runDirectory, WorkflowSnapshotFileName)
-		if err := writeJSONFile(workflowPath, run.PinnedWorkflow); err != nil {
+		snapshot := workflow.EncodePinnedSnapshot(*run.PinnedWorkflow, run.PinnedWorkflowDigest)
+		if err := writeJSONFile(workflowPath, snapshot); err != nil {
 			return fmt.Errorf("write pinned workflow: %w", err)
+		}
+	} else if run.InvocationID != "" {
+		if run.PinnedWorkflow == nil {
+			return errors.New("start invocation Run: pinned workflow is missing")
 		}
 	}
 	args := []string{

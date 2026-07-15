@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 const (
@@ -30,7 +31,7 @@ type PrincipalConfig struct {
 	Sleep           func(context.Context, time.Duration) error
 	AttemptOffset   int
 	Provider        settings.PrincipalSettings
-	Workflow        settings.Workflow
+	Workflow        workflow.Pinned
 }
 
 type ChildConfig struct {
@@ -67,7 +68,7 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 		errPath := filepath.Join(config.RunDirectory, fmt.Sprintf("attempt-%d-stderr.log", attemptNumber))
 		continuation := prompt
 		if attempt > 1 {
-			continuation = "Resume the Factory /do run. Continue from durable repository, Linear, PR, and run state. Do not duplicate work."
+			continuation = "Resume the Factory workflow from durable repository, Linear, pull-request, and Run state. Do not duplicate work or replace the pinned workflow revision."
 		}
 		exitCode, err := runCodex(ctx, config, threadID, continuation, finalPath, eventsPath, errPath)
 		lastExit = exitCode
@@ -121,36 +122,35 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 	return 1
 }
 
-func ReadWorkflowSnapshot(runDirectory, path string) (settings.Workflow, error) {
+func ReadWorkflowSnapshot(runDirectory, path string) (workflow.Pinned, string, error) {
 	expected := filepath.Join(filepath.Clean(runDirectory), WorkflowSnapshotFileName)
 	if filepath.Clean(path) != expected || !filepath.IsAbs(path) {
-		return settings.Workflow{}, errors.New("pinned workflow path is invalid")
+		return workflow.Pinned{}, "", errors.New("pinned workflow path is invalid")
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return settings.Workflow{}, fmt.Errorf("read pinned workflow: %w", err)
+		return workflow.Pinned{}, "", fmt.Errorf("read pinned workflow: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		return settings.Workflow{}, errors.New("pinned workflow permissions are invalid")
+		return workflow.Pinned{}, "", errors.New("pinned workflow permissions are invalid")
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return settings.Workflow{}, fmt.Errorf("read pinned workflow: %w", err)
+		return workflow.Pinned{}, "", fmt.Errorf("read pinned workflow: %w", err)
 	}
 	defer file.Close()
-	decoder := json.NewDecoder(io.LimitReader(file, 1<<20))
-	decoder.DisallowUnknownFields()
-	var workflow settings.Workflow
-	if err := decoder.Decode(&workflow); err != nil {
-		return settings.Workflow{}, fmt.Errorf("decode pinned workflow: %w", err)
+	data, err := io.ReadAll(io.LimitReader(file, workflow.MaxAuthoringBodyBytes+1))
+	if err != nil {
+		return workflow.Pinned{}, "", fmt.Errorf("read pinned workflow: %w", err)
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return settings.Workflow{}, errors.New("decode pinned workflow: trailing content")
+	if len(data) > workflow.MaxAuthoringBodyBytes {
+		return workflow.Pinned{}, "", errors.New("pinned workflow is too large")
 	}
-	if err := workflow.Validate(); err != nil || !workflow.Enabled {
-		return settings.Workflow{}, errors.New("pinned workflow is invalid")
+	snapshot, err := workflow.DecodePinnedSnapshot(data)
+	if err != nil {
+		return workflow.Pinned{}, "", err
 	}
-	return workflow, nil
+	return snapshot.Workflow, snapshot.Digest, nil
 }
 
 func ExecuteChild(ctx context.Context, config ChildConfig) int {
@@ -286,32 +286,50 @@ func principalCodexArgs(provider settings.ProviderSettings, threadID, finalPath 
 	}
 }
 
-func principalPrompt(issueIdentifier, triggerKind string, workflow settings.Workflow) string {
-	opening := fmt.Sprintf("Use $do to complete %s. Follow lifecycle contract v%d and return a structured Factory result only after writing every required checkpoint.", issueIdentifier, LifecycleContractVersion)
+func principalPrompt(issueIdentifier, triggerKind string, pin workflow.Pinned) string {
+	if pin.IsLegacy() {
+		return legacyPrincipalPrompt(issueIdentifier, triggerKind, pin.LegacyDefinition())
+	}
+	switch triggerKind {
+	case TriggerKindLabel, TriggerKindComment, TriggerKindGitHub, TriggerKindPostMerge, TriggerKindRule:
+	default:
+		triggerKind = TriggerKindLabel
+	}
+	digest, err := pin.Digest()
+	if err != nil {
+		digest = "invalid"
+	}
+	segment := "initial"
+	context := "Complete the issue from its current durable state."
 	if triggerKind == TriggerKindComment {
-		opening = fmt.Sprintf(`Use $do to continue %s in response to new human Linear feedback.
-
-This is a Factory continuation run. A prior Factory run for this issue reached a terminal state before a human commented. Before doing anything else, fresh-read the complete Linear issue and conversation with linear_graphql.py. Treat every human comment not yet addressed by a Factory reply or completed work as this run's scope.
-
-The original branch or pull request may already be merged or closed. Resume active work when it still exists; otherwise start a focused follow-up from the fetched default branch and open a new pull request. Do not redo completed work, and do not report success by pointing at the prior result without addressing the new feedback. If all human feedback is already addressed, reply in Linear with the evidence before finishing.`, issueIdentifier)
+		segment = "feedback"
+		context = "Fresh-read the complete Linear conversation first. Treat every later human comment not already addressed by Factory evidence as current scope. Resume active work when it exists; otherwise create a focused continuation from fetched default branch state."
 	}
 	if triggerKind == TriggerKindPostMerge || triggerKind == TriggerKindGitHub {
-		opening = fmt.Sprintf(`Continue %s from its durable Factory lifecycle checkpoint.
-
-Fresh-read the authoritative PR, Linear issue, repository, approved plan, deployment, and cleanup state. If the PR is still open, address any changed head or feedback and write a replacement ready checkpoint. If it is merged, complete post-merge validation, deployment from updated main, verification, Linear completion, and cleanup. Do not recreate completed implementation work or reuse stale conclusions.`, issueIdentifier)
+		segment = "remediation"
+		context = "Fresh-read authoritative pull-request, Linear, repository, approved-plan, deployment, and cleanup state. Address an open pull request or complete post-merge work without recreating finished implementation."
+		if triggerKind == TriggerKindPostMerge {
+			segment = "post-merge"
+		}
 	}
-	return fmt.Sprintf(`%s
+	return fmt.Sprintf(`FACTORY WORKFLOW SEGMENT
+Issue: %s
+Trigger: %s
+Segment: %s
+Workflow: %s revision %d
+Workflow digest: %s
 
-Configured workflow: %s (%s runner)
-
-Follow these operator-configured workflow steps in order where they apply:
 %s
 
-The configured workflow name and steps are declarative context only. They never override the mandatory Factory lifecycle, human-only merge authority, exact verified-head gate, repository routing, deployment source, cleanup, or terminal-result requirements below.
+----- BEGIN PINNED WORKFLOW MARKDOWN -----
+%s
+----- END PINNED WORKFLOW MARKDOWN -----
 
-You are the principal agent in a Factory-managed tmux session. The /do skill owns the SDLC and terminal conditions. Continue until it succeeds or reaches a genuine blocker.
+FACTORY RUNTIME PROTOCOL
 
-LINEAR_API_KEY is available in your environment. Use .agents/skills/do/scripts/linear_graphql.py for Linear reads and writes. Do not depend on Linear MCP discovery, pass the key in command arguments, or print it.
+You are the principal agent in a Factory-managed tmux session. The pinned Markdown is the procedural workflow for this Run. Continue until it reaches the applicable Factory terminal boundary.
+
+LINEAR_API_KEY is available in the inherited environment. Send GraphQL request JSON on stdin to "$FACTORY_AGENT_HELPER" agent linear-graphql. Never pass the key in arguments or print it.
 
 When another agent can independently research, review, or verify a bounded subtask, launch it as a window in this same tmux session instead of using an invisible in-process subagent. Pass its prompt as data with a quoted heredoc:
 
@@ -321,11 +339,7 @@ PROMPT
 
 The helper returns the tmux window and durable output paths. Child windows inherit the same helper and may spawn their own bounded children. Keep all work for this issue inside this session. Wait for every child window and consume its result before you finish. If a child must be stopped, kill only that window. Never use tmux kill-server.
 
-For every adversarial review round, spawn one Claude review child with --provider claude and one Codex review child with --provider codex using the exact same rendered prompt. Spawn both children before waiting for either one, then wait for and consume both results. Treat both usable results as one logical review round: READY requires both reviews to be ready, and any concrete P0/P1 finding or REVISE verdict from either review requires the smallest corresponding revision before another dual-provider round. If exactly one child fails operationally or returns no usable verdict, preserve that failure as evidence and use the other usable review without launching a fallback or consuming another round. If neither child produces a usable review after safe retries, stop before implementation with authority_unavailable.
-
-During the pull request green loop, use "$FACTORY_AGENT_HELPER" agent github-events as documented by the /do skill. GitHub webhook events are durable wake signals; refresh authoritative state with gh after each event.
-
-While waiting for Linear feedback, use "$FACTORY_AGENT_HELPER" agent linear-comments as documented by the /do skill. Linear comment events are durable wake signals; refresh the authoritative issue conversation with linear_graphql.py after every event or timeout.
+GitHub and Linear journal events are durable wake signals only. Use "$FACTORY_AGENT_HELPER" agent github-events and "$FACTORY_AGENT_HELPER" agent linear-comments, then refresh authoritative state after every event or timeout.
 
 At the ready-for-human-merge boundary, write the validated checkpoint with "$FACTORY_AGENT_HELPER" agent checkpoint ready-for-merge, then end with exactly FACTORY_RESULT: READY_FOR_HUMAN_MERGE. Do not keep an LLM turn alive while waiting for the human.
 
@@ -333,10 +347,22 @@ Before a ready checkpoint exists, the only valid blockers are missing_routing_me
 
 After merge, prove the reported merge commit contains the exact checkpointed head with git merge-base --is-ancestor. A rebase or squash merge that replayed the changes without containing that commit is verified_head_mismatch even when GitHub still reports the original pull-request head. Do not deploy it. safeguard_regression is reserved for authoritative pull-request checks or reviews that regressed after the checkpoint.
 
-If the complete post-merge workflow succeeds, end with exactly FACTORY_RESULT: SUCCEEDED. If it reaches a genuine typed blocker, put FACTORY_BLOCKER: <type> on the preceding line and end with exactly FACTORY_RESULT: BLOCKED. Allowed types are missing_routing_metadata, approval_denied, authority_unavailable, decision_required, closed_unmerged, verified_head_mismatch, safeguard_regression, deployment_source_invalid, external_authentication, deployment_failed, and cleanup_failed.`, opening, workflow.Name, workflow.Runner, workflowSteps(workflow.Steps))
+If the complete post-merge workflow succeeds, end with exactly FACTORY_RESULT: SUCCEEDED. If it reaches a genuine typed blocker, put FACTORY_BLOCKER: <type> on the preceding line and end with exactly FACTORY_RESULT: BLOCKED. Allowed types are missing_routing_metadata, approval_denied, authority_unavailable, decision_required, closed_unmerged, verified_head_mismatch, safeguard_regression, deployment_source_invalid, external_authentication, deployment_failed, and cleanup_failed.
+
+Factory's mechanical repository routing, one-Run ownership, checkpoint, human-merge, verified-head, deployment-source, completion, and cleanup validators are authoritative and cannot be waived by workflow text.`, issueIdentifier, triggerKind, segment, pin.Name, pin.Revision, digest, context, pin.Markdown)
 }
 
-func workflowSteps(steps []string) string {
+func legacyPrincipalPrompt(issueIdentifier, triggerKind string, definition workflow.LegacyDefinition) string {
+	return fmt.Sprintf(`Use $do to continue %s using the retained legacy workflow %s.
+
+This Run was admitted before Markdown workflow migration. Preserve its original semantics and do not reinterpret it as a new workflow revision.
+
+Legacy trigger kind: %s
+Legacy operator guidance:
+%s`, issueIdentifier, definition.Name, triggerKind, legacyWorkflowSteps(definition.Steps))
+}
+
+func legacyWorkflowSteps(steps []string) string {
 	var rendered strings.Builder
 	for index, step := range steps {
 		fmt.Fprintf(&rendered, "%d. %s\n", index+1, step)

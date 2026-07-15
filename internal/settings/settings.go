@@ -7,15 +7,13 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 const (
-	SchemaVersion        = 1
-	DefaultWorkflowID    = "full-sdlc"
-	maxWorkflows         = 8
-	maxWorkflowSteps     = 20
-	maxWorkflowNameBytes = 80
-	maxWorkflowStepBytes = 240
+	SchemaVersion        = 2
+	DefaultWorkflowID    = workflow.DefaultID
 	maxLabelNameBytes    = 64
 	minPrincipalAttempts = 1
 	maxPrincipalAttempts = 5
@@ -23,21 +21,30 @@ const (
 	maxConcurrentRuns    = 10
 )
 
-var (
-	identifierPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
-	modelPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$`)
-)
+var modelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$`)
 
 type Snapshot struct {
-	Schema    int             `json:"schema"`
-	Revision  uint64          `json:"revision"`
-	UpdatedAt time.Time       `json:"updatedAt,omitempty"`
-	Triggers  Triggers        `json:"triggers"`
-	Workflows []Workflow      `json:"workflows"`
-	Agents    AgentSettings   `json:"agents"`
-	Runtime   RuntimeSettings `json:"runtime"`
+	Schema                       int                       `json:"schema"`
+	Revision                     uint64                    `json:"revision"`
+	UpdatedAt                    time.Time                 `json:"updatedAt,omitempty"`
+	WorkflowRollbackIncompatible bool                      `json:"workflowRollbackIncompatible,omitempty"`
+	Triggers                     Triggers                  `json:"triggers"`
+	ProtectedWorkflows           ProtectedWorkflowBindings `json:"protectedWorkflows"`
+	Workflows                    []workflow.Definition     `json:"workflows"`
+	Agents                       AgentSettings             `json:"agents"`
+	Runtime                      RuntimeSettings           `json:"runtime"`
 }
 
+type ProtectedWorkflowBindings struct {
+	LinearFeedback WorkflowBinding `json:"linearFeedback"`
+}
+
+type WorkflowBinding struct {
+	WorkflowID string `json:"workflowId"`
+}
+
+// Triggers is retained only for schema-1 compatibility and legacy Run fallback.
+// New trigger admission uses the registry; protected feedback uses ProtectedWorkflows.
 type Triggers struct {
 	LinearLabel   LinearLabelTrigger `json:"linearLabel"`
 	LinearComment Trigger            `json:"linearComment"`
@@ -52,14 +59,6 @@ type LinearLabelTrigger struct {
 type Trigger struct {
 	Enabled    bool   `json:"enabled"`
 	WorkflowID string `json:"workflowId"`
-}
-
-type Workflow struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Enabled bool     `json:"enabled"`
-	Runner  string   `json:"runner"`
-	Steps   []string `json:"steps"`
 }
 
 type AgentSettings struct {
@@ -86,31 +85,17 @@ func Defaults(maxConcurrent int) Snapshot {
 	if maxConcurrent < minConcurrentRuns || maxConcurrent > maxConcurrentRuns {
 		maxConcurrent = 3
 	}
+	definition := workflow.Default(time.Time{})
 	return Snapshot{
 		Schema: SchemaVersion,
 		Triggers: Triggers{
-			LinearLabel: LinearLabelTrigger{
-				Enabled:    true,
-				Label:      "Factory",
-				WorkflowID: DefaultWorkflowID,
-			},
+			LinearLabel:   LinearLabelTrigger{Enabled: true, Label: "Factory", WorkflowID: DefaultWorkflowID},
 			LinearComment: Trigger{Enabled: true, WorkflowID: DefaultWorkflowID},
 		},
-		Workflows: []Workflow{{
-			ID:      DefaultWorkflowID,
-			Name:    "Full SDLC",
-			Enabled: true,
-			Runner:  "do",
-			Steps: []string{
-				"Research the issue and repository evidence",
-				"Publish research and cross the Linear research gate",
-				"Create and adversarially review the implementation plan",
-				"Publish the plan and cross the Linear plan gate",
-				"Implement and verify the approved plan",
-				"Remediate review and CI, then checkpoint the exact verified head",
-				"After human merge, deploy from updated main and clean up",
-			},
-		}},
+		ProtectedWorkflows: ProtectedWorkflowBindings{
+			LinearFeedback: WorkflowBinding{WorkflowID: DefaultWorkflowID},
+		},
+		Workflows: []workflow.Definition{definition},
 		Agents: AgentSettings{
 			Principal: PrincipalSettings{
 				ProviderSettings: ProviderSettings{Model: "gpt-5.6-sol", Effort: "high"},
@@ -125,34 +110,29 @@ func Defaults(maxConcurrent int) Snapshot {
 
 func (s Snapshot) Clone() Snapshot {
 	clone := s
-	clone.Workflows = make([]Workflow, len(s.Workflows))
-	for index, workflow := range s.Workflows {
-		clone.Workflows[index] = workflow
-		clone.Workflows[index].Steps = append([]string(nil), workflow.Steps...)
-	}
+	clone.Workflows = append([]workflow.Definition(nil), s.Workflows...)
 	return clone
 }
 
-func (s Snapshot) Workflow(id string) (Workflow, bool) {
-	for _, workflow := range s.Workflows {
-		if workflow.ID == id {
-			workflow.Steps = append([]string(nil), workflow.Steps...)
-			return workflow, true
+func (s Snapshot) Workflow(id string) (workflow.Definition, bool) {
+	for _, definition := range s.Workflows {
+		if definition.ID == id {
+			return definition.Clone(), true
 		}
 	}
-	return Workflow{}, false
+	return workflow.Definition{}, false
 }
 
-func (s Snapshot) WorkflowForTrigger(kind string) (Workflow, error) {
+func (s Snapshot) WorkflowForTrigger(kind string) (workflow.Definition, error) {
 	id := s.Triggers.LinearLabel.WorkflowID
 	if kind == "linear-comment" {
-		id = s.Triggers.LinearComment.WorkflowID
+		id = s.ProtectedWorkflows.LinearFeedback.WorkflowID
 	}
-	workflow, found := s.Workflow(id)
-	if !found || !workflow.Enabled {
-		return Workflow{}, fmt.Errorf("settings: trigger workflow %q is unavailable", id)
+	definition, found := s.Workflow(id)
+	if !found || !definition.Enabled {
+		return workflow.Definition{}, fmt.Errorf("settings: trigger workflow %q is unavailable", id)
 	}
-	return workflow, nil
+	return definition, nil
 }
 
 func (s Snapshot) Validate() error {
@@ -162,28 +142,20 @@ func (s Snapshot) Validate() error {
 	if !validText(s.Triggers.LinearLabel.Label, maxLabelNameBytes) {
 		return errors.New("settings: Linear label must be trimmed printable text up to 64 bytes")
 	}
-	if len(s.Workflows) == 0 || len(s.Workflows) > maxWorkflows {
-		return fmt.Errorf("settings: workflow count must be between 1 and %d", maxWorkflows)
+	if err := workflow.ValidateDefinitions(s.Workflows); err != nil {
+		return fmt.Errorf("settings: %w", err)
 	}
-
-	workflows := make(map[string]Workflow, len(s.Workflows))
-	for index, workflow := range s.Workflows {
-		if err := workflow.Validate(); err != nil {
-			return fmt.Errorf("settings: workflow %d: %w", index+1, err)
-		}
-		if _, duplicate := workflows[workflow.ID]; duplicate {
-			return fmt.Errorf("settings: workflow ID %q is duplicated", workflow.ID)
-		}
-		workflows[workflow.ID] = workflow
+	bindingID := s.ProtectedWorkflows.LinearFeedback.WorkflowID
+	definition, found := s.Workflow(bindingID)
+	if !workflow.ValidID(bindingID) || !found || !definition.Enabled {
+		return errors.New("settings: protected Linear feedback must reference an enabled workflow")
 	}
-
 	for name, id := range map[string]string{
-		"Linear label":   s.Triggers.LinearLabel.WorkflowID,
-		"Linear comment": s.Triggers.LinearComment.WorkflowID,
+		"legacy Linear label":   s.Triggers.LinearLabel.WorkflowID,
+		"legacy Linear comment": s.Triggers.LinearComment.WorkflowID,
 	} {
-		workflow, found := workflows[id]
-		if !found || !workflow.Enabled {
-			return fmt.Errorf("settings: %s trigger must reference an enabled workflow", name)
+		if id != "" && !workflow.ValidID(id) {
+			return fmt.Errorf("settings: %s workflow ID is invalid", name)
 		}
 	}
 	if err := validateProvider("principal", s.Agents.Principal.ProviderSettings, codexEffort); err != nil {
@@ -200,27 +172,6 @@ func (s Snapshot) Validate() error {
 	}
 	if s.Runtime.MaxConcurrentRuns < minConcurrentRuns || s.Runtime.MaxConcurrentRuns > maxConcurrentRuns {
 		return fmt.Errorf("settings: max concurrent runs must be between %d and %d", minConcurrentRuns, maxConcurrentRuns)
-	}
-	return nil
-}
-
-func (w Workflow) Validate() error {
-	if !identifierPattern.MatchString(w.ID) {
-		return errors.New("workflow ID is invalid")
-	}
-	if !validText(w.Name, maxWorkflowNameBytes) {
-		return fmt.Errorf("workflow %q has an invalid name", w.ID)
-	}
-	if w.Runner != "do" {
-		return fmt.Errorf("workflow %q runner must be do", w.ID)
-	}
-	if len(w.Steps) == 0 || len(w.Steps) > maxWorkflowSteps {
-		return fmt.Errorf("workflow %q must have between 1 and %d steps", w.ID, maxWorkflowSteps)
-	}
-	for index, step := range w.Steps {
-		if !validText(step, maxWorkflowStepBytes) {
-			return fmt.Errorf("workflow %q step %d is invalid", w.ID, index+1)
-		}
 	}
 	return nil
 }

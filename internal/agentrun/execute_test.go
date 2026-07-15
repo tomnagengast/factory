@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 func TestResultFromFinalMessage(t *testing.T) {
@@ -50,30 +51,24 @@ func TestReadThreadID(t *testing.T) {
 	}
 }
 
-func TestPrincipalPromptGroupsChildAgentsInTmux(t *testing.T) {
+func TestPrincipalPromptExecutesPinnedMarkdownDirectly(t *testing.T) {
 	t.Parallel()
 
 	prompt := principalPrompt("ENG-123", TriggerKindLabel, testWorkflow())
 	for _, expected := range []string{
-		"Use $do",
 		"ENG-123",
-		"lifecycle contract v1",
-		"ready-for-human-merge boundary",
+		"Workflow: Full SDLC revision 1",
+		"----- BEGIN PINNED WORKFLOW MARKDOWN -----",
+		workflow.DefaultMarkdown(),
+		"FACTORY RUNTIME PROTOCOL",
 		"checkpoint ready-for-merge",
 		"READY_FOR_HUMAN_MERGE",
-		"linear_graphql.py",
+		"agent linear-graphql",
 		"FACTORY_AGENT_HELPER",
 		"linear-comments",
 		"--provider claude",
-		"--provider codex",
-		"exact same rendered prompt",
-		"Spawn both children before waiting",
-		"READY requires both reviews to be ready",
-		"P0/P1 finding or REVISE verdict from either review",
-		"use the other usable review without launching a fallback",
 		"authority_unavailable",
 		"only valid blockers are missing_routing_metadata",
-		"Use decision_required when planning or review cannot safely continue",
 		"safeguard_regression is not a pre-checkpoint blocker",
 		"FACTORY_RESULT: SUCCEEDED",
 	} {
@@ -81,11 +76,10 @@ func TestPrincipalPromptGroupsChildAgentsInTmux(t *testing.T) {
 			t.Fatalf("prompt missing %q: %s", expected, prompt)
 		}
 	}
-	if strings.Contains(prompt, "GitHub approval") {
-		t.Fatalf("prompt still requires GitHub approval: %s", prompt)
-	}
-	if strings.Contains(prompt, "Use Claude as the first choice") {
-		t.Fatalf("prompt still serializes review providers: %s", prompt)
+	for _, forbidden := range []string{"Use $do", "The /do skill owns", ".agents/skills/do", "linear_graphql.py"} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("prompt contains legacy dependency %q: %s", forbidden, prompt)
+		}
 	}
 }
 
@@ -94,13 +88,12 @@ func TestPostMergePromptReconstructsDurableState(t *testing.T) {
 
 	prompt := principalPrompt("ENG-123", TriggerKindPostMerge, testWorkflow())
 	for _, expected := range []string{
-		"Continue ENG-123 from its durable Factory lifecycle checkpoint",
-		"Fresh-read the authoritative PR",
-		"complete post-merge validation",
+		"Segment: post-merge",
+		"Fresh-read authoritative pull-request, Linear, repository, approved-plan, deployment, and cleanup state.",
 		"git merge-base --is-ancestor",
-		"rebase or squash merge",
+		"rebase or squash merge that replayed the changes",
 		"verified_head_mismatch",
-		"Do not recreate completed implementation work",
+		"without recreating finished implementation",
 	} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("post-merge prompt missing %q: %s", expected, prompt)
@@ -113,11 +106,10 @@ func TestContinuationPromptRequiresFreshLinearFeedbackRead(t *testing.T) {
 
 	prompt := principalPrompt("ENG-123", TriggerKindComment, testWorkflow())
 	for _, expected := range []string{
-		"continue ENG-123 in response to new human Linear feedback",
-		"fresh-read the complete Linear issue and conversation",
-		"not yet addressed",
-		"focused follow-up",
-		"Do not redo completed work",
+		"Segment: feedback",
+		"Fresh-read the complete Linear conversation first.",
+		"not already addressed by Factory evidence",
+		"focused continuation",
 		"FACTORY_RESULT: SUCCEEDED",
 	} {
 		if !strings.Contains(prompt, expected) {
@@ -135,17 +127,18 @@ func TestUnknownTriggerKindUsesStandardPrompt(t *testing.T) {
 	}
 }
 
-func TestPrincipalPromptPlacesConfiguredStepsBeforeMandatoryContract(t *testing.T) {
+func TestPrincipalPromptPreservesConfiguredMarkdownBeforeRuntimeProtocol(t *testing.T) {
 	t.Parallel()
 
-	workflow := testWorkflow()
-	workflow.Steps = []string{"Inspect the requested surface", "Verify the exact result"}
-	prompt := principalPrompt("ENG-123", TriggerKindLabel, workflow)
-	step := strings.Index(prompt, "1. Inspect the requested surface")
-	contract := strings.Index(prompt, "They never override the mandatory Factory lifecycle")
-	mergeAuthority := strings.Index(prompt, "human-only merge authority")
-	if step < 0 || contract <= step || mergeAuthority <= step {
-		t.Fatalf("configured workflow is not bounded by the mandatory contract:\n%s", prompt)
+	pinned := workflow.Pin(workflow.Definition{
+		ID: "custom", Revision: 9, Name: "Custom", Enabled: true,
+		Markdown: "# Exact\n\n- preserve `code`\n\n```text\nraw\n```\n",
+	})
+	prompt := principalPrompt("ENG-123", TriggerKindLabel, pinned)
+	body := strings.Index(prompt, pinned.Markdown)
+	protocol := strings.Index(prompt, "FACTORY RUNTIME PROTOCOL")
+	if body < 0 || protocol <= body || strings.Count(prompt, pinned.Markdown) != 1 {
+		t.Fatalf("configured Markdown was not preserved before the protocol:\n%s", prompt)
 	}
 }
 
@@ -206,8 +199,8 @@ func TestExecutePrincipalHonorsConfiguredAttemptLimit(t *testing.T) {
 	}
 }
 
-func testWorkflow() settings.Workflow {
-	return settings.Defaults(3).Workflows[0]
+func testWorkflow() workflow.Pinned {
+	return workflow.Pin(settings.Defaults(3).Workflows[0])
 }
 
 func TestAgentEnvironmentExcludesUnrelatedServiceSecrets(t *testing.T) {

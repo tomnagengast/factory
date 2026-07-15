@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 const stateVersion = 1
@@ -116,7 +116,9 @@ type Run struct {
 	InvocationRootEventID      string                `json:"invocationRootEventId,omitempty"`
 	InvocationHop              int                   `json:"invocationHop,omitempty"`
 	InvocationAncestorRuleIDs  []string              `json:"invocationAncestorRuleIds,omitempty"`
-	PinnedWorkflow             *settings.Workflow    `json:"pinnedWorkflow,omitempty"`
+	PinnedWorkflow             *workflow.Pinned      `json:"pinnedWorkflow,omitempty"`
+	PinnedWorkflowDigest       string                `json:"pinnedWorkflowDigest,omitempty"`
+	PinnedPolicyRevision       uint64                `json:"pinnedPolicyRevision,omitempty"`
 	InvocationReflectedAt      *time.Time            `json:"invocationReflectedAt,omitempty"`
 }
 
@@ -128,8 +130,17 @@ type InvocationClaim struct {
 	RootEventID     string
 	Hop             int
 	AncestorRuleIDs []string
-	Workflow        settings.Workflow
+	Workflow        workflow.Pinned
+	WorkflowDigest  string
+	PolicyRevision  uint64
 	Repository      RepositoryConfig
+}
+
+type ContinuationClaim struct {
+	Trigger        Trigger
+	Workflow       workflow.Pinned
+	WorkflowDigest string
+	PolicyRevision uint64
 }
 
 var ErrInvocationIssueOwned = errors.New("agent run store: issue already has an active run")
@@ -227,11 +238,11 @@ func Open(path string, limit int) (*Store, error) {
 }
 
 func (s *Store) Claim(trigger Trigger, now time.Time) (Run, bool, error) {
-	return s.claim(trigger, now, false)
+	return s.claim(trigger, workflow.Pinned{}, "", 0, now, false)
 }
 
-func (s *Store) ClaimContinuation(trigger Trigger, now time.Time) (Run, bool, error) {
-	return s.claim(trigger, now, true)
+func (s *Store) ClaimContinuation(claim ContinuationClaim, now time.Time) (Run, bool, error) {
+	return s.claim(claim.Trigger, claim.Workflow, claim.WorkflowDigest, claim.PolicyRevision, now, true)
 }
 
 func (s *Store) EnsureInvocationRun(claim InvocationClaim, now time.Time) (Run, bool, error) {
@@ -244,7 +255,7 @@ func (s *Store) EnsureInvocationRun(claim InvocationClaim, now time.Time) (Run, 
 	if claim.RootEventID == "" || claim.Hop < 1 || len(claim.AncestorRuleIDs) != claim.Hop {
 		return Run{}, false, errors.New("agent run store: invocation causation is invalid")
 	}
-	if err := claim.Workflow.Validate(); err != nil || !claim.Workflow.Enabled {
+	if err := validatePinnedWorkflow(claim.Workflow, claim.WorkflowDigest, claim.PolicyRevision); err != nil {
 		return Run{}, false, errors.New("agent run store: pinned workflow is invalid")
 	}
 	if err := claim.Repository.validate(); err != nil {
@@ -267,8 +278,7 @@ func (s *Store) EnsureInvocationRun(claim InvocationClaim, now time.Time) (Run, 
 			return Run{}, false, ErrInvocationIssueOwned
 		}
 	}
-	workflow := claim.Workflow
-	workflow.Steps = slices.Clone(claim.Workflow.Steps)
+	pinnedWorkflow := claim.Workflow.Clone()
 	run := Run{
 		ID: claim.RunID, IssueIdentifier: claim.IssueIdentifier,
 		Repository: claim.Repository.Repository, RepositoryURL: claim.Repository.RepoURL,
@@ -277,7 +287,8 @@ func (s *Store) EnsureInvocationRun(claim InvocationClaim, now time.Time) (Run, 
 		TriggerKind: TriggerKindRule, DeliveryIDs: []string{claim.EventID}, State: StatePending,
 		CreatedAt: now, UpdatedAt: now, Transitions: []Transition{newTransition(claim.RunID, StatePending, 0, now)},
 		InvocationID: claim.InvocationID, InvocationRootEventID: claim.RootEventID, InvocationHop: claim.Hop,
-		InvocationAncestorRuleIDs: slices.Clone(claim.AncestorRuleIDs), PinnedWorkflow: &workflow,
+		InvocationAncestorRuleIDs: slices.Clone(claim.AncestorRuleIDs), PinnedWorkflow: &pinnedWorkflow,
+		PinnedWorkflowDigest: claim.WorkflowDigest, PinnedPolicyRevision: claim.PolicyRevision,
 	}
 	next := s.state
 	next.Total++
@@ -294,14 +305,38 @@ func invocationRunMatches(run Run, claim InvocationClaim) bool {
 	return run.ID == claim.RunID && run.InvocationID == claim.InvocationID && run.IssueIdentifier == claim.IssueIdentifier &&
 		run.InvocationRootEventID == claim.RootEventID && run.InvocationHop == claim.Hop &&
 		slices.Equal(run.InvocationAncestorRuleIDs, claim.AncestorRuleIDs) && run.PinnedWorkflow != nil &&
-		workflowEqual(*run.PinnedWorkflow, claim.Workflow) && run.Repository == claim.Repository.Repository &&
+		workflowEqual(*run.PinnedWorkflow, claim.Workflow) && run.PinnedWorkflowDigest == claim.WorkflowDigest &&
+		run.PinnedPolicyRevision == claim.PolicyRevision && run.Repository == claim.Repository.Repository &&
 		run.RepositoryURL == claim.Repository.RepoURL && run.RepositoryPath == claim.Repository.RepoPath &&
 		run.ManagedRoot == claim.Repository.ManagedRoot && run.BaseBranch == claim.Repository.BaseBranch &&
 		run.Bootstrap == claim.Repository.Bootstrap && run.CloudURL == claim.Repository.CloudURL
 }
 
-func workflowEqual(left, right settings.Workflow) bool {
-	return left.ID == right.ID && left.Name == right.Name && left.Enabled == right.Enabled && left.Runner == right.Runner && slices.Equal(left.Steps, right.Steps)
+func workflowEqual(left, right workflow.Pinned) bool {
+	return left.ID == right.ID && left.Revision == right.Revision && left.Name == right.Name &&
+		left.Enabled == right.Enabled && left.Markdown == right.Markdown && equalWorkflowTime(left.UpdatedAt, right.UpdatedAt) &&
+		left.Runner == right.Runner && slices.Equal(left.Steps, right.Steps)
+}
+
+func equalWorkflowTime(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
+}
+
+func validatePinnedWorkflow(pinned workflow.Pinned, digest string, policyRevision uint64) error {
+	if err := pinned.Validate(); err != nil || !pinned.Enabled || !pinned.Complete() || digest == "" {
+		return errors.New("pinned workflow metadata is incomplete")
+	}
+	actual, err := pinned.Digest()
+	if err != nil {
+		return err
+	}
+	if actual != digest {
+		return errors.New("pinned workflow digest mismatch")
+	}
+	return nil
 }
 
 func (s *Store) MarkInvocationReflected(id string, at time.Time) error {
@@ -315,13 +350,14 @@ func (s *Store) MarkInvocationReflected(id string, at time.Time) error {
 		value := at.UTC()
 		run.InvocationReflectedAt = &value
 		if run.PinnedWorkflow != nil {
-			run.PinnedWorkflow = &settings.Workflow{ID: run.PinnedWorkflow.ID}
+			compacted := run.PinnedWorkflow.Compact()
+			run.PinnedWorkflow = &compacted
 		}
 		return nil
 	})
 }
 
-func (s *Store) claim(trigger Trigger, now time.Time, requireHistory bool) (Run, bool, error) {
+func (s *Store) claim(trigger Trigger, pinned workflow.Pinned, digest string, policyRevision uint64, now time.Time, requireHistory bool) (Run, bool, error) {
 	if trigger.DeliveryID == "" {
 		return Run{}, false, errors.New("agent run store: delivery ID is required")
 	}
@@ -370,6 +406,11 @@ func (s *Store) claim(trigger Trigger, now time.Time, requireHistory bool) (Run,
 	if requireHistory && !hasHistory {
 		return Run{}, false, nil
 	}
+	if requireHistory {
+		if err := validatePinnedWorkflow(pinned, digest, policyRevision); err != nil {
+			return Run{}, false, fmt.Errorf("agent run store: continuation workflow: %w", err)
+		}
+	}
 
 	id, err := newID()
 	if err != nil {
@@ -391,6 +432,12 @@ func (s *Store) claim(trigger Trigger, now time.Time, requireHistory bool) (Run,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		Transitions:     []Transition{newTransition(id, StatePending, 0, now)},
+	}
+	if requireHistory {
+		pinned = pinned.Clone()
+		run.PinnedWorkflow = &pinned
+		run.PinnedWorkflowDigest = digest
+		run.PinnedPolicyRevision = policyRevision
 	}
 	next := s.state
 	next.Total++
@@ -850,9 +897,8 @@ func cloneRun(run Run) Run {
 	run.Completion = cloneCompletion(run.Completion)
 	run.InvocationAncestorRuleIDs = slices.Clone(run.InvocationAncestorRuleIDs)
 	if run.PinnedWorkflow != nil {
-		workflow := *run.PinnedWorkflow
-		workflow.Steps = slices.Clone(run.PinnedWorkflow.Steps)
-		run.PinnedWorkflow = &workflow
+		pinned := run.PinnedWorkflow.Clone()
+		run.PinnedWorkflow = &pinned
 	}
 	run.InvocationReflectedAt = cloneTime(run.InvocationReflectedAt)
 	return run
