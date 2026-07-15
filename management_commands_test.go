@@ -391,6 +391,31 @@ func TestManagementDoctorJSONDoesNotExposeSecretValues(t *testing.T) {
 	}
 }
 
+func TestReadEnvironmentNamesTracksPresenceWithoutRetainingValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "env")
+	secret := "sentinel-secret-value"
+	data := "export LINEAR_API_KEY=" + secret + "\nFACTORY_SESSION_KEY=\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	names, err := readEnvironmentNames(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !names["LINEAR_API_KEY"] || names["FACTORY_SESSION_KEY"] {
+		t.Fatalf("environment names = %#v", names)
+	}
+	if strings.Contains(fmt.Sprint(names), secret) {
+		t.Fatal("environment parser retained a secret value")
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readEnvironmentNames(path); err == nil {
+		t.Fatal("insecure managed environment permissions were accepted")
+	}
+}
+
 type recordingManagementRunner struct {
 	loaded  bool
 	healthy *atomic.Bool

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -102,10 +103,11 @@ type trackedString struct {
 }
 
 type managedPaths struct {
-	Plist   string
-	Wrapper string
-	Release string
-	Receipt string
+	Plist       string
+	Wrapper     string
+	Release     string
+	Receipt     string
+	Environment string
 }
 
 type doctorCheck struct {
@@ -352,11 +354,27 @@ func runManagementDoctor(ctx context.Context, args []string, output, errorOutput
 			"FACTORY_GOOGLE_CLIENT_ID", "FACTORY_GOOGLE_CLIENT_SECRET", "FACTORY_GOOGLE_ALLOWED_EMAILS", "FACTORY_SESSION_KEY",
 		)
 	}
-	for _, name := range requiredEnvironment {
-		if os.Getenv(name) == "" {
-			add("environment:"+name, "fail", name+" is not set")
+	managedEnvironment := map[string]bool{}
+	if managed {
+		var err error
+		managedEnvironment, err = readEnvironmentNames(paths.Environment)
+		if err != nil {
+			add("managed-environment", "fail", "private managed environment is missing or invalid")
 		} else {
-			add("environment:"+name, "ok", name+" is set")
+			add("managed-environment", "ok", "private managed environment is readable and secure")
+		}
+	}
+	for _, name := range requiredEnvironment {
+		present := os.Getenv(name) != ""
+		location := "current environment"
+		if managed {
+			present = managedEnvironment[name]
+			location = "managed environment"
+		}
+		if !present {
+			add("environment:"+name, "fail", name+" is not set in the "+location)
+		} else {
+			add("environment:"+name, "ok", name+" is set in the "+location)
 		}
 	}
 	if !managed && addressErr == nil && !isLoopbackManagementHost(address.Host) {
@@ -456,11 +474,58 @@ func factoryManagedPaths() (managedPaths, error) {
 	}
 	stateRoot := filepath.Join(home, ".local", "share", "factory")
 	return managedPaths{
-		Plist:   filepath.Join(home, "Library", "LaunchAgents", "com.nags.factory.plist"),
-		Wrapper: filepath.Join(home, ".local", "bin", "factory-run"),
-		Release: filepath.Join(stateRoot, "current", "factory"),
-		Receipt: filepath.Join(stateRoot, "deployments", "current.json"),
+		Plist:       filepath.Join(home, "Library", "LaunchAgents", "com.nags.factory.plist"),
+		Wrapper:     filepath.Join(home, ".local", "bin", "factory-run"),
+		Release:     filepath.Join(stateRoot, "current", "factory"),
+		Receipt:     filepath.Join(stateRoot, "deployments", "current.json"),
+		Environment: filepath.Join(home, ".config", "network-app", "env"),
 	}, nil
+}
+
+func readEnvironmentNames(path string) (map[string]bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() > 1<<20 {
+		return nil, errors.New("managed environment must be a regular 0600 file no larger than 1 MiB")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	names := make(map[string]bool)
+	scanner := bufio.NewScanner(io.LimitReader(file, 1<<20))
+	scanner.Buffer(make([]byte, 4096), 1<<20)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		name, value, found := strings.Cut(line, "=")
+		if !found || !validEnvironmentName(name) {
+			return nil, errors.New("managed environment contains an invalid assignment")
+		}
+		names[name] = strings.TrimSpace(value) != ""
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return names, nil
+}
+
+func validEnvironmentName(name string) bool {
+	if name == "" || (name[0] != '_' && (name[0] < 'A' || name[0] > 'Z') && (name[0] < 'a' || name[0] > 'z')) {
+		return false
+	}
+	for _, character := range name[1:] {
+		if character != '_' && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func managedInstallationDetected(paths managedPaths) bool {
