@@ -26,6 +26,7 @@ import (
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/server"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskstore"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/triggerrouter"
 	"github.com/tomnagengast/factory/internal/triggerscheduler"
@@ -199,6 +200,25 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	}
 	events, err := triggerrouter.NewCoordinatedWire(rawEvents, registryStore, settingsStore, routingStore, time.Now)
 	if err != nil {
+		return err
+	}
+	taskStorePath := filepath.Join(dataRoot, "native-tasks.jsonl")
+	nativeTasks, err := taskstore.Open(taskStorePath)
+	if err != nil {
+		return err
+	}
+	taskStager, err := taskstore.NewStager(filepath.Join(dataRoot, "task-operations"), taskStorePath)
+	if err != nil {
+		return err
+	}
+	taskDispatcher, err := taskstore.NewDispatcher(nativeTasks, taskStager)
+	if err != nil {
+		return err
+	}
+	if err := events.Handle(eventwire.Filter{Source: eventwire.SourceFactory, Type: taskstore.StagedEventType}, func(ctx context.Context, record eventwire.Record) error {
+		_, err := taskDispatcher.Apply(ctx, record)
+		return err
+	}); err != nil {
 		return err
 	}
 	cursorStore, err := triggerscheduler.Open(filepath.Join(dataRoot, "trigger-cursors.json"))

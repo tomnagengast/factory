@@ -300,6 +300,9 @@ func (w *CoordinatedWire) admit(_ context.Context, records []eventwire.Record) e
 
 func mayAdmitMarkdown(records []eventwire.Record, registry triggerregistry.Snapshot, configuration settings.Snapshot) bool {
 	for _, record := range records {
+		if protectedTaskMutation(record.Event) {
+			continue
+		}
 		for _, rule := range registry.Rules {
 			if !rule.Enabled || !rule.Filter.Matches(record.Event) {
 				continue

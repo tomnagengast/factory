@@ -57,6 +57,8 @@ func (s *Store) ApplyDecisionBatch(records []eventwire.Record, registry triggerr
 			}
 			outcome := Outcome{RuleID: rule.ID, RuleRevision: rule.Revision}
 			switch {
+			case protectedTaskMutation(record.Event):
+				outcome.Kind, outcome.Reason = OutcomeSuppressed, "protected-task-operation"
 			case slices.Contains(record.Event.AncestorRuleIDs, rule.ID):
 				outcome.Kind, outcome.Reason = OutcomeSuppressed, "ancestor-cycle"
 			case record.Event.Hop >= rule.MaxHop:
@@ -115,6 +117,10 @@ func (s *Store) ApplyDecisionBatch(records []eventwire.Record, registry triggerr
 		return nil, err
 	}
 	return cloneDecisions(decisions), nil
+}
+
+func protectedTaskMutation(event eventwire.Event) bool {
+	return event.Source == eventwire.SourceFactory && event.Type == "task-mutation"
 }
 
 func (s *Store) outstandingLocked() (map[string]int, int) {
