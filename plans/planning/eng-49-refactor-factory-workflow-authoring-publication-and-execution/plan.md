@@ -1,6 +1,6 @@
 # ENG-49 Factory Workflows Implementation Plan
 
-> updated: 2026-07-14T20:49:18-07:00
+> updated: 2026-07-14T20:55:31-07:00
 
 ## Linear issue context
 
@@ -15,7 +15,7 @@
 1. **What fails today?** Settings workflow steps are advisory `$do` context rather than executable policy, so authoring and lifecycle authority are split across settings, a provider-owned skill, references, prompt text, and Go validators.
 2. **Where should immutable publication attach?** `triggerrouter.ApplyDecisionBatch` already serializes, hashes, and pins the selected workflow at admission; this remains the pinning seam.
 3. **Where should live publication serialize?** `CoordinatedWire` already owns the policy mutex, pending-decision gate, and cross-store validation; workflow publish/delete extend this boundary while draft autosave remains outside it.
-4. **How does execution retain identity?** Invocations flow into Runs, private `workflow.json`, retries, feedback, remediation, and post-merge segments. The pinned value and prompt change, not the queue or segment model.
+4. **How does execution retain identity?** Invocations flow into Runs, private `workflow.json`, retries, feedback, remediation, and post-merge segments. Fresh feedback continuations also pin the selected published definition when the new Run is claimed, while feedback that resumes an active Run preserves that Run's existing pin. The pinned value and prompt change, not the queue or segment model.
 5. **What must remain mechanical?** Repository routing, one-run ownership, human-only merge, checkpoint validation, exact verified-head ancestry, merged-main deployment, completion evidence, and cleanup remain enforced in Go.
 6. **What is the dominant compatibility risk?** Strict retained routing and Run JSON embeds the legacy `runner`/`steps` shape, requiring explicit dual-shape decoding and fixtures before the new definition replaces it.
 7. **How is production changed and recovered?** Deploy the human-merged exact verified head only from updated clean managed `main` with `~/.local/bin/nags deploy --expected-commit`, verify schema/health/content/receipt state, and allow prior-binary rollback only before any new-shape workflow admission is durable. After that boundary, use schema-2-aware recovery or a forward corrective commit.
@@ -180,6 +180,7 @@ Additional execution decisions:
 
 - The first attempt in a segment receives the full header, pinned Markdown, and footer. A provider-process retry resumes the same Codex thread with `Resume the Factory workflow from durable state` and does not substitute a live workflow revision.
 - A new post-merge process receives the same original pinned Markdown plus fresh post-merge segment context.
+- Every newly created Run receives an immutable pin before it can launch. Routed invocations use the admission pin. A fresh human-feedback continuation that creates a new Run snapshots the selected current published definition and digest inside `ClaimContinuation`; feedback that coalesces into an existing nonterminal Run keeps that Run's original pin. Publication or deletion after claim cannot change the queued continuation. The launcher writes `workflow.json` whenever a new-shape pin is present, not only when `InvocationID` is nonempty.
 - `workflow.json` remains the private strict snapshot file. Define a pinned wrapper containing the complete definition plus its digest, validate the digest over canonical execution fields when reading, and keep `prompt.txt` as the rendered execution record.
 - Add `factory agent linear-graphql`, reading JSON from stdin and using the existing `LINEAR_API_KEY`, so the default workflow no longer references `.agents/skills/do/scripts/linear_graphql.py`. Keep the existing secret-filtered process environment and do not add arbitrary URL or credential flags.
 - Inline the current human-gate, adversarial-review, and PR-green-loop behavior into the compiled default Markdown after reconciling it with Factory's current parallel-review prompt and current deployment runbook. Do not leave runtime includes pointing at provider skill files.
@@ -222,13 +223,13 @@ Before replacing `settings.json`, write one private fsynced `settings.schema1.ba
 - Implement backward-compatible workflow JSON decoding for the legacy `runner: "do"` plus `steps` shape because trigger routing replay uses `DisallowUnknownFields`.
 - Accept legacy workflow values only when reading retained internal records. The workflow API and settings schema 2 must reject legacy runner/step fields.
 - Nonterminal legacy pinned records, if any exist during development or recovery, continue through a narrow legacy prompt path that invokes `$do`; do not silently reinterpret an already admitted workflow. New admissions always pin Markdown definitions.
-- Treat the first durable routing or Run record carrying a schema-2 workflow revision/body/digest as the rollback-compatibility boundary. Terminal compaction retains revision and digest, so retained state itself is monotonic evidence that restoring schema-1 settings is no longer sufficient. Surface this state in migration/preflight evidence and never claim prior-binary compatibility after it exists.
+- Add a dedicated non-prunable `workflowRollbackIncompatible` compatibility marker to the schema-2 settings checkpoint. It starts false during migration and is set monotonically, no later than the first schema-2 workflow admission or fresh new-shape continuation claim, before the corresponding routing or Run record is persisted. A conservative marker write without a completed admission is safe; clearing it is never allowed. Admission, terminal compaction, Run/routing pruning, restart, and ordinary settings/workflow updates preserve it. Use this marker, not retained prunable records, for preflight and rollback decisions.
 - Before production activation, require a quiescence preflight: service ready, wire pending count zero, routing projection healthy, and no nonterminal Run or invocation with a legacy workflow shape. The observed planning state already met this condition, but deployment must recheck it.
 - Keep the provider-installed `$do` skill in place through the rollback window. New Factory prompts do not use it. Removing the global skill or its Network source is a separate decision because it still supports direct interactive `$do ISSUE-NNN` use outside Factory.
 
 ### Rollback
 
-- Before any schema-2 workflow admission is durably recorded, a stopped and quiescent service can roll back to the prior binary by restoring the private schema-1 backup and proving no new-shape routing or Run record exists.
+- Before any schema-2 workflow admission or fresh new-shape continuation is durably recorded, a stopped and quiescent service can roll back to the prior binary only while the dedicated compatibility marker remains false and the preflight proves no new-shape routing or Run record exists.
 - After the first schema-2 admission, an older binary cannot replay the strict routing/Run state even if no operator has published an edit. Recovery must use a schema-2-aware previously verified release or a forward corrective commit deployed from clean merged Factory `main`; never promise an ordinary prior-binary or plain code-revert recovery, and never silently translate the new body back to short steps.
 - Preserve the backup and workflow revisions for diagnosis. Do not rewrite trigger-routing or Run journals during rollback.
 
@@ -244,7 +245,7 @@ Primary files:
 
 Tasks:
 
-1. Define the Markdown workflow and draft models, clone/equality helpers, editable and pinned validation modes, independent draft/published revision rules, body/aggregate limits, and embedded default.
+1. Define the Markdown workflow and draft models, clone/equality helpers, editable and pinned validation modes, independent draft/published revision rules, body/aggregate limits, embedded default, and the non-prunable schema-2 workflow rollback-compatibility marker.
 2. Reconcile the current `$do` skill, its three references, `principalPrompt`, ENG-42 parallel-review behavior, and the current Factory runbook into one self-contained compiled Full SDLC Markdown document.
 3. Change settings to schema 2 and implement strict schema-1 migration with private backup, operator-value preservation, appended legacy guidance, idempotence, and fail-closed corruption handling.
 4. Retain strict legacy workflow decoding for internal routing/Run replay without accepting legacy fields from new API writes.
@@ -303,10 +304,10 @@ Primary files:
 
 Tasks:
 
-1. Change invocation and Run types to pin the new workflow definition, revision, and digest while preserving legacy JSON decoding and terminal compaction.
+1. Change invocation and Run types to pin the new workflow definition, revision, and digest while preserving legacy JSON decoding and terminal compaction. Extend fresh continuation claims to snapshot the selected published definition and digest, preserve the pin when feedback resumes an active Run, and write the compatibility marker before persisting the first new-shape routing or continuation record.
 2. Keep contained `0600` workflow snapshot validation and reject missing, malformed, mismatched-digest, symlinked, or out-of-Run paths.
 3. Replace the principal prompt with the header, verbatim Markdown, and compact runtime footer. Update retry text to say Factory workflow, not `/do` run.
-4. Preserve initial, feedback, GitHub remediation, and post-merge segment context without replacing the pinned body.
+4. Preserve initial, feedback, GitHub remediation, and post-merge segment context without replacing the pinned body. Make the launcher write the contained snapshot for every new-shape pinned Run regardless of whether it originated from a generic invocation or fresh feedback continuation; restrict live-settings fallback to identifiable retained schema-1 Runs.
 5. Add the stdin-only `factory agent linear-graphql` helper and update the default workflow to use it.
 6. Remove all new-run prompt dependence on `$do`, `.agents/skills/do`, and skill reference files. Keep only the internal legacy replay branch.
 
@@ -422,7 +423,8 @@ Suggested commit: `Factory: document workflow execution`
 | Settings cannot overwrite workflows | Open settings and workflow editor snapshots, publish a workflow edit, submit stale settings, verify 409 and unchanged workflow body/revision. |
 | Trigger API does not leak Markdown | Decode `GET /api/triggers`, assert summary fields only, and search response bytes for a unique workflow-body sentinel. |
 | Direct prompt execution | `go test ./internal/agentrun -run 'Test.*(Workflow|PrincipalPrompt|PostMerge|Continuation)' -count=1`; assert literal Markdown, ID/revision/digest, delimiter order, segment context, footer, and no new-run `$do` text. |
-| Pinned behavior across edits | Admit revision 1, publish revision 2, launch/retry/resume/post-merge revision 1, then admit a new event and prove only it receives revision 2. |
+| Pinned behavior across edits | Admit revision 1, publish revision 2, launch/retry/resume/post-merge revision 1, then admit a new event and prove only it receives revision 2. Create a fresh feedback continuation at revision 1, publish/delete before launch, and prove the queued Run still executes its claimed revision; prove feedback coalesced into an active Run keeps the active pin. |
+| Monotonic rollback boundary | Focused settings/router/Run tests set the compatibility marker before the first schema-2 admission and fresh continuation, compact and prune terminal routing and Run records, reopen every store, and prove the marker remains true and cannot be cleared by later settings/workflow writes. |
 | Legacy journal and Run compatibility | Replay committed legacy JSON fixtures through strict trigger-routing open and Run open; exercise the legacy execution branch only for legacy pinned values. |
 | Private contained snapshot | Tests reject wrong mode, symlink, relative/outside path, malformed JSON, digest mismatch, unknown fields, and missing body. |
 | Linear helper portability | `go test . -run 'Test.*LinearGraphQL' -count=1` using `httptest`; verify stdin JSON, GraphQL errors, mutation failure, missing key, network error, and no credential in args/output. |
@@ -492,7 +494,7 @@ Finally confirm the current deployment receipt, public/local build identity, cle
 
 ### Recovery
 
-- If migration prevents startup before any schema-2 workflow admission is durably recorded, stop the service, preserve the invalid schema-2 file, prove no new-shape routing or Run record exists, restore the private schema-1 backup, and reactivate the previously verified release through the documented `nags rollback factory --to <deployment-id>` path. Recheck local/public identity and wire health.
+- If migration prevents startup before any schema-2 workflow admission or fresh new-shape continuation is durably recorded, stop the service, preserve the invalid schema-2 file, require the dedicated compatibility marker to be false, prove no new-shape routing or Run record exists, restore the private schema-1 backup, and reactivate the previously verified release through the documented `nags rollback factory --to <deployment-id>` path. Recheck local/public identity and wire health.
 - If any schema-2 workflow admission is durable, do not restore the old schema or use a prior binary that cannot decode it. Use a schema-2-aware verified release or make a corrective commit on Factory `main`, deploy that exact merged commit, and preserve current settings/routing/Run evidence.
 - If health is degraded because a wire record is pending, inspect health, `system-events.jsonl`, `trigger-routing.jsonl`, settings, and service logs. Correct the forward policy or decoder and allow ordered catch-up. Never delete or truncate the wire or routing journal.
 - If draft authoring is unavailable, preserve `workflow-drafts.json` and logs, keep published triggers and Runs operating, and repair or recover the draft store separately. Never replace corrupt drafts with an empty file or promote browser-local content as part of recovery.
