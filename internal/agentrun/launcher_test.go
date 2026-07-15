@@ -9,6 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/tomnagengast/factory/internal/taskmodel"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 type launcherFixture struct {
@@ -441,6 +445,53 @@ func TestTmuxLauncherPropagatesTriggerKind(t *testing.T) {
 		if !strings.Contains(arguments, expected) {
 			t.Fatalf("arguments missing %q:\n%s", expected, arguments)
 		}
+	}
+}
+
+func TestTmuxLauncherScopesEveryProviderNeutralRunWithoutLinearKey(t *testing.T) {
+	for _, task := range []taskmodel.TaskRef{
+		{Source: taskmodel.SourceFactory, ProviderID: "task-0123456789abcdef", Identifier: "FAC-1"},
+		{Source: taskmodel.SourceLinear, ProviderID: "ENG-123", Identifier: "ENG-123"},
+	} {
+		t.Run(string(task.Source), func(t *testing.T) {
+			root := t.TempDir()
+			capture := filepath.Join(root, "capture")
+			tmux := filepath.Join(root, "tmux")
+			script := fmt.Sprintf("#!/bin/sh\nenv > %q\nprintf 'ARG:%%s\\n' \"$@\" >> %q\n", capture, capture)
+			if err := os.WriteFile(tmux, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			launcher, err := NewTmuxLauncher(LauncherConfig{
+				Repository: "tomnagengast/factory", RepoURL: "git@example.invalid:factory.git", RepoPath: root,
+				StateRoot: root, BinaryPath: "/tmp/factory", GitPath: "git", WorktrunkPath: "wt",
+				TmuxPath: tmux, TmuxSocket: "factory-test", TaskEndpoint: "http://127.0.0.1:8092/api/agent/task",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pin := workflow.Pin(workflow.ProviderNeutralDefault(time.Now()))
+			digest, err := pin.Digest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := Run{ID: "run-0123456789abcdef", Task: task, Repository: "tomnagengast/factory", PinnedWorkflow: &pin, PinnedWorkflowDigest: digest, PinnedPolicyRevision: 1}
+			runDirectory := filepath.Join(root, "runs", run.ID)
+			t.Setenv("LINEAR_API_KEY", "must-not-leak")
+			if err := launcher.Start(context.Background(), run, taskSessionName(run), runDirectory, StartOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			captured := string(data)
+			if strings.Contains(captured, "LINEAR_API_KEY") || !strings.Contains(captured, "FACTORY_TASK_CAPABILITY_FILE=") || !strings.Contains(captured, "FACTORY_TASK_ENDPOINT=") {
+				t.Fatalf("provider-neutral launch capture:\n%s", captured)
+			}
+			if _, err := ReadTaskCapability(runDirectory); err != nil {
+				t.Fatalf("read task capability: %v", err)
+			}
+		})
 	}
 }
 

@@ -75,7 +75,7 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 		errPath := filepath.Join(config.RunDirectory, fmt.Sprintf("attempt-%d-stderr.log", attemptNumber))
 		continuation := prompt
 		if attempt > 1 {
-			continuation = "Resume the Factory workflow from durable repository, Linear, pull-request, and Run state. Do not duplicate work or replace the pinned workflow revision."
+			continuation = "Resume the Factory workflow from durable repository, task-provider, pull-request, and Run state. Do not duplicate work or replace the pinned workflow revision."
 		}
 		exitCode, err := runCodex(ctx, config, threadID, continuation, finalPath, eventsPath, errPath)
 		lastExit = exitCode
@@ -332,7 +332,7 @@ func taskPrincipalPrompt(task taskmodel.TaskRef, triggerKind string, pin workflo
 		identityLabel = "Task"
 	}
 	providerInstructions := `LINEAR_API_KEY is available in the inherited environment. Send GraphQL request JSON on stdin to "$FACTORY_AGENT_HELPER" agent linear-graphql. Never pass the key in arguments or print it.`
-	if task.Source == taskmodel.SourceFactory && pin.ID == workflow.ProviderNeutralID && digest == workflow.ProviderNeutralDigest() {
+	if pin.ID == workflow.ProviderNeutralID && digest == workflow.ProviderNeutralDigest() {
 		providerInstructions = `Use "$FACTORY_AGENT_HELPER" agent task commands for the exact task scoped to this Run. The helper capability derives task identity and never accepts a different task ID.`
 	}
 	return fmt.Sprintf(`FACTORY WORKFLOW SEGMENT

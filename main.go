@@ -435,7 +435,10 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	if err != nil {
 		return err
 	}
-	_ = nativeTaskService
+	linearTaskProvider, err := taskservice.NewLinearProvider(linearGraphQLURL, linearAPIKey, &http.Client{Timeout: 10 * time.Second})
+	if err != nil {
+		return err
+	}
 	if err := manager.SetInvocationStartGate(routingStore); err != nil {
 		return err
 	}
@@ -520,6 +523,7 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 		TriggerPolicy:   events,
 		ScheduleStatus:  scheduler,
 		Tasks:           nativeTaskService,
+		LinearTasks:     linearTaskProvider,
 		Ready:           ready.Load,
 	})
 	if err != nil {

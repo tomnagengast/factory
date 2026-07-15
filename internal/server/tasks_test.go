@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,12 +16,39 @@ import (
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
 	"github.com/tomnagengast/factory/internal/taskcontrol"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/taskservice"
 	"github.com/tomnagengast/factory/internal/taskstore"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 type testTaskController struct {
 	create taskservice.CreateRequest
+}
+
+type testLinearTaskController struct {
+	issue       taskservice.LinearIssue
+	reads       int
+	operation   string
+	idempotency string
+}
+
+func (c *testLinearTaskController) Detail(context.Context, string) (taskservice.LinearIssue, error) {
+	c.reads++
+	return c.issue, nil
+}
+func (c *testLinearTaskController) Comment(_ context.Context, _, _, _, operation, idempotency string) (taskservice.LinearIssue, error) {
+	c.operation, c.idempotency = operation, idempotency
+	return c.issue, nil
+}
+func (c *testLinearTaskController) Link(context.Context, string, string, string) (taskservice.LinearIssue, error) {
+	return c.issue, nil
+}
+func (c *testLinearTaskController) State(context.Context, string, string) (taskservice.LinearIssue, error) {
+	return c.issue, nil
+}
+func (c *testLinearTaskController) Gate(context.Context, string, string, string, string, string) (taskservice.LinearIssue, error) {
+	return c.issue, nil
 }
 
 func (c *testTaskController) Projects() []taskservice.ProjectChoice { return nil }
@@ -94,7 +122,89 @@ func TestTaskAPIsRequireAuthenticationAndDeriveActor(t *testing.T) {
 	}
 }
 
+func TestManagedLinearDetailLoadsLiveWithoutAdmittingWorkspaceBacklog(t *testing.T) {
+	linear := &testLinearTaskController{issue: taskservice.LinearIssue{
+		Ref:   taskmodel.TaskRef{Source: taskmodel.SourceLinear, ProviderID: "ENG-46", Identifier: "ENG-46"},
+		Title: "Live Linear title", Description: "Private live body", ProjectName: "Factory",
+		State: "in_progress", StateName: "In Progress", UpdatedAt: testNow, ExternalURL: "https://linear.app/nags/issue/ENG-46/live",
+	}}
+	handler, runs := testTaskAPIHandlerWithLinear(t, &testTaskController{}, linear)
+	if _, _, err := runs.Claim(agentrun.Trigger{DeliveryID: "linear-managed", IssueIdentifier: "ENG-46", Kind: agentrun.TriggerKindLabel}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	managed := authenticatedJSONRequest(t, handler, http.MethodGet, "/api/tasks/linear/ENG-46", nil, "")
+	if managed.Code != http.StatusOK || !strings.Contains(managed.Body.String(), "Private live body") || !strings.Contains(managed.Body.String(), "latestRun") || linear.reads != 1 {
+		t.Fatalf("managed detail = %d %s reads=%d", managed.Code, managed.Body.String(), linear.reads)
+	}
+	unmanaged := authenticatedJSONRequest(t, handler, http.MethodGet, "/api/tasks/linear/ENG-999", nil, "")
+	if unmanaged.Code != http.StatusNotFound || linear.reads != 1 {
+		t.Fatalf("unmanaged detail = %d %s reads=%d", unmanaged.Code, unmanaged.Body.String(), linear.reads)
+	}
+}
+
+func TestLinearAgentTaskRequiresExactActiveRunCapability(t *testing.T) {
+	linear := &testLinearTaskController{issue: taskservice.LinearIssue{
+		Ref:   taskmodel.TaskRef{Source: taskmodel.SourceLinear, ProviderID: "ENG-46", Identifier: "ENG-46"},
+		Title: "Scoped Linear task", State: "in_progress", Revision: 9,
+	}}
+	handler, runs := testTaskAPIHandlerWithLinear(t, &testTaskController{}, linear)
+	pinned := workflow.Pin(workflow.ProviderNeutralDefault(testNow))
+	digest, err := pinned.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	run, _, err := runs.EnsureInvocationRun(agentrun.InvocationClaim{
+		RunID: "run-0123456789abcdef", InvocationID: "invocation-linear", EventID: "event-linear",
+		Task: linear.issue.Ref, RootEventID: "root-linear", Hop: 1, AncestorRuleIDs: []string{"rule-linear"},
+		Workflow: pinned, WorkflowDigest: digest, PolicyRevision: 1,
+		Repository: agentrun.RepositoryConfig{
+			App: "factory", Repository: "tomnagengast/factory", RepoURL: "https://github.com/tomnagengast/factory.git",
+			RepoPath: filepath.Join(root, "factory"), ManagedRoot: root, BaseBranch: "main",
+		},
+	}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDirectory := t.TempDir()
+	if err := runs.MarkStarting(run.ID, "factory-linear-eng-46", runDirectory, testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := runs.MarkRunning(run.ID, 1, testNow); err != nil {
+		t.Fatal(err)
+	}
+	token, err := agentrun.WriteTaskCapability(runDirectory, run, strings.NewReader(strings.Repeat("a", 32)), testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(authorization string) *httptest.ResponseRecorder {
+		body := `{"operation":"comment","body":"Scoped reply","idempotencyKey":"comment-1"}`
+		httpRequest := httptest.NewRequest(http.MethodPost, "/api/agent/task", strings.NewReader(body))
+		httpRequest.RemoteAddr = "127.0.0.1:45712"
+		httpRequest.Header.Set("Content-Type", "application/json")
+		httpRequest.Header.Set("X-Factory-Run-ID", run.ID)
+		httpRequest.Header.Set("Authorization", "Bearer "+authorization)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httpRequest)
+		return recorder
+	}
+	if recorder := request("wrong-token"); recorder.Code != http.StatusUnauthorized || linear.reads != 0 {
+		t.Fatalf("wrong capability = %d reads=%d", recorder.Code, linear.reads)
+	}
+	if recorder := request(token); recorder.Code != http.StatusOK || linear.operation != "comment" || linear.idempotency != "helper:"+run.ID+":comment-1" {
+		t.Fatalf("scoped helper = %d body=%s operation=%q idempotency=%q", recorder.Code, recorder.Body.String(), linear.operation, linear.idempotency)
+	}
+	if _, err := os.Stat(filepath.Join(runDirectory, agentrun.TaskCapabilityTokenFileName)); err != nil {
+		t.Fatalf("capability token file: %v", err)
+	}
+}
+
 func testTaskAPIHandler(t *testing.T, controller TaskController) http.Handler {
+	handler, _ := testTaskAPIHandlerWithLinear(t, controller, nil)
+	return handler
+}
+
+func testTaskAPIHandlerWithLinear(t *testing.T, controller TaskController, linear LinearTaskController) (http.Handler, *agentrun.Store) {
 	t.Helper()
 	directory := t.TempDir()
 	activityStore, err := activity.Open(filepath.Join(directory, "activity.json"), 10)
@@ -119,10 +229,11 @@ func testTaskAPIHandler(t *testing.T, controller TaskController) http.Handler {
 		ViewerAuth: testViewerAuth(t), LinearSecret: testSecret, GitHubSecret: testGitHubSecret,
 		Events: testEventWire(t, 0, 0), GitHubEvents: githubEvents, LinearComments: linearComments,
 		ProjectSetups: &testProjectSetups{}, TriggerActor: testActorID, Tasks: controller,
-		Now: func() time.Time { return testNow }, Build: testBuildIdentity(),
+		LinearTasks: linear,
+		Now:         func() time.Time { return testNow }, Build: testBuildIdentity(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return handler
+	return handler, runs
 }

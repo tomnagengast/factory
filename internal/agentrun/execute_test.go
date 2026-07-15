@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
 
@@ -115,6 +116,19 @@ func TestContinuationPromptRequiresFreshLinearFeedbackRead(t *testing.T) {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("continuation prompt missing %q: %s", expected, prompt)
 		}
+	}
+}
+
+func TestProviderNeutralLinearPromptUsesScopedTaskHelper(t *testing.T) {
+	t.Parallel()
+
+	prompt := taskPrincipalPrompt(
+		taskmodel.TaskRef{Source: taskmodel.SourceLinear, ProviderID: "ENG-123", Identifier: "ENG-123"},
+		TriggerKindLabel,
+		workflow.Pin(workflow.ProviderNeutralDefault(time.Now())),
+	)
+	if !strings.Contains(prompt, "agent task commands") || strings.Contains(prompt, "LINEAR_API_KEY") || strings.Contains(prompt, "agent linear-graphql") {
+		t.Fatalf("provider-neutral Linear prompt did not use scoped helper:\n%s", prompt)
 	}
 }
 

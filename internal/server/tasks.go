@@ -24,16 +24,20 @@ import (
 const maxTaskRequestBody = 96 << 10
 
 type taskSummary struct {
-	Ref          taskmodel.TaskRef     `json:"ref"`
-	Title        string                `json:"title"`
-	ProjectID    string                `json:"projectId,omitempty"`
-	ApprovalMode string                `json:"approvalMode,omitempty"`
-	State        string                `json:"state"`
-	Revision     uint64                `json:"revision,omitempty"`
-	UpdatedAt    time.Time             `json:"updatedAt,omitempty"`
-	LatestRun    *agentrun.ActivityRun `json:"latestRun,omitempty"`
-	ReadOnly     bool                  `json:"readOnly"`
-	ExternalURL  string                `json:"externalUrl,omitempty"`
+	Ref          taskmodel.TaskRef           `json:"ref"`
+	Title        string                      `json:"title"`
+	ProjectID    string                      `json:"projectId,omitempty"`
+	ApprovalMode string                      `json:"approvalMode,omitempty"`
+	State        string                      `json:"state"`
+	Revision     uint64                      `json:"revision,omitempty"`
+	UpdatedAt    time.Time                   `json:"updatedAt,omitempty"`
+	LatestRun    *agentrun.ActivityRun       `json:"latestRun,omitempty"`
+	ReadOnly     bool                        `json:"readOnly"`
+	ExternalURL  string                      `json:"externalUrl,omitempty"`
+	Description  string                      `json:"description,omitempty"`
+	ProjectName  string                      `json:"projectName,omitempty"`
+	StateName    string                      `json:"stateName,omitempty"`
+	Messages     []taskservice.LinearMessage `json:"messages,omitempty"`
 }
 
 type tasksResponse struct {
@@ -161,13 +165,37 @@ func (s *appServer) getTask(w http.ResponseWriter, r *http.Request) {
 	provider := r.PathValue("provider")
 	if provider == string(taskmodel.SourceLinear) {
 		identifier := strings.ToUpper(r.PathValue("id"))
+		var managed *taskSummary
 		for _, summary := range s.managedLinearTasks("") {
 			if summary.Ref.Identifier == identifier || summary.Ref.ProviderID == identifier {
-				writeJSON(w, http.StatusOK, summary)
-				return
+				value := summary
+				managed = &value
+				break
 			}
 		}
-		http.NotFound(w, r)
+		if managed == nil {
+			http.NotFound(w, r)
+			return
+		}
+		if s.linearTasks == nil {
+			http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+			return
+		}
+		issue, err := s.linearTasks.Detail(r.Context(), identifier)
+		if errors.Is(err, taskservice.ErrLinearTaskNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			slog.Warn("read managed Linear task", "identifier", identifier, "error", err)
+			http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+			return
+		}
+		managed.Title, managed.Description = issue.Title, issue.Description
+		managed.ProjectID, managed.ProjectName = issue.ProjectID, issue.ProjectName
+		managed.State, managed.StateName, managed.UpdatedAt = issue.State, issue.StateName, issue.UpdatedAt
+		managed.ExternalURL, managed.Messages = issue.ExternalURL, issue.Messages
+		writeJSON(w, http.StatusOK, *managed)
 		return
 	}
 	if provider != string(taskmodel.SourceFactory) {
@@ -505,7 +533,7 @@ func (s *appServer) agentTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if run.Task.Source != taskmodel.SourceFactory {
-		http.Error(w, "task provider helper is unavailable", http.StatusServiceUnavailable)
+		s.linearAgentTask(w, r, run, request)
 		return
 	}
 	detail, err := s.tasks.Detail(run.Task.ProviderID, request.After, 500)
@@ -544,4 +572,62 @@ func (s *appServer) agentTask(w http.ResponseWriter, r *http.Request) {
 	if !s.writeTaskError(w, r, result, err) {
 		writeJSON(w, http.StatusOK, result)
 	}
+}
+
+func (s *appServer) linearAgentTask(w http.ResponseWriter, r *http.Request, run agentrun.Run, request agentTaskRequest) {
+	if run.Task.Source != taskmodel.SourceLinear || s.linearTasks == nil {
+		http.Error(w, "task provider helper is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	issue, err := s.linearTasks.Detail(r.Context(), run.Task.Identifier)
+	if err != nil {
+		s.writeLinearTaskError(w, err)
+		return
+	}
+	filtered := issue
+	filtered.Messages = nil
+	for _, message := range issue.Messages {
+		if message.Ordinal > request.After {
+			filtered.Messages = append(filtered.Messages, message)
+		}
+	}
+	if request.Operation == "activity" && len(filtered.Messages) == 0 && issue.Revision <= request.Revision {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if request.Operation == "show" || request.Operation == "messages" || request.Operation == "activity" {
+		writeJSON(w, http.StatusOK, filtered)
+		return
+	}
+	if request.IdempotencyKey == "" {
+		http.Error(w, "idempotency key is required", http.StatusBadRequest)
+		return
+	}
+	switch request.Operation {
+	case "comment", "reply":
+		issue, err = s.linearTasks.Comment(r.Context(), run.Task.Identifier, request.ParentID, request.Body, request.Operation, "helper:"+run.ID+":"+request.IdempotencyKey)
+	case "link":
+		issue, err = s.linearTasks.Link(r.Context(), run.Task.Identifier, request.Label, request.URL)
+	case "state":
+		issue, err = s.linearTasks.State(r.Context(), run.Task.Identifier, request.State)
+	case "gate-open":
+		issue, err = s.linearTasks.Gate(r.Context(), run.Task.Identifier, request.Kind, request.Mode, request.ArtifactURL, "helper:"+run.ID+":"+request.IdempotencyKey)
+	default:
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		s.writeLinearTaskError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, issue)
+}
+
+func (s *appServer) writeLinearTaskError(w http.ResponseWriter, err error) {
+	if errors.Is(err, taskservice.ErrLinearTaskNotFound) {
+		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	}
+	slog.Warn("Linear task helper request rejected", "error", err)
+	http.Error(w, err.Error(), http.StatusBadRequest)
 }

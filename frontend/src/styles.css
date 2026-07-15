@@ -1934,6 +1934,10 @@ select {
   margin: 24px 0;
 }
 
+.task-cancel-button {
+  width: 100%;
+}
+
 .task-metadata {
   margin: 0;
   display: grid;
@@ -2020,6 +2024,25 @@ select {
   margin: 16px 0 28px;
   color: var(--muted);
   line-height: 1.75;
+}
+
+.linear-task-metadata {
+  max-width: 620px;
+  margin: 28px 0;
+  border-top: 1px solid var(--border);
+}
+
+.task-readonly-note .task-linear-description {
+  max-width: 680px;
+  margin: 30px 0;
+  padding: 24px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  white-space: pre-wrap;
+}
+
+.linear-task-thread {
+  margin: 34px 0;
 }
 
 .task-external-link {

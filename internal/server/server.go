@@ -149,6 +149,14 @@ type TaskController interface {
 	Start(context.Context, taskservice.StartRequest) (taskservice.StartResult, error)
 }
 
+type LinearTaskController interface {
+	Detail(context.Context, string) (taskservice.LinearIssue, error)
+	Comment(context.Context, string, string, string, string, string) (taskservice.LinearIssue, error)
+	Link(context.Context, string, string, string) (taskservice.LinearIssue, error)
+	State(context.Context, string, string) (taskservice.LinearIssue, error)
+	Gate(context.Context, string, string, string, string, string) (taskservice.LinearIssue, error)
+}
+
 type ViewerAuthenticator interface {
 	Page(http.Handler) http.Handler
 	API(http.Handler) http.Handler
@@ -182,6 +190,7 @@ type Config struct {
 	TriggerPolicy      TriggerPolicy
 	ScheduleStatus     ScheduleStatus
 	Tasks              TaskController
+	LinearTasks        LinearTaskController
 	Ready              func() bool
 }
 
@@ -209,6 +218,7 @@ type appServer struct {
 	triggerPolicy      TriggerPolicy
 	scheduleStatus     ScheduleStatus
 	tasks              TaskController
+	linearTasks        LinearTaskController
 	ready              func() bool
 }
 
@@ -394,6 +404,7 @@ func New(config Config) (http.Handler, error) {
 		triggerPolicy:      config.TriggerPolicy,
 		scheduleStatus:     config.ScheduleStatus,
 		tasks:              config.Tasks,
+		linearTasks:        config.LinearTasks,
 		ready:              config.Ready,
 	}
 	if err := app.events.Handle(eventwire.Filter{Source: eventwire.SourceLinear}, app.dispatchLinear); err != nil {

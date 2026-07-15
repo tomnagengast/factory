@@ -75,6 +75,11 @@ type TaskSummary = {
   updatedAt?: string;
   readOnly: boolean;
   externalUrl?: string;
+  description?: string;
+  projectName?: string;
+  stateName?: string;
+  messages?: TaskMessage[];
+  latestRun?: AgentRun;
 };
 
 type TaskRecord = {
@@ -2707,7 +2712,7 @@ function TaskDetailPage(props: { provider: string; id: string }): JSX.Element {
               {(task) => (
                 <article class="task-detail linear-detail">
                   <header class="task-detail-header"><div><span class="task-source linear">Linear · read only</span><h1 id="task-title">{task().title}</h1><p>{task().ref.identifier}</p></div><span class="task-state">{runStateLabel(task().state)}</span></header>
-                  <div class="task-readonly-note"><strong>Managed coexistence record</strong><p>Factory exposes retained run and invocation evidence here without duplicating Linear authority. Continue discussion and edits in Linear.</p><Show when={task().externalUrl}><a class="primary-button task-external-link" href={task().externalUrl} target="_blank" rel="noreferrer">Open in Linear</a></Show></div>
+                  <div class="task-readonly-note"><strong>Managed coexistence record</strong><p>Factory loads this detail live from Linear without persisting its body. Continue discussion and edits in Linear.</p><dl class="task-metadata linear-task-metadata"><div><dt>Provider state</dt><dd>{task().stateName || runStateLabel(task().state)}</dd></div><div><dt>Project</dt><dd>{task().projectName || "No project"}</dd></div><Show when={task().latestRun}><div><dt>Latest Factory Run</dt><dd>{runStateLabel(task().latestRun!.state)}</dd></div><div><dt>Run updated</dt><dd>{formatTime(task().latestRun!.updatedAt)}</dd></div></Show></dl><Show when={task().description}><p class="task-linear-description">{task().description}</p></Show><Show when={(task().messages?.length ?? 0) > 0}><section class="linear-task-thread" aria-labelledby="linear-thread-title"><div class="task-section-heading"><div><p class="section-label">Live from Linear</p><h2 id="linear-thread-title">Discussion</h2></div><span>{task().messages?.length} messages</span></div><ol class="task-messages"><For each={task().messages ?? []}>{(message) => <li classList={{ reply: Boolean(message.parentId) }}><div><strong>{taskActorLabel(message.author)}</strong><time datetime={message.createdAt}>{formatTime(message.createdAt)}</time></div><p>{message.body}</p></li>}</For></ol></section></Show><Show when={task().externalUrl}><a class="primary-button task-external-link" href={task().externalUrl} target="_blank" rel="noreferrer">Open in Linear</a></Show></div>
                 </article>
               )}
             </Show>
@@ -2750,7 +2755,7 @@ function TaskDetailPage(props: { provider: string; id: string }): JSX.Element {
                           <div class="task-section-heading"><div><p class="section-label">Lifecycle</p><h2 id="control-title">Run control</h2></div></div>
                           <dl class="task-metadata"><div><dt>State</dt><dd>{runStateLabel(task().state)}</dd></div><div><dt>Approval</dt><dd>{runStateLabel(task().approvalMode)}</dd></div><div><dt>Updated</dt><dd>{formatTime(task().updatedAt)}</dd></div><div><dt>Messages</dt><dd>{task().messageCount}</dd></div></dl>
                           <button class="primary-button" type="button" disabled={busy() !== "" || !["open", "in_progress"].includes(task().state)} onClick={() => void mutate("Starting workflow", "/start", {})}>Start workflow</button>
-                          <label><span>Set state</span><select value={task().state} disabled={busy() !== ""} onChange={(event) => void mutate("Updating state", "/state", { expectedRevision: task().revision, state: event.currentTarget.value })}><option value="open">Open</option><option value="in_progress">In progress</option><option value="completed">Completed</option><option value="canceled">Canceled</option></select></label>
+                          <Show when={["open", "in_progress"].includes(task().state)}><button class="secondary-button danger-button task-cancel-button" type="button" disabled={busy() !== ""} onClick={() => void mutate("Canceling task", "/state", { expectedRevision: task().revision, state: "canceled" })}>Cancel task</button></Show>
                         </section>
 
                         <section class="task-panel" aria-labelledby="gates-title">

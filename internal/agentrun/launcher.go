@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
 
@@ -608,7 +607,7 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 		"--run-dir", runDirectory,
 		"--attempt-offset", fmt.Sprintf("%d", run.Attempts),
 	}
-	providerNeutral := run.Task.Source == taskmodel.SourceFactory && run.PinnedWorkflowDigest == workflow.ProviderNeutralDigest()
+	providerNeutral := run.PinnedWorkflowDigest == workflow.ProviderNeutralDigest()
 	if providerNeutral {
 		if launcher.config.TaskEndpoint == "" {
 			return errors.New("start provider-neutral Run: task helper endpoint is missing")
