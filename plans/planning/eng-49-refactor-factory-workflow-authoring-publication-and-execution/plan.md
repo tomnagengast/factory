@@ -1,6 +1,6 @@
 # ENG-49 Factory Workflows Implementation Plan
 
-> updated: 2026-07-14T20:42:52-07:00
+> updated: 2026-07-14T20:49:18-07:00
 
 ## Linear issue context
 
@@ -18,7 +18,7 @@
 4. **How does execution retain identity?** Invocations flow into Runs, private `workflow.json`, retries, feedback, remediation, and post-merge segments. The pinned value and prompt change, not the queue or segment model.
 5. **What must remain mechanical?** Repository routing, one-run ownership, human-only merge, checkpoint validation, exact verified-head ancestry, merged-main deployment, completion evidence, and cleanup remain enforced in Go.
 6. **What is the dominant compatibility risk?** Strict retained routing and Run JSON embeds the legacy `runner`/`steps` shape, requiring explicit dual-shape decoding and fixtures before the new definition replaces it.
-7. **How is production changed and recovered?** Deploy the human-merged exact verified head only from updated clean managed `main` with `~/.local/bin/nags deploy --expected-commit`, verify schema/health/content/receipt state, and use the documented pre-publication backup rollback or a forward corrective commit after publication.
+7. **How is production changed and recovered?** Deploy the human-merged exact verified head only from updated clean managed `main` with `~/.local/bin/nags deploy --expected-commit`, verify schema/health/content/receipt state, and allow prior-binary rollback only before any new-shape workflow admission is durable. After that boundary, use schema-2-aware recovery or a forward corrective commit.
 
 ## Outcome
 
@@ -149,8 +149,8 @@ Add a strict authenticated workflow authoring API:
 
 - `GET /api/workflows` returns the current policy revision, published definitions, current drafts, draft/publication status, draft-store availability, and per-workflow rule references. For a published workflow without a stored draft, synthesize an editor document equal to the published definition without writing it. If the draft store is unavailable, still return published definitions read-only with an explicit authoring error. It does not return pinned Run files, repository paths, commands, prompts from prior Runs, credentials, or raw trigger payloads.
 - `POST /api/workflow-drafts` allocates a stable server-generated workflow ID and immediately persists a disabled starter draft. The response includes draft revision 1 and base workflow revision 0.
-- `PUT /api/workflow-drafts/{id}` autosaves one document with an expected draft revision. It validates and canonicalizes the complete draft, assigns the next draft revision, and atomically replaces only that draft. For a synthesized editor document, expected draft revision 0 plus the current published workflow revision materializes draft revision 1. The draft base is server-owned and cannot be changed by the client.
-- `DELETE /api/workflow-drafts/{id}` discards authoring state. For a published workflow, the editor falls back to the published definition. For a never-published workflow, the document disappears.
+- `PUT /api/workflow-drafts/{id}` autosaves one document with an expected draft revision. It validates and canonicalizes the complete draft, assigns the next draft revision, and atomically replaces only that draft. For a synthesized editor document, expected draft revision 0 plus the exact current published workflow revision materializes draft revision 1. If neither a matching published definition nor an existing draft remains, return `409 Conflict` rather than recreating a discarded or deleted workflow. The draft base is server-owned and cannot be changed by the client.
+- `DELETE /api/workflow-drafts/{id}` discards authoring state only when the expected draft revision and base workflow revision still match. For a published workflow, the editor falls back to the published definition. For a never-published workflow, the document disappears. A stale cross-tab discard returns `409 Conflict` and cannot remove a newer saved draft.
 - `POST /api/workflow-drafts/{id}/publish` accepts the exact expected draft revision, base workflow revision, and policy revision. It promotes that persisted draft, not unacknowledged browser state.
 - `DELETE /api/workflows/{id}` is a separate confirmed live-policy action with expected workflow and policy revisions and remains available when draft authoring is unavailable. A retained draft whose nonzero base points at a deleted live workflow is stale deletion residue and must be removed or quarantined during reconciliation, never treated as a new workflow.
 - `409 Conflict` returns authoritative revision metadata and the current server draft or published base as appropriate. The UI preserves local text and offers explicit reload, duplicate, or manual reconciliation rather than force-overwriting either side.
@@ -222,13 +222,14 @@ Before replacing `settings.json`, write one private fsynced `settings.schema1.ba
 - Implement backward-compatible workflow JSON decoding for the legacy `runner: "do"` plus `steps` shape because trigger routing replay uses `DisallowUnknownFields`.
 - Accept legacy workflow values only when reading retained internal records. The workflow API and settings schema 2 must reject legacy runner/step fields.
 - Nonterminal legacy pinned records, if any exist during development or recovery, continue through a narrow legacy prompt path that invokes `$do`; do not silently reinterpret an already admitted workflow. New admissions always pin Markdown definitions.
+- Treat the first durable routing or Run record carrying a schema-2 workflow revision/body/digest as the rollback-compatibility boundary. Terminal compaction retains revision and digest, so retained state itself is monotonic evidence that restoring schema-1 settings is no longer sufficient. Surface this state in migration/preflight evidence and never claim prior-binary compatibility after it exists.
 - Before production activation, require a quiescence preflight: service ready, wire pending count zero, routing projection healthy, and no nonterminal Run or invocation with a legacy workflow shape. The observed planning state already met this condition, but deployment must recheck it.
 - Keep the provider-installed `$do` skill in place through the rollback window. New Factory prompts do not use it. Removing the global skill or its Network source is a separate decision because it still supports direct interactive `$do ISSUE-NNN` use outside Factory.
 
 ### Rollback
 
-- Before the first schema-2 workflow publication, a stopped and quiescent service can roll back to the prior binary by restoring the private schema-1 backup.
-- After an operator publishes Markdown-only workflow changes, an older binary cannot represent them. Rollback becomes a forward corrective or revert commit deployed from clean merged Factory `main`; never silently translate the new body back to short steps.
+- Before any schema-2 workflow admission is durably recorded, a stopped and quiescent service can roll back to the prior binary by restoring the private schema-1 backup and proving no new-shape routing or Run record exists.
+- After the first schema-2 admission, an older binary cannot replay the strict routing/Run state even if no operator has published an edit. Recovery must use a schema-2-aware previously verified release or a forward corrective commit deployed from clean merged Factory `main`; never promise an ordinary prior-binary or plain code-revert recovery, and never silently translate the new body back to short steps.
 - Preserve the backup and workflow revisions for diagnosis. Do not rewrite trigger-routing or Run journals during rollback.
 
 ## Implementation phases
@@ -276,7 +277,7 @@ Tasks:
 1. Add coordinator methods to snapshot, publish, and delete live workflows under the existing policy lock and pending-decision gate.
 2. Validate registry references against the proposed workflow collection. Reject disable/delete conflicts without mutating either snapshot.
 3. Add authenticated `GET /api/workflows`, draft create/autosave/discard, exact-draft publish, confirmed live delete, and protected `GET /workflows` routing.
-4. Make autosave conditional only on draft revision. Make publish conditional on draft revision, base workflow revision, and policy revision, with idempotent reconciliation after a publish/draft-store crash boundary.
+4. Make updates to an existing draft conditional on its draft revision; revision-zero materialization also requires the exact published workflow revision. Make discard conditional on draft and base workflow revisions. Make publish conditional on draft revision, base workflow revision, and policy revision, with idempotent reconciliation after a publish/draft-store crash boundary. Missing or stale state returns `409` instead of recreating or deleting another tab's work.
 5. Return reference metadata for enabled and disabled rules. Return only published workflow summaries from `/api/triggers`.
 6. Replace settings API serialization with the narrow agent/runtime DTO and preserve the live workflow collection during settings writes.
 7. Add `/workflows` to OAuth return-path allowlisting and canonical-route tests.
@@ -412,7 +413,7 @@ Suggested commit: `Factory: document workflow execution`
 | Workflow model/default/migration | `go test ./internal/workflow ./internal/settings -count=1` with schema-1 production-shaped fixtures, custom steps, operator overrides, backup, reopen, corruption, bounds, and idempotence cases. |
 | Draft durability and isolation | Workflow store tests cover create, serialized revision updates, reopen, discard, absent file, `0600`, bounds, stale revision, corruption preservation, write failure, and concurrent distinct drafts; assert every operation leaves live policy bytes/revision unchanged. |
 | Race-safe persistence | `go test -race ./internal/workflow ./internal/settings -count=1`. |
-| Exact saved-draft publication | Server/coordinator tests autosave draft revisions 1 through N, publish expected N, and prove the live body equals N while unsaved N+1 is excluded. Reject stale draft, base, and policy revisions without live mutation. |
+| Exact saved-draft publication | Server/coordinator tests autosave draft revisions 1 through N, publish expected N, and prove the live body equals N while unsaved N+1 is excluded. Reject stale draft, base, and policy revisions without live mutation; reject stale autosave after live deletion and stale cross-tab discard without recreating or deleting state. |
 | Publish crash idempotence | Inject failure after the settings write but before draft-base update; reopen/reconcile, retry the same publish, and prove one published workflow revision and one policy revision were created. |
 | Coordinated publish/disable/delete | `go test ./internal/triggerrouter ./internal/triggerregistry -run 'Test.*(Workflow|Policy|Admission)' -count=1`. |
 | No publish overtakes pending admission | Coordinator tests hold one undecided wire record, allow independent draft autosaves, reject publish/trigger/live-delete mutations, catch up, then publish exactly one later revision. |
@@ -491,8 +492,8 @@ Finally confirm the current deployment receipt, public/local build identity, cle
 
 ### Recovery
 
-- If migration prevents startup before any schema-2 workflow publication, stop the service, preserve the invalid schema-2 file, restore the private schema-1 backup, and reactivate the previously verified release through the documented `nags rollback factory --to <deployment-id>` path. Recheck local/public identity and wire health.
-- If any Markdown workflow revision has been published, do not restore the old schema silently. Make a corrective or revert commit on Factory `main`, deploy that exact merged commit, and preserve current settings/routing/Run evidence.
+- If migration prevents startup before any schema-2 workflow admission is durably recorded, stop the service, preserve the invalid schema-2 file, prove no new-shape routing or Run record exists, restore the private schema-1 backup, and reactivate the previously verified release through the documented `nags rollback factory --to <deployment-id>` path. Recheck local/public identity and wire health.
+- If any schema-2 workflow admission is durable, do not restore the old schema or use a prior binary that cannot decode it. Use a schema-2-aware verified release or make a corrective commit on Factory `main`, deploy that exact merged commit, and preserve current settings/routing/Run evidence.
 - If health is degraded because a wire record is pending, inspect health, `system-events.jsonl`, `trigger-routing.jsonl`, settings, and service logs. Correct the forward policy or decoder and allow ordered catch-up. Never delete or truncate the wire or routing journal.
 - If draft authoring is unavailable, preserve `workflow-drafts.json` and logs, keep published triggers and Runs operating, and repair or recover the draft store separately. Never replace corrupt drafts with an empty file or promote browser-local content as part of recovery.
 - If the new default workflow produces an incorrect agent behavior, disable affected trigger rules first through the authenticated policy surface, preserve the admitted pinned evidence, correct the workflow revision, and re-enable only after validation. Existing admitted invocations remain pinned and must be handled explicitly rather than silently changed.
