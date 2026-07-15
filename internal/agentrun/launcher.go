@@ -522,9 +522,7 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 			return fmt.Errorf("write pinned workflow: %w", err)
 		}
 	} else if run.InvocationID != "" {
-		if run.PinnedWorkflow == nil {
-			return errors.New("start invocation Run: pinned workflow is missing")
-		}
+		return errors.New("start invocation Run: pinned workflow is missing")
 	}
 	args := []string{
 		"-L", launcher.config.TmuxSocket,

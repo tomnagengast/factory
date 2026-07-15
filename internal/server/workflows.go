@@ -152,11 +152,12 @@ func (s *appServer) postWorkflowDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	configuration := s.settings.Snapshot()
-	ids := make(map[string]bool, len(configuration.Workflows)+len(s.workflowDrafts.Snapshot().Drafts))
+	drafts := s.workflowDrafts.Snapshot().Drafts
+	ids := make(map[string]bool, len(configuration.Workflows)+len(drafts))
 	for _, definition := range configuration.Workflows {
 		ids[definition.ID] = true
 	}
-	for _, draft := range s.workflowDrafts.Snapshot().Drafts {
+	for _, draft := range drafts {
 		ids[draft.WorkflowID] = true
 	}
 	if len(ids) >= workflow.MaxDefinitions {
