@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -66,11 +68,24 @@ func main() {
 }
 
 func serve(ctx context.Context) error {
+	address, err := resolveManagementAddress(managementFlags{}, nil)
+	if err != nil {
+		return fmt.Errorf("server address: %w", err)
+	}
+	return serveConfigured(ctx, serveOptions{address: address})
+}
+
+type serveOptions struct {
+	address    managementAddress
+	localStart bool
+	output     io.Writer
+}
+
+func serveConfigured(ctx context.Context, options serveOptions) error {
 	serviceStartedAt := time.Now().UTC()
 	if buildContractVersion != strconv.Itoa(agentrun.LifecycleContractVersion) {
 		return fmt.Errorf("build contract version %q does not match lifecycle contract %d", buildContractVersion, agentrun.LifecycleContractVersion)
 	}
-	port := envOr("PORT", defaultPort)
 	repository := envOr("FACTORY_REPOSITORY", defaultRepository)
 	baseBranch := envOr("FACTORY_BASE_BRANCH", defaultBaseBranch)
 	if repository != defaultRepository || baseBranch != defaultBaseBranch {
@@ -100,14 +115,24 @@ func serve(ctx context.Context) error {
 	googleClientSecret := os.Getenv("FACTORY_GOOGLE_CLIENT_SECRET")
 	allowedEmails := splitList(os.Getenv("FACTORY_GOOGLE_ALLOWED_EMAILS"))
 	sessionKey := os.Getenv("FACTORY_SESSION_KEY")
-	viewerAuth, err := viewerauth.New(viewerauth.Config{
-		ClientID:      googleClientID,
-		ClientSecret:  googleClientSecret,
-		RedirectURL:   googleRedirectURL,
-		AllowedEmails: allowedEmails,
-		SessionKey:    []byte(sessionKey),
-		Now:           time.Now,
-	})
+	var viewerAuth server.ViewerAuthenticator
+	var err error
+	if options.localStart && isLoopbackManagementHost(options.address.Host) {
+		viewerAuth, err = viewerauth.NewLocal(options.address.Host, options.address.Port)
+	} else {
+		redirectURL := googleRedirectURL
+		if options.localStart {
+			redirectURL = os.Getenv("FACTORY_GOOGLE_REDIRECT_URL")
+		}
+		viewerAuth, err = viewerauth.New(viewerauth.Config{
+			ClientID:      googleClientID,
+			ClientSecret:  googleClientSecret,
+			RedirectURL:   redirectURL,
+			AllowedEmails: allowedEmails,
+			SessionKey:    []byte(sessionKey),
+			Now:           time.Now,
+		})
+	}
 	if err != nil {
 		return err
 	}
@@ -235,7 +260,7 @@ func serve(ctx context.Context) error {
 			BaseBranch:     "main",
 			ReceiptPath:    filepath.Join(stateRoot, "deployments", "current.json"),
 			PendingReceipt: filepath.Join(stateRoot, "deployments", "pending.json"),
-			HealthURL:      "http://127.0.0.1:" + port + "/api/healthz",
+			HealthURL:      options.address.URL() + "/api/healthz",
 		},
 		{
 			App: "artifacts", Repository: "tomnagengast/artifacts",
@@ -445,7 +470,7 @@ func serve(ctx context.Context) error {
 		return err
 	}
 	httpServer := &http.Server{
-		Addr:              "127.0.0.1:" + port,
+		Addr:              options.address.NetworkAddress(),
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
@@ -453,10 +478,26 @@ func serve(ctx context.Context) error {
 		IdleTimeout:       60 * time.Second,
 	}
 
+	listener, err := net.Listen("tcp", httpServer.Addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", httpServer.Addr, err)
+	}
+	defer listener.Close()
+	if options.localStart {
+		record := newLocalRuntimeRecord(options.address, binaryPath, serviceStartedAt)
+		if err := publishLocalRuntimeRecord(record); err != nil {
+			return err
+		}
+		defer removeOwnedLocalRuntimeRecord(record)
+		if options.output != nil {
+			fmt.Fprintf(options.output, "Factory running at %s (press Ctrl-C to stop)\n", options.address.URL())
+		}
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("factory listening", "address", httpServer.Addr)
-		errCh <- httpServer.ListenAndServe()
+		errCh <- httpServer.Serve(listener)
 	}()
 	go recoverEventWire(ctx, events, 5*time.Second, triggerManager.ReconcileExisting, func() error {
 		projectManager.Reconcile(ctx)

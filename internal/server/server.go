@@ -31,7 +31,6 @@ import (
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/triggerrouter"
 	"github.com/tomnagengast/factory/internal/triggerscheduler"
-	"github.com/tomnagengast/factory/internal/viewerauth"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
 
@@ -131,6 +130,14 @@ type ScheduleStatus interface {
 	Statuses(time.Time) []triggerscheduler.Status
 }
 
+type ViewerAuthenticator interface {
+	Page(http.Handler) http.Handler
+	API(http.Handler) http.Handler
+	Login(http.ResponseWriter, *http.Request)
+	Callback(http.ResponseWriter, *http.Request)
+	Logout(http.ResponseWriter, *http.Request)
+}
+
 type Config struct {
 	Web                fs.FS
 	ActivityStore      EventStore
@@ -140,7 +147,7 @@ type Config struct {
 	Settings           SettingsStore
 	WorkflowDrafts     WorkflowDraftStore
 	WorkflowDraftError string
-	ViewerAuth         *viewerauth.Authenticator
+	ViewerAuth         ViewerAuthenticator
 	LinearSecret       []byte
 	GitHubSecret       []byte
 	Events             EventWire
@@ -166,7 +173,7 @@ type appServer struct {
 	workflowDrafts     WorkflowDraftStore
 	workflowDraftError string
 	workflowLocks      keyedWorkflowLocks
-	viewerAuth         *viewerauth.Authenticator
+	viewerAuth         ViewerAuthenticator
 	linearSecret       []byte
 	githubSecret       []byte
 	events             EventWire
