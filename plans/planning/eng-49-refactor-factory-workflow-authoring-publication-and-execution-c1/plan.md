@@ -1,6 +1,6 @@
 # ENG-49 exact-head recovery plan
 
-> updated: 2026-07-14T23:44:00-07:00
+> updated: 2026-07-15T00:02:54-07:00
 
 ## Linear issue context
 
@@ -24,6 +24,7 @@ Research: `plans/planning/eng-49-refactor-factory-workflow-authoring-publication
 - [ ] Repository policy reconciliation re-reads authoritative GitHub state and fails closed when the desired policy is not proven.
 - [ ] Existing compliant repositories incur no mutation.
 - [ ] The compiled `full-sdlc` workflow requires exact reserved Linear comment footers and explicitly tells the human to use **Create a merge commit** because squash/rebase blocks deployment.
+- [ ] The compiled `full-sdlc` workflow uses the current `~/.local/bin/nags deploy --expected-commit` Factory self-deployment command and no longer names the nonexistent `bin/network-app` path.
 - [ ] The existing protected feedback binding, independent additive generic trigger, exact-head validator, original blocked Run, and schema-2 workflow behavior remain unchanged.
 - [ ] Focused tests, all Go tests, race tests, vet, frozen Bun install, frontend typecheck, and frontend production build pass.
 - [ ] Before checkpointing, the four compiled GitHub repositories report merge-only policy and automatic branch deletion.
@@ -86,7 +87,13 @@ The text must say that emoji or marker prose elsewhere is not a signature and th
 
 At the ready boundary, require the implementation summary to name the exact verified head and tell the human to choose **Create a merge commit**. State that squash and rebase preserve neither the checkpointed OID nor deployability.
 
-Add focused default-workflow assertions rather than changing the existing parser. `internal/linearhook/event_test.go` and `internal/server/server_test.go` already cover parser/webhook behavior.
+Replace the stale Factory self-deployment command with:
+
+```text
+~/.local/bin/nags deploy --expected-commit "$(git rev-parse HEAD)"
+```
+
+Add focused default-workflow assertions for the exact footer forms, merge-method warning, current deployment command, and absence of `bin/network-app` rather than changing the existing parser. `internal/linearhook/event_test.go` and `internal/server/server_test.go` already cover parser/webhook behavior.
 
 ### Reconcile existing repositories before the recovery checkpoint
 
@@ -153,11 +160,13 @@ Rejected as out of scope and contrary to the explicit ENG-49 product decision th
 
 - Add the exact reserved Linear signature protocol.
 - Add the explicit merge-commit-only human instruction at the ready boundary.
+- Replace the nonexistent `bin/network-app` self-deployment command with the current `~/.local/bin/nags deploy --expected-commit` interface.
 - Preserve all existing full-SDLC phases and mechanical authority language.
 
 ### `internal/workflow/defaults_test.go`
 
 - Assert the compiled default includes both valid footer forms and the merge-method warning.
+- Assert it includes the current `nags deploy` command and excludes `bin/network-app`.
 - Assert it still contains the exact-head and human-only merge contract.
 
 ### `README.md`
@@ -196,7 +205,7 @@ Success: compliant state is a no-op; drift is repaired once; false success is re
 ### Phase 3: Close workflow provenance and merge-instruction gaps
 
 1. Add exact Linear footer rules and merge-commit instruction to the compiled workflow.
-2. Add focused compiled-default tests.
+2. Replace the stale self-deployment command and add focused compiled-default tests that prove the current command is present and the nonexistent path is absent.
 3. Update the full README contract and recovery guidance.
 4. Run focused workflow, Linear hook, server, and prompt tests.
 5. Commit the coherent workflow/documentation change.
@@ -268,6 +277,7 @@ After merge, use the original ENG-49 schema rollback preflight before activating
 | Greenfield path gets the same policy | updated bootstrap fixture plus policy assertions |
 | Workflow carries exact signatures | compiled-default test checks standalone `🐘` and inline-code marker instructions |
 | Workflow prohibits replay merge | compiled-default test checks **Create a merge commit** plus squash/rebase blocker language |
+| Workflow self-deployment is runnable | compiled-default test checks `~/.local/bin/nags deploy --expected-commit` and rejects `bin/network-app` |
 | Parser behavior unchanged | `go test ./internal/linearhook ./internal/server` |
 | Exact-head mechanical gate unchanged | `go test ./internal/agentrun` and diff review of completion files |
 | All backend behavior | `go test ./...` |
