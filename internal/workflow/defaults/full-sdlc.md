@@ -67,9 +67,23 @@ Use `factory agent github-events` as a durable wake signal and refresh authorita
 
 Use `factory agent linear-comments` concurrently for Linear feedback wakes. After every wake, fresh-read the complete conversation with `factory agent linear-graphql`. Address every later contextual human comment, verify accepted changes, and reply in the same thread. Wake events are never authority by themselves.
 
+Every Factory-authored Linear comment must end with one reserved signature on its final non-empty line. Use either:
+
+```text
+🐘
+```
+
+or an exact inline-code coordination marker:
+
+```text
+🐘 `codex-do:TEAM-123:phase:r1`
+```
+
+Emoji or marker prose elsewhere is not a signature, and no prose may follow the footer.
+
 The ready boundary requires an open non-draft mergeable pull request, a non-regressed merge state, no requested changes, all reported and required checks passing or legitimately skipped, no actionable unresolved thread or comment, no unanswered Linear feedback, and an exact local head matching GitHub.
 
-Write the Factory ready checkpoint for that exact verified head and return the required ready terminal marker. Do not keep a principal process alive waiting for the ordinary human merge.
+Write the Factory ready checkpoint for that exact verified head and return the required ready terminal marker. Tell the human to use **Create a merge commit**. A squash or rebase merge does not preserve the checkpointed head ancestry and blocks deployment. Do not keep a principal process alive waiting for the ordinary human merge.
 
 ## Post-merge deployment and cleanup
 
@@ -82,7 +96,7 @@ Fetch and prune origin, fast-forward the tracked default branch, and require loc
 For Factory self-deployment use:
 
 ```text
-bin/network-app deploy factory --expected-commit "$(git rev-parse HEAD)"
+~/.local/bin/nags deploy --expected-commit "$(git rev-parse HEAD)"
 ```
 
 After successful deployment, verify GitHub auto-deleted the remote issue branch, fetch and prune, ensure all child windows are complete and consumed, and remove the clean integrated issue checkout with Worktrunk without force. Re-run deployment health and refresh GitHub and Linear one final time. Move Linear to its unambiguous completed state and publish merge, deployment, and cleanup evidence.
