@@ -11,6 +11,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/triggerrouter"
 	"github.com/tomnagengast/factory/internal/triggerscheduler"
@@ -37,16 +38,17 @@ type ruleStatus struct {
 }
 
 type invocationSummary struct {
-	ID              string    `json:"id"`
-	EventID         string    `json:"eventId"`
-	RuleID          string    `json:"ruleId"`
-	RuleRevision    uint64    `json:"ruleRevision"`
-	WorkflowID      string    `json:"workflowId"`
-	IssueIdentifier string    `json:"issueIdentifier"`
-	State           string    `json:"state"`
-	RunID           string    `json:"runId,omitempty"`
-	Reason          string    `json:"reason,omitempty"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	ID              string            `json:"id"`
+	Task            taskmodel.TaskRef `json:"task"`
+	EventID         string            `json:"eventId"`
+	RuleID          string            `json:"ruleId"`
+	RuleRevision    uint64            `json:"ruleRevision"`
+	WorkflowID      string            `json:"workflowId"`
+	IssueIdentifier string            `json:"issueIdentifier"`
+	State           string            `json:"state"`
+	RunID           string            `json:"runId,omitempty"`
+	Reason          string            `json:"reason,omitempty"`
+	UpdatedAt       time.Time         `json:"updatedAt"`
 }
 
 type protectedRoute struct {
@@ -218,7 +220,7 @@ func (s *appServer) triggerResponse() triggerResponse {
 				response.Recent = append(response.Recent, invocationSummary{
 					ID: invocation.ID, EventID: invocation.EventID, RuleID: invocation.Rule.ID,
 					RuleRevision: invocation.Rule.Revision, WorkflowID: invocation.Workflow.ID,
-					IssueIdentifier: invocation.IssueIdentifier, State: invocation.State,
+					Task: invocation.Task, IssueIdentifier: invocation.IssueIdentifier, State: invocation.State,
 					RunID: invocation.RunID, Reason: visibleInvocationReason(invocation), UpdatedAt: invocation.UpdatedAt,
 				})
 				continue
