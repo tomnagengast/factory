@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+usage() {
+  printf '%s\n' 'usage: bin/network-app deploy factory [args] | rollback factory [args]' >&2
+  exit 2
+}
+
+[ "$#" -ge 2 ] || usage
+
+command=$1
+app=$2
+[ "$app" = "factory" ] || usage
+
+provider=${HOME:?HOME is required}/.local/bin/nags
+if [ ! -x "$provider" ]; then
+  printf '%s\n' "Factory deployment provider is unavailable at $provider" >&2
+  exit 1
+fi
+
+shift 2
+case "$command" in
+  deploy)
+    exec "$provider" deploy "$@"
+    ;;
+  rollback)
+    exec "$provider" rollback factory "$@"
+    ;;
+  *)
+    usage
+    ;;
+esac
