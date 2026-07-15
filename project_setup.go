@@ -78,11 +78,12 @@ func repositoryConfigsWithSetups(staticConfigs []agentrun.RepositoryConfig, spec
 }
 
 type completionReaderOptions struct {
-	linearURL     string
-	linearAPIKey  string
-	gitPath       string
-	worktrunkPath string
-	httpClient    *http.Client
+	linearURL      string
+	linearAPIKey   string
+	gitPath        string
+	worktrunkPath  string
+	httpClient     *http.Client
+	taskCompletion agentrun.TaskCompletionProvider
 }
 
 func buildCompletionReaders(configs []agentrun.RepositoryConfig, options completionReaderOptions) (map[string]agentrun.CompletionEvidenceReader, error) {
@@ -103,6 +104,7 @@ func buildCompletionReaders(configs []agentrun.RepositoryConfig, options complet
 			WorktrunkPath:  options.worktrunkPath,
 			LinearAPIKey:   options.linearAPIKey,
 			HTTPClient:     options.httpClient,
+			TaskCompletion: options.taskCompletion,
 		}
 		var reader agentrun.CompletionEvidenceReader
 		var err error

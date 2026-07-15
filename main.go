@@ -230,6 +230,10 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	if err != nil {
 		return err
 	}
+	taskCompleter, err := taskservice.NewCompleter(nativeTasks, taskCoordinator, time.Now)
+	if err != nil {
+		return err
+	}
 	nativeTaskControl, err := taskcontrol.Open(filepath.Join(dataRoot, "native-task-control.json"))
 	if err != nil {
 		return err
@@ -381,7 +385,8 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	readerOptions := completionReaderOptions{
 		linearURL: linearGraphQLURL, linearAPIKey: linearAPIKey,
 		gitPath: gitPath, worktrunkPath: worktrunkPath,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient:     &http.Client{Timeout: 10 * time.Second},
+		taskCompletion: taskCompleter,
 	}
 	completionReaders, err := buildCompletionReaders(repositoryConfigs, readerOptions)
 	if err != nil {
