@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 type RegistryStore interface {
@@ -134,6 +136,131 @@ func (w *CoordinatedWire) UpdateSettings(expected uint64, candidate settings.Sna
 		return w.settings.Snapshot(), errors.New("trigger router: settings are read-only")
 	}
 	return store.Update(expected, candidate, now)
+}
+
+func (w *CoordinatedWire) UpdateAgentSettings(expected uint64, agents settings.AgentSettings, runtime settings.RuntimeSettings, now time.Time) (settings.Snapshot, error) {
+	candidate := w.settings.Snapshot()
+	candidate.Agents = agents
+	candidate.Runtime = runtime
+	return w.UpdateSettings(expected, candidate, now)
+}
+
+func (w *CoordinatedWire) PublishWorkflow(expectedPolicy, expectedWorkflow uint64, candidate workflow.Definition, now time.Time) (settings.Snapshot, error) {
+	w.policy.Lock()
+	defer w.policy.Unlock()
+	if !w.pendingDecisionsComplete() {
+		return w.settings.Snapshot(), ErrPolicyPending
+	}
+	current := w.settings.Snapshot()
+	if current.Revision != expectedPolicy || candidate.Revision != expectedWorkflow {
+		return current, ErrPolicyConflict
+	}
+	index := -1
+	for i, definition := range current.Workflows {
+		if definition.ID == candidate.ID {
+			index = i
+			break
+		}
+	}
+	if (index < 0 && expectedWorkflow != 0) || (index >= 0 && current.Workflows[index].Revision != expectedWorkflow) {
+		return current, ErrPolicyConflict
+	}
+	next := current.Clone()
+	candidate.Markdown = workflow.CanonicalizeMarkdown(candidate.Markdown)
+	candidate.Revision = expectedWorkflow + 1
+	candidate.UpdatedAt = now.UTC()
+	if index < 0 {
+		next.Workflows = append(next.Workflows, candidate)
+	} else {
+		next.Workflows[index] = candidate
+	}
+	if err := validateWorkflowPolicy(next, w.registry.Snapshot(), "publish"); err != nil {
+		return current, err
+	}
+	store, ok := w.settings.(settingsMutationStore)
+	if !ok {
+		return current, errors.New("trigger router: settings are read-only")
+	}
+	return store.Update(expectedPolicy, next, now)
+}
+
+func (w *CoordinatedWire) DeleteWorkflow(expectedPolicy, expectedWorkflow uint64, id string, now time.Time) (settings.Snapshot, error) {
+	w.policy.Lock()
+	defer w.policy.Unlock()
+	if !w.pendingDecisionsComplete() {
+		return w.settings.Snapshot(), ErrPolicyPending
+	}
+	current := w.settings.Snapshot()
+	if current.Revision != expectedPolicy {
+		return current, ErrPolicyConflict
+	}
+	index := -1
+	for i, definition := range current.Workflows {
+		if definition.ID == id && definition.Revision == expectedWorkflow {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return current, ErrPolicyConflict
+	}
+	if workflowReferenced(id, current, w.registry.Snapshot()) {
+		return current, fmt.Errorf("%w: workflow %q is referenced", ErrPolicyValidation, id)
+	}
+	next := current.Clone()
+	next.Workflows = slices.Delete(next.Workflows, index, index+1)
+	if err := validateWorkflowPolicy(next, w.registry.Snapshot(), "delete"); err != nil {
+		return current, err
+	}
+	store, ok := w.settings.(settingsMutationStore)
+	if !ok {
+		return current, errors.New("trigger router: settings are read-only")
+	}
+	return store.Update(expectedPolicy, next, now)
+}
+
+func (w *CoordinatedWire) UpdateProtectedFeedback(expectedPolicy uint64, workflowID string, now time.Time) (settings.Snapshot, error) {
+	w.policy.Lock()
+	defer w.policy.Unlock()
+	if !w.pendingDecisionsComplete() {
+		return w.settings.Snapshot(), ErrPolicyPending
+	}
+	current := w.settings.Snapshot()
+	if current.Revision != expectedPolicy {
+		return current, ErrPolicyConflict
+	}
+	next := current.Clone()
+	next.ProtectedWorkflows.LinearFeedback.WorkflowID = workflowID
+	if err := validateWorkflowPolicy(next, w.registry.Snapshot(), "protected feedback update"); err != nil {
+		return current, err
+	}
+	store, ok := w.settings.(settingsMutationStore)
+	if !ok {
+		return current, errors.New("trigger router: settings are read-only")
+	}
+	return store.Update(expectedPolicy, next, now)
+}
+
+func validateWorkflowPolicy(configuration settings.Snapshot, registry triggerregistry.Snapshot, operation string) error {
+	if err := configuration.Validate(); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrPolicyValidation, operation, err)
+	}
+	if err := registry.Validate(configuration); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrPolicyValidation, operation, err)
+	}
+	return nil
+}
+
+func workflowReferenced(id string, configuration settings.Snapshot, registry triggerregistry.Snapshot) bool {
+	if configuration.ProtectedWorkflows.LinearFeedback.WorkflowID == id {
+		return true
+	}
+	for _, rule := range registry.Rules {
+		if rule.WorkflowID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *CoordinatedWire) pendingDecisionsComplete() bool {

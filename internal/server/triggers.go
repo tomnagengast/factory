@@ -58,6 +58,11 @@ type protectedRoute struct {
 	Protected   bool   `json:"protected"`
 }
 
+type protectedFeedbackRequest struct {
+	ExpectedPolicyRevision uint64 `json:"expectedPolicyRevision"`
+	WorkflowID             string `json:"workflowId"`
+}
+
 func (s *appServer) getTriggers(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.triggerResponse())
 }
@@ -113,6 +118,28 @@ func (s *appServer) putTriggers(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("update trigger registry", "error", err)
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.triggerResponse())
+}
+
+func (s *appServer) putProtectedFeedback(w http.ResponseWriter, r *http.Request) {
+	if !s.requireReady(w) {
+		return
+	}
+	if !sameOrigin(r) {
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
+	if s.triggerPolicy == nil {
+		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return
+	}
+	var request protectedFeedbackRequest
+	if !decodeWorkflowJSON(w, r, &request) {
+		return
+	}
+	if _, err := s.triggerPolicy.UpdateProtectedFeedback(request.ExpectedPolicyRevision, request.WorkflowID, s.now()); !s.handleWorkflowPolicyError(w, err) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.triggerResponse())

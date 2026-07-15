@@ -175,6 +175,8 @@ func TestLoginAllowsCanonicalProtectedReturnURLsOnly(t *testing.T) {
 		{name: "agents", next: "/agents", want: "/agents"},
 		{name: "agent run", next: "/agents/ENG-23/1783714439062/run", want: "/agents/ENG-23/1783714439062/run"},
 		{name: "settings", next: "/settings", want: "/settings"},
+		{name: "triggers", next: "/triggers", want: "/triggers"},
+		{name: "workflows", next: "/workflows", want: "/workflows"},
 		{name: "lookalike", next: "/wire-public", want: "/home"},
 		{name: "legacy activity", next: "/activity", want: "/home"},
 		{name: "legacy run id", next: "/agents/run-123", want: "/home"},

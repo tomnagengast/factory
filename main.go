@@ -28,6 +28,7 @@ import (
 	"github.com/tomnagengast/factory/internal/triggerrouter"
 	"github.com/tomnagengast/factory/internal/triggerscheduler"
 	"github.com/tomnagengast/factory/internal/viewerauth"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 const (
@@ -121,6 +122,12 @@ func serve(ctx context.Context) error {
 	settingsStore, err := settings.Open(filepath.Join(dataRoot, "settings.json"), settings.Defaults(maxConcurrentRuns))
 	if err != nil {
 		return err
+	}
+	draftStore, draftErr := workflow.OpenDraftStore(filepath.Join(dataRoot, "workflow-drafts.json"))
+	draftError := ""
+	if draftErr != nil {
+		draftError = draftErr.Error()
+		slog.Error("workflow authoring unavailable", "error", draftErr)
 	}
 	activityStore, err := activity.Open(filepath.Join(dataRoot, "linear-activity.json"), activityEventLimit)
 	if err != nil {
@@ -409,6 +416,8 @@ func serve(ctx context.Context) error {
 		RunNotifier:        manager,
 		AgentObserver:      observer,
 		Settings:           settingsStore,
+		WorkflowDrafts:     draftStore,
+		WorkflowDraftError: draftError,
 		ViewerAuth:         viewerAuth,
 		LinearSecret:       []byte(secret),
 		GitHubSecret:       []byte(githubSecret),

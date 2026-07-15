@@ -20,6 +20,7 @@ import (
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/triggerrouter"
 	"github.com/tomnagengast/factory/internal/triggerscheduler"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 type scheduleStatusStub struct{ values []triggerscheduler.Status }
@@ -151,7 +152,12 @@ func TestTriggerAPIRejectsCrossOriginAndWorkflowRemoval(t *testing.T) {
 
 	configuration := configurationStore.Snapshot()
 	configuration.Workflows[0].Enabled = false
-	settingsRequest := authenticatedSettingsRequest(t, handler, configuration, "")
+	settingsBody, _ := json.Marshal(configuration)
+	settingsRequest := httptest.NewRecorder()
+	update := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewReader(settingsBody))
+	update.AddCookie(viewerSessionCookie(t, handler))
+	update.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(settingsRequest, update)
 	if settingsRequest.Code != http.StatusBadRequest {
 		t.Fatalf("settings status=%d body=%s", settingsRequest.Code, settingsRequest.Body.String())
 	}
@@ -167,6 +173,7 @@ func testTriggerHandlerReady(t *testing.T, ready func() bool) (http.Handler, *tr
 	activityStore, _ := activity.Open(filepath.Join(directory, "activity.json"), 10)
 	runStore, _ := agentrun.Open(filepath.Join(directory, "runs.json"), 10)
 	configuration, _ := settings.Open(filepath.Join(directory, "settings.json"), settings.Defaults(3))
+	drafts, _ := workflow.OpenDraftStore(filepath.Join(directory, "workflow-drafts.json"))
 	registry, _ := triggerregistry.Open(filepath.Join(directory, "triggers.json"), triggerregistry.Defaults(configuration.Snapshot(), testActorID), configuration.Snapshot())
 	routing, _ := triggerrouter.Open(filepath.Join(directory, "routing.jsonl"))
 	githubEvents, _ := githubhook.Open(filepath.Join(directory, "github.json"), 10)
@@ -182,7 +189,7 @@ func testTriggerHandlerReady(t *testing.T, ready func() bool) (http.Handler, *tr
 	}}}
 	handler, err := New(Config{
 		Web: testWeb(), ActivityStore: activityStore, RunStore: runStore, RunNotifier: &testNotifier{},
-		AgentObserver: &testObserver{err: agentrun.ErrRunNotFound}, Settings: configuration,
+		AgentObserver: &testObserver{err: agentrun.ErrRunNotFound}, Settings: configuration, WorkflowDrafts: drafts,
 		ViewerAuth: testViewerAuth(t), LinearSecret: testSecret, GitHubSecret: testGitHubSecret,
 		Events: policy, GitHubEvents: githubEvents, LinearComments: linearComments,
 		ProjectSetups: &testProjectSetups{}, TriggerActor: testActorID, RepositoryResolver: resolver,
