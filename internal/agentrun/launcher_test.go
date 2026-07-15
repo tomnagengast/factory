@@ -78,7 +78,7 @@ if [ "$1 $2" = "repo view" ]; then
   fi
   branch='{"name":""}'
   if %s --git-dir=%q show-ref --verify --quiet refs/heads/main; then branch='{"name":"main"}'; fi
-  printf '{"nameWithOwner":"tomnagengast/artifacts","isPrivate":true,"defaultBranchRef":%%s}\n' "$branch"
+  printf '{"nameWithOwner":"tomnagengast/artifacts","isPrivate":true,"defaultBranchRef":%%s,"mergeCommitAllowed":true,"squashMergeAllowed":false,"rebaseMergeAllowed":false,"deleteBranchOnMerge":true}\n' "$branch"
   exit 0
 fi
 if [ "$1 $2" = "repo create" ]; then
@@ -201,6 +201,96 @@ func TestTmuxLauncherRejectsMismatchedOriginAndDefaultBranch(t *testing.T) {
 		fixture.launcher.config.GitHubPath = ghPath
 		if err := fixture.launcher.Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "default branch does not match main") {
 			t.Fatalf("error = %v, want default branch mismatch", err)
+		}
+	})
+}
+
+func TestTmuxLauncherReconcilesGitHubMergePolicy(t *testing.T) {
+	t.Parallel()
+
+	t.Run("compliant repository is unchanged", func(t *testing.T) {
+		fixture := newLauncherFixture(t)
+		editLog := filepath.Join(fixture.root, "edit.log")
+		ghPath := filepath.Join(fixture.root, "gh")
+		script := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "$1 $2" = "repo view" ]; then
+  printf '{"nameWithOwner":"tomnagengast/test","isPrivate":true,"defaultBranchRef":{"name":"main"},"mergeCommitAllowed":true,"squashMergeAllowed":false,"rebaseMergeAllowed":false,"deleteBranchOnMerge":true}\n'
+  exit 0
+fi
+if [ "$1 $2" = "repo edit" ]; then
+  printf 'edit\n' >> %q
+  exit 0
+fi
+exit 2
+`, editLog)
+		configureGitHubLauncher(t, fixture, ghPath, script)
+
+		if err := fixture.launcher.Prepare(context.Background()); err != nil {
+			t.Fatalf("prepare compliant repository: %v", err)
+		}
+		if _, err := os.Stat(editLog); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("compliant repository was edited: %v", err)
+		}
+	})
+
+	t.Run("drift is repaired once", func(t *testing.T) {
+		fixture := newLauncherFixture(t)
+		policyState := filepath.Join(fixture.root, "policy-ready")
+		editLog := filepath.Join(fixture.root, "edit.log")
+		ghPath := filepath.Join(fixture.root, "gh")
+		script := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "$1 $2" = "repo view" ]; then
+  if [ -f %q ]; then
+    policy='"mergeCommitAllowed":true,"squashMergeAllowed":false,"rebaseMergeAllowed":false,"deleteBranchOnMerge":true'
+  else
+    policy='"mergeCommitAllowed":true,"squashMergeAllowed":true,"rebaseMergeAllowed":true,"deleteBranchOnMerge":false'
+  fi
+  printf '{"nameWithOwner":"tomnagengast/test","isPrivate":true,"defaultBranchRef":{"name":"main"},%%s}\n' "$policy"
+  exit 0
+fi
+if [ "$1 $2" = "repo edit" ]; then
+  touch %q
+  printf '%%s\n' "$*" >> %q
+  exit 0
+fi
+exit 2
+`, policyState, policyState, editLog)
+		configureGitHubLauncher(t, fixture, ghPath, script)
+
+		for attempt := 1; attempt <= 2; attempt++ {
+			if err := fixture.launcher.Prepare(context.Background()); err != nil {
+				t.Fatalf("prepare attempt %d: %v", attempt, err)
+			}
+		}
+		data, err := os.ReadFile(editLog)
+		if err != nil {
+			t.Fatalf("read edit log: %v", err)
+		}
+		const want = "repo edit tomnagengast/test --enable-merge-commit=true --enable-squash-merge=false --enable-rebase-merge=false --delete-branch-on-merge=true"
+		if got := strings.TrimSpace(string(data)); got != want {
+			t.Fatalf("GitHub edit call = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("non-convergence fails closed", func(t *testing.T) {
+		fixture := newLauncherFixture(t)
+		ghPath := filepath.Join(fixture.root, "gh")
+		script := `#!/bin/sh
+set -eu
+if [ "$1 $2" = "repo view" ]; then
+  printf '{"nameWithOwner":"tomnagengast/test","isPrivate":true,"defaultBranchRef":{"name":"main"},"mergeCommitAllowed":true,"squashMergeAllowed":true,"rebaseMergeAllowed":true,"deleteBranchOnMerge":false}\n'
+  exit 0
+fi
+if [ "$1 $2" = "repo edit" ]; then exit 0; fi
+exit 2
+`
+		configureGitHubLauncher(t, fixture, ghPath, script)
+
+		err := fixture.launcher.Prepare(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "desired policy did not converge") {
+			t.Fatalf("prepare error = %v, want non-convergence", err)
 		}
 	})
 }
@@ -400,6 +490,19 @@ func newLauncherFixture(t *testing.T) launcherFixture {
 		worktrunkLog:  worktrunkLog,
 		launcher:      launcher,
 	}
+}
+
+func configureGitHubLauncher(t *testing.T, fixture launcherFixture, ghPath, script string) {
+	t.Helper()
+	if err := os.WriteFile(ghPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write gh fake: %v", err)
+	}
+	remotePath := filepath.Join(fixture.root, "remote.git")
+	repositoryURL := "git@github.com:tomnagengast/test.git"
+	runGit(t, fixture.gitPath, fixture.workspacePath, "config", "url."+remotePath+".insteadOf", repositoryURL)
+	runGit(t, fixture.gitPath, fixture.workspacePath, "remote", "set-url", "origin", repositoryURL)
+	fixture.launcher.config.Repository = "tomnagengast/test"
+	fixture.launcher.config.GitHubPath = ghPath
 }
 
 func TestCommandOutputSeparatesSuccessfulStderr(t *testing.T) {

@@ -131,13 +131,20 @@ func (l *TmuxLauncher) Prepare(ctx context.Context) error {
 	if err := l.validateGitHubDefaultBranch(ctx); err != nil {
 		return err
 	}
+	if err := l.reconcileGitHubRepositoryPolicy(ctx); err != nil {
+		return err
+	}
 	return l.synchronizeWorkspace(ctx)
 }
 
 type githubRepository struct {
-	NameWithOwner    string `json:"nameWithOwner"`
-	IsPrivate        bool   `json:"isPrivate"`
-	DefaultBranchRef *struct {
+	NameWithOwner       string `json:"nameWithOwner"`
+	IsPrivate           bool   `json:"isPrivate"`
+	MergeCommitAllowed  bool   `json:"mergeCommitAllowed"`
+	SquashMergeAllowed  bool   `json:"squashMergeAllowed"`
+	RebaseMergeAllowed  bool   `json:"rebaseMergeAllowed"`
+	DeleteBranchOnMerge bool   `json:"deleteBranchOnMerge"`
+	DefaultBranchRef    *struct {
 		Name string `json:"name"`
 	} `json:"defaultBranchRef"`
 }
@@ -193,8 +200,52 @@ func (l *TmuxLauncher) validateGitHubDefaultBranch(ctx context.Context) error {
 	return nil
 }
 
+func (l *TmuxLauncher) reconcileGitHubRepositoryPolicy(ctx context.Context) error {
+	if l.config.Repository == "" || l.config.GitHubPath == "" {
+		return nil
+	}
+	repository, found, err := l.readGitHubRepository(ctx)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("configured GitHub repository does not exist")
+	}
+	if githubRepositoryPolicyMatches(repository) {
+		return nil
+	}
+	if err := runCommand(
+		ctx,
+		"reconcile GitHub repository merge policy",
+		"",
+		l.config.GitHubPath,
+		"repo", "edit", l.config.Repository,
+		"--enable-merge-commit=true",
+		"--enable-squash-merge=false",
+		"--enable-rebase-merge=false",
+		"--delete-branch-on-merge=true",
+	); err != nil {
+		return err
+	}
+	repository, found, err = l.readGitHubRepository(ctx)
+	if err != nil {
+		return fmt.Errorf("verify GitHub repository merge policy: %w", err)
+	}
+	if !found || !githubRepositoryPolicyMatches(repository) {
+		return errors.New("verify GitHub repository merge policy: desired policy did not converge")
+	}
+	return nil
+}
+
+func githubRepositoryPolicyMatches(repository githubRepository) bool {
+	return repository.MergeCommitAllowed &&
+		!repository.SquashMergeAllowed &&
+		!repository.RebaseMergeAllowed &&
+		repository.DeleteBranchOnMerge
+}
+
 func (l *TmuxLauncher) readGitHubRepository(ctx context.Context) (githubRepository, bool, error) {
-	cmd := exec.CommandContext(ctx, l.config.GitHubPath, "repo", "view", l.config.Repository, "--json", "nameWithOwner,isPrivate,defaultBranchRef")
+	cmd := exec.CommandContext(ctx, l.config.GitHubPath, "repo", "view", l.config.Repository, "--json", "nameWithOwner,isPrivate,defaultBranchRef,mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed,deleteBranchOnMerge")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
