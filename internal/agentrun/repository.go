@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/tomnagengast/factory/internal/taskmodel"
 )
 
 var (
@@ -172,6 +174,10 @@ type RepositoryResolver interface {
 	Resolve(context.Context, string) (RepositoryConfig, error)
 }
 
+type TaskRepositoryResolver interface {
+	ResolveTask(context.Context, taskmodel.TaskRef) (RepositoryConfig, error)
+}
+
 type LinearRepositoryResolver struct {
 	endpoint   string
 	apiKey     string
@@ -238,6 +244,14 @@ func (r *LinearRepositoryResolver) Resolve(ctx context.Context, issueIdentifier 
 		return RepositoryConfig{}, permanentRouting(errors.New("resolve repository: issue has no Linear project"))
 	}
 	return r.catalog.ResolveProject(value.Data.Issue.Project.Description)
+}
+
+func (r *LinearRepositoryResolver) ResolveTask(ctx context.Context, task taskmodel.TaskRef) (RepositoryConfig, error) {
+	normalized, err := task.Normalize()
+	if err != nil || normalized.Source != taskmodel.SourceLinear {
+		return RepositoryConfig{}, permanentRouting(errors.New("resolve repository: task is not a canonical Linear reference"))
+	}
+	return r.Resolve(ctx, normalized.Identifier)
 }
 
 type permanentRoutingError struct{ error }

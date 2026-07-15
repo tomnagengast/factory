@@ -12,6 +12,7 @@ import (
 	"github.com/tomnagengast/factory/internal/agentrun"
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
@@ -67,7 +68,7 @@ func (s *Store) ApplyDecisionBatch(records []eventwire.Record, registry triggerr
 			case globalOutstanding >= GlobalOutstandingMax:
 				outcome.Kind, outcome.Reason = OutcomeSuppressed, "global-outstanding-limit"
 			default:
-				issueIdentifier, err := resolveIssue(rule.Target, record.Event)
+				task, err := resolveTask(rule.Target, record.Event)
 				if err != nil {
 					outcome.Kind, outcome.Reason = OutcomeRejected, err.Error()
 					break
@@ -77,7 +78,7 @@ func (s *Store) ApplyDecisionBatch(records []eventwire.Record, registry triggerr
 					outcome.Kind, outcome.Reason = OutcomeRejected, "workflow-unavailable"
 					break
 				}
-				invocation, err := newInvocation(record, rule, workflow, configuration.Revision, issueIdentifier, now)
+				invocation, err := newInvocation(record, rule, workflow, configuration.Revision, task, now)
 				if err != nil {
 					return nil, err
 				}
@@ -148,7 +149,11 @@ func (s *Store) expireRatesLocked(now time.Time) {
 	}
 }
 
-func resolveIssue(target triggerregistry.TargetPolicy, event eventwire.Event) (string, error) {
+func resolveTask(target triggerregistry.TargetPolicy, event eventwire.Event) (taskmodel.TaskRef, error) {
+	target = target.Canonical()
+	if target.Provider != taskmodel.SourceLinear {
+		return taskmodel.TaskRef{}, fmt.Errorf("target-provider-invalid")
+	}
 	var value string
 	switch target.Kind {
 	case triggerregistry.TargetFixedIssue:
@@ -158,20 +163,28 @@ func resolveIssue(target triggerregistry.TargetPolicy, event eventwire.Event) (s
 	case triggerregistry.TargetEventAttribute:
 		values := event.Values(target.Value)
 		if len(values) != 1 {
-			return "", fmt.Errorf("target-attribute-cardinality")
+			return taskmodel.TaskRef{}, fmt.Errorf("target-attribute-cardinality")
 		}
 		value = values[0]
 	default:
-		return "", fmt.Errorf("target-policy-invalid")
+		return taskmodel.TaskRef{}, fmt.Errorf("target-policy-invalid")
 	}
 	value = strings.ToUpper(strings.TrimSpace(value))
 	if !agentrun.ValidIssueIdentifier(value) {
-		return "", fmt.Errorf("target-issue-invalid")
+		return taskmodel.TaskRef{}, fmt.Errorf("target-issue-invalid")
 	}
-	return value, nil
+	return taskmodel.LegacyLinear(value)
 }
 
-func newInvocation(record eventwire.Record, rule triggerregistry.Rule, definition workflow.Definition, policyRevision uint64, issueIdentifier string, now time.Time) (Invocation, error) {
+func resolveIssue(target triggerregistry.TargetPolicy, event eventwire.Event) (string, error) {
+	task, err := resolveTask(target, event)
+	if err != nil {
+		return "", err
+	}
+	return task.Identifier, nil
+}
+
+func newInvocation(record eventwire.Record, rule triggerregistry.Rule, definition workflow.Definition, policyRevision uint64, task taskmodel.TaskRef, now time.Time) (Invocation, error) {
 	id := digestStrings("factory-trigger-invocation-v1", record.Event.ID, rule.ID, fmt.Sprintf("%d", rule.Revision))
 	pinned := workflow.Pin(definition)
 	digest, err := pinned.Digest()
@@ -183,9 +196,11 @@ func newInvocation(record eventwire.Record, rule triggerregistry.Rule, definitio
 		root = record.Event.ID
 	}
 	ancestors := append(slices.Clone(record.Event.AncestorRuleIDs), rule.ID)
+	rule = rule.Clone()
+	rule.Target = rule.Target.Canonical()
 	return Invocation{
-		ID: id, EventID: record.Event.ID, EventSequence: record.Sequence, Rule: rule.Clone(),
-		Workflow: pinned, WorkflowDigest: digest, PolicyRevision: policyRevision, IssueIdentifier: issueIdentifier,
+		ID: id, EventID: record.Event.ID, EventSequence: record.Sequence, Rule: rule,
+		Workflow: pinned, WorkflowDigest: digest, PolicyRevision: policyRevision, Task: task, IssueIdentifier: task.Identifier,
 		RootEventID: root, ParentInvocationID: record.Event.ParentInvocationID, ParentRunID: record.Event.ParentRunID,
 		Hop: record.Event.Hop + 1, AncestorRuleIDs: ancestors, State: StateQueued, AdmittedAt: now, UpdatedAt: now,
 	}, nil

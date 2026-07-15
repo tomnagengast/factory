@@ -1,6 +1,9 @@
 package triggerregistry
 
-import "github.com/tomnagengast/factory/internal/settings"
+import (
+	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskmodel"
+)
 
 func Defaults(configuration settings.Snapshot, triggerActor string) Snapshot {
 	label := configuration.Triggers.LinearLabel
@@ -18,7 +21,7 @@ func Defaults(configuration settings.Snapshot, triggerActor string) Snapshot {
 					Attributes: map[string]string{AttributeActorID: triggerActor, AttributeProvenance: "human"},
 				},
 				WorkflowID: comment.WorkflowID,
-				Target:     TargetPolicy{Kind: TargetEventSubject},
+				Target:     TargetPolicy{Provider: taskmodel.SourceLinear, Kind: TargetEventSubject},
 				MaxHop:     DefaultMaxHop, MaxOutstanding: DefaultMaxOutstanding, AdmissionsHour: DefaultAdmissionsHour,
 			},
 			{
@@ -31,7 +34,7 @@ func Defaults(configuration settings.Snapshot, triggerActor string) Snapshot {
 					Attributes: map[string]string{AttributeActorID: triggerActor, AttributeAddedLabel: CanonicalFold(label.Label)},
 				},
 				WorkflowID: label.WorkflowID,
-				Target:     TargetPolicy{Kind: TargetEventSubject},
+				Target:     TargetPolicy{Provider: taskmodel.SourceLinear, Kind: TargetEventSubject},
 				MaxHop:     DefaultMaxHop, MaxOutstanding: DefaultMaxOutstanding, AdmissionsHour: DefaultAdmissionsHour,
 			},
 		},

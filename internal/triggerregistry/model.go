@@ -12,9 +12,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/robfig/cron/v3"
-	"github.com/tomnagengast/factory/internal/agentrun"
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
 
@@ -88,8 +88,9 @@ type Filter struct {
 }
 
 type TargetPolicy struct {
-	Kind  string `json:"kind"`
-	Value string `json:"value,omitempty"`
+	Provider taskmodel.Source `json:"provider,omitempty"`
+	Kind     string           `json:"kind"`
+	Value    string           `json:"value,omitempty"`
 }
 
 type Schedule struct {
@@ -203,9 +204,10 @@ func (r Rule) Validate() error {
 }
 
 func (r Rule) SemanticEqual(other Rule) bool {
+	leftTarget, rightTarget := r.Target.Canonical(), other.Target.Canonical()
 	return r.Enabled == other.Enabled &&
 		r.WorkflowID == other.WorkflowID &&
-		r.Target == other.Target &&
+		leftTarget == rightTarget &&
 		r.MaxHop == other.MaxHop &&
 		r.MaxOutstanding == other.MaxOutstanding &&
 		r.AdmissionsHour == other.AdmissionsHour &&
@@ -288,9 +290,13 @@ func (f Filter) Equal(other Filter) bool {
 }
 
 func (t TargetPolicy) Validate() error {
+	t = t.Canonical()
+	if t.Provider != taskmodel.SourceLinear {
+		return errors.New("target provider is invalid")
+	}
 	switch t.Kind {
 	case TargetFixedIssue:
-		if !agentrun.ValidIssueIdentifier(strings.ToUpper(t.Value)) || t.Value != strings.ToUpper(t.Value) {
+		if !taskmodel.ValidLinearIdentifier(strings.ToUpper(t.Value)) || t.Value != strings.ToUpper(t.Value) {
 			return errors.New("fixed target must be a canonical Linear issue identifier")
 		}
 	case TargetEventSubject:
@@ -305,6 +311,19 @@ func (t TargetPolicy) Validate() error {
 		return errors.New("target kind is invalid")
 	}
 	return nil
+}
+
+func (t TargetPolicy) Canonical() TargetPolicy {
+	if t.Provider == "" {
+		t.Provider = taskmodel.SourceLinear
+	}
+	return t
+}
+
+func CanonicalizeTargets(snapshot *Snapshot) {
+	for i := range snapshot.Rules {
+		snapshot.Rules[i].Target = snapshot.Rules[i].Target.Canonical()
+	}
 }
 
 func (s Schedule) Clone() Schedule {

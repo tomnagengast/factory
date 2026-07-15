@@ -474,7 +474,7 @@ func reconcileDelay(base time.Duration, failures int) time.Duration {
 }
 
 func (m *Manager) start(ctx context.Context, run Run, options StartOptions) bool {
-	sessionName := sessionName(run.IssueIdentifier)
+	sessionName := taskSessionName(run)
 	runDirectory := runPath(m.stateRoot, run.ID)
 	if err := m.store.MarkStarting(run.ID, sessionName, runDirectory, m.now()); err != nil {
 		m.logger.Error("mark agent starting", "run_id", run.ID, "error", err)

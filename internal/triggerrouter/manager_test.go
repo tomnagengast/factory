@@ -10,6 +10,7 @@ import (
 
 	"github.com/tomnagengast/factory/internal/agentrun"
 	"github.com/tomnagengast/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 )
 
 type resolverStub struct {
@@ -19,6 +20,11 @@ type resolverStub struct {
 }
 
 func (s *resolverStub) Resolve(context.Context, string) (agentrun.RepositoryConfig, error) {
+	s.calls++
+	return s.config, s.err
+}
+
+func (s *resolverStub) ResolveTask(_ context.Context, _ taskmodel.TaskRef) (agentrun.RepositoryConfig, error) {
 	s.calls++
 	return s.config, s.err
 }

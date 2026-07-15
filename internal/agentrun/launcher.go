@@ -585,6 +585,9 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 		"-e", "FACTORY_TMUX_SESSION=" + sessionName,
 		"-e", "FACTORY_RUN_ID=" + run.ID,
 		"-e", "FACTORY_RUN_DIR=" + runDirectory,
+		"-e", "FACTORY_TASK_SOURCE=" + string(run.Task.Source),
+		"-e", "FACTORY_TASK_PROVIDER_ID=" + run.Task.ProviderID,
+		"-e", "FACTORY_TASK_IDENTIFIER=" + run.Task.Identifier,
 		"-e", "FACTORY_TRIGGER_KIND=" + run.TriggerKind,
 		"-e", "FACTORY_REPOSITORY=" + run.Repository,
 		"-e", "FACTORY_REPO_PATH=" + launcher.config.RepoPath,
@@ -701,6 +704,14 @@ func (l *TmuxLauncher) ReadReadyCheckpoint(runDirectory string) (ReadyCheckpoint
 
 func sessionName(issueIdentifier string) string {
 	return "factory-" + strings.ToLower(issueIdentifier)
+}
+
+func taskSessionName(run Run) string {
+	source := string(run.Task.Source)
+	if source == "" {
+		source = "linear"
+	}
+	return "factory-" + source + "-" + strings.TrimPrefix(run.ID, "run-")
 }
 
 func runPath(stateRoot, runID string) string {
