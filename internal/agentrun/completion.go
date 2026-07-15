@@ -63,6 +63,7 @@ type CompletionEvidence struct {
 	Health                        HealthIdentity
 	SourceValid                   bool
 	MergeContained                bool
+	VerifiedHeadContained         bool
 	HealthMatches                 bool
 	RemoteBranchAbsent            bool
 	WorktreeAbsent                bool
@@ -315,6 +316,7 @@ func (v *MechanicalCompletionValidator) validatePostReadyBlocker(
 		return rejectCompletion(decision, "read blocker evidence: "+err.Error(), true)
 	}
 	matched := result.Blocker == BlockerSafeguardRegression && evidence.SafeguardRegression ||
+		result.Blocker == BlockerVerifiedHeadMismatch && !evidence.VerifiedHeadContained ||
 		result.Blocker == BlockerDeploymentSource && !evidence.SourceValid ||
 		result.Blocker == BlockerExternalAuthentication && evidence.ExternalAuthenticationFailure ||
 		result.Blocker == BlockerDeploymentFailed && evidence.DeploymentFailed ||
@@ -355,6 +357,7 @@ func completionProblems(evidence CompletionEvidence) []string {
 	checks = append(checks, []check{
 		{evidence.SourceValid, "completion source is not clean updated main"},
 		{evidence.MergeContained, "updated main does not contain the merge"},
+		{evidence.VerifiedHeadContained, "merged result does not contain the verified head"},
 		{!evidence.SafeguardRegression, "pull request checks or reviews regressed"},
 		{evidence.RemoteBranchAbsent, "remote issue branch still exists"},
 		{evidence.WorktreeAbsent, "issue worktree still exists"},

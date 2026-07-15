@@ -94,6 +94,7 @@ func (r *SystemCompletionEvidence) ReadCompletionEvidence(ctx context.Context, r
 	}
 	evidence.SourceValid = repository.sourceValid
 	evidence.MergeContained = repository.mergeContained
+	evidence.VerifiedHeadContained = repository.verifiedHeadContained
 	evidence.RemoteBranchAbsent = repository.remoteBranchAbsent
 	evidence.WorktreeAbsent = repository.worktreeAbsent
 	evidence.LinearComplete, err = r.linearComplete(ctx, run.IssueIdentifier)
@@ -132,6 +133,7 @@ func (r *SystemCompletionEvidence) readDeployableCompletion(ctx context.Context,
 	}
 	evidence.SourceValid = repository.sourceValid
 	evidence.MergeContained = repository.mergeContained
+	evidence.VerifiedHeadContained = repository.verifiedHeadContained
 	evidence.RemoteBranchAbsent = repository.remoteBranchAbsent
 	evidence.WorktreeAbsent = repository.worktreeAbsent
 	evidence.LinearComplete, err = r.linearComplete(ctx, run.IssueIdentifier)
@@ -172,10 +174,11 @@ func completedChildResults(runDirectory string) (bool, error) {
 }
 
 type repositoryCompletion struct {
-	sourceValid        bool
-	mergeContained     bool
-	remoteBranchAbsent bool
-	worktreeAbsent     bool
+	sourceValid           bool
+	mergeContained        bool
+	verifiedHeadContained bool
+	remoteBranchAbsent    bool
+	worktreeAbsent        bool
 }
 
 func (r *SystemCompletionEvidence) readRepository(ctx context.Context, run Run, snapshot PullRequestSnapshot, receipt DeploymentReceipt) (repositoryCompletion, error) {
@@ -208,6 +211,7 @@ func (r *SystemCompletionEvidence) readRepository(ctx context.Context, run Run, 
 		return result, err
 	}
 	headOnMain := completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, strings.TrimSpace(string(head)), strings.TrimSpace(string(originMain)))
+	result.verifiedHeadContained = completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, run.Ready.VerifiedHeadOID, snapshot.MergeCommitOID)
 	receiptOnMain := false
 	receiptTree := ""
 	if gitOIDPattern.MatchString(receipt.SourceCommit) {

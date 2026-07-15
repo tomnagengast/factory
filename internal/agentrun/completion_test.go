@@ -45,6 +45,14 @@ func TestCompletionValidatorRequiresCheckpointOrTypedPrePRBlocker(t *testing.T) 
 	if !blocked.Validation.Accepted || blocked.State != StateBlocked {
 		t.Fatalf("typed blocker = %#v", blocked)
 	}
+	decisionRequired := validator.Validate(context.Background(), Run{}, ProcessResult{Status: string(StateBlocked), Blocker: BlockerDecisionRequired})
+	if !decisionRequired.Validation.Accepted || decisionRequired.State != StateBlocked {
+		t.Fatalf("decision blocker = %#v", decisionRequired)
+	}
+	preCheckpointRegression := validator.Validate(context.Background(), Run{}, ProcessResult{Status: string(StateBlocked), Blocker: BlockerSafeguardRegression})
+	if preCheckpointRegression.Validation.Accepted || preCheckpointRegression.State != StateFailed {
+		t.Fatalf("pre-checkpoint safeguard blocker = %#v", preCheckpointRegression)
+	}
 	untyped := validator.Validate(context.Background(), Run{}, ProcessResult{Status: string(StateBlocked)})
 	if untyped.Validation.Accepted || untyped.State != StateFailed {
 		t.Fatalf("untyped blocker = %#v", untyped)
@@ -97,6 +105,7 @@ func TestCompletionValidatorRequiresEveryPostMergeCondition(t *testing.T) {
 		{name: "receipt", mutate: func(value *CompletionEvidence) { value.Deployment.Status = "failed" }, want: "receipt"},
 		{name: "source", mutate: func(value *CompletionEvidence) { value.SourceValid = false }, want: "source"},
 		{name: "merge", mutate: func(value *CompletionEvidence) { value.MergeContained = false }, want: "contain"},
+		{name: "verified head", mutate: func(value *CompletionEvidence) { value.VerifiedHeadContained = false }, want: "verified head"},
 		{name: "health", mutate: func(value *CompletionEvidence) { value.HealthMatches = false }, want: "health"},
 		{name: "safeguards", mutate: func(value *CompletionEvidence) { value.SafeguardRegression = true }, want: "reviews"},
 		{name: "remote", mutate: func(value *CompletionEvidence) { value.RemoteBranchAbsent = false }, want: "remote"},
@@ -138,6 +147,13 @@ func TestCompletionValidatorVerifiesTypedPostReadyBlockers(t *testing.T) {
 		t.Fatalf("deployment blocker = %#v", decision)
 	}
 
+	rebasedEvidence := completeEvidence().evidence
+	rebasedEvidence.VerifiedHeadContained = false
+	decision = mustCompletionValidator(t, merged, staticCompletionEvidence{evidence: rebasedEvidence}, now).Validate(context.Background(), run, ProcessResult{Status: string(StateBlocked), Blocker: BlockerVerifiedHeadMismatch})
+	if !decision.Validation.Accepted || decision.State != StateBlocked {
+		t.Fatalf("rebased merge blocker = %#v", decision)
+	}
+
 	regressed := mergedSnapshot(checkpoint)
 	regressed.SafeguardRegression = true
 	decision = mustCompletionValidator(t, &fakePullRequestReader{snapshot: regressed}, staticCompletionEvidence{err: errors.New("deployment has not started")}, now).Validate(context.Background(), run, ProcessResult{Status: string(StateBlocked), Blocker: BlockerSafeguardRegression})
@@ -176,15 +192,16 @@ func TestAuthenticationFailureClassification(t *testing.T) {
 
 func completeEvidence() staticCompletionEvidence {
 	return staticCompletionEvidence{evidence: CompletionEvidence{
-		DeploymentRequired: true,
-		Deployment:         DeploymentReceipt{Status: "success", DeploymentID: "deploy-1", SourceCommit: "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b"},
-		SourceValid:        true,
-		MergeContained:     true,
-		HealthMatches:      true,
-		RemoteBranchAbsent: true,
-		WorktreeAbsent:     true,
-		LinearComplete:     true,
-		ChildrenComplete:   true,
+		DeploymentRequired:    true,
+		Deployment:            DeploymentReceipt{Status: "success", DeploymentID: "deploy-1", SourceCommit: "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b"},
+		SourceValid:           true,
+		MergeContained:        true,
+		VerifiedHeadContained: true,
+		HealthMatches:         true,
+		RemoteBranchAbsent:    true,
+		WorktreeAbsent:        true,
+		LinearComplete:        true,
+		ChildrenComplete:      true,
 	}}
 }
 
@@ -193,7 +210,7 @@ func TestCompletionValidatorAcceptsRepositoryOnlyEvidence(t *testing.T) {
 	now := time.Date(2026, time.July, 11, 22, 0, 0, 0, time.UTC)
 	checkpoint := testReadyCheckpoint("run-1", now)
 	evidence := CompletionEvidence{
-		SourceValid: true, MergeContained: true, RemoteBranchAbsent: true,
+		SourceValid: true, MergeContained: true, VerifiedHeadContained: true, RemoteBranchAbsent: true,
 		WorktreeAbsent: true, LinearComplete: true, ChildrenComplete: true,
 	}
 	decision := mustCompletionValidator(

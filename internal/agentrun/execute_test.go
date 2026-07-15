@@ -72,6 +72,9 @@ func TestPrincipalPromptGroupsChildAgentsInTmux(t *testing.T) {
 		"P0/P1 finding or REVISE verdict from either review",
 		"use the other usable review without launching a fallback",
 		"authority_unavailable",
+		"only valid blockers are missing_routing_metadata",
+		"Use decision_required when planning or review cannot safely continue",
+		"safeguard_regression is not a pre-checkpoint blocker",
 		"FACTORY_RESULT: SUCCEEDED",
 	} {
 		if !strings.Contains(prompt, expected) {
@@ -94,6 +97,9 @@ func TestPostMergePromptReconstructsDurableState(t *testing.T) {
 		"Continue ENG-123 from its durable Factory lifecycle checkpoint",
 		"Fresh-read the authoritative PR",
 		"complete post-merge validation",
+		"git merge-base --is-ancestor",
+		"rebase or squash merge",
+		"verified_head_mismatch",
 		"Do not recreate completed implementation work",
 	} {
 		if !strings.Contains(prompt, expected) {

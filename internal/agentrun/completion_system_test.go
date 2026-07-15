@@ -36,6 +36,14 @@ func TestSystemCompletionEvidenceVerifiesDeploymentAfterMainAdvances(t *testing.
 	runGit(t, gitPath, repository, "push", "-u", "origin", "main")
 	commit := gitOutput(t, gitPath, repository, "rev-parse", "HEAD")
 	tree := gitOutput(t, gitPath, repository, "rev-parse", "HEAD^{tree}")
+	runGit(t, gitPath, repository, "switch", "-c", "verified-head")
+	if err := os.WriteFile(filepath.Join(repository, "feature.txt"), []byte("verified\n"), 0o600); err != nil {
+		t.Fatalf("write verified feature: %v", err)
+	}
+	runGit(t, gitPath, repository, "add", "feature.txt")
+	runGit(t, gitPath, repository, "-c", "user.name=Factory Test", "-c", "user.email=factory@example.invalid", "commit", "-m", "verified feature")
+	verifiedHead := gitOutput(t, gitPath, repository, "rev-parse", "HEAD")
+	runGit(t, gitPath, repository, "switch", "main")
 	if err := os.WriteFile(filepath.Join(repository, "version.txt"), []byte("two\n"), 0o600); err != nil {
 		t.Fatalf("advance source: %v", err)
 	}
@@ -97,6 +105,7 @@ func TestSystemCompletionEvidenceVerifiesDeploymentAfterMainAdvances(t *testing.
 		t.Fatalf("new evidence reader: %v", err)
 	}
 	checkpoint := testReadyCheckpoint("run-1", now)
+	checkpoint.VerifiedHeadOID = commit
 	checkpoint.ValidatedAt = now
 	evidence, err := reader.ReadCompletionEvidence(t.Context(), Run{ID: "run-1", IssueIdentifier: "ENG-123", RunDirectory: filepath.Join(root, "run-1"), Ready: &checkpoint}, PullRequestSnapshot{
 		State: "MERGED", BaseBranch: "main", HeadBranch: checkpoint.HeadBranch, HeadOID: checkpoint.VerifiedHeadOID, MergeCommitOID: commit,
@@ -104,7 +113,7 @@ func TestSystemCompletionEvidenceVerifiesDeploymentAfterMainAdvances(t *testing.
 	if err != nil {
 		t.Fatalf("read completion evidence: %v", err)
 	}
-	if !evidence.SourceValid || !evidence.MergeContained || !evidence.HealthMatches || !evidence.RemoteBranchAbsent || !evidence.WorktreeAbsent || !evidence.LinearComplete {
+	if !evidence.SourceValid || !evidence.MergeContained || !evidence.VerifiedHeadContained || !evidence.HealthMatches || !evidence.RemoteBranchAbsent || !evidence.WorktreeAbsent || !evidence.LinearComplete {
 		t.Fatalf("evidence = %#v", evidence)
 	}
 	if !evidence.DeploymentRequired {
@@ -125,8 +134,20 @@ func TestSystemCompletionEvidenceVerifiesDeploymentAfterMainAdvances(t *testing.
 	if err != nil {
 		t.Fatalf("read repository-only evidence: %v", err)
 	}
-	if repositoryEvidence.DeploymentRequired || !repositoryEvidence.SourceValid || !repositoryEvidence.MergeContained || !repositoryEvidence.LinearComplete {
+	if repositoryEvidence.DeploymentRequired || !repositoryEvidence.SourceValid || !repositoryEvidence.MergeContained || !repositoryEvidence.VerifiedHeadContained || !repositoryEvidence.LinearComplete {
 		t.Fatalf("repository-only evidence = %#v", repositoryEvidence)
+	}
+
+	rebasedCheckpoint := checkpoint
+	rebasedCheckpoint.VerifiedHeadOID = verifiedHead
+	rebasedEvidence, err := repositoryOnly.ReadCompletionEvidence(t.Context(), Run{ID: "run-1", IssueIdentifier: "ENG-123", RunDirectory: filepath.Join(root, "run-1"), Ready: &rebasedCheckpoint}, PullRequestSnapshot{
+		State: "MERGED", BaseBranch: "main", HeadBranch: rebasedCheckpoint.HeadBranch, HeadOID: rebasedCheckpoint.VerifiedHeadOID, MergeCommitOID: commit,
+	})
+	if err != nil {
+		t.Fatalf("read rebased repository-only evidence: %v", err)
+	}
+	if rebasedEvidence.VerifiedHeadContained {
+		t.Fatalf("rebased repository-only evidence = %#v", rebasedEvidence)
 	}
 
 	advancer := filepath.Join(root, "advancer")

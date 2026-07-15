@@ -54,14 +54,15 @@ type completeTestEvidence struct{}
 
 func (completeTestEvidence) ReadCompletionEvidence(context.Context, Run, PullRequestSnapshot) (CompletionEvidence, error) {
 	return CompletionEvidence{
-		Deployment:         DeploymentReceipt{Status: "success", DeploymentID: "deploy-test", SourceCommit: "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b"},
-		SourceValid:        true,
-		MergeContained:     true,
-		HealthMatches:      true,
-		RemoteBranchAbsent: true,
-		WorktreeAbsent:     true,
-		LinearComplete:     true,
-		ChildrenComplete:   true,
+		Deployment:            DeploymentReceipt{Status: "success", DeploymentID: "deploy-test", SourceCommit: "378bfbbc26c0951a91bfc2db1e30c167b87bfa7b"},
+		SourceValid:           true,
+		MergeContained:        true,
+		VerifiedHeadContained: true,
+		HealthMatches:         true,
+		RemoteBranchAbsent:    true,
+		WorktreeAbsent:        true,
+		LinearComplete:        true,
+		ChildrenComplete:      true,
 	}, nil
 }
 

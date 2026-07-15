@@ -329,6 +329,10 @@ While waiting for Linear feedback, use "$FACTORY_AGENT_HELPER" agent linear-comm
 
 At the ready-for-human-merge boundary, write the validated checkpoint with "$FACTORY_AGENT_HELPER" agent checkpoint ready-for-merge, then end with exactly FACTORY_RESULT: READY_FOR_HUMAN_MERGE. Do not keep an LLM turn alive while waiting for the human.
 
+Before a ready checkpoint exists, the only valid blockers are missing_routing_metadata, approval_denied, authority_unavailable, and decision_required. Use decision_required when planning or review cannot safely continue without new human direction. safeguard_regression is not a pre-checkpoint blocker.
+
+After merge, prove the reported merge commit contains the exact checkpointed head with git merge-base --is-ancestor. A rebase or squash merge that replayed the changes without containing that commit is verified_head_mismatch even when GitHub still reports the original pull-request head. Do not deploy it. safeguard_regression is reserved for authoritative pull-request checks or reviews that regressed after the checkpoint.
+
 If the complete post-merge workflow succeeds, end with exactly FACTORY_RESULT: SUCCEEDED. If it reaches a genuine typed blocker, put FACTORY_BLOCKER: <type> on the preceding line and end with exactly FACTORY_RESULT: BLOCKED. Allowed types are missing_routing_metadata, approval_denied, authority_unavailable, decision_required, closed_unmerged, verified_head_mismatch, safeguard_regression, deployment_source_invalid, external_authentication, deployment_failed, and cleanup_failed.`, opening, workflow.Name, workflow.Runner, workflowSteps(workflow.Steps))
 }
 
