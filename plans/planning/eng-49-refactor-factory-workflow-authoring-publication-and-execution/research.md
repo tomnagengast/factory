@@ -1,6 +1,6 @@
 # ENG-49 Workflow Authoring, Publication, and Execution Research
 
-> updated: 2026-07-14T20:39:47-07:00
+> updated: 2026-07-14T22:11:45-07:00
 
 ## Research questions
 
@@ -20,6 +20,7 @@
 - The deterministic issue branch is `eng-49-refactor-factory-workflow-authoring-publication-and-execution`, created by Worktrunk from fetched `origin/main` at `f383b179d890abab1378cb670ce4964c64013539`.
 - The issue currently carries the `Yolo` label. That is intake context only until labels are refreshed independently at each Linear gate.
 - The issue references the 495-line source design `/Users/tom/notes/agent/plans/planning/2026-07-14-factory-workflows.md`. That document was read in full and is evidence for product decisions, but it is not the lifecycle plan artifact.
+- A later human reply on 2026-07-14 resolved the final plan-review decision: protected feedback uses a dedicated published-policy workflow binding, while the configurable generic `linear-comment` rule remains separate and additive. The reply also requires a schema-1-backup versus retained-trigger-registry rollback preflight and authorizes one fresh dual-provider plan-review cycle limited to those two P1 corrections.
 
 ## 1. Current behavior and root cause
 
@@ -90,6 +91,23 @@ Observed facts:
 - Human merge, exact verified-head ancestry, merged-main deployment receipts, completion evidence, and clean Worktrunk cleanup are validated in `internal/agentrun/ready.go`, `completion.go`, `completion_system.go`, and their tests.
 - The latest base commit `f383b17` strengthened verified merge ancestry. ENG-49 must not weaken or relocate that logic.
 
+### Protected feedback needs its own published-policy binding
+
+Observed facts:
+
+- `internal/server/server.go` currently decides whether a human comment carries the protected continuation marker by reading `settings.Triggers.LinearComment.Enabled`, then calls `RunStore.ClaimContinuation` without a workflow value.
+- `internal/agentrun/store.go:ClaimContinuation` coalesces feedback into an active Run or creates a fresh Run without `PinnedWorkflow`; only generic routed invocations currently create a Run with a pinned workflow.
+- `internal/server/triggers.go` exposes `linear-feedback` as metadata-only protected-route text. The independently configurable `linear-comment` registry rule is returned separately and is seeded from the same legacy settings field only when a retained registry does not already exist.
+- `settings.Snapshot.Validate` protects the legacy Linear-comment workflow reference, while `triggerregistry.Snapshot.Validate` independently protects enabled generic-rule references. Neither contract currently represents the dedicated protected binding selected by the owner.
+
+Required behavior from the human decision:
+
+- Schema-2 published policy owns a dedicated, always-enabled protected feedback binding. `/triggers` exposes its workflow selector as a protected entry that may be repointed but not disabled or deleted.
+- Repointing the protected binding is a `CoordinatedWire` settings-policy mutation. It requires an enabled published target and increments policy revision without rewriting the independent generic `linear-comment` rule.
+- Workflow disable/delete validation counts both the protected binding and generic rules. Workflow A cannot be retired until neither source references it.
+- A fresh post-terminal feedback Run pins the binding's current workflow body, workflow revision, digest, and policy revision when claimed. Feedback joining an active Run preserves that Run's existing pin. Repointing A to B affects only later fresh Runs, including when an A continuation is already queued.
+- New continuation routing stops consulting the legacy settings trigger field. The protected route remains non-disableable, and a configured generic `linear-comment` rule is explicitly additive.
+
 ## 3. Required target contracts
 
 The issue and full source design resolve the following product decisions:
@@ -128,6 +146,20 @@ Required behavior:
 - Migrate every workflow to revision 1 using the self-contained compiled Full SDLC Markdown and append its legacy steps under a labeled migrated-guidance section.
 - Preserve IDs, names, enablement, trigger references, agent settings, attempts, concurrency, policy revision, and update time.
 - A valid schema-2 checkpoint wins. Invalid, oversized, conflicting-backup, or partially migrated state fails closed without replacing last good data.
+
+### Prior-binary rollback must preflight the retained registry
+
+Observed facts:
+
+- `main.go` opens `settings.json` first and then opens `triggers.json` with `triggerregistry.Open(..., settingsStore.Snapshot())`.
+- `triggerregistry.Open` strictly decodes the retained registry and validates enabled rules against the workflows in the active settings snapshot.
+- Therefore a schema-2 workflow can be published and selected by an enabled retained rule before any admission sets the monotonic compatibility marker. Restoring the schema-1 backup would remove that workflow, and the prior binary would fail during registry startup validation.
+
+Required behavior:
+
+- Before restoring `settings.schema1.backup.json` or invoking a prior-binary rollback, a read-only schema-2-aware preflight must strictly decode the backup and retained registry and run the prior release's registry-versus-settings validation.
+- Any incompatibility forbids backup restoration and requires schema-2-aware forward recovery, even when the admission compatibility marker is still false.
+- A committed no-admission fixture must cover a schema-2-only workflow referenced by an enabled retained rule and prove the preflight rejects rollback without mutating either file.
 
 ### Retained routing and Run records
 
@@ -228,8 +260,8 @@ Use an authenticated browser/API session to prove `/api/workflows` exposes publi
 
 ### Recovery
 
-- Before any schema-2 publication, stop the service, preserve invalid schema-2 state, restore the private schema-1 backup, and use `~/.local/bin/nags rollback factory --to <deployment-id>`.
-- After any Markdown publication, recovery must be a corrective or revert commit merged and deployed from clean `main`; never silently translate Markdown back to steps.
+- Before any prior-binary rollback, stop the service, preserve schema-2 state, require the workflow compatibility marker to remain false, and run the release's read-only schema-1-backup versus retained-registry preflight. Restore the private schema-1 backup and use `~/.local/bin/nags rollback factory --to <deployment-id>` only when that preflight passes.
+- After the first durable new-shape admission, or whenever the retained registry fails the schema-1-backup preflight, recovery must use a schema-2-aware release or a corrective commit merged and deployed from clean `main`; never silently translate Markdown back to steps.
 - Never delete or truncate wire/routing journals. Preserve corrupt draft state and repair authoring separately while published admission/execution continue.
 - If a published workflow causes bad behavior, disable affected trigger rules, preserve pinned evidence, publish a corrected revision, and explicitly handle already-admitted invocations.
 
