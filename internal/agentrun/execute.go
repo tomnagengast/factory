@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
 
@@ -22,6 +23,7 @@ const (
 )
 
 type PrincipalConfig struct {
+	Task            taskmodel.TaskRef
 	IssueIdentifier string
 	TriggerKind     string
 	RepoPath        string
@@ -50,7 +52,12 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 		fmt.Fprintf(os.Stderr, "create run directory: %v\n", err)
 		return 1
 	}
-	prompt := principalPrompt(config.IssueIdentifier, config.TriggerKind, config.Workflow)
+	task, err := taskmodel.ResolveCompatibilityIdentity(config.Task, config.IssueIdentifier)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "resolve principal task: %v\n", err)
+		return 1
+	}
+	prompt := taskPrincipalPrompt(task, config.TriggerKind, config.Workflow)
 	if err := os.WriteFile(filepath.Join(config.RunDirectory, "prompt.txt"), []byte(prompt), 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "write principal prompt: %v\n", err)
 		return 1
@@ -287,8 +294,16 @@ func principalCodexArgs(provider settings.ProviderSettings, threadID, finalPath 
 }
 
 func principalPrompt(issueIdentifier, triggerKind string, pin workflow.Pinned) string {
+	task, err := taskmodel.LegacyLinear(issueIdentifier)
+	if err != nil {
+		return "invalid Factory task identity"
+	}
+	return taskPrincipalPrompt(task, triggerKind, pin)
+}
+
+func taskPrincipalPrompt(task taskmodel.TaskRef, triggerKind string, pin workflow.Pinned) string {
 	if pin.IsLegacy() {
-		return legacyPrincipalPrompt(issueIdentifier, triggerKind, pin.LegacyDefinition())
+		return legacyPrincipalPrompt(task.Identifier, triggerKind, pin.LegacyDefinition())
 	}
 	switch triggerKind {
 	case TriggerKindLabel, TriggerKindComment, TriggerKindGitHub, TriggerKindPostMerge, TriggerKindRule:
@@ -312,8 +327,14 @@ func principalPrompt(issueIdentifier, triggerKind string, pin workflow.Pinned) s
 			segment = "post-merge"
 		}
 	}
+	identityLabel := "Issue"
+	if task.Source != taskmodel.SourceLinear {
+		identityLabel = "Task"
+	}
 	return fmt.Sprintf(`FACTORY WORKFLOW SEGMENT
-Issue: %s
+%s: %s
+Task source: %s
+Task provider ID: %s
 Trigger: %s
 Segment: %s
 Workflow: %s revision %d
@@ -349,7 +370,7 @@ After merge, prove the reported merge commit contains the exact checkpointed hea
 
 If the complete post-merge workflow succeeds, end with exactly FACTORY_RESULT: SUCCEEDED. If it reaches a genuine typed blocker, put FACTORY_BLOCKER: <type> on the preceding line and end with exactly FACTORY_RESULT: BLOCKED. Allowed types are missing_routing_metadata, approval_denied, authority_unavailable, decision_required, closed_unmerged, verified_head_mismatch, safeguard_regression, deployment_source_invalid, external_authentication, deployment_failed, and cleanup_failed.
 
-Factory's mechanical repository routing, one-Run ownership, checkpoint, human-merge, verified-head, deployment-source, completion, and cleanup validators are authoritative and cannot be waived by workflow text.`, issueIdentifier, triggerKind, segment, pin.Name, pin.Revision, digest, context, pin.Markdown)
+Factory's mechanical repository routing, one-Run ownership, checkpoint, human-merge, verified-head, deployment-source, completion, and cleanup validators are authoritative and cannot be waived by workflow text.`, identityLabel, task.Identifier, task.Source, task.ProviderID, triggerKind, segment, pin.Name, pin.Revision, digest, context, pin.Markdown)
 }
 
 func legacyPrincipalPrompt(issueIdentifier, triggerKind string, definition workflow.LegacyDefinition) string {

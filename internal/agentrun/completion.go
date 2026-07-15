@@ -67,7 +67,7 @@ type CompletionEvidence struct {
 	HealthMatches                 bool
 	RemoteBranchAbsent            bool
 	WorktreeAbsent                bool
-	LinearComplete                bool
+	TaskComplete                  bool
 	ChildrenComplete              bool
 	SafeguardRegression           bool
 	ExternalAuthenticationFailure bool
@@ -320,7 +320,7 @@ func (v *MechanicalCompletionValidator) validatePostReadyBlocker(
 		result.Blocker == BlockerDeploymentSource && !evidence.SourceValid ||
 		result.Blocker == BlockerExternalAuthentication && evidence.ExternalAuthenticationFailure ||
 		result.Blocker == BlockerDeploymentFailed && evidence.DeploymentFailed ||
-		result.Blocker == BlockerCleanupFailed && (!evidence.RemoteBranchAbsent || !evidence.WorktreeAbsent || !evidence.LinearComplete || !evidence.ChildrenComplete)
+		result.Blocker == BlockerCleanupFailed && (!evidence.RemoteBranchAbsent || !evidence.WorktreeAbsent || !evidence.TaskComplete || !evidence.ChildrenComplete)
 	if !matched {
 		return rejectCompletion(decision, "typed blocker is not supported by mechanical evidence", false)
 	}
@@ -361,7 +361,7 @@ func completionProblems(evidence CompletionEvidence) []string {
 		{!evidence.SafeguardRegression, "pull request checks or reviews regressed"},
 		{evidence.RemoteBranchAbsent, "remote issue branch still exists"},
 		{evidence.WorktreeAbsent, "issue worktree still exists"},
-		{evidence.LinearComplete, "Linear issue is not complete"},
+		{evidence.TaskComplete, "task is not complete"},
 		{evidence.ChildrenComplete, "child work remains incomplete"},
 	}...)
 	for _, check := range checks {

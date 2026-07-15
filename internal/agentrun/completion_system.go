@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/tomnagengast/factory/internal/taskmodel"
 )
 
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -97,7 +99,7 @@ func (r *SystemCompletionEvidence) ReadCompletionEvidence(ctx context.Context, r
 	evidence.VerifiedHeadContained = repository.verifiedHeadContained
 	evidence.RemoteBranchAbsent = repository.remoteBranchAbsent
 	evidence.WorktreeAbsent = repository.worktreeAbsent
-	evidence.LinearComplete, err = r.linearComplete(ctx, run.IssueIdentifier)
+	evidence.TaskComplete, err = r.taskComplete(ctx, run)
 	return evidence, err
 }
 
@@ -136,7 +138,7 @@ func (r *SystemCompletionEvidence) readDeployableCompletion(ctx context.Context,
 	evidence.VerifiedHeadContained = repository.verifiedHeadContained
 	evidence.RemoteBranchAbsent = repository.remoteBranchAbsent
 	evidence.WorktreeAbsent = repository.worktreeAbsent
-	evidence.LinearComplete, err = r.linearComplete(ctx, run.IssueIdentifier)
+	evidence.TaskComplete, err = r.taskComplete(ctx, run)
 	if err != nil {
 		return evidence, err
 	}
@@ -340,6 +342,19 @@ func (r *SystemCompletionEvidence) linearComplete(ctx context.Context, issueIden
 		return false, errors.New("Linear issue state response is incomplete")
 	}
 	return strings.EqualFold(value.Data.Issue.State.Type, "completed"), nil
+}
+
+func (r *SystemCompletionEvidence) taskComplete(ctx context.Context, run Run) (bool, error) {
+	task, err := taskmodel.ResolveCompatibilityIdentity(run.Task, run.IssueIdentifier)
+	if err != nil {
+		return false, fmt.Errorf("read task state: %w", err)
+	}
+	switch task.Source {
+	case taskmodel.SourceLinear:
+		return r.linearComplete(ctx, task.Identifier)
+	default:
+		return false, fmt.Errorf("read task state: unsupported provider %q", task.Source)
+	}
 }
 
 func readDeploymentReceipt(path string) (DeploymentReceipt, error) {

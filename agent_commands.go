@@ -20,6 +20,7 @@ import (
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
@@ -64,12 +65,22 @@ func runAgentCommand(ctx context.Context, args []string) (int, bool) {
 func runPrincipal(ctx context.Context, args []string) int {
 	flags := flag.NewFlagSet("agent-exec", flag.ContinueOnError)
 	issue := flags.String("issue", "", "Linear issue identifier")
+	taskSource := flags.String("task-source", "", "task provider source")
+	taskProviderID := flags.String("task-provider-id", "", "provider-owned task ID")
+	taskIdentifier := flags.String("task-identifier", "", "task display identifier")
 	triggerKind := flags.String("trigger-kind", "", "Factory trigger kind")
 	repo := flags.String("repo", "", "repository path")
 	runDirectory := flags.String("run-dir", "", "run output directory")
 	attemptOffset := flags.Int("attempt-offset", 0, "completed attempts before this lifecycle segment")
 	workflowFile := flags.String("workflow-file", "", "pinned workflow snapshot")
-	if flags.Parse(args) != nil || *issue == "" || *repo == "" || *runDirectory == "" || *attemptOffset < 0 {
+	if flags.Parse(args) != nil || *repo == "" || *runDirectory == "" || *attemptOffset < 0 {
+		return 2
+	}
+	task, err := taskmodel.ResolveCompatibilityIdentity(taskmodel.TaskRef{
+		Source: taskmodel.Source(*taskSource), ProviderID: *taskProviderID, Identifier: *taskIdentifier,
+	}, *issue)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
 	configuration, err := loadRunSettings(*runDirectory)
@@ -90,6 +101,7 @@ func runPrincipal(ctx context.Context, args []string) int {
 		return 1
 	}
 	return agentrun.ExecutePrincipal(ctx, agentrun.PrincipalConfig{
+		Task:            task,
 		IssueIdentifier: *issue,
 		TriggerKind:     *triggerKind,
 		RepoPath:        *repo,
@@ -270,6 +282,16 @@ func runCheckpointHelper(args []string) int {
 		HeadBranch:      strings.TrimSpace(*headBranch),
 		VerifiedHeadOID: strings.TrimSpace(*verifiedHead),
 		CreatedAt:       time.Now().UTC(),
+	}
+	if source := os.Getenv("FACTORY_TASK_SOURCE"); source != "" {
+		task, err := (taskmodel.TaskRef{
+			Source: taskmodel.Source(source), ProviderID: os.Getenv("FACTORY_TASK_PROVIDER_ID"), Identifier: os.Getenv("FACTORY_TASK_IDENTIFIER"),
+		}).Normalize()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		checkpoint.Task = task
 	}
 	if err := agentrun.WriteReadyCheckpoint(runDirectory, checkpoint); err != nil {
 		fmt.Fprintln(os.Stderr, err)

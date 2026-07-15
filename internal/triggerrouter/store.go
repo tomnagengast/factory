@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/internal/taskcompat"
 	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 )
@@ -505,6 +506,9 @@ func compactTerminalInvocation(invocation *Invocation) {
 }
 
 func (s *Store) appendOperationLocked(operation diskOperation) error {
+	if err := taskcompat.Ensure(s.path); err != nil {
+		return fmt.Errorf("trigger router: establish task compatibility boundary: %w", err)
+	}
 	data, err := json.Marshal(operation)
 	if err != nil {
 		return fmt.Errorf("trigger router: encode operation: %w", err)
@@ -552,6 +556,9 @@ func (s *Store) compactIfNeededLocked() error {
 }
 
 func (s *Store) writeCheckpointLocked() error {
+	if err := taskcompat.Ensure(s.path); err != nil {
+		return fmt.Errorf("trigger router: establish task compatibility boundary: %w", err)
+	}
 	snapshot := s.snapshotLocked()
 	operation := diskOperation{Kind: operationCheckpoint, Schema: SchemaVersion, Checkpoint: &snapshot}
 	temp, err := os.CreateTemp(filepath.Dir(s.path), ".trigger-routing-*")

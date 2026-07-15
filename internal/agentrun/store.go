@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tomnagengast/factory/internal/taskcompat"
 	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
@@ -965,6 +966,9 @@ func newID() (string, error) {
 }
 
 func writeState(path string, value diskState) error {
+	if err := taskcompat.Ensure(path); err != nil {
+		return fmt.Errorf("agent run store: establish task compatibility boundary: %w", err)
+	}
 	temp, err := os.CreateTemp(filepath.Dir(path), ".agent-runs-*")
 	if err != nil {
 		return fmt.Errorf("agent run store: create temporary file: %w", err)

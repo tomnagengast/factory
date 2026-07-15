@@ -61,7 +61,7 @@ func (completeTestEvidence) ReadCompletionEvidence(context.Context, Run, PullReq
 		HealthMatches:         true,
 		RemoteBranchAbsent:    true,
 		WorktreeAbsent:        true,
-		LinearComplete:        true,
+		TaskComplete:          true,
 		ChildrenComplete:      true,
 	}, nil
 }
