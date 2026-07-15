@@ -140,9 +140,9 @@ func TestTriggerAPIRejectsCrossOriginAndWorkflowRemoval(t *testing.T) {
 	candidate := policy.RegistrySnapshot()
 	body, _ := json.Marshal(candidate)
 	request := httptest.NewRequest(http.MethodPut, "/api/triggers", bytes.NewReader(body))
+	request.AddCookie(viewerSessionCookie(t, handler))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Origin", "https://evil.example")
-	request.SetBasicAuth("factory", testViewerPassword)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusForbidden || policy.RegistrySnapshot().Revision != 0 {
@@ -203,8 +203,8 @@ func authenticatedTriggerRequest(t *testing.T, handler http.Handler, candidate t
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPut, "/api/triggers", bytes.NewReader(body))
+	request.AddCookie(viewerSessionCookie(t, handler))
 	request.Header.Set("Content-Type", "application/json")
-	request.SetBasicAuth("factory", testViewerPassword)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	return recorder
