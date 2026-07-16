@@ -1,6 +1,6 @@
 # ENG-47: Simplify the Frontend Tasks Boundary
 
-> updated: 2026-07-16T08:55:10-07:00
+> updated: 2026-07-16T09:05:45-07:00
 
 ## Issue context
 
@@ -191,7 +191,7 @@ Do not stash, reset, deploy from the issue worktree, or delete branches to hide 
 
 ### Candidate browser fixture lifecycle
 
-Run the candidate fixture only after the frontend production build has completed. It must fail closed unless `FACTORY_BROWSER_FIXTURE=1`, bind only the caller-selected loopback address, use disposable state, and serve this worktree's built assets through the production handler. Start and stop it with this bounded lifecycle:
+Run the candidate fixture only after the frontend production build has completed. It must fail closed unless `FACTORY_BROWSER_FIXTURE=1`, bind only the caller-selected loopback address, use disposable state, and serve this worktree's built assets through the production handler. Start this entire block as one PTY command and retain the returned live session for the browser run:
 
 ```sh
 if lsof -nP -iTCP:18092 -sTCP:LISTEN >/dev/null 2>&1; then
@@ -218,13 +218,29 @@ FACTORY_BROWSER_FIXTURE_ADDR=127.0.0.1:18092 \
 FACTORY_BROWSER_FIXTURE_ROOT="$fixture_root/state" \
 go test ./internal/server -run '^TestCandidateBrowserFixture$' -count=1 -timeout=15m >"$fixture_root/fixture.log" 2>&1 &
 fixture_pid=$!
-until curl -fsS http://127.0.0.1:18092/api/healthz >/dev/null; do
-  kill -0 "$fixture_pid"
+fixture_ready=
+for attempt in $(seq 1 150); do
+  if curl -fsS http://127.0.0.1:18092/api/healthz >/dev/null 2>&1; then
+    fixture_ready=1
+    break
+  fi
+  if ! kill -0 "$fixture_pid" 2>/dev/null; then
+    echo "candidate browser fixture exited before readiness" >&2
+    cat "$fixture_root/fixture.log" >&2
+    exit 1
+  fi
   sleep 0.2
 done
+if [ -z "$fixture_ready" ]; then
+  echo "candidate browser fixture readiness timed out" >&2
+  cat "$fixture_root/fixture.log" >&2
+  exit 1
+fi
+echo "FACTORY_BROWSER_FIXTURE_READY http://127.0.0.1:18092"
+wait "$fixture_pid"
 ```
 
-Use `POST /__fixture/advance` between loading and saving the seeded native task form to advance its authoritative revision and make the browser exercise the real production conflict path. After the matrix, invoke `cleanup_fixture`, clear the trap, and require `lsof -nP -iTCP:18092 -sTCP:LISTEN` to report no listener.
+The foreground `wait` keeps the PTY session, its variables, and its `EXIT` trap alive after the readiness marker. Use `POST /__fixture/advance` between loading and saving the seeded native task form to advance its authoritative revision and make the browser exercise the real production conflict path. After the matrix, send Ctrl-C to that same PTY session, poll it until the shell exits, inspect any resulting output, and require `lsof -nP -iTCP:18092 -sTCP:LISTEN` to report no listener. The trap signals and waits for the child before removing the temporary root on success, failure, timeout, or interruption.
 
 ## Verification matrix
 
