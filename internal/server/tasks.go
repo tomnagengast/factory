@@ -49,7 +49,7 @@ func (s *appServer) getTaskProjects(w http.ResponseWriter, _ *http.Request) {
 	if !s.tasksAvailable(w) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"projects": s.tasks.Projects()})
+	writeJSON(w, http.StatusOK, map[string]any{"projects": s.tasks.Projects(), "control": s.tasks.Control()})
 }
 
 func (s *appServer) putTaskProject(w http.ResponseWriter, r *http.Request) {
@@ -97,38 +97,69 @@ func (s *appServer) getTasks(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.URL.Query().Get("project"))
 	state := strings.TrimSpace(r.URL.Query().Get("state"))
 	approval := strings.TrimSpace(r.URL.Query().Get("approval"))
-	response := tasksResponse{NextCursor: page.NextCursor}
+	activity := strings.TrimSpace(r.URL.Query().Get("activity"))
+	if activity != "" && activity != "active" && activity != "inactive" {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	latestRuns, activeTasks := s.taskActivityIndex()
+	response := tasksResponse{}
+	if provider == "" || provider == string(taskmodel.SourceFactory) {
+		response.NextCursor = page.NextCursor
+	}
 	if provider == "" || provider == string(taskmodel.SourceFactory) {
 		for _, task := range page.Tasks {
-			if projectID != "" && task.ProjectID != projectID || state != "" && task.State != state || approval != "" && task.ApprovalMode != approval {
+			key := task.Ref.OwnershipKey()
+			if projectID != "" && task.ProjectID != projectID || state != "" && task.State != state || approval != "" && task.ApprovalMode != approval ||
+				activity == "active" && !activeTasks[key] || activity == "inactive" && activeTasks[key] {
 				continue
 			}
 			response.Tasks = append(response.Tasks, taskSummary{
 				Ref: task.Ref, Title: task.Title, ProjectID: task.ProjectID, ApprovalMode: task.ApprovalMode,
-				State: task.State, Revision: task.Revision, UpdatedAt: task.UpdatedAt,
+				State: task.State, Revision: task.Revision, UpdatedAt: task.UpdatedAt, LatestRun: latestRuns[key],
 			})
 		}
 	}
 	if (provider == "" || provider == string(taskmodel.SourceLinear)) && r.URL.Query().Get("cursor") == "" && projectID == "" && approval == "" {
-		response.Tasks = append(response.Tasks, s.managedLinearTasks(state)...)
+		response.Tasks = append(response.Tasks, s.managedLinearTasks(state, activity, latestRuns, activeTasks)...)
 	}
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *appServer) managedLinearTasks(state string) []taskSummary {
-	byKey := make(map[string]taskSummary)
+func (s *appServer) taskActivityIndex() (map[string]*agentrun.ActivityRun, map[string]bool) {
+	latestRuns := make(map[string]*agentrun.ActivityRun)
+	active := make(map[string]bool)
 	for _, run := range s.runStore.ActivitySnapshot().Runs {
+		key := run.Task.OwnershipKey()
+		if current := latestRuns[key]; current == nil || run.UpdatedAt.After(current.UpdatedAt) {
+			value := run
+			latestRuns[key] = &value
+		}
+		if run.State.Active() {
+			active[key] = true
+		}
+	}
+	if s.triggerPolicy != nil {
+		for _, invocation := range s.triggerPolicy.RoutingSnapshot().Invocations {
+			if invocation.Nonterminal() {
+				active[invocation.Task.OwnershipKey()] = true
+			}
+		}
+	}
+	return latestRuns, active
+}
+
+func (s *appServer) managedLinearTasks(state, activity string, latestRuns map[string]*agentrun.ActivityRun, activeTasks map[string]bool) []taskSummary {
+	byKey := make(map[string]taskSummary)
+	for key, run := range latestRuns {
 		if run.Task.Source != taskmodel.SourceLinear || state != "" && string(run.State) != state {
 			continue
 		}
 		summary := taskSummary{
 			Ref: run.Task, Title: run.Task.Identifier, State: string(run.State), UpdatedAt: run.UpdatedAt,
-			LatestRun: &run, ReadOnly: true, ExternalURL: "https://linear.app/issue/" + strings.ToLower(run.Task.Identifier),
+			LatestRun: run, ReadOnly: true, ExternalURL: "https://linear.app/issue/" + strings.ToLower(run.Task.Identifier),
 		}
-		key := run.Task.OwnershipKey()
-		if current, found := byKey[key]; !found || run.UpdatedAt.After(current.LatestRun.UpdatedAt) {
-			byKey[key] = summary
-		}
+		byKey[key] = summary
 	}
 	if s.triggerPolicy != nil {
 		for _, invocation := range s.triggerPolicy.RoutingSnapshot().Invocations {
@@ -146,7 +177,10 @@ func (s *appServer) managedLinearTasks(state string) []taskSummary {
 		}
 	}
 	result := make([]taskSummary, 0, len(byKey))
-	for _, summary := range byKey {
+	for key, summary := range byKey {
+		if activity == "active" && !activeTasks[key] || activity == "inactive" && activeTasks[key] {
+			continue
+		}
 		result = append(result, summary)
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -166,7 +200,8 @@ func (s *appServer) getTask(w http.ResponseWriter, r *http.Request) {
 	if provider == string(taskmodel.SourceLinear) {
 		identifier := strings.ToUpper(r.PathValue("id"))
 		var managed *taskSummary
-		for _, summary := range s.managedLinearTasks("") {
+		latestRuns, activeTasks := s.taskActivityIndex()
+		for _, summary := range s.managedLinearTasks("", "", latestRuns, activeTasks) {
 			if summary.Ref.Identifier == identifier || summary.Ref.ProviderID == identifier {
 				value := summary
 				managed = &value

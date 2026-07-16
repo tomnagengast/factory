@@ -139,6 +139,10 @@ func (s *Service) Projects() []ProjectChoice {
 	return result
 }
 
+func (s *Service) Control() taskcontrol.Snapshot {
+	return s.control.Snapshot()
+}
+
 func (s *Service) SetProject(expected uint64, projectID string, enabled bool) (taskcontrol.Snapshot, error) {
 	if enabled {
 		if _, err := s.projects.ResolveSucceeded(projectID); err != nil {

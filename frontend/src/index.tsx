@@ -151,7 +151,10 @@ type TaskProject = {
   enabled: boolean;
 };
 
-type TaskProjectsResponse = { projects: TaskProject[] };
+type TaskProjectsResponse = {
+  projects: TaskProject[];
+  control: { version: number; revision: number; enabledProjectIds: string[]; updatedAt?: string };
+};
 type TaskMutationResult = { task: TaskRecord };
 
 type ActivityCount = {
@@ -2492,6 +2495,9 @@ function TasksPage(): JSX.Element {
   const [state, setState] = createSignal("");
   const [project, setProject] = createSignal("");
   const [approval, setApproval] = createSignal("");
+  const [activity, setActivity] = createSignal("");
+  const [cursor, setCursor] = createSignal("");
+  const [cursorHistory, setCursorHistory] = createSignal<string[]>([]);
   const [createState, setCreateState] = createSignal<"idle" | "saving" | "failed">("idle");
   const [createMessage, setCreateMessage] = createSignal("");
   const [title, setTitle] = createSignal("");
@@ -2504,6 +2510,8 @@ function TasksPage(): JSX.Element {
     if (state()) query.set("state", state());
     if (project()) query.set("project", project());
     if (approval()) query.set("approval", approval());
+    if (activity()) query.set("activity", activity());
+    if (cursor()) query.set("cursor", cursor());
     return `/api/tasks?${query.toString()}`;
   });
   const [tasks, { refetch }] = createResource(request, getTasks);
@@ -2520,6 +2528,26 @@ function TasksPage(): JSX.Element {
   onMount(() => {
     document.title = "Tasks | Factory";
   });
+
+  function changeFilter(setter: (value: string) => void, value: string): void {
+    setter(value);
+    setCursor("");
+    setCursorHistory([]);
+  }
+
+  function nextTaskPage(): void {
+    const next = tasks()?.nextCursor;
+    if (!next) return;
+    setCursorHistory((history) => [...history, cursor()]);
+    setCursor(next);
+  }
+
+  function previousTaskPage(): void {
+    const history = cursorHistory();
+    if (history.length === 0) return;
+    setCursor(history[history.length - 1]);
+    setCursorHistory(history.slice(0, -1));
+  }
 
   async function createTask(event: SubmitEvent): Promise<void> {
     event.preventDefault();
@@ -2560,10 +2588,11 @@ function TasksPage(): JSX.Element {
         </div>
 
         <form class="task-filters" aria-label="Task filters" onSubmit={(event) => event.preventDefault()}>
-          <label><span>Source</span><select value={provider()} onChange={(event) => setProvider(event.currentTarget.value)}><option value="">All sources</option><option value="factory">Factory</option><option value="linear">Linear</option></select></label>
-          <label><span>State</span><select value={state()} onChange={(event) => setState(event.currentTarget.value)}><option value="">All states</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="completed">Completed</option><option value="canceled">Canceled</option></select></label>
-          <label><span>Project</span><select value={project()} onChange={(event) => setProject(event.currentTarget.value)}><option value="">All projects</option><For each={projects()?.projects ?? []}>{(choice) => <option value={choice.projectId}>{choice.projectName}</option>}</For></select></label>
-          <label><span>Approval</span><select value={approval()} onChange={(event) => setApproval(event.currentTarget.value)}><option value="">All modes</option><option value="gated">Gated</option><option value="automatic">Automatic</option></select></label>
+          <label><span>Source</span><select value={provider()} onChange={(event) => changeFilter(setProvider, event.currentTarget.value)}><option value="">All sources</option><option value="factory">Factory</option><option value="linear">Linear</option></select></label>
+          <label><span>State</span><select value={state()} onChange={(event) => changeFilter(setState, event.currentTarget.value)}><option value="">All states</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="completed">Completed</option><option value="canceled">Canceled</option></select></label>
+          <label><span>Project</span><select value={project()} onChange={(event) => changeFilter(setProject, event.currentTarget.value)}><option value="">All projects</option><For each={projects()?.projects ?? []}>{(choice) => <option value={choice.projectId}>{choice.projectName}</option>}</For></select></label>
+          <label><span>Approval</span><select value={approval()} onChange={(event) => changeFilter(setApproval, event.currentTarget.value)}><option value="">All modes</option><option value="gated">Gated</option><option value="automatic">Automatic</option></select></label>
+          <label><span>Lifecycle</span><select value={activity()} onChange={(event) => changeFilter(setActivity, event.currentTarget.value)}><option value="">Any activity</option><option value="active">Active Run</option><option value="inactive">No active Run</option></select></label>
         </form>
 
         <Show when={!tasks.error && !projects.error} fallback={<InlineError message="The task ledger could not be loaded. Check the Factory connection and try again." />}>
@@ -2590,7 +2619,7 @@ function TasksPage(): JSX.Element {
                   </ol>
                 </Show>
               </Show>
-              <Show when={tasks()?.nextCursor}><p class="task-limit-note">More native tasks are retained. Narrow the filters to keep this workspace bounded.</p></Show>
+              <Show when={cursorHistory().length > 0 || Boolean(tasks()?.nextCursor)}><nav class="task-pagination" aria-label="Task pages"><button class="text-button" type="button" disabled={cursorHistory().length === 0} onClick={previousTaskPage}>Previous</button><span>Page {cursorHistory().length + 1}</span><button class="text-button" type="button" disabled={!tasks()?.nextCursor} onClick={nextTaskPage}>Next</button></nav></Show>
             </section>
 
             <aside class="task-create" aria-labelledby="task-create-title">

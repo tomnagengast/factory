@@ -52,6 +52,9 @@ func (c *testLinearTaskController) Gate(context.Context, string, string, string,
 }
 
 func (c *testTaskController) Projects() []taskservice.ProjectChoice { return nil }
+func (c *testTaskController) Control() taskcontrol.Snapshot {
+	return taskcontrol.Snapshot{Version: 1}
+}
 func (c *testTaskController) SetProject(uint64, string, bool) (taskcontrol.Snapshot, error) {
 	return taskcontrol.Snapshot{Version: 1}, nil
 }
@@ -95,6 +98,10 @@ func TestTaskAPIsRequireAuthenticationAndDeriveActor(t *testing.T) {
 	if unauthorized.Code != http.StatusUnauthorized || unauthorized.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("unauthorized tasks = %d headers=%v", unauthorized.Code, unauthorized.Header())
 	}
+	projects := authenticatedJSONRequest(t, handler, http.MethodGet, "/api/task-projects", nil, "")
+	if projects.Code != http.StatusOK || !strings.Contains(projects.Body.String(), `"control":{"version":1,"revision":0`) {
+		t.Fatalf("task projects = %d %s", projects.Code, projects.Body.String())
+	}
 
 	body := `{"title":"Native","description":"Private","projectId":"project-factory","approvalMode":"gated"}`
 	crossOrigin := authenticatedJSONRequest(t, handler, http.MethodPost, "/api/tasks", json.RawMessage(body), "https://attacker.example")
@@ -131,6 +138,18 @@ func TestManagedLinearDetailLoadsLiveWithoutAdmittingWorkspaceBacklog(t *testing
 	handler, runs := testTaskAPIHandlerWithLinear(t, &testTaskController{}, linear)
 	if _, _, err := runs.Claim(agentrun.Trigger{DeliveryID: "linear-managed", IssueIdentifier: "ENG-46", Kind: agentrun.TriggerKindLabel}, testNow); err != nil {
 		t.Fatal(err)
+	}
+	active := authenticatedJSONRequest(t, handler, http.MethodGet, "/api/tasks?provider=linear&activity=active", nil, "")
+	if active.Code != http.StatusOK || !strings.Contains(active.Body.String(), "ENG-46") || strings.Contains(active.Body.String(), "nextCursor") {
+		t.Fatalf("active Linear index = %d %s", active.Code, active.Body.String())
+	}
+	inactive := authenticatedJSONRequest(t, handler, http.MethodGet, "/api/tasks?provider=linear&activity=inactive", nil, "")
+	if inactive.Code != http.StatusOK || strings.Contains(inactive.Body.String(), "ENG-46") {
+		t.Fatalf("inactive Linear index = %d %s", inactive.Code, inactive.Body.String())
+	}
+	invalid := authenticatedJSONRequest(t, handler, http.MethodGet, "/api/tasks?activity=unknown", nil, "")
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid activity filter = %d %s", invalid.Code, invalid.Body.String())
 	}
 	managed := authenticatedJSONRequest(t, handler, http.MethodGet, "/api/tasks/linear/ENG-46", nil, "")
 	if managed.Code != http.StatusOK || !strings.Contains(managed.Body.String(), "Private live body") || !strings.Contains(managed.Body.String(), "latestRun") || linear.reads != 1 {

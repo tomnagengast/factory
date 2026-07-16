@@ -136,6 +136,7 @@ type ScheduleStatus interface {
 
 type TaskController interface {
 	Projects() []taskservice.ProjectChoice
+	Control() taskcontrol.Snapshot
 	SetProject(uint64, string, bool) (taskcontrol.Snapshot, error)
 	List(string, int) (taskstore.TaskPage, error)
 	Detail(string, uint64, int) (taskservice.Detail, error)
