@@ -63,7 +63,11 @@ type StepView struct {
 	ID      string `json:"id"`
 	Type    string `json:"type"`
 	Status  string `json:"status,omitempty"`
+	Action  string `json:"action"`
 	Summary string `json:"summary"`
+	Detail  string `json:"detail,omitempty"`
+	Output  string `json:"output,omitempty"`
+	Error   string `json:"error,omitempty"`
 	Payload string `json:"payload"`
 }
 
@@ -391,75 +395,196 @@ func (o *Observer) cleanOutput(output []byte, truncate bool) paneView {
 }
 
 func agentSteps(value string, redact func(string) string) []StepView {
-	steps := make([]StepView, 0)
+	type observedStep struct {
+		view    StepView
+		sources []json.RawMessage
+	}
+
+	observed := make([]observedStep, 0)
 	stepIndexes := make(map[string]int)
 	for _, line := range strings.Split(value, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		step, ok := agentStep(line, redact)
-		if !ok {
-			continue
+		for _, update := range agentStepUpdates(line, redact) {
+			if index, found := stepIndexes[update.view.ID]; found {
+				if update.merge {
+					observed[index].view = mergeStepView(observed[index].view, update.view)
+					observed[index].sources = append(observed[index].sources, update.source)
+					observed[index].view.Payload = payloadForSources(observed[index].sources, redact)
+				} else {
+					observed[index] = observedStep{view: update.view, sources: []json.RawMessage{update.source}}
+				}
+				continue
+			}
+			stepIndexes[update.view.ID] = len(observed)
+			observed = append(observed, observedStep{view: update.view, sources: []json.RawMessage{update.source}})
 		}
-		if index, found := stepIndexes[step.ID]; found {
-			steps[index] = step
-			continue
-		}
-		stepIndexes[step.ID] = len(steps)
-		steps = append(steps, step)
+	}
+	steps := make([]StepView, 0, len(observed))
+	for _, step := range observed {
+		steps = append(steps, step.view)
 	}
 	return steps
 }
 
-func agentStep(line string, redact func(string) string) (StepView, bool) {
-	var event agentEvent
-	if json.Unmarshal([]byte(line), &event) != nil || lifecycleEvent(event.Type) {
-		return StepView{}, false
-	}
-	var payload bytes.Buffer
-	if json.Indent(&payload, []byte(line), "", "  ") != nil {
-		return StepView{}, false
-	}
-	redacted := redact(payload.String())
-	return StepView{
-		ID:      stepID(event, redacted),
-		Type:    stepType(event),
-		Status:  event.Item.Status,
-		Summary: stepSummary(event),
-		Payload: redacted,
-	}, true
+type stepUpdate struct {
+	view   StepView
+	source json.RawMessage
+	merge  bool
 }
 
-func stepID(event agentEvent, payload string) string {
-	if event.Item.ID != "" {
-		return "item:" + event.Item.ID
+func agentStepUpdates(line string, redact func(string) string) []stepUpdate {
+	var event agentEvent
+	if json.Unmarshal([]byte(line), &event) != nil || lifecycleEvent(event.Type) {
+		return nil
 	}
-	digest := sha256.Sum256([]byte(payload))
-	return fmt.Sprintf("event:%x", digest[:8])
+	source := append(json.RawMessage(nil), []byte(line)...)
+	updates := normalizedStepUpdates(event, source)
+	for index := range updates {
+		updates[index].source = source
+		updates[index].view = redactStepView(updates[index].view, redact)
+		updates[index].view.Payload = payloadForSources([]json.RawMessage{source}, redact)
+	}
+	return updates
+}
+
+func normalizedStepUpdates(event agentEvent, source json.RawMessage) []stepUpdate {
+	switch event.Type {
+	case "item.started", "item.completed":
+		return []stepUpdate{{view: codexStep(event, source)}}
+	case "assistant":
+		updates := make([]stepUpdate, 0, len(event.Message.Content))
+		for index, content := range event.Message.Content {
+			switch content.Type {
+			case "thinking":
+				continue
+			case "text":
+				if content.Text == "" {
+					continue
+				}
+				updates = append(updates, stepUpdate{view: StepView{
+					ID:      eventStepID(event, source, index),
+					Type:    "text",
+					Action:  "Responded",
+					Summary: summarizeStep(content.Text),
+					Detail:  content.Text,
+				}})
+			case "tool_use":
+				updates = append(updates, stepUpdate{view: claudeToolStep(event, content, source, index)})
+			default:
+				updates = append(updates, stepUpdate{view: StepView{
+					ID:      eventStepID(event, source, index),
+					Type:    content.Type,
+					Action:  "Observed",
+					Summary: fallbackSummary(content.Type, "Assistant event"),
+				}})
+			}
+		}
+		if len(updates) == 0 && len(event.Message.Content) == 0 {
+			updates = append(updates, stepUpdate{view: fallbackStep(event, source, 0)})
+		}
+		return updates
+	case "user":
+		updates := make([]stepUpdate, 0, len(event.Message.Content))
+		for index, content := range event.Message.Content {
+			if content.Type != "tool_result" {
+				continue
+			}
+			updates = append(updates, claudeToolResultUpdate(event, content, source, index))
+		}
+		return updates
+	case "error":
+		message := firstNonEmpty(event.Message.Text, rawErrorText(event.Error), "Agent error")
+		return []stepUpdate{{view: StepView{
+			ID:      eventStepID(event, source, 0),
+			Type:    "error",
+			Status:  "failed",
+			Action:  "Failed",
+			Summary: summarizeStep(message),
+			Error:   message,
+		}}}
+	case "result":
+		if event.Result == "" {
+			return []stepUpdate{{view: fallbackStep(event, source, 0)}}
+		}
+		return []stepUpdate{{view: StepView{
+			ID:      eventStepID(event, source, 0),
+			Type:    "result",
+			Status:  "completed",
+			Action:  "Finished",
+			Summary: summarizeStep(event.Result),
+			Detail:  event.Result,
+		}}}
+	default:
+		return []stepUpdate{{view: fallbackStep(event, source, 0)}}
+	}
+}
+
+type agentChange struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
+}
+
+type agentContent struct {
+	Type      string          `json:"type"`
+	ID        string          `json:"id"`
+	Text      string          `json:"text"`
+	Name      string          `json:"name"`
+	ToolUseID string          `json:"tool_use_id"`
+	Input     json.RawMessage `json:"input"`
+	Content   json.RawMessage `json:"content"`
+	IsError   bool            `json:"is_error"`
+}
+
+type agentMessage struct {
+	ID      string         `json:"id"`
+	Content []agentContent `json:"content"`
+	Text    string         `json:"-"`
+}
+
+func (m *agentMessage) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+	var text string
+	if json.Unmarshal(data, &text) == nil {
+		m.Text = text
+		return nil
+	}
+	type messageAlias agentMessage
+	var decoded messageAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*m = agentMessage(decoded)
+	return nil
 }
 
 type agentEvent struct {
-	Type string `json:"type"`
-	Item struct {
-		ID               string `json:"id"`
-		Type             string `json:"type"`
-		Status           string `json:"status"`
-		Text             string `json:"text"`
-		Command          string `json:"command"`
-		AggregatedOutput string `json:"aggregated_output"`
-		Changes          []struct {
-			Path string `json:"path"`
-		} `json:"changes"`
+	Type  string          `json:"type"`
+	UUID  string          `json:"uuid"`
+	Error json.RawMessage `json:"error"`
+	Item  struct {
+		ID               string          `json:"id"`
+		Type             string          `json:"type"`
+		Status           string          `json:"status"`
+		Text             string          `json:"text"`
+		Message          string          `json:"message"`
+		Command          string          `json:"command"`
+		AggregatedOutput string          `json:"aggregated_output"`
+		Server           string          `json:"server"`
+		Tool             string          `json:"tool"`
+		Query            string          `json:"query"`
+		Arguments        json.RawMessage `json:"arguments"`
+		Result           json.RawMessage `json:"result"`
+		Error            json.RawMessage `json:"error"`
+		Action           json.RawMessage `json:"action"`
+		Changes          []agentChange   `json:"changes"`
 	} `json:"item"`
-	Message struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-			Name string `json:"name"`
-		} `json:"content"`
-	} `json:"message"`
-	Result string `json:"result"`
+	Message agentMessage `json:"message"`
+	Result  string       `json:"result"`
 }
 
 func lifecycleEvent(eventType string) bool {
@@ -471,46 +596,335 @@ func lifecycleEvent(eventType string) bool {
 	}
 }
 
-func stepType(event agentEvent) string {
-	if event.Item.Type != "" {
-		return event.Item.Type
+func codexStep(event agentEvent, source json.RawMessage) StepView {
+	item := event.Item
+	step := StepView{
+		ID:     itemStepID(item.ID, source),
+		Type:   item.Type,
+		Status: item.Status,
 	}
-	return event.Type
+	switch item.Type {
+	case "command_execution":
+		step.Action = "Ran"
+		step.Summary = summarizeStep(displayCommand(item.Command))
+		step.Detail = item.Command
+		step.Output = strings.TrimSpace(item.AggregatedOutput)
+	case "agent_message":
+		step.Action = "Reported"
+		step.Summary = summarizeStep(item.Text)
+		step.Detail = item.Text
+	case "reasoning":
+		step.Action = "Reasoned"
+		step.Summary = summarizeStep(item.Text)
+		step.Detail = item.Text
+	case "mcp_tool_call":
+		step.Action = "Used"
+		step.Summary = mcpSummary(item.Server, item.Tool)
+		step.Detail = rawValuePretty(item.Arguments)
+		step.Output = rawValueText(item.Result)
+		step.Error = rawErrorText(item.Error)
+	case "web_search":
+		step.Action = "Searched"
+		step.Summary = summarizeStep(firstNonEmpty(item.Query, rawObjectString(item.Action, "query"), rawValueText(item.Action)))
+		step.Detail = rawValuePretty(item.Action)
+	case "file_change":
+		step.Action = "Updated"
+		paths := make([]string, 0, len(item.Changes))
+		for _, change := range item.Changes {
+			if change.Path != "" {
+				paths = append(paths, change.Path)
+			}
+		}
+		step.Summary = summarizePathList(paths)
+		step.Detail = strings.Join(paths, "\n")
+	case "error":
+		message := firstNonEmpty(item.Message, item.Text, rawValueText(item.Error))
+		step.Action = "Failed"
+		step.Status = "failed"
+		step.Summary = summarizeStep(message)
+		step.Error = message
+	default:
+		step.Action = "Observed"
+		step.Summary = summarizeStep(firstNonEmpty(item.Command, item.Text, item.Message, firstChangePath(item.Changes), fallbackSummary(item.Type, event.Type)))
+		step.Detail = firstNonEmpty(item.Command, item.Text, item.Message)
+	}
+	if step.Summary == "" {
+		step.Summary = fallbackSummary(item.Type, event.Type)
+	}
+	if step.Error != "" {
+		step.Status = "failed"
+	}
+	return step
 }
 
-func stepSummary(event agentEvent) string {
-	switch event.Type {
-	case "item.started", "item.completed":
-		if event.Item.Command != "" {
-			return summarizeStep(event.Item.Command)
-		}
-		if event.Item.Text != "" {
-			return summarizeStep(event.Item.Text)
-		}
-		if len(event.Item.Changes) > 0 {
-			return summarizeStep(event.Item.Changes[0].Path)
-		}
-		return strings.ReplaceAll(event.Item.Type, "_", " ")
-	case "assistant":
-		for _, content := range event.Message.Content {
-			if content.Text != "" {
-				return summarizeStep(content.Text)
-			}
-			if content.Name != "" {
-				return "Tool: " + content.Name
-			}
-		}
-		return "Assistant response"
-	case "user":
-		return "Tool result"
-	case "result":
-		if event.Result != "" {
-			return summarizeStep(event.Result)
-		}
-		return "Agent result"
-	default:
-		return strings.ReplaceAll(event.Type, "_", " ")
+func claudeToolStep(event agentEvent, content agentContent, source json.RawMessage, index int) StepView {
+	action := claudeToolAction(content.Name)
+	summary := firstNonEmpty(
+		rawObjectString(content.Input, "description"),
+		rawObjectString(content.Input, "command"),
+		rawObjectString(content.Input, "file_path", "path"),
+		rawObjectString(content.Input, "query", "pattern"),
+		content.Name,
+	)
+	if strings.EqualFold(content.Name, "Bash") {
+		summary = displayCommand(summary)
 	}
+	return StepView{
+		ID:      toolStepID(content.ID, event, source, index),
+		Type:    firstNonEmpty(content.Name, "tool_use"),
+		Status:  "in_progress",
+		Action:  action,
+		Summary: summarizeStep(summary),
+		Detail:  rawValuePretty(content.Input),
+	}
+}
+
+func claudeToolResultUpdate(event agentEvent, content agentContent, source json.RawMessage, index int) stepUpdate {
+	result := rawValueText(content.Content)
+	step := StepView{
+		ID:      toolStepID(content.ToolUseID, event, source, index),
+		Type:    "tool_result",
+		Status:  "completed",
+		Action:  "Returned",
+		Summary: fallbackSummary(content.ToolUseID, "Tool result"),
+	}
+	if content.IsError {
+		step.Status = "failed"
+		step.Error = result
+	} else {
+		step.Output = result
+	}
+	return stepUpdate{view: step, merge: content.ToolUseID != ""}
+}
+
+func fallbackStep(event agentEvent, source json.RawMessage, index int) StepView {
+	return StepView{
+		ID:      eventStepID(event, source, index),
+		Type:    event.Type,
+		Action:  "Observed",
+		Summary: fallbackSummary(event.Type, "Agent event"),
+	}
+}
+
+func mergeStepView(current, update StepView) StepView {
+	if current.Type == "" {
+		current.Type = update.Type
+	}
+	if current.Action == "" {
+		current.Action = update.Action
+	}
+	if current.Summary == "" {
+		current.Summary = update.Summary
+	}
+	if current.Detail == "" {
+		current.Detail = update.Detail
+	}
+	if update.Status != "" {
+		current.Status = update.Status
+	}
+	if update.Output != "" {
+		current.Output = update.Output
+	}
+	if update.Error != "" {
+		current.Error = update.Error
+	}
+	return current
+}
+
+func redactStepView(step StepView, redact func(string) string) StepView {
+	step.Action = redact(step.Action)
+	step.Summary = redact(step.Summary)
+	step.Detail = redact(step.Detail)
+	step.Output = redact(step.Output)
+	step.Error = redact(step.Error)
+	return step
+}
+
+func payloadForSources(sources []json.RawMessage, redact func(string) string) string {
+	var value any
+	if len(sources) == 1 {
+		value = json.RawMessage(sources[0])
+	} else {
+		value = sources
+	}
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return redact(string(encoded))
+}
+
+func itemStepID(id string, source json.RawMessage) string {
+	if id != "" {
+		return "item:" + id
+	}
+	return digestStepID("event", source, 0)
+}
+
+func toolStepID(id string, event agentEvent, source json.RawMessage, index int) string {
+	if id != "" {
+		return "tool:" + id
+	}
+	return eventStepID(event, source, index)
+}
+
+func eventStepID(event agentEvent, source json.RawMessage, index int) string {
+	if id := firstNonEmpty(event.UUID, event.Message.ID); id != "" {
+		return fmt.Sprintf("event:%s:%d", id, index)
+	}
+	return digestStepID("event", source, index)
+}
+
+func digestStepID(prefix string, source json.RawMessage, index int) string {
+	digest := sha256.Sum256(source)
+	return fmt.Sprintf("%s:%x:%d", prefix, digest[:8], index)
+}
+
+func claudeToolAction(name string) string {
+	switch strings.ToLower(name) {
+	case "bash", "shell", "execute":
+		return "Ran"
+	case "read":
+		return "Read"
+	case "write", "edit", "applypatch", "apply_patch":
+		return "Updated"
+	case "grep", "glob", "search", "websearch", "web_search":
+		return "Searched"
+	default:
+		return "Used"
+	}
+}
+
+func mcpSummary(server, tool string) string {
+	if server != "" && tool != "" {
+		return summarizeStep(server + " · " + tool)
+	}
+	return summarizeStep(firstNonEmpty(tool, server, "MCP tool"))
+}
+
+func displayCommand(command string) string {
+	for _, prefix := range []string{
+		"/bin/zsh -lc ", "zsh -lc ",
+		"/bin/bash -lc ", "bash -lc ",
+		"/bin/sh -lc ", "sh -lc ",
+		"/bin/zsh -c ", "zsh -c ",
+		"/bin/bash -c ", "bash -c ",
+		"/bin/sh -c ", "sh -c ",
+	} {
+		argument, found := strings.CutPrefix(command, prefix)
+		if !found || len(argument) < 2 {
+			continue
+		}
+		switch argument[0] {
+		case '\'':
+			if argument[len(argument)-1] == '\'' && !strings.Contains(argument[1:len(argument)-1], "'") {
+				return argument[1 : len(argument)-1]
+			}
+		case '"':
+			if argument[len(argument)-1] == '"' && !strings.Contains(argument[1:len(argument)-1], "\\") {
+				return argument[1 : len(argument)-1]
+			}
+		}
+	}
+	return command
+}
+
+func rawValuePretty(value json.RawMessage) string {
+	if len(value) == 0 || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		return ""
+	}
+	var formatted bytes.Buffer
+	if json.Indent(&formatted, value, "", "  ") != nil {
+		return strings.TrimSpace(string(value))
+	}
+	return formatted.String()
+}
+
+func rawValueText(value json.RawMessage) string {
+	if len(value) == 0 || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(value, &text) == nil {
+		return strings.TrimSpace(text)
+	}
+	var list []json.RawMessage
+	if json.Unmarshal(value, &list) == nil {
+		parts := make([]string, 0, len(list))
+		for _, item := range list {
+			if part := rawValueText(item); part != "" {
+				parts = append(parts, part)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(value, &object) == nil {
+		for _, key := range []string{"text", "message", "content", "error", "output"} {
+			if field, found := object[key]; found {
+				if result := rawValueText(field); result != "" {
+					return result
+				}
+			}
+		}
+	}
+	return rawValuePretty(value)
+}
+
+func rawErrorText(value json.RawMessage) string {
+	if bytes.Equal(bytes.TrimSpace(value), []byte("false")) {
+		return ""
+	}
+	return rawValueText(value)
+}
+
+func rawObjectString(value json.RawMessage, keys ...string) string {
+	var object map[string]json.RawMessage
+	if len(value) == 0 || json.Unmarshal(value, &object) != nil {
+		return ""
+	}
+	for _, key := range keys {
+		if field, found := object[key]; found {
+			if result := rawValueText(field); result != "" {
+				return result
+			}
+		}
+	}
+	return ""
+}
+
+func summarizePathList(paths []string) string {
+	if len(paths) == 0 {
+		return "File changes"
+	}
+	if len(paths) == 1 {
+		return summarizeStep(paths[0])
+	}
+	return summarizeStep(fmt.Sprintf("%s and %d more", paths[0], len(paths)-1))
+}
+
+func firstChangePath(changes []agentChange) string {
+	if len(changes) == 0 {
+		return ""
+	}
+	return changes[0].Path
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func fallbackSummary(value, fallback string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "_", " "), "-", " "))
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func summarizeStep(value string) string {

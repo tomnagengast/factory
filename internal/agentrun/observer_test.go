@@ -2,6 +2,7 @@ package agentrun
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -104,6 +105,149 @@ func TestAgentStepsSkipLifecycleEventsAndKeepStableIDs(t *testing.T) {
 	}
 	if first[0].ID == "" || first[0].ID != second[0].ID {
 		t.Fatalf("step IDs are not stable: %#v %#v", first, second)
+	}
+}
+
+func TestAgentStepsNormalizeCodexActions(t *testing.T) {
+	t.Parallel()
+
+	stream := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-1"}`,
+		`{"type":"item.started","item":{"id":"command-1","type":"command_execution","status":"in_progress","command":"/bin/zsh -lc 'printf \"done\"'"}}`,
+		`{"type":"item.completed","item":{"id":"command-1","type":"command_execution","status":"completed","command":"/bin/zsh -lc 'printf \"done\"'","aggregated_output":"done"}}`,
+		`{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","status":"completed","server":"linear","tool":"get_issue","arguments":{"id":"ENG-56"},"result":{"content":[{"type":"text","text":"issue loaded"}]},"error":false}}`,
+		`{"type":"item.completed","item":{"id":"search-1","type":"web_search","status":"completed","query":"Factory observer patterns","action":{"type":"search","query":"Factory observer patterns"}}}`,
+		`{"type":"item.completed","item":{"id":"file-1","type":"file_change","status":"completed","changes":[{"path":"internal/agentrun/observer.go","kind":"update"},{"path":"frontend/src/index.tsx","kind":"update"}]}}`,
+		`{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"The observer contract is ready."}}`,
+		`{"type":"item.completed","item":{"id":"error-1","type":"error","message":"provider connection failed"}}`,
+		`{"type":"error","uuid":"error-event-1","message":"turn stream failed"}`,
+		`{"type":"item.completed","item":{"id":"future-1","type":"future_widget","status":"completed","text":"future evidence"}}`,
+	}, "\n")
+	redact := func(value string) string { return value }
+	steps := agentSteps(stream, redact)
+
+	if len(steps) != 8 {
+		t.Fatalf("steps = %#v", steps)
+	}
+	command := steps[0]
+	if command.ID != "item:command-1" || command.Action != "Ran" || command.Summary != `printf "done"` || command.Detail != `/bin/zsh -lc 'printf "done"'` || command.Output != "done" || command.Status != "completed" {
+		t.Fatalf("command step = %#v", command)
+	}
+	mcp := steps[1]
+	if mcp.Action != "Used" || mcp.Summary != "linear · get_issue" || !strings.Contains(mcp.Detail, `"id": "ENG-56"`) || mcp.Output != "issue loaded" || mcp.Status != "completed" || mcp.Error != "" {
+		t.Fatalf("MCP step = %#v", mcp)
+	}
+	search := steps[2]
+	if search.Action != "Searched" || search.Summary != "Factory observer patterns" || !strings.Contains(search.Detail, `"type": "search"`) {
+		t.Fatalf("search step = %#v", search)
+	}
+	file := steps[3]
+	if file.Action != "Updated" || file.Summary != "internal/agentrun/observer.go and 1 more" || !strings.Contains(file.Detail, "frontend/src/index.tsx") {
+		t.Fatalf("file step = %#v", file)
+	}
+	if message := steps[4]; message.Action != "Reported" || message.Summary != "The observer contract is ready." || message.Type != "agent_message" {
+		t.Fatalf("message step = %#v", message)
+	}
+	if failure := steps[5]; failure.Action != "Failed" || failure.Status != "failed" || failure.Error != "provider connection failed" {
+		t.Fatalf("error step = %#v", failure)
+	}
+	if failure := steps[6]; failure.ID != "event:error-event-1:0" || failure.Action != "Failed" || failure.Status != "failed" || failure.Summary != "turn stream failed" || failure.Error != "turn stream failed" {
+		t.Fatalf("top-level error step = %#v", failure)
+	}
+	if future := steps[7]; future.Action != "Observed" || future.Summary != "future evidence" || !strings.Contains(future.Payload, `"type": "future_widget"`) {
+		t.Fatalf("future step = %#v", future)
+	}
+	if again := agentSteps(stream, redact); again[0].ID != command.ID {
+		t.Fatalf("step IDs changed: %#v %#v", steps, again)
+	}
+}
+
+func TestAgentStepsCorrelateClaudeTools(t *testing.T) {
+	t.Parallel()
+
+	stream := strings.Join([]string{
+		`{"type":"assistant","uuid":"assistant-1","message":{"content":[{"type":"thinking","thinking":"private"},{"type":"text","text":"I will inspect the observer before editing."},{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"go test ./internal/agentrun","description":"Run focused observer tests","source_marker":"tool-use-source"}}]}}`,
+		`{"type":"assistant","uuid":"assistant-2","message":{"content":[{"type":"tool_use","id":"tool-2","name":"Read","input":{"file_path":"internal/agentrun/observer.go"}}]}}`,
+		`{"type":"user","uuid":"result-1","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"focused tests passed · tool-result-source"}]}}`,
+		`{"type":"user","uuid":"result-2","message":{"content":[{"type":"tool_result","tool_use_id":"tool-2","is_error":true,"content":[{"type":"text","text":"read failed"}]}]}}`,
+		`{"type":"user","uuid":"result-3","message":{"content":[{"type":"tool_result","tool_use_id":"missing-tool","content":"orphan result"}]}}`,
+	}, "\n")
+	redact := func(value string) string { return value }
+	steps := agentSteps(stream, redact)
+
+	if len(steps) != 4 {
+		t.Fatalf("steps = %#v", steps)
+	}
+	if narrative := steps[0]; narrative.ID != "event:assistant-1:1" || narrative.Type != "text" || narrative.Action != "Responded" || narrative.Summary != "I will inspect the observer before editing." {
+		t.Fatalf("narrative step = %#v", narrative)
+	}
+	bash := steps[1]
+	if bash.ID != "tool:tool-1" || bash.Type != "Bash" || bash.Action != "Ran" || bash.Summary != "Run focused observer tests" || bash.Status != "completed" || bash.Output != "focused tests passed · tool-result-source" {
+		t.Fatalf("Bash step = %#v", bash)
+	}
+	if useIndex, resultIndex := strings.Index(bash.Payload, "tool-use-source"), strings.Index(bash.Payload, "tool-result-source"); useIndex < 0 || resultIndex <= useIndex || !strings.HasPrefix(bash.Payload, "[") {
+		t.Fatalf("correlated payload = %q", bash.Payload)
+	}
+	read := steps[2]
+	if read.ID != "tool:tool-2" || read.Action != "Read" || read.Summary != "internal/agentrun/observer.go" || read.Status != "failed" || read.Error != "read failed" || read.Output != "" {
+		t.Fatalf("Read step = %#v", read)
+	}
+	orphan := steps[3]
+	if orphan.ID != "tool:missing-tool" || orphan.Action != "Returned" || orphan.Status != "completed" || orphan.Output != "orphan result" || strings.HasPrefix(orphan.Payload, "[") {
+		t.Fatalf("orphan result = %#v", orphan)
+	}
+	for _, step := range steps {
+		if strings.Contains(step.Payload, "private") && step.Type == "thinking" {
+			t.Fatalf("thinking became visible: %#v", step)
+		}
+	}
+}
+
+func TestDisplayCommandUnwrapsOnlyRecognizedLosslessShells(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		`/bin/zsh -lc 'go test ./...'`:           `go test ./...`,
+		"bash -lc 'printf first\nprintf second'": "printf first\nprintf second",
+		`sh -c "printf ready"`:                   `printf ready`,
+		`/bin/zsh -lc 'printf '\''unsafe'`:       `/bin/zsh -lc 'printf '\''unsafe'`,
+		`/bin/zsh -l 'go test ./...'`:            `/bin/zsh -l 'go test ./...'`,
+		`/usr/bin/fish -lc 'go test ./...'`:      `/usr/bin/fish -lc 'go test ./...'`,
+		`/bin/zsh -lc 'unterminated`:             `/bin/zsh -lc 'unterminated`,
+		`go test ./internal/agentrun`:            `go test ./internal/agentrun`,
+	}
+	for input, want := range tests {
+		input, want := input, want
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+			if got := displayCommand(input); got != want {
+				t.Fatalf("displayCommand(%q) = %q, want %q", input, got, want)
+			}
+		})
+	}
+}
+
+func TestAgentStepPresentationRedactsEveryField(t *testing.T) {
+	t.Parallel()
+
+	const secret = "presentation-secret"
+	redact := func(value string) string { return strings.ReplaceAll(value, secret, "[REDACTED]") }
+	step := redactStepView(StepView{
+		ID:      "item:redaction",
+		Type:    "test",
+		Action:  "Action " + secret,
+		Summary: "Summary " + secret,
+		Detail:  "Detail " + secret,
+		Output:  "Output " + secret,
+		Error:   "Error " + secret,
+	}, redact)
+	step.Payload = payloadForSources([]json.RawMessage{json.RawMessage(`{"marker":"` + secret + `"}`)}, redact)
+	encoded, err := json.Marshal(step)
+	if err != nil {
+		t.Fatalf("marshal step: %v", err)
+	}
+	if strings.Contains(string(encoded), secret) || strings.Count(string(encoded), "[REDACTED]") != 6 {
+		t.Fatalf("redacted step = %s", encoded)
 	}
 }
 
