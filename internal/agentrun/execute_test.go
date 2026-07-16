@@ -58,6 +58,8 @@ func TestPrincipalPromptExecutesPinnedMarkdownDirectly(t *testing.T) {
 	prompt := principalPrompt("ENG-123", TriggerKindLabel, testWorkflow())
 	for _, expected := range []string{
 		"ENG-123",
+		"Required branch prefix: eng-123-",
+		"Every new branch and pull-request head",
 		"Workflow: Full SDLC revision 1",
 		"----- BEGIN PINNED WORKFLOW MARKDOWN -----",
 		workflow.DefaultMarkdown(),
@@ -132,6 +134,9 @@ func TestNativeContinuationPromptRequiresFreshDurableTaskRead(t *testing.T) {
 	}
 	if strings.Contains(prompt, "Fresh-read the complete Linear conversation first.") {
 		t.Fatalf("native continuation prompt instructed a Linear read: %s", prompt)
+	}
+	if !strings.Contains(prompt, "Required branch prefix: factory-task-0123456789abcdef-") {
+		t.Fatalf("native prompt missing provider-isolated branch prefix: %s", prompt)
 	}
 }
 

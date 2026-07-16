@@ -80,6 +80,19 @@ func (r TaskRef) Equal(other TaskRef) bool {
 	return r.Source == other.Source && r.ProviderID == other.ProviderID
 }
 
+// BranchPrefix returns the exact provider-isolated prefix required for every
+// branch and pull-request head owned by the task.
+func (r TaskRef) BranchPrefix() (string, error) {
+	normalized, err := r.Normalize()
+	if err != nil {
+		return "", err
+	}
+	if normalized.Source == SourceLinear {
+		return strings.ToLower(normalized.Identifier) + "-", nil
+	}
+	return "factory-" + strings.ToLower(normalized.ProviderID) + "-", nil
+}
+
 func LegacyLinear(identifier string) (TaskRef, error) {
 	identifier = strings.ToUpper(strings.TrimSpace(identifier))
 	return (TaskRef{Source: SourceLinear, ProviderID: identifier, Identifier: identifier}).Normalize()

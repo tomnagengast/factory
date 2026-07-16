@@ -62,3 +62,19 @@ func TestTaskRefOwnershipSeparatesProviders(t *testing.T) {
 		t.Fatal("ownership keys collide across providers")
 	}
 }
+
+func TestTaskRefBranchPrefixSeparatesProviders(t *testing.T) {
+	tests := []struct {
+		ref  TaskRef
+		want string
+	}{
+		{ref: TaskRef{Source: SourceLinear, ProviderID: "FAC-1", Identifier: "FAC-1"}, want: "fac-1-"},
+		{ref: TaskRef{Source: SourceFactory, ProviderID: "task-1", Identifier: "FAC-1"}, want: "factory-task-1-"},
+	}
+	for _, test := range tests {
+		got, err := test.ref.BranchPrefix()
+		if err != nil || got != test.want {
+			t.Fatalf("BranchPrefix(%#v) = %q, %v; want %q", test.ref, got, err, test.want)
+		}
+	}
+}

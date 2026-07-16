@@ -376,11 +376,11 @@ func validateReadySnapshot(checkpoint ReadyCheckpoint, snapshot PullRequestSnaps
 }
 
 func (m *Manager) validateCheckpoint(run Run, checkpoint ReadyCheckpoint) error {
-	if err := checkpoint.Validate(); err != nil {
-		return err
-	}
 	if checkpoint.Task.IsZero() {
 		checkpoint.Task = run.Task
+	}
+	if err := checkpoint.Validate(); err != nil {
+		return err
 	}
 	if !checkpoint.Task.Equal(run.Task) {
 		return errors.New("ready checkpoint belongs to another task")

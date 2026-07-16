@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tomnagengast/factory/internal/taskmodel"
 )
 
 func TestReadyCheckpointRoundTrip(t *testing.T) {
@@ -71,5 +73,26 @@ func TestReadyCheckpointRejectsInvalidTrustFields(t *testing.T) {
 				t.Fatal("expected validation error")
 			}
 		})
+	}
+}
+
+func TestReadyCheckpointRequiresProviderIsolatedHeadBranch(t *testing.T) {
+	checkpoint := ReadyCheckpoint{
+		ContractVersion: LifecycleContractVersion,
+		RunID:           "run-test",
+		Task:            taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-1", Identifier: "FAC-1"},
+		Repository:      "tomnagengast/network",
+		PullRequest:     8,
+		BaseBranch:      "main",
+		HeadBranch:      "fac-1-fix",
+		VerifiedHeadOID: "08c1c678a0b23bbe8e2dc2da1e398583d7e4c416",
+		CreatedAt:       time.Now(),
+	}
+	if err := checkpoint.Validate(); err == nil {
+		t.Fatal("cross-provider head prefix unexpectedly accepted")
+	}
+	checkpoint.HeadBranch = "factory-task-1-fix"
+	if err := checkpoint.Validate(); err != nil {
+		t.Fatalf("provider-isolated head rejected: %v", err)
 	}
 }

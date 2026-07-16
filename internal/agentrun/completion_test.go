@@ -37,7 +37,7 @@ func TestCompletionValidatorRequiresCheckpointOrTypedPrePRBlocker(t *testing.T) 
 
 	now := time.Date(2026, time.July, 11, 22, 0, 0, 0, time.UTC)
 	validator := mustCompletionValidator(t, &fakePullRequestReader{}, completeEvidence(), now)
-	success := validator.Validate(context.Background(), Run{}, ProcessResult{Status: string(StateSucceeded)})
+	success := validator.Validate(context.Background(), Run{IssueIdentifier: "ENG-123"}, ProcessResult{Status: string(StateSucceeded)})
 	if success.Validation.Accepted || success.State != StateFailed || !strings.Contains(success.Detail, "without a manager-validated") {
 		t.Fatalf("checkpoint-less success = %#v", success)
 	}

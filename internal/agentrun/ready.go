@@ -59,6 +59,15 @@ func (c ReadyCheckpoint) Validate() error {
 	if !validBranch(c.BaseBranch) || !validBranch(c.HeadBranch) {
 		return errors.New("ready checkpoint: base and head branches are invalid")
 	}
+	if !c.Task.IsZero() {
+		prefix, err := c.Task.BranchPrefix()
+		if err != nil {
+			return fmt.Errorf("ready checkpoint: derive task branch prefix: %w", err)
+		}
+		if !strings.HasPrefix(c.HeadBranch, prefix) {
+			return fmt.Errorf("ready checkpoint: head branch must begin with task prefix %q", prefix)
+		}
+	}
 	if !gitOIDPattern.MatchString(c.VerifiedHeadOID) {
 		return errors.New("ready checkpoint: verified head must be a lowercase 40-character Git OID")
 	}

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tomnagengast/factory/internal/taskmodel"
 )
 
 const (
@@ -267,7 +269,15 @@ func (v *MechanicalCompletionValidator) validateBeforePullRequest(ctx context.Co
 	if repository == "" {
 		repository = v.repository
 	}
-	matches, err := v.discoverer.MatchingIssuePullRequests(ctx, repository, run.IssueIdentifier)
+	task, err := taskmodel.ResolveCompatibilityIdentity(run.Task, run.IssueIdentifier)
+	if err != nil {
+		return rejectCompletion(decision, "resolve task identity for pull request discovery: "+err.Error(), false)
+	}
+	branchPrefix, err := task.BranchPrefix()
+	if err != nil {
+		return rejectCompletion(decision, "derive task branch prefix: "+err.Error(), false)
+	}
+	matches, err := v.discoverer.MatchingIssuePullRequests(ctx, repository, branchPrefix)
 	if err != nil {
 		return rejectCompletion(decision, "discover issue pull requests: "+err.Error(), false)
 	}
