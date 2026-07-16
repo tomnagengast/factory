@@ -1,6 +1,6 @@
 # ENG-56 Session Step Readability Implementation Plan
 
-> updated: 2026-07-15T18:02:10-07:00
+> updated: 2026-07-16T12:21:33-07:00
 
 ## Issue context and acceptance criteria
 
@@ -176,7 +176,7 @@ Conflict-state verification is not applicable because the observer is read-only 
 After GitHub reports a human merge commit that contains the exact checkpointed head, resolve the single managed primary checkout at `/Users/tom/repos/tomnagengast/factory`, fetch/prune, fast-forward tracked `main`, and require clean local `main` to equal upstream. Deploy only there:
 
 ```bash
-~/.local/bin/nags deploy --expected-commit "$(git rev-parse HEAD)"
+bin/network-app deploy factory --expected-commit "$(git rev-parse HEAD)"
 ```
 
 Post-deploy health, identity, content, receipt, and session probes:
@@ -194,7 +194,7 @@ Require local health, public health, and the current receipt to agree on commit,
 If the deployment provider's automatic restoration does not recover a failed release, inspect local/public health and retained receipts, identify a known successful deployment ID, then run:
 
 ```bash
-~/.local/bin/nags rollback factory --to <deployment-id>
+bin/network-app rollback factory --to <deployment-id>
 curl -fsS http://127.0.0.1:8092/api/healthz | jq .
 curl -fsS https://factory.nags.cloud/api/healthz | jq .
 ```
