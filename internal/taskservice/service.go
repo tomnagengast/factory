@@ -2,9 +2,12 @@ package taskservice
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/tomnagengast/factory/internal/agentrun"
@@ -87,8 +90,9 @@ type CreateRequest struct {
 }
 
 type StartRequest struct {
-	Actor  taskstore.Actor
-	TaskID string
+	Actor          taskstore.Actor
+	TaskID         string
+	IdempotencyKey string
 }
 
 type StartResult struct {
@@ -221,6 +225,9 @@ func (s *Service) State(ctx context.Context, command taskstore.StateCommand) (ta
 }
 
 func (s *Service) Start(ctx context.Context, request StartRequest) (StartResult, error) {
+	if request.IdempotencyKey == "" || request.IdempotencyKey != strings.TrimSpace(request.IdempotencyKey) || len(request.IdempotencyKey) > 128 {
+		return StartResult{}, errors.New("task service: start idempotency key is invalid")
+	}
 	task, found := s.tasks.Find(request.TaskID)
 	if !found {
 		return StartResult{}, taskstore.ErrNotFound
@@ -263,9 +270,10 @@ func (s *Service) Start(ctx context.Context, request StartRequest) (StartResult,
 		WorkflowID: definition.ID, WorkflowDigest: digest, AdmittedAt: now,
 	}
 	if task.Routing == nil {
+		digest := sha256.Sum256([]byte(task.Ref.ProviderID + "\x00" + request.IdempotencyKey))
 		result, err := s.mutator.Execute(ctx, taskstore.RoutingEnvelope(taskstore.RoutingCommand{
 			Actor: request.Actor, TaskID: task.Ref.ProviderID, ExpectedRevision: task.Revision,
-			Routing: route, IdempotencyKey: "native-start-route-v1",
+			Routing: route, IdempotencyKey: "native-start-route-v1:" + hex.EncodeToString(digest[:]),
 		}), now)
 		if err != nil {
 			return StartResult{}, err

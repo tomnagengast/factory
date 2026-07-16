@@ -8,6 +8,7 @@ import (
 
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	workflowpkg "github.com/tomnagengast/factory/internal/workflow"
 )
 
@@ -29,6 +30,36 @@ func TestEnsureInvocationRunIsIdempotentAndRejectsIssueOwner(t *testing.T) {
 	second := testInvocationClaim(directory, "run-fedcba9876543210", "invocation-two", "factory:two")
 	if _, _, err := store.EnsureInvocationRun(second, time.Now()); err != ErrInvocationIssueOwned {
 		t.Fatalf("issue owner error = %v", err)
+	}
+}
+
+func TestEnsureInvocationRunCoalescesNativeFeedbackIntoExactActiveOwner(t *testing.T) {
+	directory := t.TempDir()
+	store, err := Open(filepath.Join(directory, "runs.json"), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := testInvocationClaim(directory, "run-0123456789abcdef", "invocation-one", "factory:native-start:task-0123456789abcdef")
+	claim.Task = taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-0123456789abcdef", Identifier: "FAC-1"}
+	claim.IssueIdentifier = claim.Task.Identifier
+	claim.RootEventID = claim.EventID
+	run, _, err := store.EnsureInvocationRun(claim, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedback := claim
+	feedback.RunID = "run-fedcba9876543210"
+	feedback.InvocationID = "invocation-feedback"
+	feedback.EventID = "factory:native-continue:task-0123456789abcdef:0123456789abcdef"
+	feedback.RootEventID = feedback.EventID
+	feedback.Feedback = true
+	owner, created, err := store.EnsureInvocationRun(feedback, time.Now().Add(time.Minute))
+	if err != nil || created || owner.ID != run.ID || len(owner.DeliveryIDs) != 2 {
+		t.Fatalf("coalesced owner=%#v created=%t err=%v", owner, created, err)
+	}
+	repeated, _, err := store.EnsureInvocationRun(feedback, time.Now().Add(2*time.Minute))
+	if err != nil || repeated.DuplicateTriggers != owner.DuplicateTriggers || len(repeated.DeliveryIDs) != 2 {
+		t.Fatalf("repeated owner=%#v err=%v", repeated, err)
 	}
 }
 

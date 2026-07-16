@@ -318,11 +318,19 @@ func taskPrincipalPrompt(task taskmodel.TaskRef, triggerKind string, pin workflo
 	context := "Complete the issue from its current durable state."
 	if triggerKind == TriggerKindComment {
 		segment = "feedback"
-		context = "Fresh-read the complete Linear conversation first. Treat every later human comment not already addressed by Factory evidence as current scope. Resume active work when it exists; otherwise create a focused continuation from fetched default branch state."
+		if task.Source == taskmodel.SourceFactory {
+			context = "Fresh-read the complete durable task conversation first. Treat every later human message or gate decision not already addressed by Factory evidence as current scope. Resume active work when it exists; otherwise create a focused continuation from fetched default branch state."
+		} else {
+			context = "Fresh-read the complete Linear conversation first. Treat every later human comment not already addressed by Factory evidence as current scope. Resume active work when it exists; otherwise create a focused continuation from fetched default branch state."
+		}
 	}
 	if triggerKind == TriggerKindPostMerge || triggerKind == TriggerKindGitHub {
 		segment = "remediation"
-		context = "Fresh-read authoritative pull-request, Linear, repository, approved-plan, deployment, and cleanup state. Address an open pull request or complete post-merge work without recreating finished implementation."
+		provider := "Linear"
+		if task.Source == taskmodel.SourceFactory {
+			provider = "task-provider"
+		}
+		context = "Fresh-read authoritative pull-request, " + provider + ", repository, approved-plan, deployment, and cleanup state. Address an open pull request or complete post-merge work without recreating finished implementation."
 		if triggerKind == TriggerKindPostMerge {
 			segment = "post-merge"
 		}

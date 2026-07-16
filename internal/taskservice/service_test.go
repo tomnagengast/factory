@@ -85,7 +85,7 @@ func TestStartPinsRouteAndRepairsAdmissionIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := StartRequest{Actor: taskstore.Actor{ID: "human", Kind: taskstore.AuthorHuman}, TaskID: created.Task.Ref.ProviderID}
+	request := StartRequest{Actor: taskstore.Actor{ID: "human", Kind: taskstore.AuthorHuman}, TaskID: created.Task.Ref.ProviderID, IdempotencyKey: "start-1"}
 	first, err := service.Start(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -103,6 +103,41 @@ func TestStartPinsRouteAndRepairsAdmissionIdempotently(t *testing.T) {
 	stored, found := store.Find(created.Task.Ref.ProviderID)
 	if !found || stored.Revision != first.Task.Revision {
 		t.Fatalf("stored task = %#v found=%v", stored, found)
+	}
+}
+
+func TestStartScopesRoutingIdempotencyToEachTask(t *testing.T) {
+	service, store, _ := newService(t, true)
+	actor := taskstore.Actor{ID: "human", Kind: taskstore.AuthorHuman}
+	var tasks []taskstore.Task
+	for _, key := range []string{"create-one", "create-two"} {
+		created, err := service.Create(context.Background(), CreateRequest{
+			Actor: actor, Title: key, ProjectID: "project-factory", ApprovalMode: taskstore.ApprovalGated, IdempotencyKey: key,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasks = append(tasks, created.Task)
+	}
+	invocations := make(map[string]string)
+	for _, task := range tasks {
+		request := StartRequest{Actor: actor, TaskID: task.Ref.ProviderID, IdempotencyKey: "same-browser-key"}
+		first, err := service.Start(context.Background(), request)
+		if err != nil || !first.Admitted {
+			t.Fatalf("start %s: result=%#v err=%v", task.Ref.ProviderID, first, err)
+		}
+		retry, err := service.Start(context.Background(), request)
+		if err != nil || retry.Admitted || retry.Invocation.ID != first.Invocation.ID {
+			t.Fatalf("retry %s: result=%#v err=%v", task.Ref.ProviderID, retry, err)
+		}
+		stored, _ := store.Find(task.Ref.ProviderID)
+		if stored.Revision != 2 {
+			t.Fatalf("task %s revision = %d, want 2", task.Ref.ProviderID, stored.Revision)
+		}
+		invocations[task.Ref.ProviderID] = first.Invocation.ID
+	}
+	if invocations[tasks[0].Ref.ProviderID] == invocations[tasks[1].Ref.ProviderID] {
+		t.Fatal("different tasks shared a native admission invocation")
 	}
 }
 

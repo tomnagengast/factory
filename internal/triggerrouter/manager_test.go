@@ -5,12 +5,14 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/tomnagengast/factory/internal/agentrun"
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/taskmodel"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 type resolverStub struct {
@@ -161,6 +163,81 @@ func TestManagerWaitsForProtectedDispatchBeforePromotion(t *testing.T) {
 	}
 	if got := routing.Snapshot().Invocations[0].State; got != StateClaimed || len(runs.Snapshot().Runs) != 1 {
 		t.Fatalf("did not promote after protected dispatch: state=%q runs=%#v", got, runs.Snapshot().Runs)
+	}
+}
+
+func TestManagerCoalescesNativeFeedbackIntoAwaitingRun(t *testing.T) {
+	for _, eventKey := range []string{"message:msg-0123456789abcdef", "gate:gate-0123456789abcdef:approved"} {
+		t.Run(eventKey, func(t *testing.T) {
+			directory := t.TempDir()
+			clock := time.Date(2026, 7, 14, 15, 0, 0, 0, time.UTC)
+			routing, err := Open(filepath.Join(directory, "routing.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runs, err := agentrun.Open(filepath.Join(directory, "runs.json"), 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			configuration, _ := testPolicy()
+			pinned := workflow.Pin(configuration.Workflows[0])
+			digest, err := pinned.Digest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			task := taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-0123456789abcdef", Identifier: "FAC-1"}
+			admission := NativeAdmission{Task: task, Workflow: pinned, WorkflowDigest: digest, PolicyRevision: configuration.Revision, RegistryRevision: 1, AdmittedAt: clock}
+			started, _, err := routing.AdmitNative(admission)
+			if err != nil {
+				t.Fatal(err)
+			}
+			notifier := &notifierStub{}
+			manager, _ := NewManager(routing, runs, dispatchStub{dispatched: 100}, &resolverStub{config: testRepository(directory)}, notifier, slog.Default(), func() time.Time { return clock })
+			if err := manager.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			owner := runs.Snapshot().Runs[0]
+			if err := runs.MarkStarting(owner.ID, "native", filepath.Join(directory, "run"), clock); err != nil {
+				t.Fatal(err)
+			}
+			if err := runs.MarkRunning(owner.ID, 1, clock); err != nil {
+				t.Fatal(err)
+			}
+			checkpoint := agentrun.ReadyCheckpoint{
+				ContractVersion: agentrun.LifecycleContractVersion, RunID: owner.ID, Task: task,
+				Repository: "tomnagengast/factory", PullRequest: 15, BaseBranch: "main",
+				HeadBranch: "factory-task-0123456789abcdef-work", VerifiedHeadOID: strings.Repeat("a", 40), CreatedAt: clock,
+			}
+			if err := runs.MarkAwaitingMerge(owner.ID, checkpoint, clock.Add(time.Minute), 1, clock); err != nil {
+				t.Fatal(err)
+			}
+			clock = clock.Add(time.Minute)
+			continuation, _, err := routing.AdmitNativeContinuation(admission, eventKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			resumed, _ := runs.Find(owner.ID)
+			if resumed.State != agentrun.StatePending || resumed.ResumeCount != 1 || len(resumed.DeliveryIDs) != 2 || len(runs.Snapshot().Runs) != 1 {
+				t.Fatalf("resumed Run = %#v", resumed)
+			}
+			terminal, _ := routing.Invocation(continuation.ID)
+			if terminal.State != StateRejected || terminal.RunID != owner.ID || terminal.ReflectedAt == nil || terminal.Reason != "native-feedback-coalesced" {
+				t.Fatalf("continuation = %#v", terminal)
+			}
+			if started.State != StateQueued || notifier.calls < 2 {
+				t.Fatalf("notifications=%d started=%#v", notifier.calls, started)
+			}
+			if err := manager.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			repeated, _ := runs.Find(owner.ID)
+			if repeated.ResumeCount != 1 || len(repeated.DeliveryIDs) != 2 {
+				t.Fatalf("repeat changed Run = %#v", repeated)
+			}
+		})
 	}
 }
 

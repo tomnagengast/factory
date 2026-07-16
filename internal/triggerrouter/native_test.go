@@ -30,6 +30,10 @@ func TestAdmitNativeIsDurableAndIdempotent(t *testing.T) {
 	if err != nil || created || repeated.ID != invocation.ID {
 		t.Fatalf("repeat: invocation=%#v created=%t err=%v", repeated, created, err)
 	}
+	feedback, created, err := store.AdmitNativeContinuation(admission, "message:msg-0123456789abcdef")
+	if err != nil || !created || !NativeFeedbackInvocation(feedback) {
+		t.Fatalf("feedback invocation=%#v created=%t err=%v", feedback, created, err)
+	}
 	reopened, err := Open(path)
 	if err != nil {
 		t.Fatal(err)

@@ -419,7 +419,7 @@ func (s *appServer) postTaskStart(w http.ResponseWriter, r *http.Request) {
 	if !decodeTaskJSON(w, r, &struct{}{}) {
 		return
 	}
-	result, err := s.tasks.Start(r.Context(), taskservice.StartRequest{Actor: actor, TaskID: r.PathValue("id")})
+	result, err := s.tasks.Start(r.Context(), taskservice.StartRequest{Actor: actor, TaskID: r.PathValue("id"), IdempotencyKey: taskIdempotencyKey(r)})
 	if err != nil {
 		s.writeTaskError(w, r, taskstore.Result{}, err)
 		return
@@ -511,6 +511,10 @@ func (s *appServer) writeTaskError(w http.ResponseWriter, r *http.Request, resul
 		return true
 	}
 	if errors.Is(err, taskstore.ErrIdempotencyConflict) {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return true
+	}
+	if errors.Is(err, taskstore.ErrTerminalTask) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return true
 	}

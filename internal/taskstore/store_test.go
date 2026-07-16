@@ -176,6 +176,66 @@ func TestStoreAppendFailureDoesNotMutateProjection(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsNewMutationsAfterCompletionButReplaysHistory(t *testing.T) {
+	store := openTestStore(t)
+	task := createTestTask(t, store, ApprovalGated, "create-terminal")
+	routing := RoutingSnapshot{ProjectID: task.ProjectID, Repository: "tomnagengast/factory", RepositoryURL: "https://github.com/tomnagengast/factory", RepositoryPath: "/tmp/factory", ManagedRoot: "/tmp", BaseBranch: "main", WorkflowID: "full-sdlc-provider-neutral", WorkflowDigest: "digest", AdmittedAt: testNow}
+	route := RoutingCommand{Actor: agentActor, TaskID: task.Ref.ProviderID, ExpectedRevision: task.Revision, Routing: routing, IdempotencyKey: "route-terminal"}
+	task, replayed, err := store.SetRouting(route, testNow)
+	if err != nil || replayed {
+		t.Fatalf("route: task=%#v replayed=%t err=%v", task, replayed, err)
+	}
+	complete := CompletionCommand{Actor: agentActor, TaskID: task.Ref.ProviderID, ExpectedRevision: task.Revision, Completion: Completion{RunID: "run-0123456789abcdef", EvidenceRef: "checkpoint:ready"}, IdempotencyKey: "complete-terminal"}
+	task, _, err = store.Complete(complete, testNow.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, replayed, err := store.SetRouting(route, testNow.Add(2*time.Minute)); err != nil || !replayed {
+		t.Fatalf("historical retry replayed=%t err=%v", replayed, err)
+	}
+
+	checks := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "update", run: func() error {
+			_, _, err := store.Update(UpdateCommand{Actor: humanActor, TaskID: task.Ref.ProviderID, ExpectedRevision: task.Revision, Title: task.Title, ApprovalMode: task.ApprovalMode, IdempotencyKey: "terminal-update"}, testNow)
+			return err
+		}},
+		{name: "message", run: func() error {
+			_, _, _, err := store.AddMessage(MessageCommand{Actor: humanActor, TaskID: task.Ref.ProviderID, ExpectedRevision: task.Revision, Body: "late feedback", IdempotencyKey: "terminal-message"}, testNow)
+			return err
+		}},
+		{name: "link", run: func() error {
+			_, _, _, err := store.AddLink(LinkCommand{Actor: agentActor, TaskID: task.Ref.ProviderID, ExpectedRevision: task.Revision, Label: "late", URL: "https://example.com/late", IdempotencyKey: "terminal-link"}, testNow)
+			return err
+		}},
+		{name: "gate", run: func() error {
+			_, _, _, err := store.OpenGate(GateCommand{Actor: agentActor, TaskID: task.Ref.ProviderID, ExpectedRevision: task.Revision, Kind: GateKindPlan, Mode: ApprovalGated, IdempotencyKey: "terminal-gate"}, testNow)
+			return err
+		}},
+		{name: "state", run: func() error {
+			_, _, err := store.ChangeState(StateCommand{Actor: humanActor, TaskID: task.Ref.ProviderID, ExpectedRevision: task.Revision, State: StateCanceled, IdempotencyKey: "terminal-state"}, testNow)
+			return err
+		}},
+		{name: "completion", run: func() error {
+			_, _, err := store.Complete(CompletionCommand{Actor: agentActor, TaskID: task.Ref.ProviderID, ExpectedRevision: task.Revision, Completion: Completion{RunID: "run-fedcba9876543210", EvidenceRef: "other"}, IdempotencyKey: "terminal-completion"}, testNow)
+			return err
+		}},
+	}
+	before := store.Snapshot()
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			if err := check.run(); !errors.Is(err, ErrTerminalTask) {
+				t.Fatalf("error = %v, want ErrTerminalTask", err)
+			}
+		})
+	}
+	if after := store.Snapshot(); !reflect.DeepEqual(after, before) {
+		t.Fatal("terminal mutation attempts changed the task projection")
+	}
+}
+
 func TestStoreReopensAndPagesThousandTasksAndTenThousandMessages(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tasks.jsonl")
 	snapshot := workloadSnapshot(1000, 10)

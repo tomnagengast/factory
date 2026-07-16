@@ -35,6 +35,9 @@ const (
 
 	DecisionApprove = "approve"
 	DecisionRevise  = "revise"
+
+	GateKindResearch = "research"
+	GateKindPlan     = "plan"
 )
 
 var (
@@ -164,6 +167,10 @@ type Status struct {
 	Tasks         int    `json:"tasks"`
 	Messages      uint64 `json:"messages"`
 	PendingStages int    `json:"pendingStages"`
+}
+
+func (t Task) Terminal() bool {
+	return t.State == StateCompleted || t.State == StateCanceled
 }
 
 func (a Actor) Validate() error {

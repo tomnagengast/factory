@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/tomnagengast/factory/internal/eventwire"
@@ -104,4 +105,11 @@ func (s *Store) admitNative(admission NativeAdmission, eventID, invocationKey st
 
 func NativeInvocationMatches(invocation Invocation, task taskmodel.TaskRef, workflowDigest string) bool {
 	return invocation.Task.Equal(task) && invocation.WorkflowDigest == workflowDigest && invocation.Rule.ID == nativeTaskStartRuleID && slices.Equal(invocation.AncestorRuleIDs, []string{nativeTaskStartRuleID})
+}
+
+func NativeFeedbackInvocation(invocation Invocation) bool {
+	prefix := "factory:native-continue:" + invocation.Task.ProviderID + ":"
+	suffix := strings.TrimPrefix(invocation.EventID, prefix)
+	return invocation.Task.Source == taskmodel.SourceFactory && invocation.Rule.ID == nativeTaskStartRuleID &&
+		strings.HasPrefix(invocation.EventID, prefix) && len(suffix) == 16 && strings.Trim(suffix, "0123456789abcdef") == ""
 }

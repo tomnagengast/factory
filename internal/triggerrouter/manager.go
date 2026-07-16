@@ -76,12 +76,21 @@ func (m *Manager) reconcile(ctx context.Context, includeQueued bool) error {
 		if !invocation.Nonterminal() || invocation.EventSequence > dispatched || (!includeQueued && invocation.State == StateQueued) {
 			continue
 		}
+		if NativeFeedbackInvocation(invocation) {
+			continue
+		}
 		key := invocation.Task.OwnershipKey()
 		if _, found := oldest[key]; !found {
 			oldest[key] = invocation
 		}
 	}
 	for _, invocation := range snapshot.Invocations {
+		if invocation.Nonterminal() && invocation.EventSequence <= dispatched && (includeQueued || invocation.State != StateQueued) && NativeFeedbackInvocation(invocation) {
+			if err := m.reconcileInvocation(ctx, invocation); err != nil {
+				return err
+			}
+			continue
+		}
 		candidate, found := oldest[invocation.Task.OwnershipKey()]
 		if !found || candidate.ID != invocation.ID {
 			continue
@@ -151,18 +160,27 @@ func (m *Manager) finishClaim(ctx context.Context, invocation Invocation) error 
 }
 
 func (m *Manager) ensureAndClaim(invocation Invocation, repository agentrun.RepositoryConfig) error {
-	_, _, err := m.runs.EnsureInvocationRun(agentrun.InvocationClaim{
+	run, _, err := m.runs.EnsureInvocationRun(agentrun.InvocationClaim{
 		RunID: invocation.RunID, InvocationID: invocation.ID, EventID: invocation.EventID,
 		Task: invocation.Task, IssueIdentifier: invocation.IssueIdentifier, RootEventID: invocation.RootEventID,
 		Hop: invocation.Hop, AncestorRuleIDs: invocation.AncestorRuleIDs,
 		Workflow: invocation.Workflow, WorkflowDigest: invocation.WorkflowDigest,
 		PolicyRevision: invocation.PolicyRevision, Repository: repository,
+		Feedback: NativeFeedbackInvocation(invocation),
 	}, m.now())
 	if errors.Is(err, agentrun.ErrInvocationIssueOwned) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("trigger router manager: ensure invocation Run: %w", err)
+	}
+	if run.ID != invocation.RunID {
+		reflected := m.now().UTC()
+		if _, err := m.routing.TransitionInvocation(invocation.ID, StateRejected, run.ID, "native-feedback-coalesced", &reflected, reflected); err != nil {
+			return err
+		}
+		m.notifier.Notify()
+		return nil
 	}
 	if _, err := m.routing.TransitionInvocation(invocation.ID, StateClaimed, invocation.RunID, "", nil, m.now()); err != nil {
 		return err

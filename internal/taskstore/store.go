@@ -39,6 +39,7 @@ const (
 var (
 	ErrIdempotencyConflict = errors.New("task store: idempotency key conflicts with an existing command")
 	ErrNotFound            = errors.New("task store: task not found")
+	ErrTerminalTask        = errors.New("task store: terminal task cannot be mutated")
 )
 
 type RevisionConflict struct {
@@ -448,6 +449,9 @@ func (s *Store) mutateTask(kind string, actor Actor, taskID string, expected uin
 	current, found := s.tasks[taskID]
 	if !found {
 		return Task{}, false, ErrNotFound
+	}
+	if current.Terminal() {
+		return Task{}, false, ErrTerminalTask
 	}
 	if current.Revision != expected {
 		return Task{}, false, RevisionConflict{Current: current.Clone()}

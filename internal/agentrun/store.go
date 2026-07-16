@@ -139,6 +139,7 @@ type InvocationClaim struct {
 	WorkflowDigest  string
 	PolicyRevision  uint64
 	Repository      RepositoryConfig
+	Feedback        bool
 }
 
 type ContinuationClaim struct {
@@ -288,18 +289,31 @@ func (s *Store) EnsureInvocationRun(claim InvocationClaim, now time.Time) (Run, 
 	}
 	for _, run := range s.state.Runs {
 		if run.Task.Equal(task) && run.State.Active() {
+			if claim.Feedback {
+				if !validNativeFeedbackClaim(claim, task) {
+					return Run{}, false, errors.New("agent run store: native feedback claim is invalid")
+				}
+				return s.coalesceInvocationFeedbackLocked(run.ID, claim.EventID, now)
+			}
 			return Run{}, false, ErrInvocationIssueOwned
 		}
 	}
 	claim.Task = task
 	claim.IssueIdentifier = task.Identifier
 	pinnedWorkflow := claim.Workflow.Clone()
+	triggerKind := TriggerKindRule
+	if claim.Feedback {
+		if !validNativeFeedbackClaim(claim, task) {
+			return Run{}, false, errors.New("agent run store: native feedback claim is invalid")
+		}
+		triggerKind = TriggerKindComment
+	}
 	run := Run{
 		ID: claim.RunID, Task: task, IssueIdentifier: task.Identifier,
 		Repository: claim.Repository.Repository, RepositoryURL: claim.Repository.RepoURL,
 		RepositoryPath: claim.Repository.RepoPath, ManagedRoot: claim.Repository.ManagedRoot,
 		BaseBranch: claim.Repository.BaseBranch, Bootstrap: claim.Repository.Bootstrap, CloudURL: claim.Repository.CloudURL,
-		TriggerKind: TriggerKindRule, DeliveryIDs: []string{claim.EventID}, State: StatePending,
+		TriggerKind: triggerKind, DeliveryIDs: []string{claim.EventID}, State: StatePending,
 		CreatedAt: now, UpdatedAt: now, Transitions: []Transition{newTransition(claim.RunID, StatePending, 0, now)},
 		InvocationID: claim.InvocationID, InvocationRootEventID: claim.RootEventID, InvocationHop: claim.Hop,
 		InvocationAncestorRuleIDs: slices.Clone(claim.AncestorRuleIDs), PinnedWorkflow: &pinnedWorkflow,
@@ -314,6 +328,43 @@ func (s *Store) EnsureInvocationRun(claim InvocationClaim, now time.Time) (Run, 
 	}
 	s.state = next
 	return cloneRun(run), true, nil
+}
+
+func validNativeFeedbackClaim(claim InvocationClaim, task taskmodel.TaskRef) bool {
+	prefix := "factory:native-continue:" + task.ProviderID + ":"
+	suffix := strings.TrimPrefix(claim.EventID, prefix)
+	return task.Source == taskmodel.SourceFactory && strings.HasPrefix(claim.EventID, prefix) && len(suffix) == 16 &&
+		strings.Trim(suffix, "0123456789abcdef") == "" && claim.RootEventID == claim.EventID
+}
+
+func (s *Store) coalesceInvocationFeedbackLocked(runID, eventID string, now time.Time) (Run, bool, error) {
+	next := s.state
+	next.Runs = cloneRuns(s.state.Runs)
+	for index := range next.Runs {
+		run := &next.Runs[index]
+		if run.ID != runID {
+			continue
+		}
+		if slices.Contains(run.DeliveryIDs, eventID) {
+			return cloneRun(*run), false, nil
+		}
+		run.DeliveryIDs = append(run.DeliveryIDs, eventID)
+		run.DuplicateTriggers++
+		run.UpdatedAt = now
+		previousState := run.State
+		if run.State == StateAwaitingMerge {
+			resumeAwaitingRun(run, TriggerKindComment, "", "Native task feedback received; resuming lifecycle", now)
+		}
+		if run.State != previousState {
+			run.Transitions = append(run.Transitions, newTransition(run.ID, run.State, run.Attempts, now))
+		}
+		if err := writeState(s.path, next); err != nil {
+			return Run{}, false, err
+		}
+		s.state = next
+		return cloneRun(*run), false, nil
+	}
+	return Run{}, false, ErrInvocationIssueOwned
 }
 
 func invocationRunMatches(run Run, claim InvocationClaim) bool {

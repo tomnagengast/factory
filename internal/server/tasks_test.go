@@ -25,6 +25,7 @@ import (
 type testTaskController struct {
 	create taskservice.CreateRequest
 	detail taskservice.Detail
+	start  taskservice.StartRequest
 }
 
 type testLinearTaskController struct {
@@ -90,7 +91,8 @@ func (c *testTaskController) Decide(context.Context, taskstore.DecisionCommand) 
 func (c *testTaskController) State(context.Context, taskstore.StateCommand) (taskstore.Result, error) {
 	return taskstore.Result{}, nil
 }
-func (c *testTaskController) Start(context.Context, taskservice.StartRequest) (taskservice.StartResult, error) {
+func (c *testTaskController) Start(_ context.Context, request taskservice.StartRequest) (taskservice.StartResult, error) {
+	c.start = request
 	return taskservice.StartResult{}, nil
 }
 
@@ -130,6 +132,15 @@ func TestTaskAPIsRequireAuthenticationAndDeriveActor(t *testing.T) {
 	readOnly := authenticatedJSONRequest(t, handler, http.MethodPost, "/api/tasks/linear/ENG-46/messages", map[string]any{}, "")
 	if readOnly.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("Linear mutation = %d %s", readOnly.Code, readOnly.Body.String())
+	}
+	startRequest := httptest.NewRequest(http.MethodPost, "/api/tasks/factory/task-0123456789abcdef/start", strings.NewReader(`{}`))
+	startRequest.AddCookie(viewerSessionCookie(t, handler))
+	startRequest.Header.Set("Content-Type", "application/json")
+	startRequest.Header.Set("Idempotency-Key", "start-native")
+	startRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(startRecorder, startRequest)
+	if startRecorder.Code != http.StatusOK || controller.start.IdempotencyKey != "start-native" {
+		t.Fatalf("start = %d request=%#v body=%s", startRecorder.Code, controller.start, startRecorder.Body.String())
 	}
 }
 

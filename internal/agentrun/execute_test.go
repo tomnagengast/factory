@@ -119,6 +119,22 @@ func TestContinuationPromptRequiresFreshLinearFeedbackRead(t *testing.T) {
 	}
 }
 
+func TestNativeContinuationPromptRequiresFreshDurableTaskRead(t *testing.T) {
+	prompt := taskPrincipalPrompt(
+		taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-0123456789abcdef", Identifier: "FAC-1"},
+		TriggerKindComment,
+		workflow.Pin(workflow.ProviderNeutralDefault(time.Now())),
+	)
+	for _, expected := range []string{"Fresh-read the complete durable task conversation first.", "later human message or gate decision", "focused continuation"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("native continuation prompt missing %q: %s", expected, prompt)
+		}
+	}
+	if strings.Contains(prompt, "Fresh-read the complete Linear conversation first.") {
+		t.Fatalf("native continuation prompt instructed a Linear read: %s", prompt)
+	}
+}
+
 func TestProviderNeutralLinearPromptUsesScopedTaskHelper(t *testing.T) {
 	t.Parallel()
 

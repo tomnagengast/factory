@@ -52,9 +52,22 @@ func (c *Completer) Complete(ctx context.Context, ref taskmodel.TaskRef, runID, 
 	if err != nil {
 		return false, fmt.Errorf("task completion: read gates: %w", err)
 	}
+	latest := make(map[string]taskstore.Gate, len(gates))
 	for _, gate := range gates {
+		latest[gate.Kind] = gate
+	}
+	for _, gate := range latest {
 		if gate.Status != taskstore.GateApproved {
 			return false, fmt.Errorf("task completion: gate %s is not approved", gate.ID)
+		}
+	}
+	if task.ApprovalMode == taskstore.ApprovalGated {
+		for _, kind := range []string{taskstore.GateKindResearch, taskstore.GateKindPlan} {
+			gate, found := latest[kind]
+			if !found || gate.Mode != taskstore.ApprovalGated || gate.Status != taskstore.GateApproved || gate.ArtifactURL == "" ||
+				gate.Decision == nil || gate.Decision.Action != taskstore.DecisionApprove || gate.Decision.Actor.Kind != taskstore.AuthorHuman {
+				return false, fmt.Errorf("task completion: %s gate lacks current human approval evidence", kind)
+			}
 		}
 	}
 	if err := c.requireHumanFeedbackAnswered(task); err != nil {
