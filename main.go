@@ -209,9 +209,6 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	if err != nil {
 		return err
 	}
-	if _, err := events.ReconcileProviderNeutral(settingsStore.Snapshot().Revision, time.Now()); err != nil {
-		return fmt.Errorf("reconcile provider-neutral workflow: %w", err)
-	}
 	taskStorePath := filepath.Join(dataRoot, "native-tasks.jsonl")
 	nativeTasks, err := taskstore.Open(taskStorePath)
 	if err != nil {
@@ -576,7 +573,15 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 		slog.Info("factory listening", "address", httpServer.Addr)
 		errCh <- httpServer.Serve(listener)
 	}()
-	go recoverEventWire(ctx, events, 5*time.Second, triggerManager.ReconcileExisting, func() error {
+	go recoverEventWire(ctx, events, 5*time.Second, func(ctx context.Context) error {
+		if err := triggerManager.ReconcileExisting(ctx); err != nil {
+			return err
+		}
+		if _, err := events.ReconcileProviderNeutral(settingsStore.Snapshot().Revision, time.Now()); err != nil {
+			return fmt.Errorf("reconcile provider-neutral workflow: %w", err)
+		}
+		return nil
+	}, func() error {
 		projectManager.Reconcile(ctx)
 		if err := triggerManager.Reconcile(ctx); err != nil {
 			return err

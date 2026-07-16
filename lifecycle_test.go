@@ -20,6 +20,13 @@ type recordingPublisher struct {
 	notify chan struct{}
 }
 
+type countingRecoverableWire struct{ catchUps atomic.Int32 }
+
+func (w *countingRecoverableWire) CatchUp(context.Context) error {
+	w.catchUps.Add(1)
+	return nil
+}
+
 func TestRecoverEventWireGatesRuntimeUntilCatchUp(t *testing.T) {
 	t.Parallel()
 	journal, err := eventwire.Open(filepath.Join(t.TempDir(), "events.jsonl"), 10, nil)
@@ -63,6 +70,32 @@ func TestRecoverEventWireGatesRuntimeUntilCatchUp(t *testing.T) {
 	}
 	if got := attempts.Load(); got != 3 {
 		t.Fatalf("dispatch attempts = %d, want 3", got)
+	}
+}
+
+func TestRecoverEventWireRetriesPendingPolicyBeforeCatchUp(t *testing.T) {
+	t.Parallel()
+	wire := &countingRecoverableWire{}
+	var preflightAttempts atomic.Int32
+	ready := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go recoverEventWire(ctx, wire, time.Millisecond, func(context.Context) error {
+		if preflightAttempts.Add(1) == 1 {
+			return errors.New("pending event admission")
+		}
+		return nil
+	}, func() error {
+		close(ready)
+		return nil
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not recover pending policy")
+	}
+	if preflightAttempts.Load() != 2 || wire.catchUps.Load() != 1 {
+		t.Fatalf("preflight attempts=%d catch-ups=%d", preflightAttempts.Load(), wire.catchUps.Load())
 	}
 }
 
