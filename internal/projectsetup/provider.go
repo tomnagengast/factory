@@ -356,7 +356,7 @@ func providerIssueDescription(spec Spec, marker string) string {
 - Requested Cloud URL: %s
 - Provider repository: tomnagengast/network
 
-Own only the reviewed provider desired state in the Network repository. Read the tenant project's current issues and comments before choosing access. Allocate the next available provider port, register tenant app %q, and add the %q route. Default access to private unless an explicit owner decision on the tenant project requires public access. The tenant root nags.toml remains authoritative for build, run, health, processes, and secrets.
+Own the reviewed provider desired state in the Network repository. Read the tenant project's current issues and comments before choosing access. Allocate the next available provider port, register tenant app %q, and add the %q route. Default access to private unless an explicit owner decision on the tenant project requires public access. The tenant root nags.toml remains authoritative for build, run, health, processes, and secrets.
 
 Provider validation may require the tenant manifest on canonical tenant main. Prepare the provider change in its own Worktrunk branch and draft PR, but do not merge, reconcile, deploy, or bypass the exact-head Factory checkpoint. Coordinate sequencing through Linear when the tenant manifest is not ready.
 
