@@ -11,6 +11,16 @@ import {
   type Resource,
 } from "solid-js";
 import { render } from "solid-js/web";
+import {
+  ActivityHeader,
+  formatTime,
+  InlineError,
+  LoadingRows,
+  resourceState,
+  runStateLabel,
+} from "./activity";
+import { agentRunHref, type AgentActivityRun, type AgentRun } from "./agent";
+import { getJSON } from "./http";
 import "./styles.css";
 
 type Health = {
@@ -28,17 +38,6 @@ type ActivityEvent = {
   type: string;
   action: string;
   receivedAt: string;
-};
-
-type AgentRun = {
-  id: string;
-  state: string;
-  attempts: number;
-  duplicateTriggers: number;
-  createdAt: string;
-  updatedAt: string;
-  startedAt?: string;
-  finishedAt?: string;
 };
 
 type AgentRunSnapshot = {
@@ -219,44 +218,6 @@ type WireEventDetail = {
   record: WireRecord;
   payloadAvailable: boolean;
   payload?: unknown;
-};
-
-type ReadyCheckpoint = {
-  contractVersion: number;
-  repository: string;
-  pullRequest: number;
-  baseBranch: string;
-  headBranch: string;
-  verifiedHeadOid: string;
-  pullRequestUpdatedAt?: string;
-  createdAt: string;
-  validatedAt?: string;
-};
-
-type CompletionValidation = {
-  accepted: boolean;
-  intent: string;
-  blocker?: string;
-  state: string;
-  reason: string;
-  validatedAt: string;
-  mergeCommitOid?: string;
-  deploymentId?: string;
-  deploymentCommit?: string;
-};
-
-type AgentActivityRun = AgentRun & {
-  task: TaskRef;
-  issueIdentifier: string;
-  ready?: ReadyCheckpoint;
-  mergeCommitOid?: string;
-  lastGitHubCursor?: number;
-  lastAuthoritativeRefreshAt?: string;
-  nextReconcileAt?: string;
-  reconcileFailures?: number;
-  resumeCount?: number;
-  terminalRejection?: string;
-  completion?: CompletionValidation;
 };
 
 type AgentActivitySnapshot = {
@@ -460,13 +421,8 @@ type TriggerSaveResult = { snapshot: TriggerResponse; conflict: boolean };
 type SubjectFilterMode = "wildcard" | "absent" | "exact";
 
 const refreshIntervalMs = 2000;
-type ActivitySection = "home" | "wire" | "tasks" | "agents" | "workflows" | "triggers" | "settings";
 
 const activityPageSize = 25;
-const timeFormatter = new Intl.DateTimeFormat(undefined, {
-  dateStyle: "medium",
-  timeStyle: "short",
-});
 
 const observationTimeFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -687,21 +643,9 @@ async function saveSettings(
   };
 }
 
-async function getJSON<T>(url: string, label: string): Promise<T> {
-  const response = await fetch(url, {
-    cache: "no-store",
-    credentials: "same-origin",
-  });
-  if (!response.ok) {
-    throw new Error(`${label} failed with ${response.status}`);
-  }
-  return response.json() as Promise<T>;
-}
-
 function resourceSnapshot<T>(resource: Resource<T>): T | undefined {
   return resource.error ? undefined : resource();
 }
-
 function HomePage(): JSX.Element {
   const [health] = createResource(getHealth);
   const healthSnapshot = (): Health | undefined => resourceSnapshot(health);
@@ -749,84 +693,6 @@ function HomePage(): JSX.Element {
         </footer>
       </section>
     </main>
-  );
-}
-
-function ActivityHeader(props: {
-  section: ActivitySection;
-  state: "loading" | "ready" | "failed";
-  label: string;
-}): JSX.Element {
-  return (
-    <header class="activity-header">
-      <a class="brand-link" href="/">
-        <span class="mark" aria-hidden="true">
-          F
-        </span>
-        <span>Factory</span>
-      </a>
-      <nav class="activity-nav" aria-label="Activity sections">
-        <a
-          classList={{ active: props.section === "home" }}
-          aria-current={props.section === "home" ? "page" : undefined}
-          href="/home"
-        >
-          Overview
-        </a>
-        <a
-          classList={{ active: props.section === "wire" }}
-          aria-current={props.section === "wire" ? "page" : undefined}
-          href="/wire"
-        >
-          Wire
-        </a>
-        <a
-          classList={{ active: props.section === "tasks" }}
-          aria-current={props.section === "tasks" ? "page" : undefined}
-          href="/tasks"
-        >
-          Tasks
-        </a>
-        <a
-          classList={{ active: props.section === "agents" }}
-          aria-current={props.section === "agents" ? "page" : undefined}
-          href="/agents"
-        >
-          Agents
-        </a>
-        <a
-          classList={{ active: props.section === "workflows" }}
-          aria-current={props.section === "workflows" ? "page" : undefined}
-          href="/workflows"
-        >
-          Workflows
-        </a>
-        <a
-          classList={{ active: props.section === "triggers" }}
-          aria-current={props.section === "triggers" ? "page" : undefined}
-          href="/triggers"
-        >
-          Triggers
-        </a>
-        <a
-          classList={{ active: props.section === "settings" }}
-          aria-current={props.section === "settings" ? "page" : undefined}
-          href="/settings"
-        >
-          Settings
-        </a>
-      </nav>
-      <div class="listener" aria-live="polite">
-        <span
-          classList={{
-            dot: true,
-            ready: props.state === "ready",
-            failed: props.state === "failed",
-          }}
-        />
-        <span>{props.label}</span>
-      </div>
-    </header>
   );
 }
 
@@ -2868,25 +2734,6 @@ function taskErrorMessage(error: unknown): string {
   return "The task request failed.";
 }
 
-function InlineError(props: { message: string }): JSX.Element {
-  return (
-    <div class="inline-error" role="alert">
-      <strong>Connection failed</strong>
-      <span>{props.message}</span>
-    </div>
-  );
-}
-
-function LoadingRows(): JSX.Element {
-  return (
-    <div class="loading-rows" aria-label="Loading activity">
-      <span />
-      <span />
-      <span />
-    </div>
-  );
-}
-
 function AgentPage(props: { load: () => Promise<AgentView> }): JSX.Element {
   const [agent, { refetch }] = createResource(props.load);
   const agentSnapshot = (): AgentView | undefined => resourceSnapshot(agent);
@@ -3212,14 +3059,6 @@ function agentStepDetailLabel(step: AgentStep): string {
 function agentStepHasEvidence(step: AgentStep): boolean {
   return Boolean(agentStepDetail(step) || step.output || step.error);
 }
-
-function agentRunHref(run: AgentActivityRun): string | undefined {
-  if (!run.startedAt) {
-    return undefined;
-  }
-  return `/agents/${encodeURIComponent(run.issueIdentifier)}/${new Date(run.startedAt).getTime()}/run?source=${run.task.source}`;
-}
-
 function countRunStates(runs: AgentActivityRun[]): ActivityCount[] {
   const counts = new Map<string, number>();
   for (const run of runs) {
@@ -3229,12 +3068,6 @@ function countRunStates(runs: AgentActivityRun[]): ActivityCount[] {
   return [...counts.entries()]
     .map(([label, count]) => ({ label, count }))
     .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
-}
-
-function runStateLabel(value: string): string {
-  return value.replace(/(^|[-_])([a-z])/g, (_, prefix, letter: string) =>
-    `${prefix ? " " : ""}${letter.toUpperCase()}`,
-  );
 }
 
 function runLifecycleDetail(run: AgentActivityRun): string {
@@ -3269,13 +3102,6 @@ function runLifecycleDetail(run: AgentActivityRun): string {
 
 function shortOID(value: string | undefined): string {
   return value ? value.slice(0, 12) : "unknown";
-}
-
-function formatTime(value: string | null | undefined): string {
-  if (!value) {
-    return "No activity yet";
-  }
-  return timeFormatter.format(new Date(value));
 }
 
 function formatObservationTime(value: string): string {
@@ -3355,20 +3181,6 @@ function agentConsoleLabel(agent: AgentView): string {
     return "Retained run history · expand for evidence and raw event";
   }
   return "This run has no retained output";
-}
-
-function resourceState(
-  loading: boolean,
-  error: unknown,
-  ready = true,
-): "loading" | "ready" | "failed" {
-  if (error) {
-    return "failed";
-  }
-  if (loading || !ready) {
-    return "loading";
-  }
-  return "ready";
 }
 
 const root = document.getElementById("root");
