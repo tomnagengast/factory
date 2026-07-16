@@ -109,6 +109,15 @@ Provider-neutral Runs receive a private capability bound to the exact Run, TaskR
 
 Mutating helper operations derive a stable idempotency key when one is not supplied. The service rejects unknown, terminal, cross-repository, or capability-mismatched Runs. Native human messages and gate decisions can continue an in-progress Run; agent and system messages cannot. Native completion is not an editable state transition. Factory records `completed` only after the existing pull-request, review, verified-head, deployment, cleanup, child-window, task-gate, and unanswered-human-feedback evidence all passes. The only direct terminal task action is cancellation.
 
+### Native rollout canary checklist
+
+- [ ] Obtain separate human approvals for the research gate and the adversarially reviewed plan gate.
+- [ ] Verify checks and feedback at one pull-request head, then record that exact head in the ready-for-merge checkpoint.
+- [ ] Have a human use **Create a merge commit**, then prove the merge contains the checkpointed head.
+- [ ] Fast-forward the clean primary `main`, deploy that exact merged-main commit from the primary checkout, and match its receipt with local and public health.
+- [ ] Confirm GitHub automatically deleted the remote head, fetch and prune, then remove the clean integrated branch and worktree with Worktrunk.
+- [ ] Record provider-neutral completion evidence for the pull request, verified head, human merge, deployment, cleanup, completed child work, approved gates, and no unanswered human feedback.
+
 ### Native task storage and recovery
 
 All task state is private under `~/.local/share/factory/data`:
