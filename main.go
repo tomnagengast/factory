@@ -23,6 +23,7 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/linearidentity"
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/server"
 	"github.com/tomnagengast/factory/internal/settings"
@@ -146,6 +147,10 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	}
 	stateRoot := filepath.Join(home, ".local", "share", "factory")
 	dataRoot := filepath.Join(stateRoot, "data")
+	linearIdentities, err := linearidentity.Open(filepath.Join(dataRoot, "linear-task-identities.json"))
+	if err != nil {
+		return err
+	}
 	maxConcurrentRuns := envInt("FACTORY_MAX_AGENTS", defaultMaxConcurrentRuns)
 	settingsStore, err := settings.Open(filepath.Join(dataRoot, "settings.json"), settings.Defaults(maxConcurrentRuns))
 	if err != nil {
@@ -435,7 +440,7 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	if err != nil {
 		return err
 	}
-	linearTaskProvider, err := taskservice.NewLinearProvider(linearGraphQLURL, linearAPIKey, &http.Client{Timeout: 10 * time.Second})
+	linearTaskProvider, err := taskservice.NewLinearProvider(linearGraphQLURL, linearAPIKey, &http.Client{Timeout: 10 * time.Second}, linearIdentities)
 	if err != nil {
 		return err
 	}
@@ -519,12 +524,13 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 			ContractVersion: buildContractVersion,
 			StartedAt:       serviceStartedAt,
 		},
-		GenericTriggers: true,
-		TriggerPolicy:   events,
-		ScheduleStatus:  scheduler,
-		Tasks:           nativeTaskService,
-		LinearTasks:     linearTaskProvider,
-		Ready:           ready.Load,
+		GenericTriggers:  true,
+		TriggerPolicy:    events,
+		ScheduleStatus:   scheduler,
+		Tasks:            nativeTaskService,
+		LinearTasks:      linearTaskProvider,
+		LinearIdentities: linearIdentities,
+		Ready:            ready.Load,
 	})
 	if err != nil {
 		return err

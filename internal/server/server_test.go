@@ -28,6 +28,7 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/linearidentity"
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/viewerauth"
@@ -395,6 +396,36 @@ func TestLinearWebhookAcceptsAndDeduplicatesSignedDelivery(t *testing.T) {
 	}
 }
 
+func TestLinearWebhookRejectsConflictingIssueIdentityBeforePublication(t *testing.T) {
+	t.Parallel()
+	handler := testHandler(t)
+	body := func(uuid string) string {
+		return fmt.Sprintf(
+			`{"type":"Issue","action":"update","webhookTimestamp":%d,"data":{"id":%q,"identifier":"ENG-46"}}`,
+			testNow.UnixMilli(), uuid,
+		)
+	}
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, signedWebhookRequest(body("11111111-1111-4111-8111-111111111111"), "identity-1", testSecret))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first identity status = %d", first.Code)
+	}
+	conflict := httptest.NewRecorder()
+	handler.ServeHTTP(conflict, signedWebhookRequest(body("22222222-2222-4222-8222-222222222222"), "identity-2", testSecret))
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("conflicting identity status = %d, want %d", conflict.Code, http.StatusConflict)
+	}
+	home := httptest.NewRecorder()
+	handler.ServeHTTP(home, httptest.NewRequest(http.MethodGet, "/api/home", nil))
+	var response homeResponse
+	if err := json.NewDecoder(home.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != 1 {
+		t.Fatalf("published events = %d, want 1", response.Total)
+	}
+}
+
 func TestAuthenticatedWirePagesAllSourcesAndReadsLinearPayload(t *testing.T) {
 	t.Parallel()
 
@@ -676,18 +707,19 @@ func TestPermanentRepositoryRoutingFailureDoesNotBlockLaterRun(t *testing.T) {
 	}
 	wire := testEventWire(t, githubEvents.Total(), linearComments.Total())
 	handler, err := New(Config{
-		Web:            testWeb(),
-		ActivityStore:  activityStore,
-		RunStore:       runStore,
-		RunNotifier:    &testNotifier{},
-		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
-		Settings:       testSettingsStore(t),
-		ViewerAuth:     testViewerAuth(t),
-		LinearSecret:   testSecret,
-		GitHubSecret:   testGitHubSecret,
-		Events:         wire,
-		GitHubEvents:   githubEvents,
-		LinearComments: linearComments,
+		Web:              testWeb(),
+		ActivityStore:    activityStore,
+		RunStore:         runStore,
+		RunNotifier:      &testNotifier{},
+		AgentObserver:    &testObserver{err: agentrun.ErrRunNotFound},
+		Settings:         testSettingsStore(t),
+		ViewerAuth:       testViewerAuth(t),
+		LinearSecret:     testSecret,
+		GitHubSecret:     testGitHubSecret,
+		Events:           wire,
+		GitHubEvents:     githubEvents,
+		LinearComments:   linearComments,
+		LinearIdentities: testLinearIdentityStore(t),
 		RepositoryResolver: testRepositoryResolver{
 			"ENG-404": {err: eventwire.Permanent(errors.New("repository is not allowlisted"))},
 			"ENG-123": {config: agentrun.RepositoryConfig{
@@ -759,22 +791,23 @@ func TestLinearWebhookReplaysStagedPayloadWithoutProviderRedelivery(t *testing.T
 	}
 	notifier := &testNotifier{}
 	handler, err := New(Config{
-		Web:            testWeb(),
-		ActivityStore:  flaky,
-		RunStore:       runStore,
-		RunNotifier:    notifier,
-		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
-		Settings:       testSettingsStore(t),
-		ViewerAuth:     testViewerAuth(t),
-		LinearSecret:   testSecret,
-		GitHubSecret:   testGitHubSecret,
-		Events:         wire,
-		GitHubEvents:   githubEvents,
-		LinearComments: linearComments,
-		ProjectSetups:  &testProjectSetups{},
-		TriggerActor:   testActorID,
-		Now:            func() time.Time { return testNow },
-		Build:          testBuildIdentity(),
+		Web:              testWeb(),
+		ActivityStore:    flaky,
+		RunStore:         runStore,
+		RunNotifier:      notifier,
+		AgentObserver:    &testObserver{err: agentrun.ErrRunNotFound},
+		Settings:         testSettingsStore(t),
+		ViewerAuth:       testViewerAuth(t),
+		LinearSecret:     testSecret,
+		GitHubSecret:     testGitHubSecret,
+		Events:           wire,
+		GitHubEvents:     githubEvents,
+		LinearComments:   linearComments,
+		LinearIdentities: testLinearIdentityStore(t),
+		ProjectSetups:    &testProjectSetups{},
+		TriggerActor:     testActorID,
+		Now:              func() time.Time { return testNow },
+		Build:            testBuildIdentity(),
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -871,7 +904,7 @@ func TestLinearCommentsJournalUnmanagedIssuesWithoutStartingRuns(t *testing.T) {
 	}
 	for _, comment := range comments {
 		body := fmt.Sprintf(
-			`{"type":"Comment","action":"create","url":"https://linear.example/comment/%s","webhookTimestamp":%d,"actor":{"id":"%s"},"data":{"id":"%s","body":"Please handle this","issueId":"issue-123","parentId":%q,"issue":{"id":"issue-123","identifier":"ENG-123"}}}`,
+			`{"type":"Comment","action":"create","url":"https://linear.example/comment/%s","webhookTimestamp":%d,"actor":{"id":"%s"},"data":{"id":"%s","body":"Please handle this","issueId":"11111111-1111-4111-8111-111111111111","parentId":%q,"issue":{"id":"11111111-1111-4111-8111-111111111111","identifier":"ENG-123"}}}`,
 			comment.commentID,
 			testNow.UnixMilli(),
 			testActorID,
@@ -1038,7 +1071,7 @@ func TestLinearCommentWakeFiltersFactoryAndUnsupportedComments(t *testing.T) {
 				t.Fatalf("finish prior run: %v", err)
 			}
 			body := fmt.Sprintf(
-				`{"type":"Comment","action":%q,"webhookTimestamp":%d,"actor":{"id":%q},"data":{"id":"comment-1","body":%q,"issueId":"issue-123","issue":{"identifier":"ENG-123"}}}`,
+				`{"type":"Comment","action":%q,"webhookTimestamp":%d,"actor":{"id":%q},"data":{"id":"comment-1","body":%q,"issueId":"11111111-1111-4111-8111-111111111111","issue":{"identifier":"ENG-123"}}}`,
 				test.action,
 				testNow.UnixMilli(),
 				test.actor,
@@ -1333,22 +1366,23 @@ func testHandlerWithRunsAndSettingsAndWire(t *testing.T) (http.Handler, *agentru
 	}
 	wire := testEventWire(t, githubEvents.Total(), linearComments.Total())
 	handler, err := New(Config{
-		Web:            testWeb(),
-		ActivityStore:  store,
-		RunStore:       runStore,
-		RunNotifier:    notifier,
-		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
-		Settings:       configuration,
-		ViewerAuth:     testViewerAuth(t),
-		LinearSecret:   testSecret,
-		GitHubSecret:   testGitHubSecret,
-		Events:         wire,
-		GitHubEvents:   githubEvents,
-		LinearComments: linearComments,
-		ProjectSetups:  &testProjectSetups{},
-		TriggerActor:   testActorID,
-		Now:            func() time.Time { return testNow },
-		Build:          testBuildIdentity(),
+		Web:              testWeb(),
+		ActivityStore:    store,
+		RunStore:         runStore,
+		RunNotifier:      notifier,
+		AgentObserver:    &testObserver{err: agentrun.ErrRunNotFound},
+		Settings:         configuration,
+		ViewerAuth:       testViewerAuth(t),
+		LinearSecret:     testSecret,
+		GitHubSecret:     testGitHubSecret,
+		Events:           wire,
+		GitHubEvents:     githubEvents,
+		LinearComments:   linearComments,
+		LinearIdentities: testLinearIdentityStore(t),
+		ProjectSetups:    &testProjectSetups{},
+		TriggerActor:     testActorID,
+		Now:              func() time.Time { return testNow },
+		Build:            testBuildIdentity(),
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -1381,22 +1415,23 @@ func testHandlerWithObserverAndStore(t *testing.T, observer AgentObserver) (http
 		t.Fatalf("open Linear comment journal: %v", err)
 	}
 	handler, err := New(Config{
-		Web:            testWeb(),
-		ActivityStore:  store,
-		RunStore:       runStore,
-		RunNotifier:    &testNotifier{},
-		AgentObserver:  observer,
-		Settings:       testSettingsStore(t),
-		ViewerAuth:     testViewerAuth(t),
-		LinearSecret:   testSecret,
-		GitHubSecret:   testGitHubSecret,
-		Events:         testEventWire(t, githubEvents.Total(), linearComments.Total()),
-		GitHubEvents:   githubEvents,
-		LinearComments: linearComments,
-		ProjectSetups:  &testProjectSetups{},
-		TriggerActor:   testActorID,
-		Now:            func() time.Time { return testNow },
-		Build:          testBuildIdentity(),
+		Web:              testWeb(),
+		ActivityStore:    store,
+		RunStore:         runStore,
+		RunNotifier:      &testNotifier{},
+		AgentObserver:    observer,
+		Settings:         testSettingsStore(t),
+		ViewerAuth:       testViewerAuth(t),
+		LinearSecret:     testSecret,
+		GitHubSecret:     testGitHubSecret,
+		Events:           testEventWire(t, githubEvents.Total(), linearComments.Total()),
+		GitHubEvents:     githubEvents,
+		LinearComments:   linearComments,
+		LinearIdentities: testLinearIdentityStore(t),
+		ProjectSetups:    &testProjectSetups{},
+		TriggerActor:     testActorID,
+		Now:              func() time.Time { return testNow },
+		Build:            testBuildIdentity(),
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -1425,22 +1460,23 @@ func testHandlerWithGitHub(t *testing.T) (http.Handler, string) {
 		t.Fatalf("open Linear comment journal: %v", err)
 	}
 	handler, err := New(Config{
-		Web:            testWeb(),
-		ActivityStore:  activityStore,
-		RunStore:       runStore,
-		RunNotifier:    &testNotifier{},
-		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
-		Settings:       testSettingsStore(t),
-		ViewerAuth:     testViewerAuth(t),
-		LinearSecret:   testSecret,
-		GitHubSecret:   testGitHubSecret,
-		Events:         testEventWire(t, journal.Total(), linearComments.Total()),
-		GitHubEvents:   journal,
-		LinearComments: linearComments,
-		ProjectSetups:  &testProjectSetups{},
-		TriggerActor:   testActorID,
-		Now:            func() time.Time { return testNow },
-		Build:          testBuildIdentity(),
+		Web:              testWeb(),
+		ActivityStore:    activityStore,
+		RunStore:         runStore,
+		RunNotifier:      &testNotifier{},
+		AgentObserver:    &testObserver{err: agentrun.ErrRunNotFound},
+		Settings:         testSettingsStore(t),
+		ViewerAuth:       testViewerAuth(t),
+		LinearSecret:     testSecret,
+		GitHubSecret:     testGitHubSecret,
+		Events:           testEventWire(t, journal.Total(), linearComments.Total()),
+		GitHubEvents:     journal,
+		LinearComments:   linearComments,
+		LinearIdentities: testLinearIdentityStore(t),
+		ProjectSetups:    &testProjectSetups{},
+		TriggerActor:     testActorID,
+		Now:              func() time.Time { return testNow },
+		Build:            testBuildIdentity(),
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -1477,22 +1513,23 @@ func testHandlerWithLinearCommentsAndSettings(t *testing.T) (http.Handler, *agen
 	notifier := &testNotifier{}
 	configuration := testSettingsStore(t)
 	handler, err := New(Config{
-		Web:            testWeb(),
-		ActivityStore:  activityStore,
-		RunStore:       runStore,
-		RunNotifier:    notifier,
-		AgentObserver:  &testObserver{err: agentrun.ErrRunNotFound},
-		Settings:       configuration,
-		ViewerAuth:     testViewerAuth(t),
-		LinearSecret:   testSecret,
-		GitHubSecret:   testGitHubSecret,
-		Events:         testEventWire(t, githubEvents.Total(), linearComments.Total()),
-		GitHubEvents:   githubEvents,
-		LinearComments: linearComments,
-		ProjectSetups:  &testProjectSetups{},
-		TriggerActor:   testActorID,
-		Now:            func() time.Time { return testNow },
-		Build:          testBuildIdentity(),
+		Web:              testWeb(),
+		ActivityStore:    activityStore,
+		RunStore:         runStore,
+		RunNotifier:      notifier,
+		AgentObserver:    &testObserver{err: agentrun.ErrRunNotFound},
+		Settings:         configuration,
+		ViewerAuth:       testViewerAuth(t),
+		LinearSecret:     testSecret,
+		GitHubSecret:     testGitHubSecret,
+		Events:           testEventWire(t, githubEvents.Total(), linearComments.Total()),
+		GitHubEvents:     githubEvents,
+		LinearComments:   linearComments,
+		LinearIdentities: testLinearIdentityStore(t),
+		ProjectSetups:    &testProjectSetups{},
+		TriggerActor:     testActorID,
+		Now:              func() time.Time { return testNow },
+		Build:            testBuildIdentity(),
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -1536,7 +1573,8 @@ func testHandlerWithProjectSetups(t *testing.T, setups ProjectSetupController) (
 		Settings: testSettingsStore(t), ViewerAuth: testViewerAuth(t),
 		LinearSecret: testSecret, GitHubSecret: testGitHubSecret,
 		Events: wire, GitHubEvents: githubEvents, LinearComments: linearComments,
-		ProjectSetups: setups, TriggerActor: testActorID,
+		LinearIdentities: testLinearIdentityStore(t),
+		ProjectSetups:    setups, TriggerActor: testActorID,
 		Now: func() time.Time { return testNow }, Build: testBuildIdentity(),
 	})
 	if err != nil {
@@ -1594,6 +1632,15 @@ func testSettingsStore(t *testing.T) *settings.Store {
 	store, err := settings.Open(filepath.Join(t.TempDir(), "settings.json"), settings.Defaults(3))
 	if err != nil {
 		t.Fatalf("open settings store: %v", err)
+	}
+	return store
+}
+
+func testLinearIdentityStore(t *testing.T) *linearidentity.Store {
+	t.Helper()
+	store, err := linearidentity.Open(filepath.Join(t.TempDir(), "linear-task-identities.json"))
+	if err != nil {
+		t.Fatalf("open Linear identity store: %v", err)
 	}
 	return store
 }
@@ -1709,7 +1756,7 @@ func signedWebhookRequest(body, deliveryID string, secret []byte) *http.Request 
 
 func testLinearCommentBody(commentID, body string) string {
 	return fmt.Sprintf(
-		`{"type":"Comment","action":"create","url":"https://linear.example/comment/%s","webhookTimestamp":%d,"actor":{"id":"%s"},"data":{"id":"%s","body":%q,"issueId":"issue-123","issue":{"id":"issue-123","identifier":"ENG-123"}}}`,
+		`{"type":"Comment","action":"create","url":"https://linear.example/comment/%s","webhookTimestamp":%d,"actor":{"id":"%s"},"data":{"id":"%s","body":%q,"issueId":"11111111-1111-4111-8111-111111111111","issue":{"id":"11111111-1111-4111-8111-111111111111","identifier":"ENG-123"}}}`,
 		commentID,
 		testNow.UnixMilli(),
 		testActorID,

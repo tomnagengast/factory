@@ -58,9 +58,54 @@ type LinearProvider struct {
 	endpoint   string
 	apiKey     string
 	httpClient *http.Client
+	identities LinearIdentityBinder
 }
 
-func NewLinearProvider(endpoint, apiKey string, client *http.Client) (*LinearProvider, error) {
+type LinearIdentityBinder interface {
+	Bind(identifier, uuid string) (bool, error)
+}
+
+type linearCommentNode struct {
+	ID        string    `json:"id"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"createdAt"`
+	Parent    *struct {
+		ID string `json:"id"`
+	} `json:"parent"`
+	User *struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"user"`
+}
+
+type linearIssuePage struct {
+	ID          string    `json:"id"`
+	Identifier  string    `json:"identifier"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	URL         string    `json:"url"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+	State       struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	} `json:"state"`
+	Project *struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"project"`
+	Team struct {
+		ID string `json:"id"`
+	} `json:"team"`
+	Comments struct {
+		Nodes    []linearCommentNode `json:"nodes"`
+		PageInfo struct {
+			HasNextPage bool   `json:"hasNextPage"`
+			EndCursor   string `json:"endCursor"`
+		} `json:"pageInfo"`
+	} `json:"comments"`
+}
+
+func NewLinearProvider(endpoint, apiKey string, client *http.Client, identities LinearIdentityBinder) (*LinearProvider, error) {
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed == nil {
 		return nil, errors.New("Linear task provider: endpoint must be HTTPS")
@@ -70,10 +115,10 @@ func NewLinearProvider(endpoint, apiKey string, client *http.Client) (*LinearPro
 		(parsed.Scheme != "https" && !(parsed.Scheme == "http" && host != nil && host.IsLoopback())) {
 		return nil, errors.New("Linear task provider: endpoint must be HTTPS")
 	}
-	if apiKey == "" || client == nil {
-		return nil, errors.New("Linear task provider: API key and HTTP client are required")
+	if apiKey == "" || client == nil || identities == nil {
+		return nil, errors.New("Linear task provider: API key, HTTP client, and identity binder are required")
 	}
-	return &LinearProvider{endpoint: endpoint, apiKey: apiKey, httpClient: client}, nil
+	return &LinearProvider{endpoint: endpoint, apiKey: apiKey, httpClient: client, identities: identities}, nil
 }
 
 func (p *LinearProvider) Detail(ctx context.Context, identifier string) (LinearIssue, error) {
@@ -81,72 +126,85 @@ func (p *LinearProvider) Detail(ctx context.Context, identifier string) (LinearI
 	if err != nil {
 		return LinearIssue{}, ErrLinearTaskNotFound
 	}
-	var response struct {
-		Issue *struct {
-			ID          string    `json:"id"`
-			Identifier  string    `json:"identifier"`
-			Title       string    `json:"title"`
-			Description string    `json:"description"`
-			URL         string    `json:"url"`
-			UpdatedAt   time.Time `json:"updatedAt"`
-			State       struct {
-				Name string `json:"name"`
-				Type string `json:"type"`
-			} `json:"state"`
-			Project *struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"project"`
-			Team struct {
-				ID string `json:"id"`
-			} `json:"team"`
-			Comments struct {
-				Nodes []struct {
-					ID        string    `json:"id"`
-					Body      string    `json:"body"`
-					CreatedAt time.Time `json:"createdAt"`
-					Parent    *struct {
-						ID string `json:"id"`
-					} `json:"parent"`
-					User *struct {
-						ID   string `json:"id"`
-						Name string `json:"name"`
-					} `json:"user"`
-				} `json:"nodes"`
-			} `json:"comments"`
-		} `json:"issue"`
-	}
-	err = p.graphql(ctx, `query FactoryTask($id: String!) {
+	var first *linearIssuePage
+	comments := make([]linearCommentNode, 0)
+	commentIDs := make(map[string]struct{})
+	after := ""
+	for {
+		var response struct {
+			Issue *linearIssuePage `json:"issue"`
+		}
+		variables := map[string]any{"id": ref.Identifier}
+		if after != "" {
+			variables["after"] = after
+		}
+		err = p.graphql(ctx, `query FactoryTask($id: String!, $after: String) {
   issue(id: $id) {
     id identifier title description url updatedAt
     state { name type }
     project { id name }
     team { id }
-    comments(first: 250) { nodes { id body createdAt parent { id } user { id name } } }
+    comments(first: 100, after: $after) {
+      nodes { id body createdAt parent { id } user { id name } }
+      pageInfo { hasNextPage endCursor }
+    }
   }
-}`, map[string]any{"id": ref.Identifier}, &response)
-	if err != nil {
-		return LinearIssue{}, err
+}`, variables, &response)
+		if err != nil {
+			return LinearIssue{}, err
+		}
+		if response.Issue == nil || !strings.EqualFold(response.Issue.Identifier, ref.Identifier) {
+			return LinearIssue{}, ErrLinearTaskNotFound
+		}
+		if _, err := p.identities.Bind(response.Issue.Identifier, response.Issue.ID); err != nil {
+			return LinearIssue{}, fmt.Errorf("Linear task provider: bind issue identity: %w", err)
+		}
+		if first == nil {
+			first = response.Issue
+		} else if response.Issue.ID != first.ID || !strings.EqualFold(response.Issue.Identifier, first.Identifier) {
+			return LinearIssue{}, errors.New("Linear task provider: issue identity changed during pagination")
+		}
+		for _, comment := range response.Issue.Comments.Nodes {
+			if comment.ID == "" {
+				return LinearIssue{}, errors.New("Linear task provider: comment ID is missing")
+			}
+			if _, duplicate := commentIDs[comment.ID]; duplicate {
+				return LinearIssue{}, fmt.Errorf("Linear task provider: duplicate comment ID %s", comment.ID)
+			}
+			commentIDs[comment.ID] = struct{}{}
+			comments = append(comments, comment)
+		}
+		pageInfo := response.Issue.Comments.PageInfo
+		if !pageInfo.HasNextPage {
+			break
+		}
+		if pageInfo.EndCursor == "" || pageInfo.EndCursor == after {
+			return LinearIssue{}, errors.New("Linear task provider: invalid comments pagination cursor")
+		}
+		after = pageInfo.EndCursor
 	}
-	if response.Issue == nil || !strings.EqualFold(response.Issue.Identifier, ref.Identifier) {
+	if first == nil {
 		return LinearIssue{}, ErrLinearTaskNotFound
 	}
 	issue := LinearIssue{
-		Ref: ref, ProviderUUID: response.Issue.ID, TeamUUID: response.Issue.Team.ID,
-		Title: response.Issue.Title, Description: response.Issue.Description, ExternalURL: response.Issue.URL,
-		State: linearState(response.Issue.State.Type), StateName: response.Issue.State.Name,
-		UpdatedAt: response.Issue.UpdatedAt.UTC(),
+		Ref: ref, ProviderUUID: first.ID, TeamUUID: first.Team.ID,
+		Title: first.Title, Description: first.Description, ExternalURL: first.URL,
+		State: linearState(first.State.Type), StateName: first.State.Name,
+		UpdatedAt: first.UpdatedAt.UTC(),
 	}
 	if issue.ExternalURL == "" {
 		issue.ExternalURL = "https://linear.app/issue/" + strings.ToLower(ref.Identifier)
 	}
-	if response.Issue.Project != nil {
-		issue.ProjectID, issue.ProjectName = response.Issue.Project.ID, response.Issue.Project.Name
+	if first.Project != nil {
+		issue.ProjectID, issue.ProjectName = first.Project.ID, first.Project.Name
 	}
-	sort.Slice(response.Issue.Comments.Nodes, func(i, j int) bool {
-		return response.Issue.Comments.Nodes[i].CreatedAt.Before(response.Issue.Comments.Nodes[j].CreatedAt)
+	sort.Slice(comments, func(i, j int) bool {
+		if comments[i].CreatedAt.Equal(comments[j].CreatedAt) {
+			return comments[i].ID < comments[j].ID
+		}
+		return comments[i].CreatedAt.Before(comments[j].CreatedAt)
 	})
-	for index, comment := range response.Issue.Comments.Nodes {
+	for index, comment := range comments {
 		message := LinearMessage{ID: comment.ID, Ordinal: uint64(index + 1), Body: comment.Body, CreatedAt: comment.CreatedAt.UTC(), Author: LinearActor{Kind: "human"}}
 		if comment.Parent != nil {
 			message.ParentID = comment.Parent.ID

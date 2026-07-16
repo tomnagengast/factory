@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/agentrun"
+	"github.com/tomnagengast/factory/internal/linearidentity"
 	"github.com/tomnagengast/factory/internal/taskcontrol"
 	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/taskservice"
@@ -222,6 +223,10 @@ func (s *appServer) getTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		issue, err := s.linearTasks.Detail(r.Context(), identifier)
+		if errors.Is(err, linearidentity.ErrConflict) {
+			http.Error(w, http.StatusText(http.StatusConflict), http.StatusConflict)
+			return
+		}
 		if errors.Is(err, taskservice.ErrLinearTaskNotFound) {
 			http.NotFound(w, r)
 			return
@@ -669,6 +674,10 @@ func (s *appServer) linearAgentTask(w http.ResponseWriter, r *http.Request, run 
 }
 
 func (s *appServer) writeLinearTaskError(w http.ResponseWriter, err error) {
+	if errors.Is(err, linearidentity.ErrConflict) {
+		http.Error(w, http.StatusText(http.StatusConflict), http.StatusConflict)
+		return
+	}
 	if errors.Is(err, taskservice.ErrLinearTaskNotFound) {
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		return

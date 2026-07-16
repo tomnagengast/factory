@@ -15,6 +15,7 @@ import (
 	"github.com/tomnagengast/factory/internal/agentrun"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/linearidentity"
 	"github.com/tomnagengast/factory/internal/taskcontrol"
 	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/taskservice"
@@ -33,11 +34,12 @@ type testLinearTaskController struct {
 	reads       int
 	operation   string
 	idempotency string
+	err         error
 }
 
 func (c *testLinearTaskController) Detail(context.Context, string) (taskservice.LinearIssue, error) {
 	c.reads++
-	return c.issue, nil
+	return c.issue, c.err
 }
 func (c *testLinearTaskController) Comment(_ context.Context, _, _, _, operation, idempotency string) (taskservice.LinearIssue, error) {
 	c.operation, c.idempotency = operation, idempotency
@@ -176,6 +178,21 @@ func TestManagedLinearDetailLoadsLiveWithoutAdmittingWorkspaceBacklog(t *testing
 	}
 }
 
+func TestManagedLinearDetailReportsIdentityConflict(t *testing.T) {
+	linear := &testLinearTaskController{
+		issue: taskservice.LinearIssue{Ref: taskmodel.TaskRef{Source: taskmodel.SourceLinear, ProviderID: "ENG-46", Identifier: "ENG-46"}},
+		err:   linearidentity.ErrConflict,
+	}
+	handler, runs := testTaskAPIHandlerWithLinear(t, &testTaskController{}, linear)
+	if _, _, err := runs.Claim(agentrun.Trigger{DeliveryID: "linear-managed", IssueIdentifier: "ENG-46", Kind: agentrun.TriggerKindLabel}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	response := authenticatedJSONRequest(t, handler, http.MethodGet, "/api/tasks/linear/ENG-46", nil, "")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("identity conflict = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestNativeTaskDetailIncludesLatestLifecycleRun(t *testing.T) {
 	ref := taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-0123456789abcdef", Identifier: "FAC-1"}
 	controller := &testTaskController{detail: taskservice.Detail{Task: taskstore.Task{
@@ -279,7 +296,8 @@ func testTaskAPIHandlerWithLinear(t *testing.T, controller TaskController, linea
 		AgentObserver: &testObserver{err: agentrun.ErrRunNotFound}, Settings: testSettingsStore(t),
 		ViewerAuth: testViewerAuth(t), LinearSecret: testSecret, GitHubSecret: testGitHubSecret,
 		Events: testEventWire(t, 0, 0), GitHubEvents: githubEvents, LinearComments: linearComments,
-		ProjectSetups: &testProjectSetups{}, TriggerActor: testActorID, Tasks: controller,
+		LinearIdentities: testLinearIdentityStore(t),
+		ProjectSetups:    &testProjectSetups{}, TriggerActor: testActorID, Tasks: controller,
 		LinearTasks: linear,
 		Now:         func() time.Time { return testNow }, Build: testBuildIdentity(),
 	})

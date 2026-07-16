@@ -26,6 +26,7 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/linearidentity"
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/taskcontrol"
@@ -158,6 +159,10 @@ type LinearTaskController interface {
 	Gate(context.Context, string, string, string, string, string) (taskservice.LinearIssue, error)
 }
 
+type LinearIdentityBinder interface {
+	Bind(identifier, uuid string) (bool, error)
+}
+
 type ViewerAuthenticator interface {
 	Page(http.Handler) http.Handler
 	API(http.Handler) http.Handler
@@ -192,6 +197,7 @@ type Config struct {
 	ScheduleStatus     ScheduleStatus
 	Tasks              TaskController
 	LinearTasks        LinearTaskController
+	LinearIdentities   LinearIdentityBinder
 	Ready              func() bool
 }
 
@@ -220,6 +226,7 @@ type appServer struct {
 	scheduleStatus     ScheduleStatus
 	tasks              TaskController
 	linearTasks        LinearTaskController
+	linearIdentities   LinearIdentityBinder
 	ready              func() bool
 }
 
@@ -345,6 +352,9 @@ func New(config Config) (http.Handler, error) {
 	if config.LinearComments == nil {
 		return nil, errors.New("server: Linear comment store is required")
 	}
+	if config.LinearIdentities == nil {
+		return nil, errors.New("server: Linear identity binder is required")
+	}
 	if config.RunStore == nil {
 		return nil, errors.New("server: agent run store is required")
 	}
@@ -406,6 +416,7 @@ func New(config Config) (http.Handler, error) {
 		scheduleStatus:     config.ScheduleStatus,
 		tasks:              config.Tasks,
 		linearTasks:        config.LinearTasks,
+		linearIdentities:   config.LinearIdentities,
 		ready:              config.Ready,
 	}
 	if err := app.events.Handle(eventwire.Filter{Source: eventwire.SourceLinear}, app.dispatchLinear); err != nil {
@@ -721,6 +732,22 @@ func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
+	identifier, uuid, hasIdentity, err := linearPayloadIdentity(payload)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	if hasIdentity {
+		if _, err := s.linearIdentities.Bind(identifier, uuid); err != nil {
+			if errors.Is(err, linearidentity.ErrConflict) {
+				http.Error(w, http.StatusText(http.StatusConflict), http.StatusConflict)
+				return
+			}
+			slog.Error("bind Linear webhook identity", "identifier", identifier, "error", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+	}
 	wake, hasWake := commentWake(payload, deliveryID, s.triggerActor, now)
 	configuration := s.settings.Snapshot()
 	trigger, hasTrigger := agentTrigger(payload, deliveryID, s.triggerActor, configuration.Triggers.LinearLabel)
@@ -736,6 +763,33 @@ func (s *appServer) linearWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func linearPayloadIdentity(payload linearPayload) (string, string, bool, error) {
+	identifier, uuid := "", ""
+	switch payload.Type {
+	case "Issue":
+		identifier, uuid = payload.Data.Identifier, payload.Data.ID
+	case "Comment":
+		identifier = payload.Data.Issue.Identifier
+		uuid = payload.Data.IssueID
+		if uuid == "" {
+			uuid = payload.Data.Issue.ID
+		} else if payload.Data.Issue.ID != "" && payload.Data.Issue.ID != uuid {
+			return "", "", false, errors.New("Linear webhook issue UUID fields conflict")
+		}
+	default:
+		return "", "", false, nil
+	}
+	identifier = strings.ToUpper(strings.TrimSpace(identifier))
+	uuid = strings.TrimSpace(uuid)
+	if identifier == "" && uuid == "" {
+		return "", "", false, nil
+	}
+	if identifier == "" || uuid == "" {
+		return "", "", false, nil
+	}
+	return identifier, uuid, true, nil
 }
 
 func commentWake(payload linearPayload, deliveryID, allowedActorID string, now time.Time) (linearhook.Event, bool) {
