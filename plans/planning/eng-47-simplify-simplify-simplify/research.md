@@ -47,6 +47,15 @@
 - `system-events.jsonl` is the authoritative event ledger. `github-events.json` and `linear-comments.json` retain lifetime totals but zero records; no production helper reads them.
 - Baseline `go test ./...`, `go test -race ./...`, `go vet ./...`, frozen Bun install, frontend typecheck, and frontend build pass on the existing branch.
 
+## Remediation refresh: deployment-provider boundary
+
+- A 2026-07-16 remediation refresh found no newly routed prerequisite in Linear's Network project. Its only issues remain completed ENG-31, ENG-38, and ENG-39, none of which authorizes the ENG-47 deployment-contract work.
+- GitHub reports `tomnagengast/network` `main` at `bb6f5d2c0676925611561ed2e4c90b61ff95e04f`. The provider's `bin/nags` acquires `$HOME/.local/share/<app>/.deployment-lock`, atomically replaces `current`, rewrites launch wrappers and plists, restarts and verifies health, and atomically replaces `deployments/current.json`.
+- Those provider writes do not fsync the release, selection, runtime artifacts, receipts, or parent directories. Direct `nags deploy` and `nags rollback` also have no Factory generation compatibility or state-transition-lease guard before activation.
+- The durability defect does not itself require a Network write. After `nags deploy` returns, Factory can acquire its state-transition lease and the provider's existing deployment lock in that order, revalidate the exact selected release, wrapper/plist set, successful receipt, and deployment identity, recursively fsync the release/runtime/receipt graph and parent directories, then write and fsync a Factory-owned finalization acknowledgement before publishing the canonical manifest. A competing direct provider action either owns the deployment lock first and is detected by revalidation, or fails while Factory owns it.
+- That Factory-local finalization cannot close the activation-bypass defect after the lock is released. Direct provider deploy or rollback could still select and start an incompatible release against canonical state. A separately routed Network change must therefore enforce a Factory activation guard for both entry points, including generation compatibility and the valid Factory state-transition lease for rollback.
+- PR 18 remains draft at planning-artifact head `4b867a9a350858ee8ac03e652c867636a09bf99a`. `origin/main` advanced to `02994e84295d6b7b9a2e725f3b51868e266f8709` through PR 19 and overlaps the preserved revision-1 frontend slice. No rebase or conflict resolution is justified while the revised plan remains blocked before implementation.
+
 ## Current capabilities and protected invariants
 
 The following are capabilities or non-waivable safeguards. Simplification must give each one a clearer owner, never remove it.
