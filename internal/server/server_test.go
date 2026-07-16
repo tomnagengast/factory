@@ -31,6 +31,7 @@ import (
 	"github.com/tomnagengast/factory/internal/linearidentity"
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskstore"
 	"github.com/tomnagengast/factory/internal/viewerauth"
 )
 
@@ -53,7 +54,7 @@ func TestHealthz(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	want := healthResponse{Status: "ok", App: "factory", Wire: wireHealthStatus{}, BuildIdentity: testBuildIdentity()}
+	want := healthResponse{Status: "ok", App: "factory", Wire: wireHealthStatus{}, Tasks: taskstore.Status{Healthy: true}, BuildIdentity: testBuildIdentity()}
 	if got != want {
 		t.Fatalf("response = %#v, want %#v", got, want)
 	}
@@ -85,6 +86,31 @@ func TestHealthzReportsPendingWireAsDegraded(t *testing.T) {
 	}
 	if got.Status != "degraded" || got.Wire.Pending != 1 || got.Wire.Total != 1 || got.Wire.Dispatched != 0 {
 		t.Fatalf("response = %#v", got)
+	}
+}
+
+func TestHealthzReportsPendingTaskStageAsDegraded(t *testing.T) {
+	t.Parallel()
+	server := &appServer{
+		events:        testEventWire(t, 0, 0),
+		projectSetups: &testProjectSetups{},
+		taskStatus: func() taskstore.Status {
+			return taskstore.Status{Healthy: false, PendingStages: 1}
+		},
+		ready: func() bool { return true },
+		build: testBuildIdentity(),
+	}
+	recorder := httptest.NewRecorder()
+	server.healthz(recorder, httptest.NewRequest(http.MethodGet, "/api/healthz", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	var response healthResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != "degraded" || response.Tasks.PendingStages != 1 {
+		t.Fatalf("response = %#v", response)
 	}
 }
 

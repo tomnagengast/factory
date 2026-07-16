@@ -52,11 +52,8 @@ func TestStagingDispatchKeepsBodiesOffGlobalEvent(t *testing.T) {
 	if err != nil || created.Task.Ref.Identifier != "FAC-1" || created.Replayed {
 		t.Fatalf("dispatch create: result=%#v err=%v", created, err)
 	}
-	if _, err := os.Stat(stager.path(staged.OperationID)); err != nil {
-		t.Fatalf("staged create was removed before wire acknowledgment: %v", err)
-	}
-	if err := stager.Cancel(staged.OperationID); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(stager.path(staged.OperationID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("applied create stage was retained: %v", err)
 	}
 
 	privateBody := "private reply body bdf301"
@@ -74,8 +71,8 @@ func TestStagingDispatchKeepsBodiesOffGlobalEvent(t *testing.T) {
 	if err != nil || result.Message == nil || result.Message.Body != privateBody {
 		t.Fatalf("dispatch message: result=%#v err=%v", result, err)
 	}
-	if err := stager.Cancel(stagedMessage.OperationID); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(stager.path(stagedMessage.OperationID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("applied message stage was retained: %v", err)
 	}
 }
 
@@ -105,11 +102,8 @@ func TestDispatcherReplaysAppliedCommandBeforeRemovingStage(t *testing.T) {
 	if err != nil || !replayed.Replayed || replayed.Task.Ref != first.Task.Ref {
 		t.Fatalf("replayed dispatch: result=%#v err=%v", replayed, err)
 	}
-	if _, err := os.Stat(stager.path(staged.OperationID)); err != nil {
-		t.Fatalf("replayed stage was removed before acknowledgment: %v", err)
-	}
-	if err := stager.Cancel(staged.OperationID); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(stager.path(staged.OperationID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replayed stage was retained: %v", err)
 	}
 }
 
@@ -156,7 +150,7 @@ func (p *dispatcherPublisher) Publish(ctx context.Context, event eventwire.Event
 	return record, true, nil
 }
 
-func TestCoordinatorCleansStageOnlyAfterPublishAcknowledges(t *testing.T) {
+func TestCoordinatorCleansStageAfterApplyEvenWhenAcknowledgmentFails(t *testing.T) {
 	directory := t.TempDir()
 	storePath := filepath.Join(directory, "tasks.jsonl")
 	store, _ := Open(storePath)
@@ -170,7 +164,7 @@ func TestCoordinatorCleansStageOnlyAfterPublishAcknowledges(t *testing.T) {
 		t.Fatal("publish acknowledgment failure was accepted")
 	}
 	entries, err := os.ReadDir(stager.directory)
-	if err != nil || len(entries) != 1 {
+	if err != nil || len(entries) != 0 {
 		t.Fatalf("stage after acknowledgment failure = %#v err=%v", entries, err)
 	}
 	if got := store.Snapshot(); len(got.Tasks) != 1 {
@@ -183,7 +177,38 @@ func TestCoordinatorCleansStageOnlyAfterPublishAcknowledges(t *testing.T) {
 		t.Fatalf("coordinator retry: result=%#v err=%v", result, err)
 	}
 	entries, err = os.ReadDir(stager.directory)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("retry should consume only its acknowledged stage: entries=%#v err=%v", entries, err)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("retry retained a stage: entries=%#v err=%v", entries, err)
+	}
+}
+
+func TestStagerRecoveryKeepsOnlyPendingWireStages(t *testing.T) {
+	directory := t.TempDir()
+	storePath := filepath.Join(directory, "tasks.jsonl")
+	stager, _ := NewStager(filepath.Join(directory, "staged"), storePath)
+	stager.random = bytes.NewReader([]byte("12345678abcdefghABCDEFGH"))
+	command := CommandEnvelope{Kind: operationCreate, Create: &CreateCommand{Actor: humanActor, Title: "Recover", ProjectID: "project-1", ApprovalMode: ApprovalGated, IdempotencyKey: "recover"}}
+	orphan, err := stager.Stage(command, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := stager.Stage(command, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stager.directory, ".task-operation-crash"), []byte("private temporary body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := stager.Recover(1, []eventwire.Record{{Sequence: 2, Event: pending.Event}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stager.path(orphan.OperationID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphaned stage was retained: %v", err)
+	}
+	if _, err := os.Stat(stager.path(pending.OperationID)); err != nil {
+		t.Fatalf("pending stage was removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stager.directory, ".task-operation-crash")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary stage was retained: %v", err)
 	}
 }

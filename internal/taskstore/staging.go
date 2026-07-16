@@ -160,7 +160,7 @@ func (s *Stager) Stage(command CommandEnvelope, now time.Time) (StagedOperation,
 		}, ReceivedAt: now.UTC(),
 	}
 	if err := event.Validate(); err != nil {
-		_ = os.Remove(path)
+		_ = s.Cancel(operationID)
 		return StagedOperation{}, err
 	}
 	return StagedOperation{OperationID: operationID, Event: event}, nil
@@ -170,8 +170,87 @@ func (s *Stager) Cancel(operationID string) error {
 	if !operationIDPattern.MatchString(operationID) {
 		return errors.New("task staging: invalid operation ID")
 	}
-	if err := os.Remove(s.path(operationID)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("task staging: cancel: %w", err)
+	removed, err := s.remove(s.path(operationID))
+	if err != nil {
+		return err
+	}
+	if removed {
+		return s.syncDirectory()
+	}
+	return nil
+}
+
+// Recover removes command files that have no pending wire record. Pending
+// records retain their bodies until CatchUp dispatches them successfully.
+func (s *Stager) Recover(dispatched uint64, records []eventwire.Record) error {
+	pending := make(map[string]struct{})
+	for _, record := range records {
+		if record.Sequence <= dispatched || record.Event.Source != eventwire.SourceFactory || record.Event.Type != StagedEventType {
+			continue
+		}
+		values := record.Event.Values(attributeOperation)
+		if len(values) == 1 && operationIDPattern.MatchString(values[0]) && record.Event.ID == "factory:task:"+values[0] {
+			pending[values[0]] = struct{}{}
+		}
+	}
+	entries, err := os.ReadDir(s.directory)
+	if err != nil {
+		return fmt.Errorf("task staging: read recovery directory: %w", err)
+	}
+	removed := false
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("task staging: unsafe recovery entry %s", entry.Name())
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".task-operation-") {
+			deleted, err := s.remove(filepath.Join(s.directory, name))
+			if err != nil {
+				return err
+			}
+			removed = removed || deleted
+			continue
+		}
+		if !strings.HasSuffix(name, ".json") {
+			return fmt.Errorf("task staging: unknown recovery entry %s", name)
+		}
+		operationID := strings.TrimSuffix(name, ".json")
+		if !operationIDPattern.MatchString(operationID) {
+			return fmt.Errorf("task staging: invalid recovery entry %s", name)
+		}
+		if _, keep := pending[operationID]; keep {
+			continue
+		}
+		deleted, err := s.remove(filepath.Join(s.directory, name))
+		if err != nil {
+			return err
+		}
+		removed = removed || deleted
+	}
+	if removed {
+		return s.syncDirectory()
+	}
+	return nil
+}
+
+func (s *Stager) remove(path string) (bool, error) {
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("task staging: remove: %w", err)
+	}
+	return true, nil
+}
+
+func (s *Stager) syncDirectory() error {
+	directory, err := os.Open(s.directory)
+	if err != nil {
+		return fmt.Errorf("task staging: open directory for sync: %w", err)
+	}
+	defer directory.Close()
+	if err := directory.Sync(); err != nil {
+		return fmt.Errorf("task staging: sync directory: %w", err)
 	}
 	return nil
 }
@@ -246,6 +325,9 @@ func (d *Dispatcher) Apply(_ context.Context, record eventwire.Record) (Result, 
 			return Result{}, eventwire.Permanent(err)
 		}
 		return Result{}, err
+	}
+	if err := d.stager.Cancel(operationID); err != nil {
+		return Result{}, fmt.Errorf("task dispatcher: clean applied command: %w", err)
 	}
 	return result, nil
 }

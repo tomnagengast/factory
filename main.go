@@ -221,6 +221,10 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	if err != nil {
 		return err
 	}
+	_, dispatchedEvents, _, retainedEvents := eventJournal.Snapshot()
+	if err := taskStager.Recover(dispatchedEvents, retainedEvents); err != nil {
+		return fmt.Errorf("recover staged task operations: %w", err)
+	}
 	taskDispatcher, err := taskstore.NewDispatcher(nativeTasks, taskStager)
 	if err != nil {
 		return err
@@ -530,7 +534,14 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 		Tasks:            nativeTaskService,
 		LinearTasks:      linearTaskProvider,
 		LinearIdentities: linearIdentities,
-		Ready:            ready.Load,
+		TaskStatus: func() taskstore.Status {
+			status := nativeTasks.Status()
+			staging := taskStager.Status()
+			status.PendingStages = staging.PendingStages
+			status.Healthy = status.Healthy && staging.Healthy && staging.PendingStages == 0
+			return status
+		},
+		Ready: ready.Load,
 	})
 	if err != nil {
 		return err

@@ -198,6 +198,7 @@ type Config struct {
 	Tasks              TaskController
 	LinearTasks        LinearTaskController
 	LinearIdentities   LinearIdentityBinder
+	TaskStatus         func() taskstore.Status
 	Ready              func() bool
 }
 
@@ -227,6 +228,7 @@ type appServer struct {
 	tasks              TaskController
 	linearTasks        LinearTaskController
 	linearIdentities   LinearIdentityBinder
+	taskStatus         func() taskstore.Status
 	ready              func() bool
 }
 
@@ -260,6 +262,7 @@ type healthResponse struct {
 	Status        string                      `json:"status"`
 	App           string                      `json:"app"`
 	Wire          wireHealthStatus            `json:"wire"`
+	Tasks         taskstore.Status            `json:"tasks"`
 	ProjectSetups projectsetup.PublicSnapshot `json:"projectSetups"`
 	BuildIdentity
 }
@@ -388,6 +391,9 @@ func New(config Config) (http.Handler, error) {
 	if config.Ready == nil {
 		config.Ready = func() bool { return true }
 	}
+	if config.TaskStatus == nil {
+		config.TaskStatus = func() taskstore.Status { return taskstore.Status{Healthy: true} }
+	}
 	if config.GenericTriggers && (config.TriggerPolicy == nil || config.ScheduleStatus == nil) {
 		return nil, errors.New("server: generic trigger policy and schedule status are required")
 	}
@@ -417,6 +423,7 @@ func New(config Config) (http.Handler, error) {
 		tasks:              config.Tasks,
 		linearTasks:        config.LinearTasks,
 		linearIdentities:   config.LinearIdentities,
+		taskStatus:         config.TaskStatus,
 		ready:              config.Ready,
 	}
 	if err := app.events.Handle(eventwire.Filter{Source: eventwire.SourceLinear}, app.dispatchLinear); err != nil {
@@ -491,9 +498,10 @@ func (s *appServer) healthz(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	setups := s.projectSetups.PublicSnapshot()
-	health := healthResponse{Status: "ok", App: "factory", Wire: wire, ProjectSetups: setups, BuildIdentity: s.build}
+	tasks := s.taskStatus()
+	health := healthResponse{Status: "ok", App: "factory", Wire: wire, Tasks: tasks, ProjectSetups: setups, BuildIdentity: s.build}
 	httpStatus := http.StatusOK
-	if !s.ready() || status.Pending > 0 || setups.Failed > 0 {
+	if !s.ready() || status.Pending > 0 || setups.Failed > 0 || !tasks.Healthy {
 		health.Status = "degraded"
 		httpStatus = http.StatusServiceUnavailable
 	}
