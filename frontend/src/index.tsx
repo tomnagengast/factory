@@ -277,7 +277,11 @@ type AgentStep = {
   id: string;
   type: string;
   status?: string;
+  action: string;
   summary: string;
+  detail?: string;
+  output?: string;
+  error?: string;
   payload: string;
 };
 
@@ -3035,7 +3039,12 @@ function AgentPage(props: { load: () => Promise<AgentView> }): JSX.Element {
                       <For each={selectedWindow()?.steps ?? []}>
                         {(step) => (
                           <details
-                            class="log-step"
+                            classList={{
+                              "log-step": true,
+                              narrative: agentStepIsNarrative(step),
+                              running: agentStepState(step) === "running",
+                              failed: agentStepState(step) === "failed",
+                            }}
                             open={stepExpanded(step.id)}
                             onToggle={(event) =>
                               setStepExpanded(
@@ -3045,17 +3054,42 @@ function AgentPage(props: { load: () => Promise<AgentView> }): JSX.Element {
                             }
                           >
                             <summary>
-                              <span class={`step-status ${step.status ?? ""}`}>
-                                {step.status
-                                  ? runStateLabel(step.status)
-                                  : "Event"}
+                              <span class="step-icon" aria-hidden="true">
+                                <AgentStepIcon step={step} />
                               </span>
-                              <strong>{step.summary}</strong>
-                              <code>{runStateLabel(step.type)}</code>
+                              <span class="step-copy">
+                                <span class="step-action">{step.action || "Observed"}</span>
+                                <strong>{step.summary}</strong>
+                              </span>
+                              <Show when={agentStepStateLabel(step)}>
+                                {(label) => <span class="step-state">{label()}</span>}
+                              </Show>
                             </summary>
-                            <pre class="step-payload" tabIndex={0}>
-                              <code>{step.payload}</code>
-                            </pre>
+                            <div class="step-evidence">
+                              <Show when={agentStepDetail(step)}>
+                                {(detail) => (
+                                  <AgentStepEvidence
+                                    label={agentStepDetailLabel(step)}
+                                    value={detail()}
+                                  />
+                                )}
+                              </Show>
+                              <Show when={step.output}>
+                                {(output) => <AgentStepEvidence label="Output" value={output()} />}
+                              </Show>
+                              <Show when={step.error}>
+                                {(error) => <AgentStepEvidence label="Error" value={error()} error />}
+                              </Show>
+                              <details class="raw-event" open={!agentStepHasEvidence(step)}>
+                                <summary>
+                                  <span>Raw event</span>
+                                  <code>{runStateLabel(step.type || "event")}</code>
+                                </summary>
+                                <pre class="step-payload" tabIndex={0}>
+                                  <code>{step.payload}</code>
+                                </pre>
+                              </details>
+                            </div>
                           </details>
                         )}
                       </For>
@@ -3085,6 +3119,98 @@ function AgentPage(props: { load: () => Promise<AgentView> }): JSX.Element {
       </section>
     </main>
   );
+}
+
+function AgentStepEvidence(props: {
+  label: string;
+  value: string;
+  error?: boolean;
+}): JSX.Element {
+  return (
+    <section classList={{ "step-evidence-section": true, error: Boolean(props.error) }}>
+      <span>{props.label}</span>
+      <pre tabIndex={0}><code>{props.value}</code></pre>
+    </section>
+  );
+}
+
+function AgentStepIcon(props: { step: AgentStep }): JSX.Element {
+  const kind = (): "narrative" | "command" | "search" | "file" | "tool" | "error" | "event" => {
+    const type = props.step.type.toLowerCase();
+    if (agentStepState(props.step) === "failed" || type === "error") return "error";
+    if (agentStepIsNarrative(props.step)) return "narrative";
+    if (["command_execution", "bash", "shell"].includes(type)) return "command";
+    if (type.includes("search") || ["grep", "glob"].includes(type)) return "search";
+    if (type.includes("file") || ["read", "write", "edit"].includes(type)) return "file";
+    if (type.includes("tool") || type.includes("mcp")) return "tool";
+    return "event";
+  };
+  return (
+    <svg viewBox="0 0 20 20">
+      <Show when={kind() === "narrative"}>
+        <path d="M3.5 4.5h13v8h-7l-4 3v-3h-2z" />
+      </Show>
+      <Show when={kind() === "command"}>
+        <path d="m4 6 3.5 4L4 14m6 0h6" />
+      </Show>
+      <Show when={kind() === "search"}>
+        <circle cx="8.5" cy="8.5" r="4.5" />
+        <path d="m12 12 4 4" />
+      </Show>
+      <Show when={kind() === "file"}>
+        <path d="M5 2.75h6l4 4v10.5H5zM11 2.75v4h4M7.5 11h5M7.5 14h4" />
+      </Show>
+      <Show when={kind() === "tool"}>
+        <path d="M6 4.5h8v4H6zM3.5 11.5h5v4h-5zM11.5 11.5h5v4h-5zM10 8.5v3M6 11.5v-1.25h8v1.25" />
+      </Show>
+      <Show when={kind() === "error"}>
+        <circle cx="10" cy="10" r="7" />
+        <path d="M10 6v5m0 3v.1" />
+      </Show>
+      <Show when={kind() === "event"}>
+        <circle cx="10" cy="10" r="5.5" />
+        <circle cx="10" cy="10" r="1" class="step-icon-fill" />
+      </Show>
+    </svg>
+  );
+}
+
+function agentStepIsNarrative(step: AgentStep): boolean {
+  return ["text", "agent_message", "reasoning", "result"].includes(step.type.toLowerCase());
+}
+
+function agentStepState(step: AgentStep): "running" | "failed" | "complete" {
+  const status = (step.status ?? "").toLowerCase().replaceAll("-", "_");
+  if (step.error || ["failed", "error", "blocked", "cancelled", "canceled"].includes(status)) {
+    return "failed";
+  }
+  if (["in_progress", "running", "started", "pending"].includes(status)) {
+    return "running";
+  }
+  return "complete";
+}
+
+function agentStepStateLabel(step: AgentStep): string | undefined {
+  const state = agentStepState(step);
+  if (state === "running") return "Running";
+  if (state === "failed") return "Failed";
+  return undefined;
+}
+
+function agentStepDetail(step: AgentStep): string | undefined {
+  if (!step.detail || (agentStepIsNarrative(step) && step.detail === step.summary)) return undefined;
+  return step.detail;
+}
+
+function agentStepDetailLabel(step: AgentStep): string {
+  const type = step.type.toLowerCase();
+  if (["command_execution", "bash", "shell"].includes(type)) return "Command";
+  if (type === "file_change") return "Files";
+  return "Input";
+}
+
+function agentStepHasEvidence(step: AgentStep): boolean {
+  return Boolean(agentStepDetail(step) || step.output || step.error);
 }
 
 function agentRunHref(run: AgentActivityRun): string | undefined {
@@ -3223,10 +3349,10 @@ function runStateIsActive(state: string): boolean {
 
 function agentConsoleLabel(agent: AgentView): string {
   if (agent.live) {
-    return "Live steps · expand for raw payload";
+    return "Live steps · expand for evidence and raw event";
   }
   if (agent.windows.length > 0) {
-    return "Retained run history · expand for raw payload";
+    return "Retained run history · expand for evidence and raw event";
   }
   return "This run has no retained output";
 }
