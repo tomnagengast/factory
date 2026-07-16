@@ -14,9 +14,11 @@
 ## Issue, routing, and revised human direction
 
 - Linear issue: `ENG-47`, "Simplify simplify simplify."
-- Project routing remains authoritative: `tomnagengast/factory` at `/Users/tom/repos/tomnagengast/factory`. The managed repository and normalized `origin` match that metadata.
-- The isolated branch is `eng-47-simplify-simplify-simplify`, based on `origin/main` at `e5034d6208fbc7cfaa41fc24aa4793f2c8870c4b`.
-- The branch already contains the approved revision-1 research, plan, dual review evidence, a typed Tasks frontend module, shared frontend helpers, and a candidate browser fixture through `70c3544391e0190b1d8b74de278ba73650ac1208`.
+- Primary project routing remains authoritative: `tomnagengast/factory` at `/Users/tom/repos/tomnagengast/factory`. The managed repository and normalized `origin` match that metadata.
+- Factory `main` commits `28573aa8d0ed4b4f9d1895d594f8f171fc5a36f5` and `7b464322f7319f4af7fc3404befa5aff99cfa6f0` supersede the earlier repository-scoped authority model. A run now has write authority across every admitted repository, with one branch, pull request, human merge, exact verified-head proof, and repository-native deployment per repository. A separately routed coordination issue is explicitly unnecessary.
+- The Network project admits `tomnagengast/network` at `/Volumes/T9/Repos/tomnagengast/network`; its normalized `origin`, clean `main`, and fetched `origin/main` all identify `bb6f5d2c0676925611561ed2e4c90b61ff95e04f`.
+- The isolated primary branch is `eng-47-simplify-simplify-simplify`, rebased onto Factory `origin/main` at `7b464322f7319f4af7fc3404befa5aff99cfa6f0`. The coordinated Network branch will be `eng-47-network-generation-guard`. Both begin with the required `eng-47-` prefix.
+- The Factory branch already contains the approved revision-1 research, plan, dual review evidence, typed Tasks frontend module, shared frontend helpers, and candidate browser fixture. Rebase conflict resolution retained current main's source-qualified agent observer links and readable observer steps while preserving the completed Tasks extraction; focused frontend typecheck and `git diff --check` pass.
 - The issue remains `In Review` with `Factory` and `Yolo`; pull request 18 is open and currently points at that head.
 - Tom's later contextual reply `dd8ab575-ddf6-4a60-87a3-932f49c1b3a6` rejects the conservative scope. Factory is unreleased greenfield software in a first-principles refactor phase. Risk tolerance is explicitly very high, and maximum-ambition consolidation and legacy cleanup are preferred over a benign patch.
 - That reply invalidates the old plan's central non-goal, which excluded production Go, persistence, lifecycle, rollback, and repository-wide frontend changes. The completed Tasks extraction remains useful evidence and implementation, but it is no longer the endpoint.
@@ -47,14 +49,16 @@
 - `system-events.jsonl` is the authoritative event ledger. `github-events.json` and `linear-comments.json` retain lifetime totals but zero records; no production helper reads them.
 - Baseline `go test ./...`, `go test -race ./...`, `go vet ./...`, frozen Bun install, frontend typecheck, and frontend build pass on the existing branch.
 
-## Remediation refresh: deployment-provider boundary
+## Remediation refresh: coordinated deployment-provider boundary
 
-- A 2026-07-16 remediation refresh found no newly routed prerequisite in Linear's Network project. Its only issues remain completed ENG-31, ENG-38, and ENG-39, none of which authorizes the ENG-47 deployment-contract work.
-- GitHub reports `tomnagengast/network` `main` at `bb6f5d2c0676925611561ed2e4c90b61ff95e04f`. The provider's `bin/nags` acquires `$HOME/.local/share/<app>/.deployment-lock`, atomically replaces `current`, rewrites launch wrappers and plists, restarts and verifies health, and atomically replaces `deployments/current.json`.
+- The Network repository is admitted to the machine-wide catalog and therefore falls inside this run's current authority. The same ENG-47 plan and adversarial reviews must cover its branch and pull request; no additional Linear issue or approval is required while the current `Yolo` label remains present at the plan gate.
+- The provider's `bin/nags` acquires `$HOME/.local/share/<app>/.deployment-lock`, atomically replaces `current`, rewrites launch wrappers and plists, restarts and verifies health, and atomically replaces `deployments/current.json`.
 - Those provider writes do not fsync the release, selection, runtime artifacts, receipts, or parent directories. Direct `nags deploy` and `nags rollback` also have no Factory generation compatibility or state-transition-lease guard before activation.
 - The durability defect does not itself require a Network write. After `nags deploy` returns, Factory can acquire its state-transition lease and the provider's existing deployment lock in that order, revalidate the exact selected release, wrapper/plist set, successful receipt, and deployment identity, recursively fsync the release/runtime/receipt graph and parent directories, then write and fsync a Factory-owned finalization acknowledgement before publishing the canonical manifest. A competing direct provider action either owns the deployment lock first and is detected by revalidation, or fails while Factory owns it.
-- That Factory-local finalization cannot close the activation-bypass defect after the lock is released. Direct provider deploy or rollback could still select and start an incompatible release against canonical state. A separately routed Network change must therefore enforce a Factory activation guard for both entry points, including generation compatibility and the valid Factory state-transition lease for rollback.
-- PR 18 remains draft at planning-artifact head `4b867a9a350858ee8ac03e652c867636a09bf99a`. `origin/main` advanced to `02994e84295d6b7b9a2e725f3b51868e266f8709` through PR 19 and overlaps the preserved revision-1 frontend slice. No rebase or conflict resolution is justified while the revised plan remains blocked before implementation.
+- That Factory-local finalization cannot close the activation-bypass defect after the lock is released. Direct provider deploy or rollback could still select and start an incompatible release against canonical state. This run must add a provider-enforced pre-activation contract for both entry points: deploy proves target-generation compatibility, and rollback additionally proves the process- and token-bound Factory state-transition lease before `activate_release`.
+- Network manifests are validated centrally by `platform/nags_config.py`; release selection, deployment locking, activation, health, receipt finalization, and rollback are owned by `bin/nags`. Provider tests currently cover manifest parsing, runtime artifact identity, state presentation, reconciliation, and console actions, but no shell-level deployment/rollback contract harness exists. The change therefore needs a disposable-runtime harness around `bin/nags` plus schema and console regression coverage.
+- Network's own post-merge contract starts from its updated clean admitted checkout but installs and executes through the internal clean provider clone: run `bin/nags refresh-env` and `bin/nags reconcile`, require `~/.local/share/nags/provider/main == origin/main`, then from that internal checkout run `~/.local/bin/nags deploy network --expected-commit "$(git rev-parse HEAD)"`, followed by `http://127.0.0.1:8090/healthz`, `https://network.nags.cloud/healthz`, and Network receipt identity checks. Nothing runs from the T9 checkout.
+- PR 18 remains the draft Factory pull request. Its remote head still records the prior planning boundary until the reviewed cross-repository plan is committed and the rebased branch is force-pushed with lease. No Network branch or pull request existed at intake, so this run will create exactly one after plan approval.
 
 ## Current capabilities and protected invariants
 
@@ -216,6 +220,7 @@ Source rollback alone is insufficient after the one-way state cut. Recovery requ
 | Task outbox | Duplicate idempotency key, stale revision, private-body audit, crash before/after pending append, event publish, apply, result, acknowledgement |
 | Policy | Publish/delete/binding/rule/schedule/project changes; optimistic conflicts; mutation blocked while admission pending; draft-store failure does not block execution |
 | Repository catalog | Origin/path/managed-root/default-branch validation, compiled/admitted projects, bootstrap, provider coordination, completion reader identity |
+| Network provider guard | Manifest contract validation; guarded and unguarded target releases; direct deploy before/after canonical activation; rollback with missing/stale/foreign/valid lease token; preflight failure before selection; automatic restore compatibility; shell-level disposable runtime; complete provider and console regressions |
 | Mechanical lifecycle | Tampered checkpoint, changed head, unmerged close, squash/rebase ancestry failure, review/check regression, dirty/divergent main, receipt/health mismatch, incomplete task/children, branch/worktree residue |
 | Security | Webhook HMAC and replay window, OAuth/local viewer auth, same-origin, strict bounded JSON, file modes, symlink/path traversal, environment allowlist and redaction |
 | Runtime supervision | Recovery before readiness, component error propagation, cancellation, bounded join, no leaked temporary processes |
@@ -255,19 +260,27 @@ Rejected as a default. Cascade order is behavior. Remove proven dead selectors u
 
 ## Deployment, health, and recovery
 
-After a human merge containing the exact checkpointed head:
+After humans merge every exact verified head with merge commits in the approved order:
 
-1. Reconstruct and revalidate GitHub, Linear, the ready checkpoint, and the exact verified head.
-2. Resolve the single primary Worktrunk checkout at `/Users/tom/repos/tomnagengast/factory`; require a safe clean checkout, fetch/prune, fast-forward `main`, and prove `HEAD == origin/main`.
-3. Capture and validate the complete Factory data backup required by the approved migration phase.
-4. From that updated clean primary checkout only, run:
+1. Reconstruct and revalidate GitHub, Linear, the routed-primary ready checkpoint, both pull requests, and both exact verified heads. Prove each reported merge commit contains its verified head.
+2. Merge and deploy Network first. Resolve the single admitted Network main checkout at `/Volumes/T9/Repos/tomnagengast/network`, require it clean and equal to fetched `origin/main`, run `bin/nags refresh-env` and `bin/nags reconcile`, then require the clean internal provider clone at `~/.local/share/nags/provider` to equal the same merged commit.
+3. From that internal provider clone only, run:
+
+   ```text
+   ~/.local/bin/nags deploy network --expected-commit "$(git rev-parse HEAD)"
+   ```
+
+   Verify loopback/public Network health, deployment receipt and release identity, and a disposable direct Factory deploy/rollback guard probe. Do not proceed to Factory deployment if the provider contract is absent or unhealthy.
+4. Resolve the single primary Factory Worktrunk checkout at `/Users/tom/repos/tomnagengast/factory`; require a safe clean checkout, fetch/prune, fast-forward `main`, and prove `HEAD == origin/main`.
+5. Capture and validate the complete Factory data backup required by the approved migration phase.
+6. From that updated clean Factory primary checkout only, run:
 
    ```text
    ~/.local/bin/nags deploy --expected-commit "$(git rev-parse HEAD)"
    ```
 
-5. Verify the migration receipt, new durable-authority inventory, wire continuity, active Run identity, task/policy/repository content, and runtime component status.
-6. Verify exact deployment identity with:
+7. Verify the migration receipt, provider-finalization acknowledgement, new durable-authority inventory, wire continuity, active Run identity, task/policy/repository content, and runtime component status.
+8. Verify exact Factory deployment identity with:
 
    ```text
    curl -fsS http://127.0.0.1:8092/api/healthz | jq .
@@ -275,10 +288,10 @@ After a human merge containing the exact checkpointed head:
    jq . ~/.local/share/factory/deployments/current.json
    ```
 
-7. Require commit, tree, build ID, deployment ID, and contract identity to agree across loopback, public health, receipt, and active release.
-8. Exercise one read-only route per authority and a bounded duplicate/restart-safe operation where the approved plan permits it.
-9. If migration or deployment fails before new canonical writes, stop the service, preserve failed evidence, restore the complete pre-cut data backup, activate the last compatible verified release, and repeat health checks. After new canonical writes, use a reviewed forward correction unless restoring a complete compatible snapshot.
-10. Never deploy from the issue worktree or the T9 mirror. Do not remove the issue checkout or branch until deployment and health verification succeed.
+9. Require commit, tree, build ID, deployment ID, generation contract, and active-release identity to agree across loopback, public health, receipt, provider contract, and active release.
+10. Exercise one read-only route per authority and a bounded duplicate/restart-safe operation where the approved plan permits it.
+11. If migration or deployment fails before new canonical writes, stop the service, preserve failed evidence, restore the complete pre-cut data backup, activate the last compatible verified release through the guarded provider path, and repeat health checks. After new canonical writes, use a reviewed forward correction unless restoring a complete compatible snapshot.
+12. Never run an application from an issue worktree or the T9 Network checkout. Do not remove either issue checkout or branch until both deployments and health verification succeed.
 
 ## Unresolved questions
 

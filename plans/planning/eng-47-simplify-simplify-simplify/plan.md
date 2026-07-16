@@ -1,6 +1,6 @@
 # ENG-47 First-Principles Simplification Plan, Revision 2
 
-> updated: 2026-07-16T19:11:58Z
+> updated: 2026-07-16T23:54:33Z
 
 ## Issue context and outcome
 
@@ -17,6 +17,17 @@ This revision keeps the completed Tasks extraction but replaces the revision-1 e
 7. one frontend feature owner and one shared owner for each repeated invariant.
 
 The implementation must preserve live Factory data through a fail-closed one-shot migration. Greenfield status does not authorize deleting the current active Run, retained history, tasks, workflow pins, routing evidence, or completion evidence.
+
+## Repositories, branches, pull requests, and sequencing
+
+This is one coordinated ENG-47 change across two admitted repositories under Factory's machine-wide run authority:
+
+| Repository | Admitted checkout | Branch | Pull request |
+| --- | --- | --- | --- |
+| `tomnagengast/factory` | `/Users/tom/repos/tomnagengast/factory` | `eng-47-simplify-simplify-simplify` | existing draft PR 18 |
+| `tomnagengast/network` | `/Volumes/T9/Repos/tomnagengast/network` | `eng-47-network-generation-guard` | create one draft PR after plan approval |
+
+Both branches use the required `eng-47-` prefix. Both diffs are covered by the same adversarial plan reviews and final green loop. Humans merge Network with a merge commit first and Factory with a merge commit second. The post-merge continuation then reconciles and deploys Network before it deploys Factory; Factory remains undeployed unless the provider prerequisite is healthy. The routed-primary ready checkpoint remains bound to Factory PR 18; durable PR and Linear evidence record the exact verified Network head and merge ancestry as the additional-repository checkpoint.
 
 ## Acceptance criteria
 
@@ -37,6 +48,7 @@ The implementation must preserve live Factory data through a fail-closed one-sho
 15. Frontend reads and writes share one transport core with semantic wrappers; tasks-only idempotency and endpoint-specific conflict semantics remain exact. Settings/triggers/protected binding share one optimistic-save machine, workflows retain their distinct autosave queue, and polling has one owner.
 16. Full Go tests, race detector, vet, frozen Bun install, typecheck, production build, migration/crash/security matrices, and authenticated desktop/mobile browser verification pass.
 17. The result moves toward 10 to 12 Go packages, removes at least 15 percent of production Go lines unless preserved invariants prove a lower honest result, removes roughly half of the current durable authorities, and reduces the frontend entry to roughly 70 to 120 lines. Budgets never justify deleting a safeguard.
+18. Network `nags deploy` rejects source incompatibility before creating a release, receipt, or artifact backup and rejects copied/build output drift before selection or process mutation. `nags rollback` rejects incompatibility before any receipt, runtime artifact, process, or `current` mutation. Once a guarded Factory release is active, rollback also requires the continuously held process- and token-bound Factory state-transition lease, including the success-receipt-to-manifest cutover window.
 
 ## Evidence and root cause
 
@@ -50,6 +62,7 @@ The implementation must preserve live Factory data through a fail-closed one-sho
 - `serveConfigured` opens the stores and starts five post-readiness loops without a join-owning runtime supervisor.
 - After the revision-1 Tasks extraction, `index.tsx` is still 2,584 lines with 35 feature types, four write transports, three copied optimistic-save machines, four polling loops, and repeated route shells.
 - Live state has 59 retained Runs and one active ENG-47 Run. Settings are schema 2. The wire has no pending records, task staging is empty, workflow drafts are empty, and no registry file exists. These facts make a fail-closed one-shot migration possible, but the code must also reject non-empty or ambiguous variants safely.
+- Current Factory main explicitly grants this Run coordinated authority over all admitted repositories. Network is admitted at its clean T9 checkout, and its direct deploy/rollback paths converge in `bin/nags` under one per-app provider lock before `activate_release`. Its strict manifest parser has no Factory generation declaration and its rollback validates receipt status and provider contract version but not retained-manifest SHA or a Factory lease.
 
 The root cause is parallel ownership, not insufficient abstraction. Rapid feature delivery added transitional journals, state machines, models, stores, and UI implementations beside earlier authorities. The plan removes or folds those authorities before extracting shared mechanics.
 
@@ -77,7 +90,9 @@ One data-root state-transition lease excludes canonical manifest publication and
 
 Factory finalizes provider durability without adding a second provider protocol. After `nags deploy` exits, the application acquires the provider's existing `$HOME/.local/share/factory/.deployment-lock` while still holding the state-transition lease. It revalidates the exact `current` target, release identity, generated wrappers/plists, successful `deployments/current.json`, and health identity; recursively fsyncs the immutable release, selection directory, runtime artifacts, receipt, and every affected parent directory; and writes a durable acknowledgement containing their paths, identities, and hashes. Manifest publication requires that acknowledgement. If another direct provider action won the lock first, revalidation must either prove the same exact deployment graph or refuse activation and require a forward correction.
 
-This finalization does not make direct provider activation safe after Factory releases the lock. The Network provider must separately enforce a Factory activation guard before both deploy and rollback select a release. Once a canonical manifest exists, deploy must reject a release that does not declare support for the selected generation, and rollback must additionally require the valid Factory state-transition lease. That guard is a provider-owned prerequisite and requires separately routed Network authority.
+This finalization does not make direct provider activation safe after Factory releases the lock. The coordinated Network change therefore adds a strict optional `[compatibility.factory]` manifest table with `state_generations`, `deployment_contracts`, and `rollback_lease_contract`. `platform/nags_factory_guard.py`, invoked by `bin/nags` while the provider lock is held and before any mutable deploy or rollback work, reads the selected Factory generation manifest at `~/.local/share/factory/data/state-generation.json`. If canonical state is selected, the target release must declare the exact generation and deployment contract. Rollback also requires lease contract 1 when canonical state is selected or when the active Factory release already declares that lease contract, closing the success-receipt-to-manifest race.
+
+The provider validates the original source manifest before deploy creates a release or receipt, then revalidates the copied release manifest and original SHA immediately before `activate_release` so the build cannot change compatibility metadata. Rollback validates the retained receipt's `manifestSha256` against the retained release before the same generation check. A lease is one nonsymlink `0600` file at `~/.local/share/factory/data/state-transition.lock`, exclusively held with an OS advisory lock by the Factory wrapper. Its strict contract records the owner PID/process identity and SHA-256 of a random token passed privately through `NAGS_FACTORY_STATE_LEASE_TOKEN`. Provider validation proves the inode is currently locked, the token matches, the recorded owner is a live ancestor of `nags`, and the file owner, mode, JSON shape, and contract are exact. Unlocked, stale, malformed, foreign, symlinked, PID-only, or wrong-token leases fail before activation.
 
 ### Unified Run model
 
@@ -171,9 +186,33 @@ Package folding is complete only after callers import the canonical owner and th
 
 Frontend target files are `index.tsx`, `home.tsx`, `wire.tsx`, `agents.tsx`, `tasks.tsx`, `workflows.tsx`, `triggers.tsx`, `settings.tsx`, plus narrow `http.ts`, `activity.tsx`, `forms.tsx`, `editor.ts`, `poll.ts`, and `agent.ts` shared owners.
 
+Factory also changes root `nags.toml` to declare generation 1, provider deployment contract 1, and rollback lease contract 1; `bin/network-app` and its tests become the owner of continuous lease acquisition, quiescence, generation-aware preflight/restore, provider invocation, and receipt finalization.
+
+The coordinated Network diff is deliberately narrow:
+
+| Network file or interface | Change |
+| --- | --- |
+| `platform/nags_config.py` | Strictly validate and expose optional `[compatibility.factory]`; reject unknown keys, invalid generations/contracts, and Factory compatibility on non-Factory apps. |
+| `platform/nags_factory_guard.py` | Read and strictly validate the selected generation, target compatibility, retained manifest SHA, and live token-bound lease without mutating Factory state. |
+| `bin/nags` | Invoke the guard under the existing deployment lock before any deploy/rollback mutation and revalidate the copied release immediately before `activate_release`. |
+| `tests/test_nags_config.py`, `tests/test_nags_factory_guard.py`, `tests/test_nags_release_guard.py` | Schema, generation, lease, target-integrity, no-mutation refusal, race, and direct CLI coverage. |
+| provider console tests/text if needed | Prove console actions inherit identical guard refusal through the canonical CLI; no second guard implementation. |
+
 ## Vertical implementation phases
 
 Each phase ends in a logical commit and its focused verification. If evidence disproves a migration or ownership premise, stop and return to revised research and dual-provider planning rather than adding a bridge.
+
+### Provider prerequisite: make direct Network activation generation-aware
+
+- Create the Network Worktrunk branch `eng-47-network-generation-guard` from current `origin/main` and one draft pull request.
+- Add the strict optional Factory compatibility table and pure guard module. Legacy Factory releases and every non-Factory app remain unchanged while no generation manifest exists and no active Factory release declares a rollback lease contract.
+- In deploy, validate the source manifest and selected generation before creating the release directory, pending receipt, receipt backup, or artifact backup. After copy/build, require the copied `nags.toml` SHA and compatibility values to equal the original immediately before activation.
+- In rollback, validate the target receipt identity and `manifestSha256`, retained release manifest, selected generation, and required lease before artifact backup, process stop, symlink selection, runtime artifact write, health call, or receipt mutation.
+- Require a valid live lease for rollback whenever canonical state is selected or the currently active Factory release declares `rollback_lease_contract = 1`. This protects the interval after the cutover release becomes active but before Factory publishes `state-generation.json`.
+- Keep guard order as Factory state-transition lease first, provider deployment lock second. The provider only validates the already-held Factory lease; it never invents, acquires, or releases application state authority.
+- Add a disposable runtime harness that snapshots release, receipt, selection, wrapper/plist, process-call, and Factory-state paths before every refusal and proves they remain byte-for-byte unchanged. Cover build-time manifest mutation and lease-versus-finalization contention.
+
+Focused checks: `bash -n bin/nags bin/network-app bin/caddy-run bin/cloudflared-run`; focused config/guard/release tests; `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'`; `(cd apps/network && PYTHONDONTWRITEBYTECODE=1 /opt/homebrew/bin/uv run --frozen pytest -q)`; `bin/nags validate --all`; `bin/nags generate --check`; `git diff --check`.
 
 ### Phase 0: characterize invariants and build the migration harness
 
@@ -274,22 +313,30 @@ Focused checks: `rg` for obsolete paths/symbols, `go list` import boundaries, `g
 
 ### Deployment cutover
 
-After the exact checkpointed head is human-merged with a merge commit and all safeguards remain green:
+Humans use **Create a merge commit** on Network first and Factory second. After both exact verified heads are human-merged and all safeguards remain green:
 
-1. Resolve the single primary Worktrunk checkout at `/Users/tom/repos/tomnagengast/factory` and require it clean, on `main`, tracking the official origin, and exactly equal to fetched `origin/main`.
-2. Fresh-read GitHub and Linear and prove the merge commit contains the checkpointed head.
-3. Record the prior successful deployment ID and current health/receipt identity.
-4. Require the live wire to have zero pending records, task staging to be fully accounted for, no policy mutation in flight, and the migration dry-run against a fresh permission-preserving copy to pass.
-5. Deploy only with:
+1. Fresh-read both GitHub pull requests and Linear. Prove each reported merge commit contains its recorded exact verified head with `git merge-base --is-ancestor`; reject squash/rebase replay in either repository.
+2. Resolve exactly one main Worktrunk checkout for Network at `/Volumes/T9/Repos/tomnagengast/network`. Require it clean, on `main`, tracking the official origin, and exactly equal to fetched `origin/main`; do not run a service from this T9 checkout.
+3. Run `bin/nags refresh-env` and `bin/nags reconcile --json`. Require the internal provider checkout at `~/.local/share/nags/provider` to be clean `main`, equal to its `origin/main`, and equal to the verified Network merge commit.
+4. From the internal provider checkout only, deploy the Network service with:
+
+   ```text
+   ~/.local/bin/nags deploy network --expected-commit "$(git rev-parse HEAD)" --json
+   ```
+
+5. Require exact Network identity across `~/.local/bin/nags app show network --json`, `releases network --json`, `doctor network --json`, `http://127.0.0.1:8090/healthz`, `https://network.nags.cloud/healthz`, receipt, current symlink, and active release. Run a disposable guard probe that confirms incompatible direct Factory deploy and lease-free rollback fail without mutation.
+6. Resolve the single primary Factory Worktrunk checkout at `/Users/tom/repos/tomnagengast/factory` and require it clean, on `main`, tracking the official origin, and exactly equal to fetched `origin/main`.
+7. Record the prior successful Factory deployment ID and current health/receipt identity. Require the live wire to have zero pending records, task staging to be fully accounted for, no policy mutation in flight, and the migration dry-run against a fresh permission-preserving copy to pass.
+8. Deploy Factory only with:
 
    ```text
    ~/.local/bin/nags deploy --expected-commit "$(git rev-parse HEAD)"
    ```
 
-6. Startup creates the permission-preserving backup and staged canonical generation, validates and opens it read-only, recovers the authoritative wire, and serves exact health identity with advancing work gated. It does not publish the generation manifest. Capture the migration/backup receipt path from diagnostics.
-7. `nags deploy` verifies loopback and public health and writes the exact successful current deployment receipt. Only then may the application acquire the state-transition lease and the provider's existing deployment lock, revalidate the exact selection, release, runtime artifacts, receipt, source hashes, and staged generation, fsync that complete graph and its parents, and write a durable Factory-owned provider-finalization acknowledgement. Manifest publication, `canonicalWritesStarted`, advancing managers, and mutations remain gated until that acknowledgement is fsynced. A concurrent rollback guard wins the state exclusion and keeps advancement gated; a concurrent direct provider action that won its lock first must be detected by exact revalidation.
-8. Verify active advancement state, receipt identity, immutable migration audit hashes, mutable store replay/counts, wire cursor, policy defaults/custom data, repository choices, task detail, retained Run history, and the active ENG-47 Run identity.
-9. Exercise read-only APIs plus bounded duplicate-safe operations approved by the verification matrix.
+9. Startup creates the permission-preserving backup and staged canonical generation, validates and opens it read-only, recovers the authoritative wire, and serves exact health identity with advancing work gated. It does not publish the generation manifest. Capture the migration/backup receipt path from diagnostics.
+10. `nags deploy` verifies loopback and public health and writes the exact successful current deployment receipt. Only then may the application acquire the state-transition lease and the provider's existing deployment lock, revalidate the exact selection, release, runtime artifacts, receipt, source hashes, staged generation, and installed provider guard, fsync that complete graph and its parents, and write a durable Factory-owned provider-finalization acknowledgement. Manifest publication, `canonicalWritesStarted`, advancing managers, and mutations remain gated until that acknowledgement is fsynced. A concurrent rollback guard wins the state exclusion and keeps advancement gated; a concurrent direct provider action that won its lock first must be detected by exact revalidation.
+11. Verify active advancement state, receipt and provider-finalization identity, immutable migration audit hashes, mutable store replay/counts, wire cursor, policy defaults/custom data, repository choices, task detail, retained Run history, and the active ENG-47 Run identity.
+12. Exercise read-only APIs plus bounded duplicate-safe operations approved by the verification matrix.
 
 ### Recovery
 
@@ -316,6 +363,7 @@ After the exact checkpointed head is human-merged with a merge commit and all sa
 - After `canonicalWritesStarted`, never start the old release against stale source stores. Under the continuous state-transition lease, quiesce Factory and preserve the failed canonical generation. Run fail-closed `state-restore` only when replay proves the canonical generation is still exactly the no-post-cut-work activation snapshot and the activation inventory proves there was no nonterminal Run or live effect-capable agent session. An activation-spanning retained session, any later session, or any post-cut work or effect makes restoration and rollback forbidden even when journals and the wire appear unchanged; merge and deploy a forward correction. Only an eligible no-session snapshot may proceed to `state-rollback-preflight` and `nags rollback` under the same lease.
 - Never mix individual old and canonical store files. Recovery is whole-generation or whole-backup only.
 - Preserve migration, deployment, and failed-release receipts for diagnosis.
+- If Network reconciliation or self-deployment fails, keep Factory undeployed. The previous Network application release can be provider-restored, but a faulty installed CLI guard requires a human-merged Network revert or forward fix followed by reconciliation; never bypass the guard. If the provider succeeds but Factory cutover fails, retain the backward-compatible provider guard and follow the Factory recovery rules above.
 
 Exact health and receipt probes:
 
@@ -329,6 +377,7 @@ jq . /Users/tom/.local/share/factory/deployments/current.json
 
 | Surface | Exact verification |
 | --- | --- |
+| Network provider guard | Strict optional manifest table; legacy/non-Factory parity; malformed/unknown/symlinked/torn generation manifest; supported/unsupported generation and deployment contract; source/copy/build manifest SHA equality; retained receipt/manifest SHA equality; missing/unlocked/stale/wrong-token/wrong-owner/unrelated-holder/valid lease; active cutover release lease requirement before manifest publication; direct CLI and console refusal; byte-for-byte no-mutation snapshots; lease-before-provider-lock race; `bash -n`; focused and complete provider/console suites; validate/generate checks |
 | Migration | Fresh and current-shape fixtures; non-activating dry-run audit; immutable initial source/canonical hashes and counts; mutable journal replay after legitimate writes; manifest absent through candidate health, receipt finalization, and Factory-owned provider finalization; provider fallback after health failure and success-receipt-finalization failure; deployment-lock contention and exact selection/artifact/receipt revalidation; failure injection at every release/selection/runtime/receipt/acknowledgement fsync; exact-acknowledgement activation; monotonic write boundary; rollback-versus-receipt race paused after preflight; unknown/ambiguous rejection; injected failure at every write/sync/rename/activation; idempotent reopen; no-post-cut-work restore rehearsal; restore refusal after task creation, Run transition, wire advance, external-effect receipt, later live tmux session, or an activation-spanning retained legacy session that makes a GitHub/Linear mutation with delayed or absent webhook delivery while journals and wire remain unchanged |
 | Event wire | duplicate IDs, batch order, channel cursors, retention, torn tail, append/sync rollback, poison latch, handler retry/permanent reject, restart catch-up, body-free audit |
 | Unified Runs | rule match/no-match/multi-match, suppression, hop/cycle/rate/global limits, same-task serialization, source-dispatch gate, immutable admission/causation identity, transition outbox publication/ack ordering, routing failures, native start, protected/native feedback, retry, crash transitions, GitHub remediation, retention/compaction |
@@ -341,6 +390,7 @@ jq . /Users/tom/.local/share/factory/deployments/current.json
 | Frontend static | frozen install, typecheck, build, one JS/one CSS asset, no package/lock changes, exact route dispatch, raw `fetch` only in transport, `setInterval` only in poll owner, copied normal save state removed |
 | Browser | candidate assets, all public/authenticated routes, desktop/mobile, keyboard/focus, loading, empty, error, 409 conflict, offline/recovery, success, console/network clean, Linear read-only, native idempotency |
 | Required Factory suites | `go test ./...`; `go test -race ./...`; `go vet ./...`; `MISE_BUN_VERSION=1.3.11 bun install --cwd frontend --frozen-lockfile`; `MISE_BUN_VERSION=1.3.11 bun run --cwd frontend typecheck`; `MISE_BUN_VERSION=1.3.11 bun run --cwd frontend build` |
+| Required Network suites | `bash -n bin/nags bin/network-app bin/caddy-run bin/cloudflared-run`; `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'`; `(cd apps/network && PYTHONDONTWRITEBYTECODE=1 /opt/homebrew/bin/uv run --frozen pytest -q)`; `bin/nags validate --all`; `bin/nags generate --check` |
 | Diff quality | `git diff --check`; no secret/debug/generated/unrelated files; actual package/LOC/artifact/API budgets recorded |
 
 ## Principal risks and mitigations
@@ -355,7 +405,7 @@ jq . /Users/tom/.local/share/factory/deployments/current.json
 - **P1: preflight races receipt-triggered advancement.** Hold one state-transition lease from pre-quiescence through provider receipt finalization, and require the application boundary transition to acquire the same exclusion.
 - **P1: provider fallback bypasses Factory rollback state repair.** Keep the canonical generation staged and unselected through both provider failure branches; publish the manifest only after the exact successful receipt under the state-transition lease.
 - **P1: power loss reverts provider selection, artifacts, or receipt after canonical activation.** Under the state-transition lease and provider deployment lock, revalidate and fsync the complete provider graph, persist the Factory-owned finalization acknowledgement, and require it before manifest publication.
-- **P1: direct provider entry points bypass Factory state compatibility.** Require the separately routed Network provider to enforce generation compatibility before deploy or rollback activation and the valid Factory state-transition lease for rollback.
+- **P1: direct provider entry points bypass Factory state compatibility.** Merge and deploy the coordinated Network guard first; validate source and copied target contracts before mutation, bind rollback to the live token-bound Factory lease, and revalidate retained manifest SHA under the provider lock.
 - **P1: backup restore discards post-cut state or misses an agent side effect.** Permit restoration only when canonical replay, wire cursors, effect receipts, and live-session inventory prove the exact no-post-cut-work activation snapshot, and categorically refuse when any nonterminal Run or effect-capable session spanned activation; otherwise require a forward correction.
 - **P1: terminal or derived Run events publish before their source state.** Preserve immutable causation identity and require the transition/outbox journal operation before publication and global-dispatch acknowledgement.
 - **P1: active ENG-47 cannot resume.** Preserve exact pin/session/segment/attempt identity and keep required helper commands plus legacy pin execution until no retained nonterminal pin needs them.
@@ -366,6 +416,4 @@ jq . /Users/tom/.local/share/factory/deployments/current.json
 
 ## Unresolved questions
 
-1. Will a separately routed `tomnagengast/network` issue authorize the remaining provider prerequisite from round 8 before ENG-47 planning resumes: a pre-activation Factory generation-compatibility guard on direct deploy and rollback, with rollback also requiring the valid Factory state-transition lease? ENG-47's Factory project metadata does not grant cross-repository write authority. Factory now owns post-provider revalidation, fsync durability, and the finalization acknowledgement, but the cutover remains unsafe while direct provider activation can bypass the state contract.
-
-All Factory-local product and security choices are resolved. The plan deliberately chooses non-destructive one-shot migration over an ungranted live-data wipe and preserves current Linear capability plus the active old workflow pin. The single remaining provider activation guard is the sole authority blocker.
+None. Current Factory main grants this Run coordinated authority over the admitted Network repository, the Network guard design and rollout order are evidence-backed, and the current `Yolo` label covers the complete reviewed scope after the normal plan-gate publication. The plan deliberately chooses non-destructive one-shot migration, preserves current Linear capability plus the active old workflow pin, and deploys the provider prerequisite before Factory.
