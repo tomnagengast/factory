@@ -574,14 +574,11 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 		errCh <- httpServer.Serve(listener)
 	}()
 	go recoverEventWire(ctx, events, 5*time.Second, func(ctx context.Context) error {
-		if err := triggerManager.ReconcileExisting(ctx); err != nil {
-			return err
-		}
+		return triggerManager.ReconcileExisting(ctx)
+	}, func() error {
 		if _, err := events.ReconcileProviderNeutral(settingsStore.Snapshot().Revision, time.Now()); err != nil {
 			return fmt.Errorf("reconcile provider-neutral workflow: %w", err)
 		}
-		return nil
-	}, func() error {
 		projectManager.Reconcile(ctx)
 		if err := triggerManager.Reconcile(ctx); err != nil {
 			return err
