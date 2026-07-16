@@ -354,7 +354,12 @@ func (c *Coordinator) Execute(ctx context.Context, command CommandEnvelope, now 
 	if err != nil {
 		return Result{}, err
 	}
-	if _, _, err := c.publisher.Publish(ctx, staged.Event); err != nil {
+	if _, added, err := c.publisher.Publish(ctx, staged.Event); err != nil {
+		if !added {
+			if cleanupErr := c.stager.Cancel(staged.OperationID); cleanupErr != nil {
+				return Result{}, errors.Join(err, cleanupErr)
+			}
+		}
 		return Result{}, err
 	}
 	result, err := c.store.Execute(command, now)

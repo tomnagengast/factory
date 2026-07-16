@@ -134,11 +134,15 @@ func permanent(err error) bool {
 
 type dispatcherPublisher struct {
 	dispatcher *Dispatcher
+	failBefore bool
 	failAfter  bool
 	sequence   uint64
 }
 
 func (p *dispatcherPublisher) Publish(ctx context.Context, event eventwire.Event) (eventwire.Record, bool, error) {
+	if p.failBefore {
+		return eventwire.Record{}, false, errors.New("catch-up acknowledgment failed")
+	}
 	p.sequence++
 	record := eventwire.Record{Sequence: p.sequence, Event: event}
 	if _, err := p.dispatcher.Apply(ctx, record); err != nil {
@@ -148,6 +152,27 @@ func (p *dispatcherPublisher) Publish(ctx context.Context, event eventwire.Event
 		return record, true, errors.New("ack failed")
 	}
 	return record, true, nil
+}
+
+func TestCoordinatorCleansUnpublishedStageWhenCatchUpFails(t *testing.T) {
+	directory := t.TempDir()
+	storePath := filepath.Join(directory, "tasks.jsonl")
+	store, _ := Open(storePath)
+	stager, _ := NewStager(filepath.Join(directory, "staged"), storePath)
+	stager.random = bytes.NewReader([]byte("12345678"))
+	dispatcher, _ := NewDispatcher(store, stager)
+	coordinator, _ := NewCoordinator(store, stager, &dispatcherPublisher{dispatcher: dispatcher, failBefore: true})
+	command := CommandEnvelope{Kind: operationCreate, Create: &CreateCommand{Actor: humanActor, Title: "Unpublished", ProjectID: "project-1", ApprovalMode: ApprovalGated, IdempotencyKey: "unpublished"}}
+	if _, err := coordinator.Execute(context.Background(), command, testNow); err == nil {
+		t.Fatal("pre-publication catch-up failure was accepted")
+	}
+	entries, err := os.ReadDir(stager.directory)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("unpublished stage was retained: entries=%#v err=%v", entries, err)
+	}
+	if len(store.Snapshot().Tasks) != 0 {
+		t.Fatal("unpublished command mutated the task store")
+	}
 }
 
 func TestCoordinatorCleansStageAfterApplyEvenWhenAcknowledgmentFails(t *testing.T) {
