@@ -61,7 +61,7 @@ func (completeTestEvidence) ReadCompletionEvidence(context.Context, Run, PullReq
 		HealthMatches:         true,
 		RemoteBranchAbsent:    true,
 		WorktreeAbsent:        true,
-		LinearComplete:        true,
+		TaskComplete:          true,
 		ChildrenComplete:      true,
 	}, nil
 }
@@ -155,7 +155,7 @@ func TestManagerStartsPendingRunAndRecordsCompletion(t *testing.T) {
 		t.Fatalf("cleanup calls = %d, want 1", launcher.cleanupCalls)
 	}
 	running := store.Snapshot().Runs[0]
-	if running.State != StateRunning || running.SessionName != "factory-eng-123" {
+	if running.State != StateRunning || running.SessionName != "factory-linear-"+strings.TrimPrefix(run.ID, "run-") {
 		t.Fatalf("running = %#v", running)
 	}
 

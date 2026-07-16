@@ -6,12 +6,14 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 const (
-	SchemaVersion        = 1
+	SchemaVersion        = 2
+	legacySchemaVersion  = 1
 	GlobalOutstandingMax = 100
 	OutcomeInvocation    = "invocation"
 	OutcomeRejected      = "rejected"
@@ -51,7 +53,8 @@ type Invocation struct {
 	Workflow           workflow.Pinned      `json:"workflow"`
 	WorkflowDigest     string               `json:"workflowDigest"`
 	PolicyRevision     uint64               `json:"policyRevision"`
-	IssueIdentifier    string               `json:"issueIdentifier"`
+	Task               taskmodel.TaskRef    `json:"task"`
+	IssueIdentifier    string               `json:"issueIdentifier,omitempty"`
 	RootEventID        string               `json:"rootEventId"`
 	ParentInvocationID string               `json:"parentInvocationId,omitempty"`
 	ParentRunID        string               `json:"parentRunId,omitempty"`

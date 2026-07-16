@@ -10,13 +10,16 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/tomnagengast/factory/internal/taskcompat"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
 
-const stateVersion = 1
+const stateVersion = 2
 
 const (
 	TriggerKindLabel     = "linear-label"
@@ -27,8 +30,7 @@ const (
 )
 
 var (
-	issueIdentifierPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[1-9][0-9]*$`)
-	runIDPattern           = regexp.MustCompile(`^run-[a-f0-9]{16}$`)
+	runIDPattern = regexp.MustCompile(`^run-[a-f0-9]{16}$`)
 )
 
 type State string
@@ -58,6 +60,7 @@ func (s State) HasWorker() bool {
 
 type Trigger struct {
 	DeliveryID      string
+	Task            taskmodel.TaskRef
 	IssueIdentifier string
 	Kind            string
 	Repository      string
@@ -78,7 +81,8 @@ type Transition struct {
 
 type Run struct {
 	ID                         string                `json:"id"`
-	IssueIdentifier            string                `json:"issueIdentifier"`
+	Task                       taskmodel.TaskRef     `json:"task"`
+	IssueIdentifier            string                `json:"issueIdentifier,omitempty"`
 	Repository                 string                `json:"repository,omitempty"`
 	RepositoryURL              string                `json:"repositoryUrl,omitempty"`
 	RepositoryPath             string                `json:"repositoryPath,omitempty"`
@@ -126,6 +130,7 @@ type InvocationClaim struct {
 	RunID           string
 	InvocationID    string
 	EventID         string
+	Task            taskmodel.TaskRef
 	IssueIdentifier string
 	RootEventID     string
 	Hop             int
@@ -134,6 +139,7 @@ type InvocationClaim struct {
 	WorkflowDigest  string
 	PolicyRevision  uint64
 	Repository      RepositoryConfig
+	Feedback        bool
 }
 
 type ContinuationClaim struct {
@@ -170,6 +176,7 @@ type PublicSnapshot struct {
 
 type ActivityRun struct {
 	ID                         string                `json:"id"`
+	Task                       taskmodel.TaskRef     `json:"task"`
 	IssueIdentifier            string                `json:"issueIdentifier"`
 	State                      State                 `json:"state"`
 	Attempts                   int                   `json:"attempts"`
@@ -230,9 +237,15 @@ func Open(path string, limit int) (*Store, error) {
 	if err := json.Unmarshal(data, &s.state); err != nil {
 		return nil, fmt.Errorf("agent run store: decode: %w", err)
 	}
-	if s.state.Version != stateVersion {
+	if s.state.Version != 1 && s.state.Version != stateVersion {
 		return nil, fmt.Errorf("agent run store: unsupported state version %d", s.state.Version)
 	}
+	for i := range s.state.Runs {
+		if err := normalizeRunIdentity(&s.state.Runs[i]); err != nil {
+			return nil, fmt.Errorf("agent run store: run %q identity: %w", s.state.Runs[i].ID, err)
+		}
+	}
+	s.state.Version = stateVersion
 	s.state.Runs = prune(s.state.Runs, limit)
 	return s, nil
 }
@@ -249,8 +262,9 @@ func (s *Store) EnsureInvocationRun(claim InvocationClaim, now time.Time) (Run, 
 	if !runIDPattern.MatchString(claim.RunID) || claim.InvocationID == "" || claim.EventID == "" {
 		return Run{}, false, errors.New("agent run store: invocation identity is invalid")
 	}
-	if !ValidIssueIdentifier(claim.IssueIdentifier) {
-		return Run{}, false, fmt.Errorf("agent run store: invalid issue identifier %q", claim.IssueIdentifier)
+	task, err := taskmodel.ResolveCompatibilityIdentity(claim.Task, claim.IssueIdentifier)
+	if err != nil {
+		return Run{}, false, fmt.Errorf("agent run store: invalid invocation task: %w", err)
 	}
 	if claim.RootEventID == "" || claim.Hop < 1 || len(claim.AncestorRuleIDs) != claim.Hop {
 		return Run{}, false, errors.New("agent run store: invocation causation is invalid")
@@ -274,17 +288,32 @@ func (s *Store) EnsureInvocationRun(claim InvocationClaim, now time.Time) (Run, 
 		}
 	}
 	for _, run := range s.state.Runs {
-		if run.IssueIdentifier == claim.IssueIdentifier && run.State.Active() {
+		if run.Task.Equal(task) && run.State.Active() {
+			if claim.Feedback {
+				if !validNativeFeedbackClaim(claim, task) {
+					return Run{}, false, errors.New("agent run store: native feedback claim is invalid")
+				}
+				return s.coalesceInvocationFeedbackLocked(run.ID, claim.EventID, now)
+			}
 			return Run{}, false, ErrInvocationIssueOwned
 		}
 	}
+	claim.Task = task
+	claim.IssueIdentifier = task.Identifier
 	pinnedWorkflow := claim.Workflow.Clone()
+	triggerKind := TriggerKindRule
+	if claim.Feedback {
+		if !validNativeFeedbackClaim(claim, task) {
+			return Run{}, false, errors.New("agent run store: native feedback claim is invalid")
+		}
+		triggerKind = TriggerKindComment
+	}
 	run := Run{
-		ID: claim.RunID, IssueIdentifier: claim.IssueIdentifier,
+		ID: claim.RunID, Task: task, IssueIdentifier: task.Identifier,
 		Repository: claim.Repository.Repository, RepositoryURL: claim.Repository.RepoURL,
 		RepositoryPath: claim.Repository.RepoPath, ManagedRoot: claim.Repository.ManagedRoot,
 		BaseBranch: claim.Repository.BaseBranch, Bootstrap: claim.Repository.Bootstrap, CloudURL: claim.Repository.CloudURL,
-		TriggerKind: TriggerKindRule, DeliveryIDs: []string{claim.EventID}, State: StatePending,
+		TriggerKind: triggerKind, DeliveryIDs: []string{claim.EventID}, State: StatePending,
 		CreatedAt: now, UpdatedAt: now, Transitions: []Transition{newTransition(claim.RunID, StatePending, 0, now)},
 		InvocationID: claim.InvocationID, InvocationRootEventID: claim.RootEventID, InvocationHop: claim.Hop,
 		InvocationAncestorRuleIDs: slices.Clone(claim.AncestorRuleIDs), PinnedWorkflow: &pinnedWorkflow,
@@ -301,8 +330,46 @@ func (s *Store) EnsureInvocationRun(claim InvocationClaim, now time.Time) (Run, 
 	return cloneRun(run), true, nil
 }
 
+func validNativeFeedbackClaim(claim InvocationClaim, task taskmodel.TaskRef) bool {
+	prefix := "factory:native-continue:" + task.ProviderID + ":"
+	suffix := strings.TrimPrefix(claim.EventID, prefix)
+	return task.Source == taskmodel.SourceFactory && strings.HasPrefix(claim.EventID, prefix) && len(suffix) == 16 &&
+		strings.Trim(suffix, "0123456789abcdef") == "" && claim.RootEventID == claim.EventID
+}
+
+func (s *Store) coalesceInvocationFeedbackLocked(runID, eventID string, now time.Time) (Run, bool, error) {
+	next := s.state
+	next.Runs = cloneRuns(s.state.Runs)
+	for index := range next.Runs {
+		run := &next.Runs[index]
+		if run.ID != runID {
+			continue
+		}
+		if slices.Contains(run.DeliveryIDs, eventID) {
+			return cloneRun(*run), false, nil
+		}
+		run.DeliveryIDs = append(run.DeliveryIDs, eventID)
+		run.DuplicateTriggers++
+		run.UpdatedAt = now
+		previousState := run.State
+		if run.State == StateAwaitingMerge {
+			resumeAwaitingRun(run, TriggerKindComment, "", "Native task feedback received; resuming lifecycle", now)
+		}
+		if run.State != previousState {
+			run.Transitions = append(run.Transitions, newTransition(run.ID, run.State, run.Attempts, now))
+		}
+		if err := writeState(s.path, next); err != nil {
+			return Run{}, false, err
+		}
+		s.state = next
+		return cloneRun(*run), false, nil
+	}
+	return Run{}, false, ErrInvocationIssueOwned
+}
+
 func invocationRunMatches(run Run, claim InvocationClaim) bool {
-	return run.ID == claim.RunID && run.InvocationID == claim.InvocationID && run.IssueIdentifier == claim.IssueIdentifier &&
+	task, err := taskmodel.ResolveCompatibilityIdentity(claim.Task, claim.IssueIdentifier)
+	return err == nil && run.ID == claim.RunID && run.InvocationID == claim.InvocationID && run.Task.Equal(task) &&
 		run.InvocationRootEventID == claim.RootEventID && run.InvocationHop == claim.Hop &&
 		slices.Equal(run.InvocationAncestorRuleIDs, claim.AncestorRuleIDs) && run.PinnedWorkflow != nil &&
 		workflowEqual(*run.PinnedWorkflow, claim.Workflow) && run.PinnedWorkflowDigest == claim.WorkflowDigest &&
@@ -361,8 +428,9 @@ func (s *Store) claim(trigger Trigger, pinned workflow.Pinned, digest string, po
 	if trigger.DeliveryID == "" {
 		return Run{}, false, errors.New("agent run store: delivery ID is required")
 	}
-	if !issueIdentifierPattern.MatchString(trigger.IssueIdentifier) {
-		return Run{}, false, fmt.Errorf("agent run store: invalid issue identifier %q", trigger.IssueIdentifier)
+	task, err := taskmodel.ResolveCompatibilityIdentity(trigger.Task, trigger.IssueIdentifier)
+	if err != nil {
+		return Run{}, false, fmt.Errorf("agent run store: invalid task: %w", err)
 	}
 	if trigger.Kind == "" {
 		return Run{}, false, errors.New("agent run store: trigger kind is required")
@@ -378,7 +446,7 @@ func (s *Store) claim(trigger Trigger, pinned workflow.Pinned, digest string, po
 		if slices.Contains(run.DeliveryIDs, trigger.DeliveryID) {
 			return run, false, nil
 		}
-		if run.IssueIdentifier != trigger.IssueIdentifier {
+		if !run.Task.Equal(task) {
 			continue
 		}
 		hasHistory = true
@@ -418,7 +486,8 @@ func (s *Store) claim(trigger Trigger, pinned workflow.Pinned, digest string, po
 	}
 	run := Run{
 		ID:              id,
-		IssueIdentifier: trigger.IssueIdentifier,
+		Task:            task,
+		IssueIdentifier: task.Identifier,
 		Repository:      trigger.Repository,
 		RepositoryURL:   trigger.RepositoryURL,
 		RepositoryPath:  trigger.RepositoryPath,
@@ -722,7 +791,7 @@ func (s *Store) Find(id string) (Run, bool) {
 }
 
 func ValidIssueIdentifier(value string) bool {
-	return issueIdentifierPattern.MatchString(value)
+	return taskmodel.ValidLinearIdentifier(value)
 }
 
 func (s *Store) FindStarted(issueIdentifier string, startedUnixMilli int64) (Run, bool) {
@@ -732,7 +801,7 @@ func (s *Store) FindStarted(issueIdentifier string, startedUnixMilli int64) (Run
 	var matched Run
 	found := false
 	for _, run := range s.state.Runs {
-		if run.IssueIdentifier != issueIdentifier || run.StartedAt == nil || run.StartedAt.UnixMilli() != startedUnixMilli {
+		if run.Task.Source != taskmodel.SourceLinear || !strings.EqualFold(run.Task.Identifier, issueIdentifier) || run.StartedAt == nil || run.StartedAt.UnixMilli() != startedUnixMilli {
 			continue
 		}
 		if !found || run.CreatedAt.After(matched.CreatedAt) {
@@ -770,6 +839,7 @@ func (s *Store) ActivitySnapshot() ActivitySnapshot {
 	for i, run := range snapshot.Runs {
 		runs[i] = ActivityRun{
 			ID:                         run.ID,
+			Task:                       run.Task,
 			IssueIdentifier:            run.IssueIdentifier,
 			State:                      run.State,
 			Attempts:                   run.Attempts,
@@ -904,6 +974,16 @@ func cloneRun(run Run) Run {
 	return run
 }
 
+func normalizeRunIdentity(run *Run) error {
+	resolved, err := taskmodel.ResolveCompatibilityIdentity(run.Task, run.IssueIdentifier)
+	if err != nil {
+		return err
+	}
+	run.Task = resolved
+	run.IssueIdentifier = resolved.Identifier
+	return nil
+}
+
 func cloneCompletion(value *CompletionValidation) *CompletionValidation {
 	if value == nil {
 		return nil
@@ -937,6 +1017,9 @@ func newID() (string, error) {
 }
 
 func writeState(path string, value diskState) error {
+	if err := taskcompat.Ensure(path); err != nil {
+		return fmt.Errorf("agent run store: establish task compatibility boundary: %w", err)
+	}
 	temp, err := os.CreateTemp(filepath.Dir(path), ".agent-runs-*")
 	if err != nil {
 		return fmt.Errorf("agent run store: create temporary file: %w", err)

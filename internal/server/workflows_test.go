@@ -19,7 +19,13 @@ func TestWorkflowDraftPublishAndProtectedBindingLifecycle(t *testing.T) {
 	if err := json.NewDecoder(initial.Body).Decode(&catalog); err != nil {
 		t.Fatal(err)
 	}
-	if initial.Code != http.StatusOK || !catalog.DraftAvailable || len(catalog.Workflows) != 1 || catalog.Workflows[0].Draft.Markdown == "" {
+	defaultDocument := workflowDocument{}
+	for _, candidate := range catalog.Workflows {
+		if candidate.WorkflowID == workflow.DefaultID {
+			defaultDocument = candidate
+		}
+	}
+	if initial.Code != http.StatusOK || !catalog.DraftAvailable || defaultDocument.Draft.Markdown == "" {
 		t.Fatalf("initial workflow catalog = %d %#v", initial.Code, catalog)
 	}
 
@@ -96,7 +102,8 @@ func TestWorkflowDraftPublishAndProtectedBindingLifecycle(t *testing.T) {
 		ExpectedDraftRevision: disabledDraft.Revision, ExpectedWorkflowRevision: 1,
 		ExpectedPolicyRevision: policy.SettingsSnapshot().Revision,
 	}, "")
-	if rejected.Code != http.StatusBadRequest || !policy.SettingsSnapshot().Workflows[1].Enabled {
+	publishedAfterReject, found := policy.SettingsSnapshot().Workflow(created.WorkflowID)
+	if rejected.Code != http.StatusBadRequest || !found || !publishedAfterReject.Enabled {
 		t.Fatalf("referenced disable = %d %s policy=%#v", rejected.Code, rejected.Body.String(), policy.SettingsSnapshot())
 	}
 
@@ -116,7 +123,7 @@ func TestWorkflowAuthoringUnavailableKeepsPublishedCatalogReadable(t *testing.T)
 	if err := json.NewDecoder(response.Body).Decode(&catalog); err != nil {
 		t.Fatal(err)
 	}
-	if response.Code != http.StatusOK || catalog.DraftAvailable || len(catalog.Workflows) != 1 {
+	if response.Code != http.StatusOK || catalog.DraftAvailable || len(catalog.Workflows) != 2 {
 		t.Fatalf("read-only catalog = %d %#v", response.Code, catalog)
 	}
 	mutation := authenticatedJSONRequest(t, handler, http.MethodPost, "/api/workflow-drafts", nil, "")

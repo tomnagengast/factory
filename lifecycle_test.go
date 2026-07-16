@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/triggerregistry"
+	"github.com/tomnagengast/factory/internal/triggerrouter"
 )
 
 type recordingPublisher struct {
@@ -63,6 +66,72 @@ func TestRecoverEventWireGatesRuntimeUntilCatchUp(t *testing.T) {
 	}
 	if got := attempts.Load(); got != 3 {
 		t.Fatalf("dispatch attempts = %d, want 3", got)
+	}
+}
+
+func TestRecoverEventWireAdmitsPendingEventBeforeProviderNeutralReconciliation(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	configuration, err := settings.Open(filepath.Join(directory, "settings.json"), settings.Defaults(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := triggerregistry.Open(
+		filepath.Join(directory, "triggers.json"),
+		triggerregistry.Defaults(configuration.Snapshot(), "human"),
+		configuration.Snapshot(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing, err := triggerrouter.Open(filepath.Join(directory, "routing.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := eventwire.Open(filepath.Join(directory, "events.jsonl"), 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := eventwire.New(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := triggerrouter.NewCoordinatedWire(raw, registry, configuration, routing, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := eventwire.Event{
+		ID: "factory:test:pending-admission", Source: eventwire.SourceFactory, Type: "service",
+		Action: "complete", Subject: "ENG-46", ReceivedAt: now,
+	}
+	if _, added, err := journal.Add(event); err != nil || !added {
+		t.Fatalf("seed pending event: added=%t err=%v", added, err)
+	}
+	if _, err := wire.ReconcileProviderNeutral(configuration.Snapshot().Revision, now); !errors.Is(err, triggerrouter.ErrPolicyPending) {
+		t.Fatalf("pre-catch-up reconciliation error = %v, want pending policy", err)
+	}
+
+	ready := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go recoverEventWire(ctx, wire, time.Millisecond, func(context.Context) error { return nil }, func() error {
+		if _, err := wire.ReconcileProviderNeutral(configuration.Snapshot().Revision, now); err != nil {
+			return err
+		}
+		close(ready)
+		return nil
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not recover pending policy")
+	}
+	if status := wire.Status(); status.Pending != 0 || status.Dispatched != 1 {
+		t.Fatalf("wire status = %#v", status)
+	}
+	if decisions := routing.Snapshot().Decisions; len(decisions) != 1 || decisions[0].EventID != event.ID {
+		t.Fatalf("routing decisions = %#v", decisions)
 	}
 }
 

@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/tomnagengast/factory/internal/taskmodel"
 )
 
 const (
@@ -23,16 +25,17 @@ var (
 )
 
 type ReadyCheckpoint struct {
-	ContractVersion      int       `json:"contractVersion"`
-	RunID                string    `json:"runId"`
-	Repository           string    `json:"repository"`
-	PullRequest          int       `json:"pullRequest"`
-	BaseBranch           string    `json:"baseBranch"`
-	HeadBranch           string    `json:"headBranch"`
-	VerifiedHeadOID      string    `json:"verifiedHeadOid"`
-	PullRequestUpdatedAt time.Time `json:"pullRequestUpdatedAt,omitempty"`
-	CreatedAt            time.Time `json:"createdAt"`
-	ValidatedAt          time.Time `json:"validatedAt,omitempty"`
+	ContractVersion      int               `json:"contractVersion"`
+	RunID                string            `json:"runId"`
+	Task                 taskmodel.TaskRef `json:"task,omitzero"`
+	Repository           string            `json:"repository"`
+	PullRequest          int               `json:"pullRequest"`
+	BaseBranch           string            `json:"baseBranch"`
+	HeadBranch           string            `json:"headBranch"`
+	VerifiedHeadOID      string            `json:"verifiedHeadOid"`
+	PullRequestUpdatedAt time.Time         `json:"pullRequestUpdatedAt,omitempty"`
+	CreatedAt            time.Time         `json:"createdAt"`
+	ValidatedAt          time.Time         `json:"validatedAt,omitempty"`
 }
 
 func (c ReadyCheckpoint) Validate() error {
@@ -42,6 +45,11 @@ func (c ReadyCheckpoint) Validate() error {
 	if c.RunID == "" {
 		return errors.New("ready checkpoint: run ID is required")
 	}
+	if !c.Task.IsZero() {
+		if err := c.Task.Validate(); err != nil {
+			return fmt.Errorf("ready checkpoint: invalid task: %w", err)
+		}
+	}
 	if !repositoryPattern.MatchString(c.Repository) {
 		return errors.New("ready checkpoint: repository must be owner/name")
 	}
@@ -50,6 +58,15 @@ func (c ReadyCheckpoint) Validate() error {
 	}
 	if !validBranch(c.BaseBranch) || !validBranch(c.HeadBranch) {
 		return errors.New("ready checkpoint: base and head branches are invalid")
+	}
+	if !c.Task.IsZero() {
+		prefix, err := c.Task.BranchPrefix()
+		if err != nil {
+			return fmt.Errorf("ready checkpoint: derive task branch prefix: %w", err)
+		}
+		if !strings.HasPrefix(c.HeadBranch, prefix) {
+			return fmt.Errorf("ready checkpoint: head branch must begin with task prefix %q", prefix)
+		}
 	}
 	if !gitOIDPattern.MatchString(c.VerifiedHeadOID) {
 		return errors.New("ready checkpoint: verified head must be a lowercase 40-character Git OID")

@@ -38,7 +38,7 @@ For any admitted project with a Cloud URL, onboarding also creates one marker-ba
 2. The delivery is persisted, the Linear project's GitHub Repo and Local Path are resolved against the current repository catalog, and a pending run is claimed before the handler returns `200`.
 3. The background manager prepares that repository's isolated internal clone. Existing checkouts must match the configured managed root, GitHub origin, base branch, GitHub default branch, merge-commit-only policy, and automatic branch deletion. A catalog entry may explicitly allow greenfield bootstrap: Factory creates the private GitHub repository when absent, clones through a staging directory, initializes and publishes the configured base branch when the remote is empty, and verifies the final identity before starting an agent. GitHub policy drift is reconciled once and verified by a second authoritative read; non-convergence fails preparation. Symlink escapes, files or non-Git directories at the target, mismatched origins, and unexpected branches fail closed. Registered linked worktrees are excluded from the clone's dirty check; all other local changes and divergence fail preparation instead of being overwritten. Before starting a pending run with no other agent active, Factory removes clean, unlocked worktrees whose branches are already integrated into that repository's fetched upstream as a backstop for interrupted cleanup.
 4. One isolated tmux session named `factory-<issue-lower>` starts on the `factory-agents` tmux socket.
-5. Factory starts the principal with the complete Markdown body and identity of the workflow revision pinned on the Run. The compiled `full-sdlc` workflow drives gated research, dual-provider plan review, implementation, and the complete ready-for-human-merge predicate through Factory-owned helpers. Comment continuations fresh-read the Linear thread and treat only unaddressed human feedback as new scope.
+5. Factory starts the principal with the complete Markdown body and identity of the workflow revision pinned on the Run. The compiled `full-sdlc-provider-neutral` workflow drives gated research, dual-provider plan review, implementation, and the complete ready-for-human-merge predicate through Factory-owned task helpers. Retained older Linear pins continue through their original `full-sdlc` workflow. Comment continuations fresh-read the provider conversation and treat only unaddressed human feedback as new scope.
 6. A failed Codex process is resumed, when a thread ID is available, up to three total attempts.
 7. After the PR is ready, the principal records the exact locally verified head through `agent checkpoint ready-for-merge` and exits with `FACTORY_RESULT: READY_FOR_HUMAN_MERGE`. Factory validates the contract-v1 checkpoint, parks the run as `awaiting_human_merge`, and closes the tmux segment. This is nonterminal and does not consume an LLM while waiting.
 8. GitHub webhooks wake the parked run immediately. A supervisor sweep also refreshes authoritative GitHub state at least once per minute with a persisted cursor, bounded backoff, and restart-safe schedule. An `OPEN` PR stays parked, a closed-unmerged PR becomes a typed blocker, and only a fresh `MERGED` snapshot with a merge commit starts a new `post-merge` continuation.
@@ -66,11 +66,90 @@ Factory separates public health from authenticated operational detail:
 - `/wire` is the authenticated system-event workspace with source and type filters, retained-window charts, 25-event pages, normalized journal records, and available Linear raw-payload inspection.
 - `/agents` is the authenticated run dashboard with issue context, lifecycle phase, ready-checkpoint PR and verified head, authoritative refresh timing, resume counts, deployment receipt identity, and terminal rejection evidence.
 - `/agents/<issue-id>/<started-unix-ms>/run` is the authenticated, read-only loop observer for one started run.
+- `/tasks` is the authenticated source-neutral task workspace. Factory tasks are native and mutable; retained managed Linear tasks are read-only and load their private detail live from Linear.
 - `/workflows` is the authenticated Markdown workflow authoring and publication workspace.
 - `/triggers` is the authenticated generic event-rule, cron schedule, protected-route binding, and recent-routing workspace.
 - `/settings` is the authenticated agent-provider and manager-capacity editor.
 
 Validated Linear request bodies are retained prospectively as private `0600` sidecar files beside the bounded activity index. Sidecars age out with their projection records. Historical wire records from before payload retention remain listable without a body, and GitHub request bodies are never retained. Pending runs without a start timestamp appear as non-link rows until the canonical observer reference exists. Deprecated activity URLs, direct run-ID URLs, unknown paths, malformed paths, and trailing-slash variants return `404` without redirects or compatibility aliases.
+
+## Native tasks and provider authority
+
+Factory and Linear remain separate task authorities. Factory owns `FAC-N` tasks, their descriptions, immutable discussion, links, gates, project selection, and lifecycle state. Linear owns `TEAM-N` issues. The `/tasks` index includes only Linear issues already retained by a Factory Run or admitted Invocation, never the whole Linear workspace. Opening one of those records fetches its current description, state, project, and comments from Linear without copying them into native task storage. A Linear outage therefore leaves native tasks readable but makes live Linear detail and Linear-backed workflow operations temporarily unavailable.
+
+Native task creation and start are dark by default. A project appears as an eligible choice only after Linear project onboarding has reached `succeeded` and its repository metadata resolves through the allowlisted catalog. Activation is per project and stored separately from the task journal. The authenticated control API returns both choices and the optimistic control revision:
+
+```bash
+curl -fsS -b "$FACTORY_COOKIE_JAR" \
+  https://factory.nags.cloud/api/task-projects | jq .
+
+curl -fsS -b "$FACTORY_COOKIE_JAR" \
+  -H 'Origin: https://factory.nags.cloud' \
+  -H 'Content-Type: application/json' \
+  -X PUT \
+  --data '{"expectedRevision":0,"enabled":true}' \
+  https://factory.nags.cloud/api/task-projects/project-id
+```
+
+Use the `control.revision` returned by the read endpoint, substitute the exact admitted project ID, and preserve the same authenticated browser session. A stale revision returns `409` with the authoritative snapshot. Disable the project with the same request and `enabled:false`. Disabling prevents new create/start operations; it does not rewrite native records or terminate an admitted Run.
+
+Startup reconciles the exact compiled `full-sdlc-provider-neutral` workflow. A conflicting customized definition stops startup instead of being overwritten. Native start rechecks the enabled project, succeeded project setup, repository catalog, and exact workflow digest before it snapshots the route and admits work. The committed default enables no project. After ENG-46 deployment, rollout remains limited to the admitted Factory project and one separately scoped native canary. The canary must independently cross its research and plan gates and complete its own checkpointed pull request, human merge, deployment, and cleanup. Network-provider workflow work and broader project enablement remain separate follow-ups.
+
+Provider-neutral Runs receive a private capability bound to the exact Run, TaskRef, and repository. They do not receive `LINEAR_API_KEY`. Retained Runs pinned to older workflows keep the legacy Linear access needed to finish safely. Inside an exact provider-neutral Run, use the scoped helper rather than selecting a task ID:
+
+```bash
+"$FACTORY_AGENT_HELPER" agent task show
+"$FACTORY_AGENT_HELPER" agent task messages --after 0
+"$FACTORY_AGENT_HELPER" agent task activity --after 0 --revision 0 --wait 60s
+"$FACTORY_AGENT_HELPER" agent task comment --body 'Implementation evidence is ready'
+"$FACTORY_AGENT_HELPER" agent task reply --parent message-id --body 'Addressed'
+"$FACTORY_AGENT_HELPER" agent task link --label 'Pull request' --url 'https://github.com/owner/repository/pull/1'
+"$FACTORY_AGENT_HELPER" agent task gate open --kind plan --mode gated --artifact-url 'https://example.invalid/plan'
+```
+
+Mutating helper operations derive a stable idempotency key when one is not supplied. The service rejects unknown, terminal, cross-repository, or capability-mismatched Runs. Native human messages and gate decisions can continue an in-progress Run; agent and system messages cannot. Native completion is not an editable state transition. Factory records `completed` only after the existing pull-request, review, verified-head, deployment, cleanup, child-window, task-gate, and unanswered-human-feedback evidence all passes. The only direct terminal task action is cancellation.
+
+### Native task storage and recovery
+
+All task state is private under `~/.local/share/factory/data`:
+
+- `native-tasks.jsonl` is the append journal and compacted checkpoint. It contains the FAC sequence, tasks, messages, links, gates, idempotency outcomes, pinned routing, and completion evidence.
+- `task-operations/` contains private staged commands until their body-free `system-events.jsonl` records are applied and acknowledged.
+- `native-task-control.json` contains the per-project dark-launch control.
+- `task-source-neutral.json` is the monotonic compatibility marker written and fsynced before the first source-neutral Run, Invocation, staged task, or task-journal write.
+
+Directories are `0700`; files are `0600` and use fsync plus append or atomic replacement. Do not edit, truncate, combine, or selectively restore these files. The task journal may recover only an incomplete final JSONL record. A malformed complete record, invalid sequence, revision conflict, duplicate identity, or incompatible checkpoint fails startup closed and must be preserved for diagnosis.
+
+For a consistent backup, quiesce Factory and copy the complete data directory, not only `native-tasks.jsonl`. This keeps the task journal, pending wire records, staged command bodies, Run/Invocation ownership, sequence state, control, and compatibility marker at one point in time:
+
+```bash
+factory stop
+backup="$HOME/.local/share/factory/backups/tasks-$(date -u +%Y%m%dT%H%M%SZ)"
+install -d -m 700 "$backup"
+cp -a "$HOME/.local/share/factory/data" "$backup/data"
+test "$(stat -f '%Lp' "$backup/data")" = 700
+find "$backup/data" -type f ! -perm 600 -print
+```
+
+The final `find` must print nothing. Keep Factory stopped until the copy and permission checks finish. For restore, preserve the failed live directory, prepare a complete sibling directory from one backup, verify permissions, then replace the data directory using directory renames before starting Factory:
+
+```bash
+factory stop
+state="$HOME/.local/share/factory"
+restore="$state/.data-restore.$(date -u +%Y%m%dT%H%M%SZ)"
+cp -a "/absolute/path/to/backup/data" "$restore"
+test "$(stat -f '%Lp' "$restore")" = 700
+test -z "$(find "$restore" -type f ! -perm 600 -print -quit)"
+mv "$state/data" "$state/data.pre-restore.$(date -u +%Y%m%dT%H%M%SZ)"
+mv "$restore" "$state/data"
+factory start
+factory doctor --json
+curl -fsS http://127.0.0.1:8092/api/healthz | jq .
+```
+
+Each rename is atomic. If recovery is interrupted between them, keep the service stopped and select one complete directory rather than merging files. After restart, require a drained wire, healthy task store, expected FAC sequence, and correct authenticated `/tasks` detail before admitting new work.
+
+The compatibility marker is not a feature flag. Once `task-source-neutral.json` exists, a task-unaware release is not a valid rollback target even if native projects are disabled or no FAC task was created. Never delete or edit the marker to force rollback. Restore a complete backup with the marker and deploy a TaskRef-aware release, or forward-fix from clean merged `main`.
 
 ## System event wire
 
@@ -126,7 +205,7 @@ The authenticated API mirrors that model:
 
 Every fresh admission snapshots the selected published ID, revision, complete Markdown body, digest, rule revision where applicable, and policy revision before promotion. The launcher validates and writes that pin as private `workflow.json`, then places the Markdown verbatim in the principal prompt. Retries, active-run feedback, GitHub remediation, and post-merge segments keep the same pin. Repointing the protected feedback binding affects only later fresh post-terminal continuations. The generic `linear-comment` rule remains independent and may create an additional serialized invocation for the same human event.
 
-The compiled `full-sdlc` document is self-contained and calls `factory agent linear-graphql` with a JSON request on standard input for Linear operations. New Factory Runs do not depend on a provider-installed skill or repository-relative workflow assets. Narrow legacy decoding and the old prompt path remain only for already admitted schema-1 records during the compatibility window.
+The compiled `full-sdlc-provider-neutral` document is self-contained and calls `factory agent task` for the exact capability-scoped TaskRef. The retained `full-sdlc` document continues to call `factory agent linear-graphql` for older Linear pins. New Factory Runs do not depend on a provider-installed skill or repository-relative workflow assets. Narrow legacy decoding and the old prompt path remain only for already admitted records during the compatibility window.
 
 ## GitHub event sink
 
@@ -259,7 +338,7 @@ If any managed marker exists at the fixed plist, wrapper, active release, or rec
 The launchd wrapper sources `~/.config/network-app/env`. Factory requires:
 
 - `LINEAR_WEBHOOK_SECRET` for webhook authentication.
-- `LINEAR_API_KEY` for the principal and child agents' Linear access.
+- `LINEAR_API_KEY` for the Factory service's Linear adapter and retained legacy workflow pins. Exact provider-neutral Runs receive only their scoped task capability.
 - `LINEAR_TRIGGER_ACTOR_ID` for the only Linear user allowed to start runs.
 - `GITHUB_WEBHOOK_SECRET` for GitHub repository webhook authentication.
 - `FACTORY_GOOGLE_CLIENT_ID` and `FACTORY_GOOGLE_CLIENT_SECRET` for Google sign-in.
@@ -291,7 +370,7 @@ The compiled catalog routes `tomnagengast/network`, `tomnagengast/notebook`, `to
 
 The public health API exposes only service and aggregate wire state. `/api/home` returns privacy-safe delivery metadata and opaque run state, while `/api/wire`, `/api/agents`, canonical run observers, and settings remain authenticated. Linear issue identifiers, raw request bodies, prompts, logs, errors, repository paths, and session names remain private.
 
-Factory also starts its tmux server with a restricted environment. Agent processes receive normal shell/GitHub runtime variables and the dedicated Linear API key, but not the webhook signing secret, Cloudflare token, UniFi key, tunnel token, or 1Password service-account token sourced by the parent service.
+Factory also starts its tmux server with a restricted environment. Agent processes receive normal shell/GitHub runtime variables. Exact provider-neutral Runs receive the scoped task capability instead of the Linear API key; retained older pins receive the key only for compatibility. No agent receives the webhook signing secret, Cloudflare token, UniFi key, tunnel token, or 1Password service-account token sourced by the parent service.
 
 ## Deploy and verify
 

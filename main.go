@@ -23,9 +23,13 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
+	"github.com/tomnagengast/factory/internal/linearidentity"
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/server"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskcontrol"
+	"github.com/tomnagengast/factory/internal/taskservice"
+	"github.com/tomnagengast/factory/internal/taskstore"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/triggerrouter"
 	"github.com/tomnagengast/factory/internal/triggerscheduler"
@@ -143,6 +147,10 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	}
 	stateRoot := filepath.Join(home, ".local", "share", "factory")
 	dataRoot := filepath.Join(stateRoot, "data")
+	linearIdentities, err := linearidentity.Open(filepath.Join(dataRoot, "linear-task-identities.json"))
+	if err != nil {
+		return err
+	}
 	maxConcurrentRuns := envInt("FACTORY_MAX_AGENTS", defaultMaxConcurrentRuns)
 	settingsStore, err := settings.Open(filepath.Join(dataRoot, "settings.json"), settings.Defaults(maxConcurrentRuns))
 	if err != nil {
@@ -198,6 +206,41 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 		return err
 	}
 	events, err := triggerrouter.NewCoordinatedWire(rawEvents, registryStore, settingsStore, routingStore, time.Now)
+	if err != nil {
+		return err
+	}
+	taskStorePath := filepath.Join(dataRoot, "native-tasks.jsonl")
+	nativeTasks, err := taskstore.Open(taskStorePath)
+	if err != nil {
+		return err
+	}
+	taskStager, err := taskstore.NewStager(filepath.Join(dataRoot, "task-operations"), taskStorePath)
+	if err != nil {
+		return err
+	}
+	_, dispatchedEvents, _, retainedEvents := eventJournal.Snapshot()
+	if err := taskStager.Recover(dispatchedEvents, retainedEvents); err != nil {
+		return fmt.Errorf("recover staged task operations: %w", err)
+	}
+	taskDispatcher, err := taskstore.NewDispatcher(nativeTasks, taskStager)
+	if err != nil {
+		return err
+	}
+	if err := events.Handle(eventwire.Filter{Source: eventwire.SourceFactory, Type: taskstore.StagedEventType}, func(ctx context.Context, record eventwire.Record) error {
+		_, err := taskDispatcher.Apply(ctx, record)
+		return err
+	}); err != nil {
+		return err
+	}
+	taskCoordinator, err := taskstore.NewCoordinator(nativeTasks, taskStager, events)
+	if err != nil {
+		return err
+	}
+	taskCompleter, err := taskservice.NewCompleter(nativeTasks, taskCoordinator, time.Now)
+	if err != nil {
+		return err
+	}
+	nativeTaskControl, err := taskcontrol.Open(filepath.Join(dataRoot, "native-task-control.json"))
 	if err != nil {
 		return err
 	}
@@ -314,6 +357,14 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	if err != nil {
 		return err
 	}
+	factoryRepositoryResolver, err := agentrun.NewFactoryRepositoryResolver(nativeTasks, repositoryCatalog)
+	if err != nil {
+		return err
+	}
+	taskRepositoryResolver, err := agentrun.NewCompositeTaskRepositoryResolver(repositoryResolver, factoryRepositoryResolver)
+	if err != nil {
+		return err
+	}
 	launcherConfig := agentrun.LauncherConfig{
 		Repository:    defaultRepository,
 		RepoURL:       envOr("FACTORY_REPO_URL", defaultRepoURL),
@@ -327,6 +378,7 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 		WorktrunkPath: worktrunkPath,
 		TmuxPath:      tmuxPath,
 		TmuxSocket:    tmuxSocket,
+		TaskEndpoint:  "http://127.0.0.1:" + strconv.Itoa(options.address.Port) + "/api/agent/task",
 	}
 	launcher, err := agentrun.NewTmuxLauncher(launcherConfig)
 	if err != nil {
@@ -339,7 +391,8 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	readerOptions := completionReaderOptions{
 		linearURL: linearGraphQLURL, linearAPIKey: linearAPIKey,
 		gitPath: gitPath, worktrunkPath: worktrunkPath,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient:     &http.Client{Timeout: 10 * time.Second},
+		taskCompletion: taskCompleter,
 	}
 	completionReaders, err := buildCompletionReaders(repositoryConfigs, readerOptions)
 	if err != nil {
@@ -377,7 +430,18 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	if err != nil {
 		return err
 	}
-	triggerManager, err := triggerrouter.NewManager(routingStore, runStore, events, repositoryResolver, manager, slog.Default(), time.Now)
+	triggerManager, err := triggerrouter.NewManager(routingStore, runStore, events, taskRepositoryResolver, manager, slog.Default(), time.Now)
+	if err != nil {
+		return err
+	}
+	nativeTaskService, err := taskservice.New(
+		nativeTaskControl, projectSetupStore, repositoryCatalog, nativeTasks, taskCoordinator,
+		events, routingStore, triggerManager, time.Now,
+	)
+	if err != nil {
+		return err
+	}
+	linearTaskProvider, err := taskservice.NewLinearProvider(linearGraphQLURL, linearAPIKey, &http.Client{Timeout: 10 * time.Second}, linearIdentities)
 	if err != nil {
 		return err
 	}
@@ -461,10 +525,20 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 			ContractVersion: buildContractVersion,
 			StartedAt:       serviceStartedAt,
 		},
-		GenericTriggers: true,
-		TriggerPolicy:   events,
-		ScheduleStatus:  scheduler,
-		Ready:           ready.Load,
+		GenericTriggers:  true,
+		TriggerPolicy:    events,
+		ScheduleStatus:   scheduler,
+		Tasks:            nativeTaskService,
+		LinearTasks:      linearTaskProvider,
+		LinearIdentities: linearIdentities,
+		TaskStatus: func() taskstore.Status {
+			status := nativeTasks.Status()
+			staging := taskStager.Status()
+			status.PendingStages = staging.PendingStages
+			status.Healthy = status.Healthy && staging.Healthy && staging.PendingStages == 0
+			return status
+		},
+		Ready: ready.Load,
 	})
 	if err != nil {
 		return err
@@ -499,7 +573,12 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 		slog.Info("factory listening", "address", httpServer.Addr)
 		errCh <- httpServer.Serve(listener)
 	}()
-	go recoverEventWire(ctx, events, 5*time.Second, triggerManager.ReconcileExisting, func() error {
+	go recoverEventWire(ctx, events, 5*time.Second, func(ctx context.Context) error {
+		return triggerManager.ReconcileExisting(ctx)
+	}, func() error {
+		if _, err := events.ReconcileProviderNeutral(settingsStore.Snapshot().Revision, time.Now()); err != nil {
+			return fmt.Errorf("reconcile provider-neutral workflow: %w", err)
+		}
 		projectManager.Reconcile(ctx)
 		if err := triggerManager.Reconcile(ctx); err != nil {
 			return err

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,12 @@ type PublicSnapshot struct {
 	Running          int `json:"running"`
 	Succeeded        int `json:"succeeded"`
 	Failed           int `json:"failed"`
+}
+
+type Choice struct {
+	ProjectID   string `json:"projectId"`
+	ProjectName string `json:"projectName"`
+	Repository  string `json:"repository"`
 }
 
 type diskState struct {
@@ -300,6 +307,40 @@ func (s *Store) RepositorySpecs() []Spec {
 		}
 	}
 	return specs
+}
+
+func (s *Store) ResolveSucceeded(projectID string) (Spec, error) {
+	projectID = strings.TrimSpace(projectID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, entry := range s.state.Entries {
+		if entry.ProjectID != projectID {
+			continue
+		}
+		if entry.State != StateSucceeded || entry.Repository == "" || !entry.ProviderCoordinated {
+			return Spec{}, permanent(errors.New("project setup: project is not successfully admitted"))
+		}
+		return entry.Spec, nil
+	}
+	return Spec{}, permanent(errors.New("project setup: project is not admitted"))
+}
+
+func (s *Store) Choices() []Choice {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	choices := make([]Choice, 0, len(s.state.Entries))
+	for _, entry := range s.state.Entries {
+		if entry.State == StateSucceeded && entry.Repository != "" && entry.ProviderCoordinated {
+			choices = append(choices, Choice{ProjectID: entry.ProjectID, ProjectName: entry.ProjectName, Repository: entry.Repository})
+		}
+	}
+	sort.Slice(choices, func(i, j int) bool {
+		if choices[i].ProjectName != choices[j].ProjectName {
+			return choices[i].ProjectName < choices[j].ProjectName
+		}
+		return choices[i].ProjectID < choices[j].ProjectID
+	})
+	return choices
 }
 
 func (s *Store) Snapshot() Snapshot {

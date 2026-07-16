@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
 
@@ -57,6 +58,8 @@ func TestPrincipalPromptExecutesPinnedMarkdownDirectly(t *testing.T) {
 	prompt := principalPrompt("ENG-123", TriggerKindLabel, testWorkflow())
 	for _, expected := range []string{
 		"ENG-123",
+		"Required branch prefix: eng-123-",
+		"Every new branch and pull-request head",
 		"Workflow: Full SDLC revision 1",
 		"----- BEGIN PINNED WORKFLOW MARKDOWN -----",
 		workflow.DefaultMarkdown(),
@@ -115,6 +118,38 @@ func TestContinuationPromptRequiresFreshLinearFeedbackRead(t *testing.T) {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("continuation prompt missing %q: %s", expected, prompt)
 		}
+	}
+}
+
+func TestNativeContinuationPromptRequiresFreshDurableTaskRead(t *testing.T) {
+	prompt := taskPrincipalPrompt(
+		taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-0123456789abcdef", Identifier: "FAC-1"},
+		TriggerKindComment,
+		workflow.Pin(workflow.ProviderNeutralDefault(time.Now())),
+	)
+	for _, expected := range []string{"Fresh-read the complete durable task conversation first.", "later human message or gate decision", "focused continuation"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("native continuation prompt missing %q: %s", expected, prompt)
+		}
+	}
+	if strings.Contains(prompt, "Fresh-read the complete Linear conversation first.") {
+		t.Fatalf("native continuation prompt instructed a Linear read: %s", prompt)
+	}
+	if !strings.Contains(prompt, "Required branch prefix: factory-task-0123456789abcdef-") {
+		t.Fatalf("native prompt missing provider-isolated branch prefix: %s", prompt)
+	}
+}
+
+func TestProviderNeutralLinearPromptUsesScopedTaskHelper(t *testing.T) {
+	t.Parallel()
+
+	prompt := taskPrincipalPrompt(
+		taskmodel.TaskRef{Source: taskmodel.SourceLinear, ProviderID: "ENG-123", Identifier: "ENG-123"},
+		TriggerKindLabel,
+		workflow.Pin(workflow.ProviderNeutralDefault(time.Now())),
+	)
+	if !strings.Contains(prompt, "agent task commands") || strings.Contains(prompt, "LINEAR_API_KEY") || strings.Contains(prompt, "agent linear-graphql") {
+		t.Fatalf("provider-neutral Linear prompt did not use scoped helper:\n%s", prompt)
 	}
 }
 
@@ -213,7 +248,7 @@ func TestAgentEnvironmentExcludesUnrelatedServiceSecrets(t *testing.T) {
 		"LINEAR_WEBHOOK_SECRET=webhook-secret",
 		"CF_API_TOKEN=cloudflare-secret",
 		"OP_SERVICE_ACCOUNT_TOKEN=one-password-secret",
-	})
+	}, true)
 	joined := strings.Join(got, "\n")
 	for _, expected := range []string{"HOME=/Users/test", "PATH=/usr/bin", "LINEAR_API_KEY=linear-secret"} {
 		if !strings.Contains(joined, expected) {
@@ -224,5 +259,12 @@ func TestAgentEnvironmentExcludesUnrelatedServiceSecrets(t *testing.T) {
 		if strings.Contains(joined, secret) {
 			t.Fatalf("environment leaked %s: %v", secret, got)
 		}
+	}
+}
+
+func TestProviderNeutralAgentEnvironmentExcludesLinearKey(t *testing.T) {
+	got := agentEnvironment([]string{"HOME=/Users/test", "LINEAR_API_KEY=linear-secret"}, false)
+	if joined := strings.Join(got, "\n"); strings.Contains(joined, "LINEAR_API_KEY") || !strings.Contains(joined, "HOME=/Users/test") {
+		t.Fatalf("provider-neutral environment = %v", got)
 	}
 }

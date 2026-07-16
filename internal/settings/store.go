@@ -125,6 +125,41 @@ func (s *Store) Update(expectedRevision uint64, candidate Snapshot, now time.Tim
 	return s.state.Clone(), nil
 }
 
+func (s *Store) ReconcileProviderNeutral(expectedRevision uint64, now time.Time) (Snapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if expectedRevision != s.state.Revision {
+		return s.state.Clone(), ErrRevisionConflict
+	}
+	desired := workflow.ProviderNeutralDefault(now)
+	desiredDigest, err := workflow.Digest(desired)
+	if err != nil {
+		return s.state.Clone(), err
+	}
+	for _, existing := range s.state.Workflows {
+		if existing.ID != workflow.ProviderNeutralID {
+			continue
+		}
+		existingDigest, err := workflow.Digest(existing)
+		if err != nil || existingDigest != desiredDigest {
+			return s.state.Clone(), errors.New("settings: reserved provider-neutral workflow conflicts with the compiled definition")
+		}
+		return s.state.Clone(), nil
+	}
+	next := s.state.Clone()
+	next.Workflows = append(next.Workflows, desired)
+	next.Revision++
+	next.UpdatedAt = now.UTC()
+	if err := next.Validate(); err != nil {
+		return s.state.Clone(), err
+	}
+	if err := write(s.path, next); err != nil {
+		return s.state.Clone(), err
+	}
+	s.state = next
+	return s.state.Clone(), nil
+}
+
 // MarkWorkflowRollbackIncompatible is intentionally a direct store mutation. Admission
 // and continuation dispatch already run under CoordinatedWire's non-reentrant policy lock.
 func (s *Store) MarkWorkflowRollbackIncompatible(now time.Time) (Snapshot, error) {

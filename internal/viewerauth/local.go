@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/tomnagengast/factory/internal/taskstore"
 )
 
 type Local struct {
@@ -28,6 +30,13 @@ func (a *Local) Page(next http.Handler) http.Handler {
 
 func (a *Local) API(next http.Handler) http.Handler {
 	return a.protect(next)
+}
+
+func (a *Local) Actor(r *http.Request) (taskstore.Actor, bool) {
+	if !a.authorized(r) {
+		return taskstore.Actor{}, false
+	}
+	return taskstore.Actor{ID: "local-operator", Kind: taskstore.AuthorHuman}, true
 }
 
 func (a *Local) Login(w http.ResponseWriter, r *http.Request) {

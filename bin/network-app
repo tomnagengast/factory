@@ -24,6 +24,21 @@ case "$command" in
     exec "$provider" deploy "$@"
     ;;
   rollback)
+    factory_bin=$HOME/.local/share/factory/current/factory
+    if [ ! -x "$factory_bin" ]; then
+      factory_bin=$(command -v factory || true)
+    fi
+    if [ -z "$factory_bin" ] || [ ! -x "$factory_bin" ]; then
+      printf '%s\n' 'Factory rollback preflight tool is unavailable' >&2
+      exit 1
+    fi
+    data=$HOME/.local/share/factory/data
+    "$factory_bin" workflow-rollback-preflight \
+      --settings-backup "$data/settings.schema1.backup.json" \
+      --trigger-registry "$data/triggers.json" || {
+        printf '%s\n' 'Rollback refused: workflow rollback preflight failed' >&2
+        exit 1
+      }
     exec "$provider" rollback factory "$@"
     ;;
   *)

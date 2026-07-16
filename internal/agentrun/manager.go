@@ -291,6 +291,9 @@ func (m *Manager) parkReadyRun(ctx context.Context, run Run, result ProcessResul
 		m.finishInvalidReady(run, result, err)
 		return
 	}
+	if checkpoint.Task.IsZero() {
+		checkpoint.Task = run.Task
+	}
 	if err := m.validateCheckpoint(run, checkpoint); err != nil {
 		m.finishInvalidReady(run, result, err)
 		return
@@ -373,8 +376,14 @@ func validateReadySnapshot(checkpoint ReadyCheckpoint, snapshot PullRequestSnaps
 }
 
 func (m *Manager) validateCheckpoint(run Run, checkpoint ReadyCheckpoint) error {
+	if checkpoint.Task.IsZero() {
+		checkpoint.Task = run.Task
+	}
 	if err := checkpoint.Validate(); err != nil {
 		return err
+	}
+	if !checkpoint.Task.Equal(run.Task) {
+		return errors.New("ready checkpoint belongs to another task")
 	}
 	lifecycle := runRepository(run, m.lifecycle)
 	if !strings.EqualFold(checkpoint.Repository, lifecycle.Repository) {
@@ -474,7 +483,7 @@ func reconcileDelay(base time.Duration, failures int) time.Duration {
 }
 
 func (m *Manager) start(ctx context.Context, run Run, options StartOptions) bool {
-	sessionName := sessionName(run.IssueIdentifier)
+	sessionName := taskSessionName(run)
 	runDirectory := runPath(m.stateRoot, run.ID)
 	if err := m.store.MarkStarting(run.ID, sessionName, runDirectory, m.now()); err != nil {
 		m.logger.Error("mark agent starting", "run_id", run.ID, "error", err)

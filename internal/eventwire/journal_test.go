@@ -259,6 +259,27 @@ func TestJournalCompactionRetainsUnacknowledgedRecords(t *testing.T) {
 	}
 }
 
+func TestJournalReportsAddedWhenAutomaticCompactionFailsAfterAppend(t *testing.T) {
+	journal, err := Open(filepath.Join(t.TempDir(), "events.jsonl"), 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"factory:one", "factory:two"} {
+		if _, _, err := journal.Add(testEvent(id, SourceFactory, "service")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	journal.compact = func() error { return errors.New("injected compaction failure") }
+	record, added, err := journal.Add(testEvent("factory:three", SourceFactory, "service"))
+	if err == nil || !added || record.Sequence != 3 || record.Event.ID != "factory:three" {
+		t.Fatalf("add = %#v, %t, %v", record, added, err)
+	}
+	status := journal.Status()
+	if status.Total != 3 || status.Pending != 3 {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
 func assertCurrentReaderCompatible(t *testing.T, path string) {
 	t.Helper()
 	file, err := os.Open(path)

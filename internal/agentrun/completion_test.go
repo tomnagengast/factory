@@ -37,7 +37,7 @@ func TestCompletionValidatorRequiresCheckpointOrTypedPrePRBlocker(t *testing.T) 
 
 	now := time.Date(2026, time.July, 11, 22, 0, 0, 0, time.UTC)
 	validator := mustCompletionValidator(t, &fakePullRequestReader{}, completeEvidence(), now)
-	success := validator.Validate(context.Background(), Run{}, ProcessResult{Status: string(StateSucceeded)})
+	success := validator.Validate(context.Background(), Run{IssueIdentifier: "ENG-123"}, ProcessResult{Status: string(StateSucceeded)})
 	if success.Validation.Accepted || success.State != StateFailed || !strings.Contains(success.Detail, "without a manager-validated") {
 		t.Fatalf("checkpoint-less success = %#v", success)
 	}
@@ -110,7 +110,7 @@ func TestCompletionValidatorRequiresEveryPostMergeCondition(t *testing.T) {
 		{name: "safeguards", mutate: func(value *CompletionEvidence) { value.SafeguardRegression = true }, want: "reviews"},
 		{name: "remote", mutate: func(value *CompletionEvidence) { value.RemoteBranchAbsent = false }, want: "remote"},
 		{name: "worktree", mutate: func(value *CompletionEvidence) { value.WorktreeAbsent = false }, want: "worktree"},
-		{name: "Linear", mutate: func(value *CompletionEvidence) { value.LinearComplete = false }, want: "Linear"},
+		{name: "task", mutate: func(value *CompletionEvidence) { value.TaskComplete = false }, want: "task"},
 		{name: "children", mutate: func(value *CompletionEvidence) { value.ChildrenComplete = false }, want: "child"},
 	}
 	for _, test := range tests {
@@ -200,7 +200,7 @@ func completeEvidence() staticCompletionEvidence {
 		HealthMatches:         true,
 		RemoteBranchAbsent:    true,
 		WorktreeAbsent:        true,
-		LinearComplete:        true,
+		TaskComplete:          true,
 		ChildrenComplete:      true,
 	}}
 }
@@ -211,7 +211,7 @@ func TestCompletionValidatorAcceptsRepositoryOnlyEvidence(t *testing.T) {
 	checkpoint := testReadyCheckpoint("run-1", now)
 	evidence := CompletionEvidence{
 		SourceValid: true, MergeContained: true, VerifiedHeadContained: true, RemoteBranchAbsent: true,
-		WorktreeAbsent: true, LinearComplete: true, ChildrenComplete: true,
+		WorktreeAbsent: true, TaskComplete: true, ChildrenComplete: true,
 	}
 	decision := mustCompletionValidator(
 		t, &fakePullRequestReader{snapshot: mergedSnapshot(checkpoint)},

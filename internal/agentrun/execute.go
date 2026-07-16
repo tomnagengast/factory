@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
 
@@ -22,6 +23,7 @@ const (
 )
 
 type PrincipalConfig struct {
+	Task            taskmodel.TaskRef
 	IssueIdentifier string
 	TriggerKind     string
 	RepoPath        string
@@ -50,7 +52,12 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 		fmt.Fprintf(os.Stderr, "create run directory: %v\n", err)
 		return 1
 	}
-	prompt := principalPrompt(config.IssueIdentifier, config.TriggerKind, config.Workflow)
+	task, err := taskmodel.ResolveCompatibilityIdentity(config.Task, config.IssueIdentifier)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "resolve principal task: %v\n", err)
+		return 1
+	}
+	prompt := taskPrincipalPrompt(task, config.TriggerKind, config.Workflow)
 	if err := os.WriteFile(filepath.Join(config.RunDirectory, "prompt.txt"), []byte(prompt), 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "write principal prompt: %v\n", err)
 		return 1
@@ -68,7 +75,7 @@ func ExecutePrincipal(ctx context.Context, config PrincipalConfig) int {
 		errPath := filepath.Join(config.RunDirectory, fmt.Sprintf("attempt-%d-stderr.log", attemptNumber))
 		continuation := prompt
 		if attempt > 1 {
-			continuation = "Resume the Factory workflow from durable repository, Linear, pull-request, and Run state. Do not duplicate work or replace the pinned workflow revision."
+			continuation = "Resume the Factory workflow from durable repository, task-provider, pull-request, and Run state. Do not duplicate work or replace the pinned workflow revision."
 		}
 		exitCode, err := runCodex(ctx, config, threadID, continuation, finalPath, eventsPath, errPath)
 		lastExit = exitCode
@@ -287,8 +294,16 @@ func principalCodexArgs(provider settings.ProviderSettings, threadID, finalPath 
 }
 
 func principalPrompt(issueIdentifier, triggerKind string, pin workflow.Pinned) string {
+	task, err := taskmodel.LegacyLinear(issueIdentifier)
+	if err != nil {
+		return "invalid Factory task identity"
+	}
+	return taskPrincipalPrompt(task, triggerKind, pin)
+}
+
+func taskPrincipalPrompt(task taskmodel.TaskRef, triggerKind string, pin workflow.Pinned) string {
 	if pin.IsLegacy() {
-		return legacyPrincipalPrompt(issueIdentifier, triggerKind, pin.LegacyDefinition())
+		return legacyPrincipalPrompt(task.Identifier, triggerKind, pin.LegacyDefinition())
 	}
 	switch triggerKind {
 	case TriggerKindLabel, TriggerKindComment, TriggerKindGitHub, TriggerKindPostMerge, TriggerKindRule:
@@ -303,21 +318,46 @@ func principalPrompt(issueIdentifier, triggerKind string, pin workflow.Pinned) s
 	context := "Complete the issue from its current durable state."
 	if triggerKind == TriggerKindComment {
 		segment = "feedback"
-		context = "Fresh-read the complete Linear conversation first. Treat every later human comment not already addressed by Factory evidence as current scope. Resume active work when it exists; otherwise create a focused continuation from fetched default branch state."
+		if task.Source == taskmodel.SourceFactory {
+			context = "Fresh-read the complete durable task conversation first. Treat every later human message or gate decision not already addressed by Factory evidence as current scope. Resume active work when it exists; otherwise create a focused continuation from fetched default branch state."
+		} else {
+			context = "Fresh-read the complete Linear conversation first. Treat every later human comment not already addressed by Factory evidence as current scope. Resume active work when it exists; otherwise create a focused continuation from fetched default branch state."
+		}
 	}
 	if triggerKind == TriggerKindPostMerge || triggerKind == TriggerKindGitHub {
 		segment = "remediation"
-		context = "Fresh-read authoritative pull-request, Linear, repository, approved-plan, deployment, and cleanup state. Address an open pull request or complete post-merge work without recreating finished implementation."
+		provider := "Linear"
+		if task.Source == taskmodel.SourceFactory {
+			provider = "task-provider"
+		}
+		context = "Fresh-read authoritative pull-request, " + provider + ", repository, approved-plan, deployment, and cleanup state. Address an open pull request or complete post-merge work without recreating finished implementation."
 		if triggerKind == TriggerKindPostMerge {
 			segment = "post-merge"
 		}
 	}
+	identityLabel := "Issue"
+	if task.Source != taskmodel.SourceLinear {
+		identityLabel = "Task"
+	}
+	branchPrefix, err := task.BranchPrefix()
+	if err != nil {
+		branchPrefix = "invalid"
+	}
+	providerInstructions := `LINEAR_API_KEY is available in the inherited environment. Send GraphQL request JSON on stdin to "$FACTORY_AGENT_HELPER" agent linear-graphql. Never pass the key in arguments or print it.`
+	if pin.ID == workflow.ProviderNeutralID && digest == workflow.ProviderNeutralDigest() {
+		providerInstructions = `Use "$FACTORY_AGENT_HELPER" agent task commands for the exact task scoped to this Run. The helper capability derives task identity and never accepts a different task ID.`
+	}
 	return fmt.Sprintf(`FACTORY WORKFLOW SEGMENT
-Issue: %s
+%s: %s
+Task source: %s
+Task provider ID: %s
+Required branch prefix: %s
 Trigger: %s
 Segment: %s
 Workflow: %s revision %d
 Workflow digest: %s
+
+Every new branch and pull-request head for this task must begin with the exact required branch prefix above.
 
 %s
 
@@ -329,7 +369,7 @@ FACTORY RUNTIME PROTOCOL
 
 You are the principal agent in a Factory-managed tmux session. The pinned Markdown is the procedural workflow for this Run. Continue until it reaches the applicable Factory terminal boundary.
 
-LINEAR_API_KEY is available in the inherited environment. Send GraphQL request JSON on stdin to "$FACTORY_AGENT_HELPER" agent linear-graphql. Never pass the key in arguments or print it.
+%s
 
 When another agent can independently research, review, or verify a bounded subtask, launch it as a window in this same tmux session instead of using an invisible in-process subagent. Pass its prompt as data with a quoted heredoc:
 
@@ -349,7 +389,7 @@ After merge, prove the reported merge commit contains the exact checkpointed hea
 
 If the complete post-merge workflow succeeds, end with exactly FACTORY_RESULT: SUCCEEDED. If it reaches a genuine typed blocker, put FACTORY_BLOCKER: <type> on the preceding line and end with exactly FACTORY_RESULT: BLOCKED. Allowed types are missing_routing_metadata, approval_denied, authority_unavailable, decision_required, closed_unmerged, verified_head_mismatch, safeguard_regression, deployment_source_invalid, external_authentication, deployment_failed, and cleanup_failed.
 
-Factory's mechanical repository routing, one-Run ownership, checkpoint, human-merge, verified-head, deployment-source, completion, and cleanup validators are authoritative and cannot be waived by workflow text.`, issueIdentifier, triggerKind, segment, pin.Name, pin.Revision, digest, context, pin.Markdown)
+Factory's mechanical repository routing, one-Run ownership, checkpoint, human-merge, verified-head, deployment-source, completion, and cleanup validators are authoritative and cannot be waived by workflow text.`, identityLabel, task.Identifier, task.Source, task.ProviderID, branchPrefix, triggerKind, segment, pin.Name, pin.Revision, digest, context, pin.Markdown, providerInstructions)
 }
 
 func legacyPrincipalPrompt(issueIdentifier, triggerKind string, definition workflow.LegacyDefinition) string {

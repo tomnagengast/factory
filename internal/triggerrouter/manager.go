@@ -23,13 +23,13 @@ type Manager struct {
 	routing  *Store
 	runs     *agentrun.Store
 	dispatch EventDispatchGate
-	resolver agentrun.RepositoryResolver
+	resolver agentrun.TaskRepositoryResolver
 	notifier RunNotifier
 	logger   *slog.Logger
 	now      func() time.Time
 }
 
-func NewManager(routing *Store, runs *agentrun.Store, dispatch EventDispatchGate, resolver agentrun.RepositoryResolver, notifier RunNotifier, logger *slog.Logger, now func() time.Time) (*Manager, error) {
+func NewManager(routing *Store, runs *agentrun.Store, dispatch EventDispatchGate, resolver agentrun.TaskRepositoryResolver, notifier RunNotifier, logger *slog.Logger, now func() time.Time) (*Manager, error) {
 	if routing == nil || runs == nil || dispatch == nil || resolver == nil || notifier == nil || logger == nil || now == nil {
 		return nil, errors.New("trigger router manager: dependencies are required")
 	}
@@ -76,12 +76,22 @@ func (m *Manager) reconcile(ctx context.Context, includeQueued bool) error {
 		if !invocation.Nonterminal() || invocation.EventSequence > dispatched || (!includeQueued && invocation.State == StateQueued) {
 			continue
 		}
-		if _, found := oldest[invocation.IssueIdentifier]; !found {
-			oldest[invocation.IssueIdentifier] = invocation
+		if NativeFeedbackInvocation(invocation) {
+			continue
+		}
+		key := invocation.Task.OwnershipKey()
+		if _, found := oldest[key]; !found {
+			oldest[key] = invocation
 		}
 	}
 	for _, invocation := range snapshot.Invocations {
-		candidate, found := oldest[invocation.IssueIdentifier]
+		if invocation.Nonterminal() && invocation.EventSequence <= dispatched && (includeQueued || invocation.State != StateQueued) && NativeFeedbackInvocation(invocation) {
+			if err := m.reconcileInvocation(ctx, invocation); err != nil {
+				return err
+			}
+			continue
+		}
+		candidate, found := oldest[invocation.Task.OwnershipKey()]
 		if !found || candidate.ID != invocation.ID {
 			continue
 		}
@@ -121,7 +131,7 @@ func (m *Manager) reconcileInvocation(ctx context.Context, invocation Invocation
 }
 
 func (m *Manager) beginClaim(ctx context.Context, invocation Invocation) error {
-	repository, err := m.resolver.Resolve(ctx, invocation.IssueIdentifier)
+	repository, err := m.resolver.ResolveTask(ctx, invocation.Task)
 	if err != nil {
 		if isPermanentRouting(err) {
 			_, transitionErr := m.routing.TransitionInvocation(invocation.ID, StateRejected, "", "repository-routing-rejected", nil, m.now())
@@ -138,7 +148,7 @@ func (m *Manager) beginClaim(ctx context.Context, invocation Invocation) error {
 }
 
 func (m *Manager) finishClaim(ctx context.Context, invocation Invocation) error {
-	repository, err := m.resolver.Resolve(ctx, invocation.IssueIdentifier)
+	repository, err := m.resolver.ResolveTask(ctx, invocation.Task)
 	if err != nil {
 		if isPermanentRouting(err) {
 			_, transitionErr := m.routing.TransitionInvocation(invocation.ID, StateRejected, invocation.RunID, "repository-routing-rejected", nil, m.now())
@@ -150,18 +160,27 @@ func (m *Manager) finishClaim(ctx context.Context, invocation Invocation) error 
 }
 
 func (m *Manager) ensureAndClaim(invocation Invocation, repository agentrun.RepositoryConfig) error {
-	_, _, err := m.runs.EnsureInvocationRun(agentrun.InvocationClaim{
+	run, _, err := m.runs.EnsureInvocationRun(agentrun.InvocationClaim{
 		RunID: invocation.RunID, InvocationID: invocation.ID, EventID: invocation.EventID,
-		IssueIdentifier: invocation.IssueIdentifier, RootEventID: invocation.RootEventID,
+		Task: invocation.Task, IssueIdentifier: invocation.IssueIdentifier, RootEventID: invocation.RootEventID,
 		Hop: invocation.Hop, AncestorRuleIDs: invocation.AncestorRuleIDs,
 		Workflow: invocation.Workflow, WorkflowDigest: invocation.WorkflowDigest,
 		PolicyRevision: invocation.PolicyRevision, Repository: repository,
+		Feedback: NativeFeedbackInvocation(invocation),
 	}, m.now())
 	if errors.Is(err, agentrun.ErrInvocationIssueOwned) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("trigger router manager: ensure invocation Run: %w", err)
+	}
+	if run.ID != invocation.RunID {
+		reflected := m.now().UTC()
+		if _, err := m.routing.TransitionInvocation(invocation.ID, StateRejected, run.ID, "native-feedback-coalesced", &reflected, reflected); err != nil {
+			return err
+		}
+		m.notifier.Notify()
+		return nil
 	}
 	if _, err := m.routing.TransitionInvocation(invocation.ID, StateClaimed, invocation.RunID, "", nil, m.now()); err != nil {
 		return err
@@ -173,13 +192,13 @@ func (m *Manager) ensureAndClaim(invocation Invocation, repository agentrun.Repo
 func (m *Manager) reflectOrRecover(ctx context.Context, invocation Invocation) error {
 	run, found := m.runs.Find(invocation.RunID)
 	if !found {
-		repository, err := m.resolver.Resolve(ctx, invocation.IssueIdentifier)
+		repository, err := m.resolver.ResolveTask(ctx, invocation.Task)
 		if err != nil {
 			return nil
 		}
 		_, _, err = m.runs.EnsureInvocationRun(agentrun.InvocationClaim{
 			RunID: invocation.RunID, InvocationID: invocation.ID, EventID: invocation.EventID,
-			IssueIdentifier: invocation.IssueIdentifier, RootEventID: invocation.RootEventID,
+			Task: invocation.Task, IssueIdentifier: invocation.IssueIdentifier, RootEventID: invocation.RootEventID,
 			Hop: invocation.Hop, AncestorRuleIDs: invocation.AncestorRuleIDs,
 			Workflow: invocation.Workflow, WorkflowDigest: invocation.WorkflowDigest,
 			PolicyRevision: invocation.PolicyRevision, Repository: repository,

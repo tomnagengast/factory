@@ -122,7 +122,7 @@ func pullRequestSafeguardRegression(reviewDecision string, checks []pullRequestC
 	return false
 }
 
-func (c *GitHubCLI) MatchingIssuePullRequests(ctx context.Context, repository, issueIdentifier string) ([]PullRequestSnapshot, error) {
+func (c *GitHubCLI) MatchingIssuePullRequests(ctx context.Context, repository, branchPrefix string) ([]PullRequestSnapshot, error) {
 	cmd := exec.CommandContext(ctx, c.path,
 		"pr", "list", "--repo", repository, "--state", "all", "--limit", "100",
 		"--json", "number,state,isDraft,baseRefName,headRefName,headRefOid,mergeCommit,updatedAt",
@@ -153,10 +153,9 @@ func (c *GitHubCLI) MatchingIssuePullRequests(ctx context.Context, repository, i
 	if err := json.Unmarshal(output, &values); err != nil {
 		return nil, fmt.Errorf("GitHub CLI: decode issue PRs: %w", err)
 	}
-	prefix := strings.ToLower(issueIdentifier) + "-"
 	var snapshots []PullRequestSnapshot
 	for _, value := range values {
-		if !strings.HasPrefix(strings.ToLower(value.HeadRefName), prefix) {
+		if !strings.HasPrefix(value.HeadRefName, branchPrefix) {
 			continue
 		}
 		snapshot := PullRequestSnapshot{

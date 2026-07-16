@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/tomnagengast/factory/internal/taskmodel"
 )
 
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -33,6 +35,11 @@ type SystemCompletionConfig struct {
 	WorktrunkPath  string
 	LinearAPIKey   string
 	HTTPClient     *http.Client
+	TaskCompletion TaskCompletionProvider
+}
+
+type TaskCompletionProvider interface {
+	Complete(context.Context, taskmodel.TaskRef, string, string, string) (bool, error)
 }
 
 type SystemCompletionEvidence struct {
@@ -97,7 +104,7 @@ func (r *SystemCompletionEvidence) ReadCompletionEvidence(ctx context.Context, r
 	evidence.VerifiedHeadContained = repository.verifiedHeadContained
 	evidence.RemoteBranchAbsent = repository.remoteBranchAbsent
 	evidence.WorktreeAbsent = repository.worktreeAbsent
-	evidence.LinearComplete, err = r.linearComplete(ctx, run.IssueIdentifier)
+	evidence.TaskComplete, err = r.taskComplete(ctx, run, snapshot, evidence)
 	return evidence, err
 }
 
@@ -136,7 +143,7 @@ func (r *SystemCompletionEvidence) readDeployableCompletion(ctx context.Context,
 	evidence.VerifiedHeadContained = repository.verifiedHeadContained
 	evidence.RemoteBranchAbsent = repository.remoteBranchAbsent
 	evidence.WorktreeAbsent = repository.worktreeAbsent
-	evidence.LinearComplete, err = r.linearComplete(ctx, run.IssueIdentifier)
+	evidence.TaskComplete, err = r.taskComplete(ctx, run, snapshot, evidence)
 	if err != nil {
 		return evidence, err
 	}
@@ -340,6 +347,43 @@ func (r *SystemCompletionEvidence) linearComplete(ctx context.Context, issueIden
 		return false, errors.New("Linear issue state response is incomplete")
 	}
 	return strings.EqualFold(value.Data.Issue.State.Type, "completed"), nil
+}
+
+func (r *SystemCompletionEvidence) taskComplete(ctx context.Context, run Run, snapshot PullRequestSnapshot, evidence CompletionEvidence) (bool, error) {
+	task, err := taskmodel.ResolveCompatibilityIdentity(run.Task, run.IssueIdentifier)
+	if err != nil {
+		return false, fmt.Errorf("read task state: %w", err)
+	}
+	switch task.Source {
+	case taskmodel.SourceLinear:
+		return r.linearComplete(ctx, task.Identifier)
+	case taskmodel.SourceFactory:
+		if r.config.TaskCompletion == nil {
+			return false, errors.New("read task state: native completion provider is unavailable")
+		}
+		if !taskCompletionEvidenceReady(evidence) {
+			return false, nil
+		}
+		return r.config.TaskCompletion.Complete(ctx, task, run.ID, run.Repository, completionEvidenceRef(run.Repository, snapshot, evidence))
+	default:
+		return false, fmt.Errorf("read task state: unsupported provider %q", task.Source)
+	}
+}
+
+func taskCompletionEvidenceReady(evidence CompletionEvidence) bool {
+	if evidence.DeploymentRequired && (evidence.Deployment.Status != "success" || !evidence.HealthMatches) {
+		return false
+	}
+	return evidence.SourceValid && evidence.MergeContained && evidence.VerifiedHeadContained && !evidence.SafeguardRegression &&
+		evidence.RemoteBranchAbsent && evidence.WorktreeAbsent && evidence.ChildrenComplete
+}
+
+func completionEvidenceRef(repository string, snapshot PullRequestSnapshot, evidence CompletionEvidence) string {
+	value := fmt.Sprintf("github:%s:pr:%d:merge:%s", repository, snapshot.Number, snapshot.MergeCommitOID)
+	if evidence.DeploymentRequired {
+		value += ":deployment:" + evidence.Deployment.DeploymentID
+	}
+	return value
 }
 
 func readDeploymentReceipt(path string) (DeploymentReceipt, error) {

@@ -106,6 +106,32 @@ func TestResolveIssueRejectsAmbiguousAttribute(t *testing.T) {
 	}
 }
 
+func TestApplyDecisionBatchSuppressesProtectedTaskMutation(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 14, 15, 0, 0, 0, time.UTC)
+	configuration, registry := testPolicy()
+	for index := range registry.Rules {
+		registry.Rules[index].Filter = triggerregistry.Filter{Source: eventwire.SourceFactory, Type: "task-mutation", Action: "create"}
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "routing.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := eventwire.Record{Sequence: 1, Event: eventwire.Event{ID: "factory:task:op-0123456789abcdef", Source: eventwire.SourceFactory, Type: "task-mutation", Action: "create", RootEventID: "factory:task:op-0123456789abcdef", ReceivedAt: now}}
+	decisions, err := store.ApplyDecisionBatch([]eventwire.Record{record}, registry, configuration, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 1 || len(decisions[0].Outcomes) != 2 || len(store.Snapshot().Invocations) != 0 {
+		t.Fatalf("protected task decision = %#v", decisions)
+	}
+	for _, outcome := range decisions[0].Outcomes {
+		if outcome.Kind != OutcomeSuppressed || outcome.Reason != "protected-task-operation" {
+			t.Fatalf("protected task outcome = %#v", outcome)
+		}
+	}
+}
+
 func testPolicy() (settings.Snapshot, triggerregistry.Snapshot) {
 	configuration := settings.Defaults(3)
 	registry := triggerregistry.Defaults(configuration, "human")

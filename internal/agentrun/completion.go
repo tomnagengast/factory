@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tomnagengast/factory/internal/taskmodel"
 )
 
 const (
@@ -67,7 +69,7 @@ type CompletionEvidence struct {
 	HealthMatches                 bool
 	RemoteBranchAbsent            bool
 	WorktreeAbsent                bool
-	LinearComplete                bool
+	TaskComplete                  bool
 	ChildrenComplete              bool
 	SafeguardRegression           bool
 	ExternalAuthenticationFailure bool
@@ -267,7 +269,15 @@ func (v *MechanicalCompletionValidator) validateBeforePullRequest(ctx context.Co
 	if repository == "" {
 		repository = v.repository
 	}
-	matches, err := v.discoverer.MatchingIssuePullRequests(ctx, repository, run.IssueIdentifier)
+	task, err := taskmodel.ResolveCompatibilityIdentity(run.Task, run.IssueIdentifier)
+	if err != nil {
+		return rejectCompletion(decision, "resolve task identity for pull request discovery: "+err.Error(), false)
+	}
+	branchPrefix, err := task.BranchPrefix()
+	if err != nil {
+		return rejectCompletion(decision, "derive task branch prefix: "+err.Error(), false)
+	}
+	matches, err := v.discoverer.MatchingIssuePullRequests(ctx, repository, branchPrefix)
 	if err != nil {
 		return rejectCompletion(decision, "discover issue pull requests: "+err.Error(), false)
 	}
@@ -320,7 +330,7 @@ func (v *MechanicalCompletionValidator) validatePostReadyBlocker(
 		result.Blocker == BlockerDeploymentSource && !evidence.SourceValid ||
 		result.Blocker == BlockerExternalAuthentication && evidence.ExternalAuthenticationFailure ||
 		result.Blocker == BlockerDeploymentFailed && evidence.DeploymentFailed ||
-		result.Blocker == BlockerCleanupFailed && (!evidence.RemoteBranchAbsent || !evidence.WorktreeAbsent || !evidence.LinearComplete || !evidence.ChildrenComplete)
+		result.Blocker == BlockerCleanupFailed && (!evidence.RemoteBranchAbsent || !evidence.WorktreeAbsent || !evidence.TaskComplete || !evidence.ChildrenComplete)
 	if !matched {
 		return rejectCompletion(decision, "typed blocker is not supported by mechanical evidence", false)
 	}
@@ -361,7 +371,7 @@ func completionProblems(evidence CompletionEvidence) []string {
 		{!evidence.SafeguardRegression, "pull request checks or reviews regressed"},
 		{evidence.RemoteBranchAbsent, "remote issue branch still exists"},
 		{evidence.WorktreeAbsent, "issue worktree still exists"},
-		{evidence.LinearComplete, "Linear issue is not complete"},
+		{evidence.TaskComplete, "task is not complete"},
 		{evidence.ChildrenComplete, "child work remains incomplete"},
 	}...)
 	for _, check := range checks {

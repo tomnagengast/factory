@@ -13,6 +13,7 @@ import (
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskcompat"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 )
 
@@ -87,6 +88,18 @@ func TestWorkflowRollbackPreflightRejectsSchemaTwoOnlyReferenceWithoutWrites(t *
 	}
 	if code := runWorkflowRollbackPreflight([]string{"--settings-backup", backupPath, "--trigger-registry", registryPath}); code != 0 {
 		t.Fatalf("compatible preflight exit = %d, want 0", code)
+	}
+	if err := taskcompat.Ensure(backupPath); err != nil {
+		t.Fatal(err)
+	}
+	if code := runWorkflowRollbackPreflight([]string{"--settings-backup", backupPath, "--trigger-registry", registryPath}); code != 1 {
+		t.Fatalf("marker-present preflight exit = %d, want 1", code)
+	}
+	if err := os.WriteFile(taskcompat.PathFor(backupPath), []byte("corrupt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := runWorkflowRollbackPreflight([]string{"--settings-backup", backupPath, "--trigger-registry", registryPath}); code != 1 {
+		t.Fatalf("corrupt-marker preflight exit = %d, want 1", code)
 	}
 }
 

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/tomnagengast/factory/internal/taskmodel"
 )
 
 const (
@@ -32,20 +34,21 @@ var (
 )
 
 type AgentView struct {
-	ID                string       `json:"id"`
-	IssueIdentifier   string       `json:"issueIdentifier"`
-	State             State        `json:"state"`
-	Attempts          int          `json:"attempts"`
-	DuplicateTriggers uint64       `json:"duplicateTriggers"`
-	Detail            string       `json:"detail,omitempty"`
-	CreatedAt         time.Time    `json:"createdAt"`
-	UpdatedAt         time.Time    `json:"updatedAt"`
-	StartedAt         *time.Time   `json:"startedAt,omitempty"`
-	FinishedAt        *time.Time   `json:"finishedAt,omitempty"`
-	ObservedAt        time.Time    `json:"observedAt"`
-	Live              bool         `json:"live"`
-	AttachCommand     string       `json:"attachCommand,omitempty"`
-	Windows           []WindowView `json:"windows"`
+	ID                string            `json:"id"`
+	Task              taskmodel.TaskRef `json:"task"`
+	IssueIdentifier   string            `json:"issueIdentifier"`
+	State             State             `json:"state"`
+	Attempts          int               `json:"attempts"`
+	DuplicateTriggers uint64            `json:"duplicateTriggers"`
+	Detail            string            `json:"detail,omitempty"`
+	CreatedAt         time.Time         `json:"createdAt"`
+	UpdatedAt         time.Time         `json:"updatedAt"`
+	StartedAt         *time.Time        `json:"startedAt,omitempty"`
+	FinishedAt        *time.Time        `json:"finishedAt,omitempty"`
+	ObservedAt        time.Time         `json:"observedAt"`
+	Live              bool              `json:"live"`
+	AttachCommand     string            `json:"attachCommand,omitempty"`
+	Windows           []WindowView      `json:"windows"`
 }
 
 type WindowView struct {
@@ -111,6 +114,7 @@ func (o *Observer) Observe(ctx context.Context, id string) (AgentView, error) {
 	}
 	view := AgentView{
 		ID:                run.ID,
+		Task:              run.Task,
 		IssueIdentifier:   run.IssueIdentifier,
 		State:             run.State,
 		Attempts:          run.Attempts,

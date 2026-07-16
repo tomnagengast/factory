@@ -204,6 +204,9 @@ func agentRecordEvent(run Run, file string, offset, length int64, line []byte) e
 		Subject: run.IssueIdentifier,
 		Attributes: map[string][]string{
 			"runId":                       {run.ID},
+			"taskSource":                  {string(run.Task.Source)},
+			"taskProviderId":              {run.Task.ProviderID},
+			"taskIdentifier":              {run.Task.Identifier},
 			"file":                        {file},
 			"offset":                      {strconv.FormatInt(offset, 10)},
 			"length":                      {strconv.FormatInt(length, 10)},
@@ -245,6 +248,7 @@ func lifecycleEvents(runs []Run) ([]eventwire.Event, []string) {
 				Subject: run.IssueIdentifier,
 				Attributes: map[string][]string{
 					"runId": {run.ID}, "attempts": {strconv.Itoa(transition.Attempts)},
+					"taskSource": {string(run.Task.Source)}, "taskProviderId": {run.Task.ProviderID}, "taskIdentifier": {run.Task.Identifier},
 					eventwire.AttributeProducer: {"agent-collector"}, eventwire.AttributeProvenance: {"factory"},
 				},
 				ReceivedAt: transition.At,

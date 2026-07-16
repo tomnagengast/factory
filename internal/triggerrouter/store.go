@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/internal/taskcompat"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 )
 
@@ -253,13 +255,20 @@ func (s *Store) replay(data []byte) error {
 			return fmt.Errorf("trigger router: decode operation: %w", err)
 		}
 		if operation.Kind == operationCheckpoint {
-			if foundCheckpoint || operation.Schema != SchemaVersion || operation.Checkpoint == nil {
+			if foundCheckpoint || (operation.Schema != legacySchemaVersion && operation.Schema != SchemaVersion) || operation.Checkpoint == nil || operation.Checkpoint.Schema != operation.Schema {
 				return errors.New("trigger router: invalid checkpoint")
 			}
 			foundCheckpoint = true
 		}
 		if !foundCheckpoint {
 			return errors.New("trigger router: operation precedes checkpoint")
+		}
+		if err := normalizeOperationIdentities(&operation); err != nil {
+			return err
+		}
+		if operation.Kind == operationCheckpoint {
+			operation.Schema = SchemaVersion
+			operation.Checkpoint.Schema = SchemaVersion
 		}
 		if err := s.applyOperationLocked(operation); err != nil {
 			return err
@@ -285,7 +294,7 @@ func (s *Store) applyOperationLocked(operation diskOperation) error {
 			s.decisions[decision.EventID] = decision.Clone()
 		}
 		for _, invocation := range operation.Checkpoint.Invocations {
-			if _, exists := s.invocations[invocation.ID]; exists || invocation.ID == "" || invocation.EventID == "" {
+			if _, exists := s.invocations[invocation.ID]; exists || invocation.ID == "" || invocation.EventID == "" || invocation.Task.Validate() != nil {
 				return errors.New("trigger router: invalid checkpoint invocation")
 			}
 			s.invocations[invocation.ID] = invocation.Clone()
@@ -311,7 +320,7 @@ func (s *Store) applyOperationLocked(operation diskOperation) error {
 		}
 		invocationByID := make(map[string]Invocation, len(operation.Invocations))
 		for _, invocation := range operation.Invocations {
-			if invocation.ID == "" || invocation.EventID == "" || invocation.State != StateQueued {
+			if invocation.ID == "" || invocation.EventID == "" || invocation.State != StateQueued || invocation.Task.Validate() != nil {
 				return errors.New("trigger router: invalid admitted invocation")
 			}
 			if _, exists := invocationByID[invocation.ID]; exists {
@@ -426,6 +435,33 @@ func (s *Store) validateProjectionLocked() error {
 	return nil
 }
 
+func normalizeOperationIdentities(operation *diskOperation) error {
+	if operation.Checkpoint != nil {
+		for i := range operation.Checkpoint.Invocations {
+			if err := normalizeInvocationIdentity(&operation.Checkpoint.Invocations[i]); err != nil {
+				return fmt.Errorf("trigger router: checkpoint invocation identity: %w", err)
+			}
+		}
+	}
+	for i := range operation.Invocations {
+		if err := normalizeInvocationIdentity(&operation.Invocations[i]); err != nil {
+			return fmt.Errorf("trigger router: admitted invocation identity: %w", err)
+		}
+	}
+	return nil
+}
+
+func normalizeInvocationIdentity(invocation *Invocation) error {
+	resolved, err := taskmodel.ResolveCompatibilityIdentity(invocation.Task, invocation.IssueIdentifier)
+	if err != nil {
+		return err
+	}
+	invocation.Task = resolved
+	invocation.IssueIdentifier = resolved.Identifier
+	invocation.Rule.Target = invocation.Rule.Target.Canonical()
+	return nil
+}
+
 func validateDecision(decision Decision) error {
 	if decision.EventID == "" || decision.EventSequence == 0 || !eventwire.ValidSource(decision.Source) || decision.DecidedAt.IsZero() {
 		return errors.New("decision identity is invalid")
@@ -470,6 +506,9 @@ func compactTerminalInvocation(invocation *Invocation) {
 }
 
 func (s *Store) appendOperationLocked(operation diskOperation) error {
+	if err := taskcompat.Ensure(s.path); err != nil {
+		return fmt.Errorf("trigger router: establish task compatibility boundary: %w", err)
+	}
 	data, err := json.Marshal(operation)
 	if err != nil {
 		return fmt.Errorf("trigger router: encode operation: %w", err)
@@ -517,6 +556,9 @@ func (s *Store) compactIfNeededLocked() error {
 }
 
 func (s *Store) writeCheckpointLocked() error {
+	if err := taskcompat.Ensure(s.path); err != nil {
+		return fmt.Errorf("trigger router: establish task compatibility boundary: %w", err)
+	}
 	snapshot := s.snapshotLocked()
 	operation := diskOperation{Kind: operationCheckpoint, Schema: SchemaVersion, Checkpoint: &snapshot}
 	temp, err := os.CreateTemp(filepath.Dir(s.path), ".trigger-routing-*")

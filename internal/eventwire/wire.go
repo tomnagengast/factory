@@ -78,7 +78,7 @@ func (w *Wire) Publish(ctx context.Context, event Event) (Record, bool, error) {
 	}
 	record, added, err := w.journal.Add(event)
 	if err != nil {
-		return Record{}, false, err
+		return record, added, err
 	}
 	if err := w.catchUpLocked(ctx); err != nil {
 		return record, added, err

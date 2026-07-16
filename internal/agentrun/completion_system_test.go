@@ -113,7 +113,7 @@ func TestSystemCompletionEvidenceVerifiesDeploymentAfterMainAdvances(t *testing.
 	if err != nil {
 		t.Fatalf("read completion evidence: %v", err)
 	}
-	if !evidence.SourceValid || !evidence.MergeContained || !evidence.VerifiedHeadContained || !evidence.HealthMatches || !evidence.RemoteBranchAbsent || !evidence.WorktreeAbsent || !evidence.LinearComplete {
+	if !evidence.SourceValid || !evidence.MergeContained || !evidence.VerifiedHeadContained || !evidence.HealthMatches || !evidence.RemoteBranchAbsent || !evidence.WorktreeAbsent || !evidence.TaskComplete {
 		t.Fatalf("evidence = %#v", evidence)
 	}
 	if !evidence.DeploymentRequired {
@@ -134,7 +134,7 @@ func TestSystemCompletionEvidenceVerifiesDeploymentAfterMainAdvances(t *testing.
 	if err != nil {
 		t.Fatalf("read repository-only evidence: %v", err)
 	}
-	if repositoryEvidence.DeploymentRequired || !repositoryEvidence.SourceValid || !repositoryEvidence.MergeContained || !repositoryEvidence.VerifiedHeadContained || !repositoryEvidence.LinearComplete {
+	if repositoryEvidence.DeploymentRequired || !repositoryEvidence.SourceValid || !repositoryEvidence.MergeContained || !repositoryEvidence.VerifiedHeadContained || !repositoryEvidence.TaskComplete {
 		t.Fatalf("repository-only evidence = %#v", repositoryEvidence)
 	}
 
@@ -210,7 +210,7 @@ func TestCompletedChildResultsRequiresEveryChildToFinish(t *testing.T) {
 	}
 }
 
-func TestLinearCompleteClassifiesGraphQLAuthenticationFailure(t *testing.T) {
+func TestTaskCompleteClassifiesGraphQLAuthenticationFailure(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

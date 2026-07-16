@@ -28,6 +28,7 @@ func Open(path string, defaults Snapshot, configuration settings.Snapshot) (*Sto
 	if path == "" {
 		return nil, errors.New("trigger registry: path is required")
 	}
+	CanonicalizeTargets(&defaults)
 	if err := defaults.Validate(configuration); err != nil {
 		return nil, fmt.Errorf("trigger registry: invalid defaults: %w", err)
 	}
@@ -50,6 +51,7 @@ func Open(path string, defaults Snapshot, configuration settings.Snapshot) (*Sto
 	if err != nil {
 		return nil, err
 	}
+	CanonicalizeTargets(&state)
 	if err := state.Validate(configuration); err != nil {
 		return nil, err
 	}
@@ -74,6 +76,7 @@ func Read(path string, configuration settings.Snapshot) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	CanonicalizeTargets(&state)
 	if err := state.Validate(configuration); err != nil {
 		return Snapshot{}, err
 	}
@@ -97,6 +100,7 @@ func (s *Store) Update(expectedRevision uint64, candidate Snapshot, configuratio
 		return s.state.Clone(), errors.New("trigger registry: server-owned fields changed")
 	}
 	next := candidate.Clone()
+	CanonicalizeTargets(&next)
 	Sort(&next)
 	if err := reconcileRevisions(s.state, &next); err != nil {
 		return s.state.Clone(), err

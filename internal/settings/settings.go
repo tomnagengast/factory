@@ -86,6 +86,7 @@ func Defaults(maxConcurrent int) Snapshot {
 		maxConcurrent = 3
 	}
 	definition := workflow.Default(time.Time{})
+	providerNeutral := workflow.ProviderNeutralDefault(time.Time{})
 	return Snapshot{
 		Schema: SchemaVersion,
 		Triggers: Triggers{
@@ -95,7 +96,7 @@ func Defaults(maxConcurrent int) Snapshot {
 		ProtectedWorkflows: ProtectedWorkflowBindings{
 			LinearFeedback: WorkflowBinding{WorkflowID: DefaultWorkflowID},
 		},
-		Workflows: []workflow.Definition{definition},
+		Workflows: []workflow.Definition{definition, providerNeutral},
 		Agents: AgentSettings{
 			Principal: PrincipalSettings{
 				ProviderSettings: ProviderSettings{Model: "gpt-5.6-sol", Effort: "high"},

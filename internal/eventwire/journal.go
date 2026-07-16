@@ -76,6 +76,7 @@ type Journal struct {
 	poisoned error
 	write    func(*os.File, []byte) (int, error)
 	sync     func(*os.File) error
+	compact  func() error
 }
 
 func Open(path string, limit int, channelSeeds map[string]uint64) (*Journal, error) {
@@ -119,6 +120,7 @@ func Open(path string, limit int, channelSeeds map[string]uint64) (*Journal, err
 	}
 	j.write = func(file *os.File, data []byte) (int, error) { return file.Write(data) }
 	j.sync = func(file *os.File) error { return file.Sync() }
+	j.compact = j.compactLocked
 	for i := range state.records {
 		j.ids[state.records[i].Event.ID] = i
 	}
@@ -144,6 +146,9 @@ func newJournalState(seeds map[string]uint64) journalState {
 func (j *Journal) Add(event Event) (Record, bool, error) {
 	records, err := j.AddBatch([]Event{event})
 	if err != nil {
+		if len(records) == 1 {
+			return records[0], true, err
+		}
 		return Record{}, false, err
 	}
 	if len(records) == 0 {
@@ -222,8 +227,8 @@ func (j *Journal) AddBatch(events []Event) ([]Record, error) {
 		j.state.records = append(j.state.records, record)
 	}
 	if len(j.state.records) > j.limit*2 {
-		if err := j.compactLocked(); err != nil {
-			return nil, err
+		if err := j.compact(); err != nil {
+			return cloneRecords(added), err
 		}
 	}
 	return cloneRecords(added), nil
