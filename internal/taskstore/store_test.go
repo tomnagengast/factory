@@ -269,6 +269,60 @@ func TestStoreReopensAndPagesThousandTasksAndTenThousandMessages(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsCorruptCheckpointOutcomes(t *testing.T) {
+	store := openTestStore(t)
+	first := createTestTask(t, store, ApprovalGated, "checkpoint-first")
+	first, message, _, err := store.AddMessage(MessageCommand{Actor: humanActor, TaskID: first.Ref.ProviderID, ExpectedRevision: first.Revision, Body: "one", IdempotencyKey: "checkpoint-message"}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := store.Create(CreateCommand{Actor: humanActor, Title: "Second", ProjectID: "project-1", ApprovalMode: ApprovalGated, IdempotencyKey: "checkpoint-second"}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := store.Snapshot()
+	messageOutcome := -1
+	for index := range base.Outcomes {
+		if base.Outcomes[index].Kind == operationMessage {
+			messageOutcome = index
+			break
+		}
+	}
+	if messageOutcome < 0 {
+		t.Fatal("message outcome missing")
+	}
+	tests := []struct {
+		name   string
+		mutate func(*OperationOutcome)
+	}{
+		{name: "missing entity", mutate: func(outcome *OperationOutcome) { outcome.Message = nil }},
+		{name: "cross task entity", mutate: func(outcome *OperationOutcome) {
+			value := message
+			value.TaskID = second.Ref.ProviderID
+			outcome.Message = &value
+		}},
+		{name: "cross task outcome", mutate: func(outcome *OperationOutcome) { value := second; outcome.Task = &value }},
+		{name: "unknown kind", mutate: func(outcome *OperationOutcome) { outcome.Kind = "future" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := base.Clone()
+			test.mutate(&snapshot.Outcomes[messageOutcome])
+			data, err := json.Marshal(diskOperation{Kind: operationCheckpoint, Schema: SchemaVersion, Checkpoint: &snapshot})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "tasks.jsonl")
+			if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(path); err == nil {
+				t.Fatal("corrupt checkpoint outcome was accepted")
+			}
+		})
+	}
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := Open(filepath.Join(t.TempDir(), "tasks.jsonl"))

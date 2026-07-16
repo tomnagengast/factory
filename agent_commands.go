@@ -22,6 +22,7 @@ import (
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskcompat"
 	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/workflow"
@@ -329,6 +330,14 @@ func runWorkflowRollbackPreflight(args []string) int {
 	configuration, err := settings.ReadSchema1Backup(*settingsBackup)
 	if err == nil {
 		_, err = triggerregistry.Read(*triggerRegistry, configuration)
+	}
+	if err == nil {
+		markerPath := taskcompat.PathFor(*settingsBackup)
+		if _, markerErr := taskcompat.Read(markerPath); markerErr == nil {
+			err = errors.New("source-neutral task marker is present; task-unaware rollback is unavailable")
+		} else if !errors.Is(markerErr, os.ErrNotExist) {
+			err = markerErr
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "workflow rollback preflight failed: %v\n", err)

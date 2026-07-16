@@ -202,6 +202,17 @@ func Open(path string) (*Store, error) {
 		if err := os.Truncate(path, int64(complete)); err != nil {
 			return nil, fmt.Errorf("task store: truncate incomplete tail: %w", err)
 		}
+		file, err := os.OpenFile(path, os.O_WRONLY, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("task store: reopen truncated store: %w", err)
+		}
+		if err := file.Sync(); err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("task store: sync truncated store: %w", err)
+		}
+		if err := file.Close(); err != nil {
+			return nil, fmt.Errorf("task store: close truncated store: %w", err)
+		}
 	}
 	if err := s.replay(data[:complete]); err != nil {
 		return nil, err
@@ -746,8 +757,15 @@ func (s *Store) applyCheckpointLocked(operation diskOperation) error {
 		s.gates[gate.TaskID] = append(s.gates[gate.TaskID], gate.Clone())
 	}
 	for _, outcome := range operation.Checkpoint.Outcomes {
-		if outcome.Scope == "" || outcome.CommandHash == "" || outcome.Kind == "" || outcome.Task == nil || s.tasks[outcome.Task.Ref.ProviderID].Revision == 0 || s.outcomes[outcome.Scope].Scope != "" {
+		if outcome.Scope == "" || outcome.CommandHash == "" || outcome.Task == nil || s.outcomes[outcome.Scope].Scope != "" {
 			return errors.New("task store: invalid checkpoint outcome")
+		}
+		current := s.tasks[outcome.Task.Ref.ProviderID]
+		if err := outcome.Task.Validate(); err != nil || current.Revision == 0 || outcome.Task.Revision > current.Revision || errTaskIdentityChanged(*outcome.Task, current) != nil {
+			return errors.New("task store: invalid checkpoint outcome task")
+		}
+		if err := s.validateCheckpointOutcomeEntities(outcome); err != nil {
+			return err
 		}
 		s.outcomes[outcome.Scope] = outcome.Clone()
 	}
@@ -755,6 +773,63 @@ func (s *Store) applyCheckpointLocked(operation diskOperation) error {
 		if task.MessageCount != uint64(len(s.messages[id])) || task.LinkCount != uint64(len(s.links[id])) || task.GateCount != uint64(len(s.gates[id])) {
 			return errors.New("task store: checkpoint counters conflict")
 		}
+	}
+	return nil
+}
+
+func (s *Store) validateCheckpointOutcomeEntities(outcome OperationOutcome) error {
+	taskID := outcome.Task.Ref.ProviderID
+	invalid := func() error { return errors.New("task store: invalid checkpoint outcome entity") }
+	switch outcome.Kind {
+	case operationCreate, operationUpdate, operationState, operationRouting, operationCompletion:
+		if outcome.Message != nil || outcome.Link != nil || outcome.Gate != nil {
+			return invalid()
+		}
+	case operationMessage:
+		if outcome.Message == nil || outcome.Link != nil || outcome.Gate != nil || outcome.Message.TaskID != taskID {
+			return invalid()
+		}
+		messages := s.messages[taskID]
+		index := int(outcome.Message.Ordinal - 1)
+		if index < 0 || index >= len(messages) || messages[index] != *outcome.Message || outcome.Task.MessageCount != outcome.Message.Ordinal {
+			return invalid()
+		}
+	case operationLink:
+		if outcome.Link == nil || outcome.Message != nil || outcome.Gate != nil || outcome.Link.TaskID != taskID {
+			return invalid()
+		}
+		found := false
+		for _, link := range s.links[taskID] {
+			if link == *outcome.Link {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return invalid()
+		}
+	case operationGate, operationDecision:
+		if outcome.Gate == nil || outcome.Message != nil || outcome.Link != nil || outcome.Gate.TaskID != taskID {
+			return invalid()
+		}
+		index := s.gateIndex(taskID, outcome.Gate.ID)
+		if index < 0 {
+			return invalid()
+		}
+		current := s.gates[taskID][index]
+		if outcome.Kind == operationDecision {
+			if !reflect.DeepEqual(current, *outcome.Gate) {
+				return invalid()
+			}
+		} else {
+			expected := outcome.Gate.Clone()
+			expected.Status, expected.Decision = current.Status, current.Decision
+			if !reflect.DeepEqual(expected, current) {
+				return invalid()
+			}
+		}
+	default:
+		return errors.New("task store: invalid checkpoint outcome kind")
 	}
 	return nil
 }
@@ -899,6 +974,14 @@ func (s *Store) writeCheckpointLocked() error {
 	}
 	if err := os.Rename(tempPath, s.path); err != nil {
 		return fmt.Errorf("task store: replace checkpoint: %w", err)
+	}
+	directory, err := os.Open(filepath.Dir(s.path))
+	if err != nil {
+		return fmt.Errorf("task store: open checkpoint directory: %w", err)
+	}
+	defer directory.Close()
+	if err := directory.Sync(); err != nil {
+		return fmt.Errorf("task store: sync checkpoint directory: %w", err)
 	}
 	return nil
 }
