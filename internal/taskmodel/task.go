@@ -132,3 +132,7 @@ func ResolveCompatibilityIdentity(current TaskRef, legacyIdentifier string) (Tas
 func ValidLinearIdentifier(value string) bool {
 	return linearIdentifierPattern.MatchString(value)
 }
+
+func ValidDisplayIdentifier(value string) bool {
+	return linearIdentifierPattern.MatchString(value) || factoryIdentifierPattern.MatchString(value)
+}
