@@ -78,3 +78,22 @@ func TestTaskRefBranchPrefixSeparatesProviders(t *testing.T) {
 		}
 	}
 }
+
+func TestValidDisplayIdentifier(t *testing.T) {
+	tests := []struct {
+		value string
+		want  bool
+	}{
+		{value: "ENG-46", want: true},
+		{value: "FAC-1", want: true},
+		{value: "eng-46", want: false},
+		{value: "FAC-0", want: false},
+		{value: "", want: false},
+		{value: "not-an-identifier", want: false},
+	}
+	for _, test := range tests {
+		if got := ValidDisplayIdentifier(test.value); got != test.want {
+			t.Errorf("ValidDisplayIdentifier(%q) = %t, want %t", test.value, got, test.want)
+		}
+	}
+}

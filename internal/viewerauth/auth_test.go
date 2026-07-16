@@ -65,7 +65,7 @@ func TestGoogleCallbackCreatesSessionForAllowedVerifiedEmail(t *testing.T) {
 	})}
 	auth := testAuthenticator(t, client)
 
-	stateCookie, state := beginLogin(t, auth, "/agents/ENG-23/1783714439062/run")
+	stateCookie, state := beginLogin(t, auth, "/agents/ENG-23/1783714439062/run?source=linear")
 	callback := httptest.NewRecorder()
 	request := httptest.NewRequest(
 		http.MethodGet,
@@ -74,7 +74,7 @@ func TestGoogleCallbackCreatesSessionForAllowedVerifiedEmail(t *testing.T) {
 	)
 	request.AddCookie(stateCookie)
 	auth.Callback(callback, request)
-	if callback.Code != http.StatusFound || callback.Header().Get("Location") != "/agents/ENG-23/1783714439062/run" {
+	if callback.Code != http.StatusFound || callback.Header().Get("Location") != "/agents/ENG-23/1783714439062/run?source=linear" {
 		t.Fatalf("callback = %d, location %q, body %q", callback.Code, callback.Header().Get("Location"), callback.Body.String())
 	}
 	if !responseDeletesCookie(callback, stateCookieName) {
@@ -173,7 +173,7 @@ func TestLoginAllowsCanonicalProtectedReturnURLsOnly(t *testing.T) {
 		{name: "home", next: "/home", want: "/home"},
 		{name: "wire", next: "/wire?page=2", want: "/wire?page=2"},
 		{name: "agents", next: "/agents", want: "/agents"},
-		{name: "agent run", next: "/agents/ENG-23/1783714439062/run", want: "/agents/ENG-23/1783714439062/run"},
+		{name: "agent run", next: "/agents/ENG-23/1783714439062/run?source=linear", want: "/agents/ENG-23/1783714439062/run?source=linear"},
 		{name: "settings", next: "/settings", want: "/settings"},
 		{name: "triggers", next: "/triggers", want: "/triggers"},
 		{name: "workflows", next: "/workflows", want: "/workflows"},

@@ -794,18 +794,23 @@ func ValidIssueIdentifier(value string) bool {
 	return taskmodel.ValidLinearIdentifier(value)
 }
 
-func (s *Store) FindStarted(issueIdentifier string, startedUnixMilli int64) (Run, bool) {
+func (s *Store) FindObserverRun(source taskmodel.Source, taskIdentifier string, startedUnixMilli int64) (Run, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var matched Run
+	var matchedSource taskmodel.Source
 	found := false
 	for _, run := range s.state.Runs {
-		if run.Task.Source != taskmodel.SourceLinear || !strings.EqualFold(run.Task.Identifier, issueIdentifier) || run.StartedAt == nil || run.StartedAt.UnixMilli() != startedUnixMilli {
+		if (source != "" && run.Task.Source != source) || !strings.EqualFold(run.Task.Identifier, taskIdentifier) || run.StartedAt == nil || run.StartedAt.UnixMilli() != startedUnixMilli {
 			continue
+		}
+		if source == "" && found && run.Task.Source != matchedSource {
+			return Run{}, false
 		}
 		if !found || run.CreatedAt.After(matched.CreatedAt) {
 			matched = run
+			matchedSource = run.Task.Source
 			found = true
 		}
 	}

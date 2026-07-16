@@ -8,6 +8,7 @@ import {
   onMount,
   Show,
   type JSX,
+  type Resource,
 } from "solid-js";
 import { render } from "solid-js/web";
 import "./styles.css";
@@ -245,6 +246,7 @@ type CompletionValidation = {
 };
 
 type AgentActivityRun = AgentRun & {
+  task: TaskRef;
   issueIdentifier: string;
   ready?: ReadyCheckpoint;
   mergeCommitOid?: string;
@@ -544,11 +546,13 @@ async function taskRequest<T>(url: string, method: string, body: unknown): Promi
 }
 
 async function getAgentByReference(
-  issueIdentifier: string,
+  taskIdentifier: string,
   startedAt: string,
+  source?: TaskRef["source"],
 ): Promise<AgentView> {
+  const query = source ? `?source=${source}` : "";
   return getJSON<AgentView>(
-    `/api/agents/${encodeURIComponent(issueIdentifier)}/${encodeURIComponent(startedAt)}/run`,
+    `/api/agents/${encodeURIComponent(taskIdentifier)}/${encodeURIComponent(startedAt)}/run${query}`,
     "Agent request",
   );
 }
@@ -690,8 +694,13 @@ async function getJSON<T>(url: string, label: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+function resourceSnapshot<T>(resource: Resource<T>): T | undefined {
+  return resource.error ? undefined : resource();
+}
+
 function HomePage(): JSX.Element {
   const [health] = createResource(getHealth);
+  const healthSnapshot = (): Health | undefined => resourceSnapshot(health);
 
   return (
     <main class="home-page">
@@ -718,7 +727,7 @@ function HomePage(): JSX.Element {
             <span
               classList={{
                 dot: true,
-                ready: health()?.status === "ok",
+                ready: healthSnapshot()?.status === "ok",
                 failed: Boolean(health.error),
               }}
             />
@@ -726,7 +735,7 @@ function HomePage(): JSX.Element {
               <span>
                 {health.error
                   ? "Offline"
-                  : `Systems online · ${shortOID(health()?.commit)} · contract ${health()?.contractVersion}`}
+                  : `Systems online · ${shortOID(healthSnapshot()?.commit)} · contract ${healthSnapshot()?.contractVersion}`}
               </span>
             </Show>
           </div>
@@ -819,6 +828,7 @@ function ActivityHeader(props: {
 
 function ActivityPage(): JSX.Element {
   const [activity, { refetch }] = createResource(getActivity);
+  const activitySnapshot = (): ActivitySnapshot | undefined => resourceSnapshot(activity);
 
   onMount(() => {
     document.title = "Home | Factory";
@@ -832,7 +842,7 @@ function ActivityPage(): JSX.Element {
         <ActivityHeader
           section="home"
           state={resourceState(activity.loading, activity.error)}
-          label={listenerLabel(activity.loading, activity.error, Boolean(activity()))}
+          label={listenerLabel(activity.loading, activity.error, Boolean(activitySnapshot()))}
         />
 
         <div class="activity-hero overview-hero">
@@ -855,19 +865,19 @@ function ActivityPage(): JSX.Element {
           </div>
           <div>
             <dt>Verified deliveries</dt>
-            <dd>{activity()?.total ?? 0}</dd>
+            <dd>{activitySnapshot()?.total ?? 0}</dd>
           </div>
           <div>
             <dt>Last received</dt>
-            <dd>{formatTime(activity()?.lastReceivedAt)}</dd>
+            <dd>{formatTime(activitySnapshot()?.lastReceivedAt)}</dd>
           </div>
           <div>
             <dt>Agent runs</dt>
-            <dd>{activity()?.agentRuns.total ?? 0}</dd>
+            <dd>{activitySnapshot()?.agentRuns.total ?? 0}</dd>
           </div>
           <div>
             <dt>Active loops</dt>
-            <dd>{activity()?.agentRuns.active ?? 0}</dd>
+            <dd>{activitySnapshot()?.agentRuns.active ?? 0}</dd>
           </div>
         </dl>
 
@@ -880,7 +890,7 @@ function ActivityPage(): JSX.Element {
               metadata and available Linear payloads.
             </p>
             <span class="destination-meta">
-              {activity()?.events.filter((event) => !event.type.startsWith("github/"))
+              {activitySnapshot()?.events.filter((event) => !event.type.startsWith("github/"))
                 .length ?? 0} recent events
             </span>
           </a>
@@ -888,11 +898,11 @@ function ActivityPage(): JSX.Element {
             <span class="destination-index">02 / Agents</span>
             <strong>Follow autonomous work</strong>
             <p>
-              Review loop state by issue, then enter the authenticated live tmux
+              Review loop state by task, then enter the authenticated live tmux
               observer for a specific run.
             </p>
             <span class="destination-meta">
-              {activity()?.agentRuns.active ?? 0} active now
+              {activitySnapshot()?.agentRuns.active ?? 0} active now
             </span>
           </a>
         </section>
@@ -924,6 +934,8 @@ function WirePage(): JSX.Element {
   });
   const [activity, { refetch }] = createResource(request, getWire);
   const [eventDetail] = createResource(selectedSequence, getWireEvent);
+  const activitySnapshot = (): WireSnapshot | undefined => resourceSnapshot(activity);
+  const eventSnapshot = (): WireEventDetail | undefined => resourceSnapshot(eventDetail);
 
   onMount(() => {
     document.title = "System wire | Factory";
@@ -967,19 +979,19 @@ function WirePage(): JSX.Element {
         <dl class="activity-summary detail-summary">
           <div>
             <dt>Retained events</dt>
-            <dd>{activity()?.retained ?? 0}</dd>
+            <dd>{activitySnapshot()?.retained ?? 0}</dd>
           </div>
           <div>
             <dt>Matching events</dt>
-            <dd>{activity()?.matching ?? 0}</dd>
+            <dd>{activitySnapshot()?.matching ?? 0}</dd>
           </div>
           <div>
             <dt>Pending dispatch</dt>
-            <dd>{activity()?.status.pending ?? 0}</dd>
+            <dd>{activitySnapshot()?.status.pending ?? 0}</dd>
           </div>
           <div>
             <dt>Rejected total</dt>
-            <dd>{activity()?.status.rejectedTotal ?? 0}</dd>
+            <dd>{activitySnapshot()?.status.rejectedTotal ?? 0}</dd>
           </div>
         </dl>
 
@@ -988,7 +1000,7 @@ function WirePage(): JSX.Element {
             <span>Source</span>
             <select value={source()} onChange={(event) => changeFilter(setSource, event.currentTarget.value)}>
               <option value="">All sources</option>
-              <For each={activity()?.sourceCounts ?? []}>
+              <For each={activitySnapshot()?.sourceCounts ?? []}>
                 {(count) => <option value={count.label}>{count.label} ({count.count})</option>}
               </For>
             </select>
@@ -997,7 +1009,7 @@ function WirePage(): JSX.Element {
             <span>Event type</span>
             <select value={eventType()} onChange={(event) => changeFilter(setEventType, event.currentTarget.value)}>
               <option value="">All event types</option>
-              <For each={activity()?.typeCounts ?? []}>
+              <For each={activitySnapshot()?.typeCounts ?? []}>
                 {(count) => <option value={count.label}>{count.label} ({count.count})</option>}
               </For>
             </select>
@@ -1012,12 +1024,12 @@ function WirePage(): JSX.Element {
             <ActivityChart
               title="Events by source"
               subtitle="Current retained window"
-              items={activity()?.sourceCounts ?? []}
+              items={activitySnapshot()?.sourceCounts ?? []}
             />
             <ActivityChart
               title="Recent hourly volume"
               subtitle="Up to twelve active UTC hours"
-              items={activity()?.hourCounts ?? []}
+              items={activitySnapshot()?.hourCounts ?? []}
             />
           </section>
 
@@ -1029,7 +1041,7 @@ function WirePage(): JSX.Element {
               </div>
               <Pagination
                 page={page()}
-                pageCount={activity()?.pageCount ?? 0}
+                pageCount={activitySnapshot()?.pageCount ?? 0}
                 onChange={changePage}
               />
             </div>
@@ -1037,11 +1049,11 @@ function WirePage(): JSX.Element {
             <div class="event-workspace">
               <div class="event-scroll" tabIndex={0} aria-label="System events">
                 <Show
-                  when={!activity.loading || Boolean(activity())}
+                  when={!activity.loading || Boolean(activitySnapshot())}
                   fallback={<LoadingRows />}
                 >
                   <Show
-                    when={(activity()?.records.length ?? 0) > 0}
+                    when={(activitySnapshot()?.records.length ?? 0) > 0}
                     fallback={
                       <div class="empty-state compact">
                         <strong>No events match these filters.</strong>
@@ -1050,7 +1062,7 @@ function WirePage(): JSX.Element {
                     }
                   >
                     <ol class="event-list selectable-events">
-                      <For each={activity()?.records ?? []}>
+                      <For each={activitySnapshot()?.records ?? []}>
                         {(record) => (
                           <li>
                             <button
@@ -1091,7 +1103,7 @@ function WirePage(): JSX.Element {
                     fallback={<div class="payload-placeholder"><strong>Loading payload</strong></div>}
                   >
                     <Show
-                      when={!eventDetail.error && eventDetail()}
+                      when={eventSnapshot()}
                       fallback={<InlineError message="This event could not be loaded." />}
                     >
                       {(detail) => (
@@ -1148,7 +1160,8 @@ function WirePage(): JSX.Element {
 
 function AgentActivityPage(): JSX.Element {
   const [activity, { refetch }] = createResource(getAgentActivity);
-  const stateCounts = createMemo(() => countRunStates(activity()?.runs ?? []));
+  const activitySnapshot = (): AgentActivitySnapshot | undefined => resourceSnapshot(activity);
+  const stateCounts = createMemo(() => countRunStates(activitySnapshot()?.runs ?? []));
 
   onMount(() => {
     document.title = "Agent activity | Factory";
@@ -1173,7 +1186,7 @@ function AgentActivityPage(): JSX.Element {
             </h1>
           </div>
           <p class="activity-intro">
-            Every retained Factory loop, addressed by its Linear issue and start
+            Every retained Factory loop, addressed by its task identifier and start
             time. Enter a run to observe the live session or durable result.
           </p>
         </div>
@@ -1181,15 +1194,15 @@ function AgentActivityPage(): JSX.Element {
         <dl class="activity-summary detail-summary">
           <div>
             <dt>Total runs</dt>
-            <dd>{activity()?.total ?? 0}</dd>
+            <dd>{activitySnapshot()?.total ?? 0}</dd>
           </div>
           <div>
             <dt>Active loops</dt>
-            <dd>{activity()?.active ?? 0}</dd>
+            <dd>{activitySnapshot()?.active ?? 0}</dd>
           </div>
           <div>
             <dt>Terminal runs</dt>
-            <dd>{Math.max(0, (activity()?.runs.length ?? 0) - (activity()?.active ?? 0))}</dd>
+            <dd>{Math.max(0, (activitySnapshot()?.runs.length ?? 0) - (activitySnapshot()?.active ?? 0))}</dd>
           </div>
         </dl>
 
@@ -1205,9 +1218,9 @@ function AgentActivityPage(): JSX.Element {
             />
             <div class="run-pulse" aria-label="Current run status">
               <span class="section-label">Live capacity</span>
-              <strong>{activity()?.active ?? 0}</strong>
+              <strong>{activitySnapshot()?.active ?? 0}</strong>
               <p>
-                {(activity()?.active ?? 0) === 1 ? "loop is" : "loops are"} active across the
+                {(activitySnapshot()?.active ?? 0) === 1 ? "loop is" : "loops are"} active across the
                 Factory runner.
               </p>
             </div>
@@ -1216,15 +1229,15 @@ function AgentActivityPage(): JSX.Element {
           <section class="run-feed dedicated-run-feed" aria-labelledby="run-feed-title">
             <div class="feed-heading">
               <h2 id="run-feed-title">Run ledger</h2>
-              <span>Issue context is authenticated</span>
+              <span>Task context is authenticated</span>
             </div>
 
             <Show
-              when={!activity.loading || Boolean(activity())}
+              when={!activity.loading || Boolean(activitySnapshot())}
               fallback={<LoadingRows />}
             >
               <Show
-                when={(activity()?.runs.length ?? 0) > 0}
+                when={(activitySnapshot()?.runs.length ?? 0) > 0}
                 fallback={
                   <div class="empty-state compact">
                     <strong>No agent run has been claimed.</strong>
@@ -1233,7 +1246,7 @@ function AgentActivityPage(): JSX.Element {
                 }
               >
                 <ol class="run-list private-run-list">
-                  <For each={activity()?.runs ?? []}>
+                  <For each={activitySnapshot()?.runs ?? []}>
                     {(run) => (
                       <li class="run-row private-run-row">
                         <Show
@@ -1274,6 +1287,7 @@ function AgentActivityPage(): JSX.Element {
 
 function TriggersPage(): JSX.Element {
   const [triggers] = createResource(getTriggers);
+  const triggerSnapshot = (): TriggerResponse | undefined => resourceSnapshot(triggers);
 
   onMount(() => {
     document.title = "Triggers | Factory";
@@ -1288,7 +1302,7 @@ function TriggersPage(): JSX.Element {
           label={triggers.error ? "Trigger registry unavailable" : "Admission policy"}
         />
         <Show
-          when={triggers()}
+          when={triggerSnapshot()}
           fallback={
             <div class="settings-loading" aria-live="polite">
               <p class="section-label">Event admission</p>
@@ -1833,6 +1847,7 @@ type WorkflowEditorState = "published" | "unpublished" | "dirty" | "saving" | "c
 
 function WorkflowsPage(): JSX.Element {
   const [workflows] = createResource(getWorkflows);
+  const workflowSnapshot = (): WorkflowsResponse | undefined => resourceSnapshot(workflows);
 
   onMount(() => {
     document.title = "Workflows | Factory";
@@ -1847,7 +1862,7 @@ function WorkflowsPage(): JSX.Element {
           label={workflows.error ? "Workflow policy unavailable" : "Markdown workflow policy"}
         />
         <Show
-          when={workflows()}
+          when={workflowSnapshot()}
           fallback={
             <div class="settings-loading" aria-live="polite">
               <p class="section-label">Procedural policy</p>
@@ -2172,6 +2187,7 @@ function workflowStateLabel(state: WorkflowEditorState): string {
 
 function SettingsPage(): JSX.Element {
   const [settings] = createResource(getSettings);
+  const settingsSnapshot = (): FactorySettings | undefined => resourceSnapshot(settings);
 
   onMount(() => {
     document.title = "Settings | Factory";
@@ -2187,7 +2203,7 @@ function SettingsPage(): JSX.Element {
         />
 
         <Show
-          when={settings()}
+          when={settingsSnapshot()}
           fallback={
             <div class="settings-loading" aria-live="polite">
               <p class="section-label">Runtime policy</p>
@@ -2531,7 +2547,9 @@ function TasksPage(): JSX.Element {
   });
   const [tasks, { refetch }] = createResource(request, getTasks);
   const [projects] = createResource(getTaskProjects);
-  const enabledProjects = createMemo(() => (projects()?.projects ?? []).filter((choice) => choice.enabled));
+  const taskSnapshot = (): TasksResponse | undefined => resourceSnapshot(tasks);
+  const projectSnapshot = (): TaskProjectsResponse | undefined => resourceSnapshot(projects);
+  const enabledProjects = createMemo(() => (projectSnapshot()?.projects ?? []).filter((choice) => choice.enabled));
 
   createEffect(() => {
     const choices = enabledProjects();
@@ -2551,7 +2569,7 @@ function TasksPage(): JSX.Element {
   }
 
   function nextTaskPage(): void {
-    const next = tasks()?.nextCursor;
+    const next = taskSnapshot()?.nextCursor;
     if (!next) return;
     setCursorHistory((history) => [...history, cursor()]);
     setCursor(next);
@@ -2605,7 +2623,7 @@ function TasksPage(): JSX.Element {
         <form class="task-filters" aria-label="Task filters" onSubmit={(event) => event.preventDefault()}>
           <label><span>Source</span><select value={provider()} onChange={(event) => changeFilter(setProvider, event.currentTarget.value)}><option value="">All sources</option><option value="factory">Factory</option><option value="linear">Linear</option></select></label>
           <label><span>State</span><select value={state()} onChange={(event) => changeFilter(setState, event.currentTarget.value)}><option value="">All states</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="completed">Completed</option><option value="canceled">Canceled</option></select></label>
-          <label><span>Project</span><select value={project()} onChange={(event) => changeFilter(setProject, event.currentTarget.value)}><option value="">All projects</option><For each={projects()?.projects ?? []}>{(choice) => <option value={choice.projectId}>{choice.projectName}</option>}</For></select></label>
+          <label><span>Project</span><select value={project()} onChange={(event) => changeFilter(setProject, event.currentTarget.value)}><option value="">All projects</option><For each={projectSnapshot()?.projects ?? []}>{(choice) => <option value={choice.projectId}>{choice.projectName}</option>}</For></select></label>
           <label><span>Approval</span><select value={approval()} onChange={(event) => changeFilter(setApproval, event.currentTarget.value)}><option value="">All modes</option><option value="gated">Gated</option><option value="automatic">Automatic</option></select></label>
           <label><span>Lifecycle</span><select value={activity()} onChange={(event) => changeFilter(setActivity, event.currentTarget.value)}><option value="">Any activity</option><option value="active">Active Run</option><option value="inactive">No active Run</option></select></label>
         </form>
@@ -2615,12 +2633,12 @@ function TasksPage(): JSX.Element {
             <section class="task-ledger" aria-labelledby="task-ledger-title">
               <div class="task-section-heading">
                 <div><p class="section-label">Current scope</p><h2 id="task-ledger-title">Task ledger</h2></div>
-                <span>{tasks()?.tasks.length ?? 0} shown</span>
+                <span>{taskSnapshot()?.tasks.length ?? 0} shown</span>
               </div>
-              <Show when={!tasks.loading || Boolean(tasks())} fallback={<LoadingRows />}>
-                <Show when={(tasks()?.tasks.length ?? 0) > 0} fallback={<div class="empty-state task-empty"><strong>No tasks match this view.</strong><span>Adjust the filters or create the first native Factory task.</span></div>}>
+              <Show when={!tasks.loading || Boolean(taskSnapshot())} fallback={<LoadingRows />}>
+                <Show when={(taskSnapshot()?.tasks.length ?? 0) > 0} fallback={<div class="empty-state task-empty"><strong>No tasks match this view.</strong><span>Adjust the filters or create the first native Factory task.</span></div>}>
                   <ol class="task-list">
-                    <For each={tasks()?.tasks ?? []}>
+                    <For each={taskSnapshot()?.tasks ?? []}>
                       {(task) => (
                         <li>
                           <a href={`/tasks/${task.ref.source}/${encodeURIComponent(task.ref.providerId)}`}>
@@ -2634,7 +2652,7 @@ function TasksPage(): JSX.Element {
                   </ol>
                 </Show>
               </Show>
-              <Show when={cursorHistory().length > 0 || Boolean(tasks()?.nextCursor)}><nav class="task-pagination" aria-label="Task pages"><button class="text-button" type="button" disabled={cursorHistory().length === 0} onClick={previousTaskPage}>Previous</button><span>Page {cursorHistory().length + 1}</span><button class="text-button" type="button" disabled={!tasks()?.nextCursor} onClick={nextTaskPage}>Next</button></nav></Show>
+              <Show when={cursorHistory().length > 0 || Boolean(taskSnapshot()?.nextCursor)}><nav class="task-pagination" aria-label="Task pages"><button class="text-button" type="button" disabled={cursorHistory().length === 0} onClick={previousTaskPage}>Previous</button><span>Page {cursorHistory().length + 1}</span><button class="text-button" type="button" disabled={!taskSnapshot()?.nextCursor} onClick={nextTaskPage}>Next</button></nav></Show>
             </section>
 
             <aside class="task-create" aria-labelledby="task-create-title">
@@ -2664,12 +2682,13 @@ function TaskDetailPage(props: { provider: string; id: string }): JSX.Element {
     () => `${props.provider}:${props.id}`,
     () => getTaskDetail(props.provider, props.id),
   );
+  const detailSnapshot = (): NativeTaskDetail | TaskSummary | undefined => resourceSnapshot(detail);
   const native = createMemo(() => {
-    const value = detail();
+    const value = detailSnapshot();
     return value && "task" in value ? value as NativeTaskDetail : undefined;
   });
   const linear = createMemo(() => {
-    const value = detail();
+    const value = detailSnapshot();
     return value && !("task" in value) ? value as TaskSummary : undefined;
   });
   const [title, setTitle] = createSignal("");
@@ -2749,9 +2768,9 @@ function TaskDetailPage(props: { provider: string; id: string }): JSX.Element {
   return (
     <main class="activity-page" id="main-content">
       <section class="activity-shell" aria-labelledby="task-title">
-        <ActivityHeader section="tasks" state={resourceState(detail.loading, detail.error, Boolean(detail()))} label={detail.error ? "Task unavailable" : props.provider === "linear" ? "Managed Linear record" : "Native task journal"} />
+        <ActivityHeader section="tasks" state={resourceState(detail.loading, detail.error, Boolean(detailSnapshot()))} label={detail.error ? "Task unavailable" : props.provider === "linear" ? "Managed Linear record" : "Native task journal"} />
         <Show when={!detail.error} fallback={<InlineError message="This task could not be loaded. It may have moved or Factory may be offline." />}>
-          <Show when={!detail.loading || Boolean(detail())} fallback={<LoadingRows />}>
+          <Show when={!detail.loading || Boolean(detailSnapshot())} fallback={<LoadingRows />}>
             <Show when={linear()}>
               {(task) => (
                 <article class="task-detail linear-detail">
@@ -2866,12 +2885,13 @@ function LoadingRows(): JSX.Element {
 
 function AgentPage(props: { load: () => Promise<AgentView> }): JSX.Element {
   const [agent, { refetch }] = createResource(props.load);
+  const agentSnapshot = (): AgentView | undefined => resourceSnapshot(agent);
   const [selectedWindowID, setSelectedWindowID] = createSignal("");
   const [expandedStepIDs, setExpandedStepIDs] = createSignal<Set<string>>(
     new Set(),
   );
   const selectedWindow = (): AgentWindow | undefined => {
-    const windows = agent()?.windows ?? [];
+    const windows = agentSnapshot()?.windows ?? [];
     return windows.find((window) => window.id === selectedWindowID()) ?? windows[0];
   };
   const setStepExpanded = (stepID: string, expanded: boolean): void => {
@@ -2893,7 +2913,7 @@ function AgentPage(props: { load: () => Promise<AgentView> }): JSX.Element {
   onMount(() => {
     document.title = "Agent run | Factory";
     const timer = window.setInterval(() => {
-      if (shouldRefreshAgent(agent())) {
+      if (shouldRefreshAgent(agentSnapshot())) {
         void refetch();
       }
     }, refreshIntervalMs);
@@ -2905,12 +2925,12 @@ function AgentPage(props: { load: () => Promise<AgentView> }): JSX.Element {
       <section class="agent-shell" aria-labelledby="agent-title">
         <ActivityHeader
           section="agents"
-          state={resourceState(agent.loading, agent.error, agent()?.live)}
-          label={agentStatusLabel(agent.loading, agent.error, agent())}
+          state={resourceState(agent.loading, agent.error, agentSnapshot()?.live)}
+          label={agentStatusLabel(agent.loading, agent.error, agentSnapshot())}
         />
 
         <Show
-          when={agent()}
+          when={agentSnapshot()}
           fallback={
             <div class="agent-loading">
               <p class="section-label">Agent observer</p>
@@ -3071,7 +3091,7 @@ function agentRunHref(run: AgentActivityRun): string | undefined {
   if (!run.startedAt) {
     return undefined;
   }
-  return `/agents/${encodeURIComponent(run.issueIdentifier)}/${new Date(run.startedAt).getTime()}/run`;
+  return `/agents/${encodeURIComponent(run.issueIdentifier)}/${new Date(run.startedAt).getTime()}/run?source=${run.task.source}`;
 }
 
 function countRunStates(runs: AgentActivityRun[]): ActivityCount[] {
@@ -3232,6 +3252,10 @@ if (!root) {
 
 const currentPath = window.location.pathname;
 const agentActivityRoute = /^\/agents\/([^/]+)\/(\d+)\/run$/.exec(currentPath);
+const requestedAgentSource = new URLSearchParams(window.location.search).get("source");
+const agentSource = requestedAgentSource === "factory" || requestedAgentSource === "linear"
+  ? requestedAgentSource
+  : undefined;
 const taskDetailRoute = /^\/tasks\/(factory|linear)\/([^/]+)$/.exec(currentPath);
 
 render(() => {
@@ -3262,7 +3286,7 @@ render(() => {
   if (agentActivityRoute) {
     return (
       <AgentPage
-        load={() => getAgentByReference(agentActivityRoute[1], agentActivityRoute[2])}
+        load={() => getAgentByReference(agentActivityRoute[1], agentActivityRoute[2], agentSource)}
       />
     );
   }

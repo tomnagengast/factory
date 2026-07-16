@@ -30,6 +30,7 @@ import (
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/taskcontrol"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/taskservice"
 	"github.com/tomnagengast/factory/internal/taskstore"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
@@ -71,7 +72,7 @@ type RunStore interface {
 	ClaimContinuation(claim agentrun.ContinuationClaim, now time.Time) (agentrun.Run, bool, error)
 	PublicSnapshot() agentrun.PublicSnapshot
 	ActivitySnapshot() agentrun.ActivitySnapshot
-	FindStarted(issueIdentifier string, startedUnixMilli int64) (agentrun.Run, bool)
+	FindObserverRun(source taskmodel.Source, taskIdentifier string, startedUnixMilli int64) (agentrun.Run, bool)
 	Find(string) (agentrun.Run, bool)
 	SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, cursor uint64, remediation bool, now time.Time) (bool, error)
 }
@@ -439,7 +440,7 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("GET /api/wire", app.viewerAuth.API(http.HandlerFunc(app.wire)))
 	mux.Handle("GET /api/wire/{sequence}", app.viewerAuth.API(http.HandlerFunc(app.wireEvent)))
 	mux.Handle("GET /api/agents", app.viewerAuth.API(http.HandlerFunc(app.agents)))
-	mux.Handle("GET /api/agents/{issue}/{started}/run", canonicalAgentReference(app.viewerAuth.API(http.HandlerFunc(app.agentByReference))))
+	mux.Handle("GET /api/agents/{identifier}/{started}/run", canonicalAgentReference(app.viewerAuth.API(http.HandlerFunc(app.agentByReference))))
 	mux.Handle("GET /api/settings", app.viewerAuth.API(http.HandlerFunc(app.getSettings)))
 	mux.Handle("PUT /api/settings", app.viewerAuth.API(http.HandlerFunc(app.putSettings)))
 	mux.Handle("GET /api/triggers", app.viewerAuth.API(http.HandlerFunc(app.getTriggers)))
@@ -476,7 +477,7 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("GET /agents", app.viewerAuth.Page(page))
 	mux.Handle("GET /tasks", app.viewerAuth.Page(page))
 	mux.Handle("GET /tasks/{provider}/{id}", app.viewerAuth.Page(page))
-	mux.Handle("GET /agents/{issue}/{started}/run", canonicalAgentReference(app.viewerAuth.Page(page)))
+	mux.Handle("GET /agents/{identifier}/{started}/run", canonicalAgentReference(app.viewerAuth.Page(page)))
 	mux.Handle("GET /settings", app.viewerAuth.Page(page))
 	mux.Handle("GET /triggers", app.viewerAuth.Page(page))
 	mux.Handle("GET /workflows", app.viewerAuth.Page(page))
@@ -588,8 +589,8 @@ func (s *appServer) agents(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *appServer) agentByReference(w http.ResponseWriter, r *http.Request) {
-	issueIdentifier := strings.ToUpper(r.PathValue("issue"))
-	if !agentrun.ValidIssueIdentifier(issueIdentifier) {
+	taskIdentifier := strings.ToUpper(r.PathValue("identifier"))
+	if !taskmodel.ValidDisplayIdentifier(taskIdentifier) {
 		http.NotFound(w, r)
 		return
 	}
@@ -598,7 +599,12 @@ func (s *appServer) agentByReference(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	run, found := s.runStore.FindStarted(issueIdentifier, started)
+	source, ok := observerTaskSource(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	run, found := s.runStore.FindObserverRun(source, taskIdentifier, started)
 	if !found {
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		return
@@ -1206,14 +1212,30 @@ func canonicalPaths(next http.Handler) http.Handler {
 
 func canonicalAgentReference(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		issueIdentifier := strings.ToUpper(r.PathValue("issue"))
+		taskIdentifier := strings.ToUpper(r.PathValue("identifier"))
 		started, err := strconv.ParseInt(r.PathValue("started"), 10, 64)
-		if !agentrun.ValidIssueIdentifier(issueIdentifier) || err != nil || started < 1 {
+		_, sourceOK := observerTaskSource(r)
+		if !taskmodel.ValidDisplayIdentifier(taskIdentifier) || err != nil || started < 1 || !sourceOK {
 			http.NotFound(w, r)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func observerTaskSource(r *http.Request) (taskmodel.Source, bool) {
+	values, present := r.URL.Query()["source"]
+	if !present {
+		return "", true
+	}
+	if len(values) != 1 {
+		return "", false
+	}
+	source := taskmodel.Source(values[0])
+	if source != taskmodel.SourceFactory && source != taskmodel.SourceLinear {
+		return "", false
+	}
+	return source, true
 }
 
 func frontendPage(web fs.FS) http.Handler {

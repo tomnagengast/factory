@@ -31,6 +31,7 @@ import (
 	"github.com/tomnagengast/factory/internal/linearidentity"
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/taskstore"
 	"github.com/tomnagengast/factory/internal/viewerauth"
 )
@@ -146,6 +147,7 @@ func TestPrivateCanonicalRoutesRequireViewerAuthentication(t *testing.T) {
 		"/wire",
 		"/agents",
 		"/agents/ENG-23/1783714439062/run",
+		"/agents/FAC-1/1783714439062/run?source=factory",
 		"/settings",
 	} {
 		recorder := httptest.NewRecorder()
@@ -163,6 +165,7 @@ func TestPrivateCanonicalRoutesRequireViewerAuthentication(t *testing.T) {
 		"/api/wire/1",
 		"/api/agents",
 		"/api/agents/ENG-23/1783714439062/run",
+		"/api/agents/FAC-1/1783714439062/run?source=factory",
 		"/api/settings",
 	} {
 		recorder := httptest.NewRecorder()
@@ -554,6 +557,24 @@ func TestAuthenticatedAgentActivityAndReference(t *testing.T) {
 	if err := store.MarkRunning(run.ID, 1, testNow); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
+	native, _, err := store.Claim(agentrun.Trigger{
+		DeliveryID: "delivery-native-agent",
+		Task: taskmodel.TaskRef{
+			Source:     taskmodel.SourceFactory,
+			ProviderID: "task-1",
+			Identifier: "FAC-1",
+		},
+		Kind: "test",
+	}, testNow)
+	if err != nil {
+		t.Fatalf("claim native run: %v", err)
+	}
+	if err := store.MarkStarting(native.ID, "factory-task-1", t.TempDir(), testNow); err != nil {
+		t.Fatalf("mark native run starting: %v", err)
+	}
+	if err := store.MarkRunning(native.ID, 1, testNow); err != nil {
+		t.Fatalf("mark native run running: %v", err)
+	}
 	observer.view = agentrun.AgentView{ID: run.ID, IssueIdentifier: "ENG-23", State: agentrun.StateRunning, Live: true}
 
 	summaryRecorder := authenticatedRequest(t, handler, "/api/agents")
@@ -561,7 +582,7 @@ func TestAuthenticatedAgentActivityAndReference(t *testing.T) {
 	if err := json.NewDecoder(summaryRecorder.Body).Decode(&summary); err != nil {
 		t.Fatalf("decode summary: %v", err)
 	}
-	if summaryRecorder.Code != http.StatusOK || summary.Total != 1 || summary.Active != 1 || summary.Runs[0].IssueIdentifier != "ENG-23" {
+	if summaryRecorder.Code != http.StatusOK || summary.Total != 2 || summary.Active != 2 {
 		t.Fatalf("summary response = %d %#v", summaryRecorder.Code, summary)
 	}
 
@@ -575,6 +596,21 @@ func TestAuthenticatedAgentActivityAndReference(t *testing.T) {
 		t.Fatalf("detail response = %d %#v, observer ID %q", detailRecorder.Code, detail, observer.lastID)
 	}
 
+	observer.view = agentrun.AgentView{ID: native.ID, IssueIdentifier: "FAC-1", State: agentrun.StateRunning, Live: true}
+	for _, nativeTarget := range []string{
+		fmt.Sprintf("/api/agents/FAC-1/%d/run", testNow.UnixMilli()),
+		fmt.Sprintf("/api/agents/FAC-1/%d/run?source=factory", testNow.UnixMilli()),
+	} {
+		nativeRecorder := authenticatedRequest(t, handler, nativeTarget)
+		var nativeDetail agentrun.AgentView
+		if err := json.NewDecoder(nativeRecorder.Body).Decode(&nativeDetail); err != nil {
+			t.Fatalf("decode native detail: %v", err)
+		}
+		if nativeRecorder.Code != http.StatusOK || nativeDetail.ID != native.ID || observer.lastID != native.ID {
+			t.Fatalf("native detail response = %d %#v, observer ID %q", nativeRecorder.Code, nativeDetail, observer.lastID)
+		}
+	}
+
 	for _, invalidTarget := range []string{
 		"/api/agents/not-an-issue/123/run",
 		"/api/agents/ENG-23/not-a-time/run",
@@ -585,6 +621,59 @@ func TestAuthenticatedAgentActivityAndReference(t *testing.T) {
 	}
 	if recorder := authenticatedRequest(t, handler, "/api/agents/ENG-24/"+strconv.FormatInt(testNow.UnixMilli(), 10)+"/run"); recorder.Code != http.StatusNotFound {
 		t.Fatalf("missing run status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+}
+
+func TestAgentReferenceSourceCollisionAndInvalidSourceFailClosed(t *testing.T) {
+	t.Parallel()
+
+	observer := &testObserver{}
+	handler, store := testHandlerWithObserverAndStore(t, observer)
+	now := testNow
+	factory, _, err := store.Claim(agentrun.Trigger{
+		DeliveryID: "factory-collision",
+		Task:       taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-collision", Identifier: "FAC-1"},
+		Kind:       "test",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linear, _, err := store.Claim(agentrun.Trigger{DeliveryID: "linear-collision", IssueIdentifier: "FAC-1", Kind: "test"}, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []agentrun.Run{factory, linear} {
+		if err := store.MarkStarting(run.ID, "collision-"+run.ID, t.TempDir(), now); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.MarkRunning(run.ID, 1, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	base := fmt.Sprintf("/api/agents/FAC-1/%d/run", now.UnixMilli())
+	if recorder := authenticatedRequest(t, handler, base); recorder.Code != http.StatusNotFound {
+		t.Fatalf("ambiguous queryless status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+	for source, run := range map[string]agentrun.Run{"factory": factory, "linear": linear} {
+		observer.view = agentrun.AgentView{ID: run.ID}
+		recorder := authenticatedRequest(t, handler, base+"?source="+source)
+		if recorder.Code != http.StatusOK || observer.lastID != run.ID {
+			t.Fatalf("source %s response = %d, observer ID %q; want %s", source, recorder.Code, observer.lastID, run.ID)
+		}
+	}
+
+	for _, target := range []string{
+		base + "?source=unknown",
+		base + "?source=",
+		base + "?source=factory&source=linear",
+		fmt.Sprintf("/agents/FAC-1/%d/run?source=unknown", now.UnixMilli()),
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+		if recorder.Code != http.StatusNotFound || recorder.Header().Get("Location") != "" {
+			t.Fatalf("%s response = %d, location %q", target, recorder.Code, recorder.Header().Get("Location"))
+		}
 	}
 }
 

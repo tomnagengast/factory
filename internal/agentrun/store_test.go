@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
 
@@ -281,12 +282,18 @@ func TestStoreFindsNewestRunByIssueAndStartedMillisecond(t *testing.T) {
 		t.Fatalf("mark second run running: %v", err)
 	}
 
-	found, ok := store.FindStarted("ENG-123", now.UnixMilli())
+	found, ok := store.FindObserverRun(taskmodel.SourceLinear, "ENG-123", now.UnixMilli())
 	if !ok || found.ID != second.ID {
 		t.Fatalf("found = %#v, ok = %t, want newest run %s", found, ok, second.ID)
 	}
-	if _, ok := store.FindStarted("ENG-999", now.UnixMilli()); ok {
+	if queryless, ok := store.FindObserverRun("", "eng-123", now.UnixMilli()); !ok || queryless.ID != second.ID {
+		t.Fatalf("queryless lowercase lookup = %#v, %t; want %s", queryless, ok, second.ID)
+	}
+	if _, ok := store.FindObserverRun(taskmodel.SourceLinear, "ENG-999", now.UnixMilli()); ok {
 		t.Fatal("found run for wrong issue")
+	}
+	if _, ok := store.FindObserverRun(taskmodel.SourceLinear, "ENG-123", now.Add(time.Millisecond).UnixMilli()); ok {
+		t.Fatal("found run for wrong start time")
 	}
 	if !ValidIssueIdentifier("ENG-123") || ValidIssueIdentifier("eng-123") {
 		t.Fatal("issue identifier validation mismatch")
@@ -298,6 +305,52 @@ func TestStoreFindsNewestRunByIssueAndStartedMillisecond(t *testing.T) {
 	}
 	if activity.Runs[0].StartedAt == nil || activity.Runs[0].StartedAt.UnixMilli() != now.UnixMilli() {
 		t.Fatalf("activity run = %#v", activity.Runs[0])
+	}
+}
+
+func TestStoreFindObserverRunSeparatesTaskSources(t *testing.T) {
+	t.Parallel()
+
+	store := openTestStore(t, 10)
+	now := time.Date(2026, time.July, 10, 9, 0, 0, 123456789, time.UTC)
+	factory, _, err := store.Claim(Trigger{
+		DeliveryID: "factory-delivery",
+		Task: taskmodel.TaskRef{
+			Source:     taskmodel.SourceFactory,
+			ProviderID: "task-1",
+			Identifier: "FAC-1",
+		},
+		Kind: "test",
+	}, now)
+	if err != nil {
+		t.Fatalf("claim Factory run: %v", err)
+	}
+	if err := store.MarkStarting(factory.ID, "factory-task-1", t.TempDir(), now); err != nil {
+		t.Fatalf("mark Factory run starting: %v", err)
+	}
+	if err := store.MarkRunning(factory.ID, 1, now); err != nil {
+		t.Fatalf("mark Factory run running: %v", err)
+	}
+
+	linear, _, err := store.Claim(Trigger{DeliveryID: "linear-delivery", IssueIdentifier: "FAC-1", Kind: "test"}, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("claim Linear run: %v", err)
+	}
+	if err := store.MarkStarting(linear.ID, "fac-1-linear", t.TempDir(), now.Add(time.Second)); err != nil {
+		t.Fatalf("mark Linear run starting: %v", err)
+	}
+	if err := store.MarkRunning(linear.ID, 1, now); err != nil {
+		t.Fatalf("mark Linear run running: %v", err)
+	}
+
+	if found, ok := store.FindObserverRun(taskmodel.SourceFactory, "FAC-1", now.UnixMilli()); !ok || found.ID != factory.ID {
+		t.Fatalf("Factory lookup = %#v, %t; want %s", found, ok, factory.ID)
+	}
+	if found, ok := store.FindObserverRun(taskmodel.SourceLinear, "FAC-1", now.UnixMilli()); !ok || found.ID != linear.ID {
+		t.Fatalf("Linear lookup = %#v, %t; want %s", found, ok, linear.ID)
+	}
+	if _, ok := store.FindObserverRun("", "FAC-1", now.UnixMilli()); ok {
+		t.Fatal("queryless lookup selected an ambiguous cross-provider Run")
 	}
 }
 
