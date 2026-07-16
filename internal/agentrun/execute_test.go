@@ -60,7 +60,7 @@ func TestPrincipalPromptExecutesPinnedMarkdownDirectly(t *testing.T) {
 		"ENG-123",
 		"Required branch prefix: eng-123-",
 		"Every new branch and pull-request head",
-		"Workflow: Full SDLC revision 1",
+		"Workflow: Full SDLC revision 2",
 		"----- BEGIN PINNED WORKFLOW MARKDOWN -----",
 		workflow.DefaultMarkdown(),
 		"FACTORY RUNTIME PROTOCOL",

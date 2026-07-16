@@ -257,7 +257,7 @@ func (s *Service) Start(ctx context.Context, request StartRequest) (StartResult,
 		return StartResult{}, ErrWorkflowUnavailable
 	}
 	digest, err := workflow.Digest(definition)
-	if err != nil || digest != workflow.ProviderNeutralDigest() {
+	if err != nil {
 		return StartResult{}, ErrWorkflowUnavailable
 	}
 	pin := workflow.Pin(definition)
@@ -312,7 +312,7 @@ func (s *Service) resolveTask(value string) (taskstore.Task, bool) {
 }
 
 func (s *Service) continueTask(task taskstore.Task, eventKey string) (triggerrouter.Invocation, bool, error) {
-	if task.Routing == nil || task.Routing.WorkflowID != workflow.ProviderNeutralID || task.Routing.WorkflowDigest != workflow.ProviderNeutralDigest() {
+	if task.Routing == nil || task.Routing.WorkflowID != workflow.ProviderNeutralID {
 		return triggerrouter.Invocation{}, false, ErrWorkflowUnavailable
 	}
 	configuration := s.policy.SettingsSnapshot()
@@ -320,8 +320,10 @@ func (s *Service) continueTask(task taskstore.Task, eventKey string) (triggerrou
 	if !found || !definition.Enabled {
 		return triggerrouter.Invocation{}, false, ErrWorkflowUnavailable
 	}
+	// Continuations pin the currently published reserved workflow, so a task
+	// admitted under an older compiled revision keeps working after upgrades.
 	digest, err := workflow.Digest(definition)
-	if err != nil || digest != task.Routing.WorkflowDigest {
+	if err != nil {
 		return triggerrouter.Invocation{}, false, ErrWorkflowUnavailable
 	}
 	return s.admitter.AdmitNativeContinuation(triggerrouter.NativeAdmission{

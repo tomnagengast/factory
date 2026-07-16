@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -128,6 +129,19 @@ func (c *RepositoryCatalog) Replace(configs []RepositoryConfig) error {
 	c.byRepository = byRepository
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *RepositoryCatalog) Snapshot() []RepositoryConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	configs := make([]RepositoryConfig, 0, len(c.byRepository))
+	for _, config := range c.byRepository {
+		configs = append(configs, config)
+	}
+	slices.SortFunc(configs, func(left, right RepositoryConfig) int {
+		return strings.Compare(strings.ToLower(left.Repository), strings.ToLower(right.Repository))
+	})
+	return configs
 }
 
 func (c *RepositoryCatalog) ResolveProject(description string) (RepositoryConfig, error) {

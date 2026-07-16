@@ -41,6 +41,9 @@ type LauncherConfig struct {
 	TmuxPath      string
 	TmuxSocket    string
 	TaskEndpoint  string
+	// Repositories returns the current admitted repository catalog, exposed to
+	// every run as FACTORY_REPOSITORIES so agents can work across repositories.
+	Repositories func() []RepositoryConfig
 }
 
 type TmuxLauncher struct {
@@ -594,6 +597,7 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 		"-e", "FACTORY_TRIGGER_KIND=" + run.TriggerKind,
 		"-e", "FACTORY_REPOSITORY=" + run.Repository,
 		"-e", "FACTORY_REPO_PATH=" + launcher.config.RepoPath,
+		"-e", "FACTORY_REPOSITORIES=" + launcher.repositoriesJSON(),
 		"-e", "FACTORY_CLOUD_URL=" + run.CloudURL,
 		"-e", "FACTORY_AGENT_HELPER=" + launcher.config.BinaryPath,
 		launcher.config.BinaryPath,
@@ -607,7 +611,7 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 		"--run-dir", runDirectory,
 		"--attempt-offset", fmt.Sprintf("%d", run.Attempts),
 	}
-	providerNeutral := run.PinnedWorkflowDigest == workflow.ProviderNeutralDigest()
+	providerNeutral := run.PinnedWorkflow != nil && run.PinnedWorkflow.ID == workflow.ProviderNeutralID
 	if providerNeutral {
 		if launcher.config.TaskEndpoint == "" {
 			return errors.New("start provider-neutral Run: task helper endpoint is missing")
@@ -634,6 +638,31 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 		return fmt.Errorf("tmux new-session: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func (l *TmuxLauncher) repositoriesJSON() string {
+	if l.config.Repositories == nil {
+		return ""
+	}
+	type catalogEntry struct {
+		Repository string `json:"repository"`
+		Path       string `json:"path"`
+		BaseBranch string `json:"baseBranch"`
+	}
+	configs := l.config.Repositories()
+	entries := make([]catalogEntry, 0, len(configs))
+	for _, config := range configs {
+		entries = append(entries, catalogEntry{
+			Repository: config.Repository,
+			Path:       config.RepoPath,
+			BaseBranch: config.BaseBranch,
+		})
+	}
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func (l *TmuxLauncher) forRun(run Run) *TmuxLauncher {

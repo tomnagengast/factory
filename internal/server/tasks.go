@@ -568,7 +568,7 @@ func (s *appServer) agentTask(w http.ResponseWriter, r *http.Request) {
 	}
 	runID := strings.TrimSpace(r.Header.Get("X-Factory-Run-ID"))
 	run, found := s.runStore.Find(runID)
-	if !found || !run.State.HasWorker() || run.RunDirectory == "" || run.PinnedWorkflowDigest != workflow.ProviderNeutralDigest() {
+	if !found || !run.State.HasWorker() || run.RunDirectory == "" || run.PinnedWorkflow == nil || run.PinnedWorkflow.ID != workflow.ProviderNeutralID {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}

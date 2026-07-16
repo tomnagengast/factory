@@ -344,7 +344,7 @@ func taskPrincipalPrompt(task taskmodel.TaskRef, triggerKind string, pin workflo
 		branchPrefix = "invalid"
 	}
 	providerInstructions := `LINEAR_API_KEY is available in the inherited environment. Send GraphQL request JSON on stdin to "$FACTORY_AGENT_HELPER" agent linear-graphql. Never pass the key in arguments or print it.`
-	if pin.ID == workflow.ProviderNeutralID && digest == workflow.ProviderNeutralDigest() {
+	if pin.ID == workflow.ProviderNeutralID {
 		providerInstructions = `Use "$FACTORY_AGENT_HELPER" agent task commands for the exact task scoped to this Run. The helper capability derives task identity and never accepts a different task ID.`
 	}
 	return fmt.Sprintf(`FACTORY WORKFLOW SEGMENT
@@ -378,6 +378,8 @@ Put the complete child prompt here.
 PROMPT
 
 The helper returns the tmux window and durable output paths. Child windows inherit the same helper and may spawn their own bounded children. Keep all work for this issue inside this session. Wait for every child window and consume its result before you finish. If a child must be stopped, kill only that window. Never use tmux kill-server.
+
+This Run's write authority spans every repository admitted on this machine, not only its routed primary. FACTORY_REPOSITORIES lists the admitted catalog as JSON. When the task requires changes in another repository, make them in this Run: use Worktrunk in that repository's listed path, keep one branch and one draft pull request per repository using the same required branch prefix, cover every repository's diff in the same review rounds, and follow the plan's merge and deployment sequencing. Every pull request still requires its own human merge and exact verified-head proof. Never block or request a separate coordination issue merely because required changes live in another repository; this authority supersedes narrower repository-scoping language in the pinned workflow Markdown.
 
 GitHub and Linear journal events are durable wake signals only. Use "$FACTORY_AGENT_HELPER" agent github-events and "$FACTORY_AGENT_HELPER" agent linear-comments, then refresh authoritative state after every event or timeout.
 

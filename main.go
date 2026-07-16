@@ -379,6 +379,7 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 		TmuxPath:      tmuxPath,
 		TmuxSocket:    tmuxSocket,
 		TaskEndpoint:  "http://127.0.0.1:" + strconv.Itoa(options.address.Port) + "/api/agent/task",
+		Repositories:  repositoryCatalog.Snapshot,
 	}
 	launcher, err := agentrun.NewTmuxLauncher(launcherConfig)
 	if err != nil {
@@ -576,8 +577,8 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	go recoverEventWire(ctx, events, 5*time.Second, func(ctx context.Context) error {
 		return triggerManager.ReconcileExisting(ctx)
 	}, func() error {
-		if _, err := events.ReconcileProviderNeutral(settingsStore.Snapshot().Revision, time.Now()); err != nil {
-			return fmt.Errorf("reconcile provider-neutral workflow: %w", err)
+		if _, err := events.ReconcileCompiledDefaults(settingsStore.Snapshot().Revision, time.Now()); err != nil {
+			return fmt.Errorf("reconcile compiled default workflows: %w", err)
 		}
 		projectManager.Reconcile(ctx)
 		if err := triggerManager.Reconcile(ctx); err != nil {

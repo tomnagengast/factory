@@ -14,7 +14,7 @@ var providerNeutralMarkdown string
 func Default(now time.Time) Definition {
 	return Definition{
 		ID:        DefaultID,
-		Revision:  1,
+		Revision:  2,
 		Name:      "Full SDLC",
 		Enabled:   true,
 		Markdown:  CanonicalizeMarkdown(fullSDLCMarkdown),
@@ -27,7 +27,7 @@ func DefaultMarkdown() string { return CanonicalizeMarkdown(fullSDLCMarkdown) }
 func ProviderNeutralDefault(now time.Time) Definition {
 	return Definition{
 		ID:        ProviderNeutralID,
-		Revision:  1,
+		Revision:  2,
 		Name:      "Full SDLC (provider neutral)",
 		Enabled:   true,
 		Markdown:  CanonicalizeMarkdown(providerNeutralMarkdown),

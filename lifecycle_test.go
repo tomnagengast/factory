@@ -108,7 +108,7 @@ func TestRecoverEventWireAdmitsPendingEventBeforeProviderNeutralReconciliation(t
 	if _, added, err := journal.Add(event); err != nil || !added {
 		t.Fatalf("seed pending event: added=%t err=%v", added, err)
 	}
-	if _, err := wire.ReconcileProviderNeutral(configuration.Snapshot().Revision, now); !errors.Is(err, triggerrouter.ErrPolicyPending) {
+	if _, err := wire.ReconcileCompiledDefaults(configuration.Snapshot().Revision, now); !errors.Is(err, triggerrouter.ErrPolicyPending) {
 		t.Fatalf("pre-catch-up reconciliation error = %v, want pending policy", err)
 	}
 
@@ -116,7 +116,7 @@ func TestRecoverEventWireAdmitsPendingEventBeforeProviderNeutralReconciliation(t
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go recoverEventWire(ctx, wire, time.Millisecond, func(context.Context) error { return nil }, func() error {
-		if _, err := wire.ReconcileProviderNeutral(configuration.Snapshot().Revision, now); err != nil {
+		if _, err := wire.ReconcileCompiledDefaults(configuration.Snapshot().Revision, now); err != nil {
 			return err
 		}
 		close(ready)

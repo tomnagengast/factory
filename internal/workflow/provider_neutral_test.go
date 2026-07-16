@@ -18,7 +18,7 @@ func TestProviderNeutralDefaultIsStableAndScoped(t *testing.T) {
 	if definition.ID != ProviderNeutralID || digest != ProviderNeutralDigest() {
 		t.Fatalf("provider-neutral definition = %#v digest=%s", definition, digest)
 	}
-	for _, required := range []string{"factory agent task show", "factory agent task gate open", "Create a merge commit", "exact verified-head"} {
+	for _, required := range []string{"factory agent task show", "factory agent task gate open", "Create a merge commit", "exact verified-head", "## Cross-repository authority", "FACTORY_REPOSITORIES"} {
 		if !strings.Contains(definition.Markdown, required) {
 			t.Fatalf("provider-neutral workflow is missing %q", required)
 		}

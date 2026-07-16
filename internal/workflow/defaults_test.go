@@ -18,6 +18,9 @@ func TestDefaultMarkdownIncludesLifecycleSafeguards(t *testing.T) {
 		"Create a merge commit",
 		"squash or rebase",
 		`~/.local/bin/nags deploy --expected-commit "$(git rev-parse HEAD)"`,
+		"## Cross-repository authority",
+		"FACTORY_REPOSITORIES",
+		"that blocker class does not exist",
 	} {
 		if !strings.Contains(markdown, required) {
 			t.Errorf("compiled default is missing %q", required)

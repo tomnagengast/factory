@@ -125,29 +125,56 @@ func (s *Store) Update(expectedRevision uint64, candidate Snapshot, now time.Tim
 	return s.state.Clone(), nil
 }
 
-func (s *Store) ReconcileProviderNeutral(expectedRevision uint64, now time.Time) (Snapshot, error) {
+// ReconcileCompiledDefaults upserts the compiled reserved workflows into the
+// persisted collection. A missing entry is appended, an entry from an older
+// compiled revision is upgraded, and an entry newer than the binary (an
+// operator publication or a binary rollback) is preserved. A same-revision
+// divergence indicates manual state edits and fails closed.
+func (s *Store) ReconcileCompiledDefaults(expectedRevision uint64, now time.Time) (Snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if expectedRevision != s.state.Revision {
 		return s.state.Clone(), ErrRevisionConflict
 	}
-	desired := workflow.ProviderNeutralDefault(now)
-	desiredDigest, err := workflow.Digest(desired)
-	if err != nil {
-		return s.state.Clone(), err
-	}
-	for _, existing := range s.state.Workflows {
-		if existing.ID != workflow.ProviderNeutralID {
+	next := s.state.Clone()
+	changed := false
+	for _, desired := range []workflow.Definition{workflow.Default(now), workflow.ProviderNeutralDefault(now)} {
+		index := -1
+		for i, existing := range next.Workflows {
+			if existing.ID == desired.ID {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			next.Workflows = append(next.Workflows, desired)
+			changed = true
 			continue
 		}
-		existingDigest, err := workflow.Digest(existing)
-		if err != nil || existingDigest != desiredDigest {
-			return s.state.Clone(), errors.New("settings: reserved provider-neutral workflow conflicts with the compiled definition")
+		existing := next.Workflows[index]
+		if existing.Revision > desired.Revision {
+			continue
 		}
+		if existing.Revision == desired.Revision {
+			existingDigest, err := workflow.Digest(existing)
+			if err != nil {
+				return s.state.Clone(), err
+			}
+			desiredDigest, err := workflow.Digest(desired)
+			if err != nil {
+				return s.state.Clone(), err
+			}
+			if existingDigest != desiredDigest {
+				return s.state.Clone(), fmt.Errorf("settings: reserved workflow %s conflicts with the compiled definition", desired.ID)
+			}
+			continue
+		}
+		next.Workflows[index] = desired
+		changed = true
+	}
+	if !changed {
 		return s.state.Clone(), nil
 	}
-	next := s.state.Clone()
-	next.Workflows = append(next.Workflows, desired)
 	next.Revision++
 	next.UpdatedAt = now.UTC()
 	if err := next.Validate(); err != nil {
