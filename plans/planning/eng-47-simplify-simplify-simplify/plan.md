@@ -1,6 +1,6 @@
 # ENG-47: Simplify the Frontend Tasks Boundary
 
-> updated: 2026-07-16T08:48:49-07:00
+> updated: 2026-07-16T08:55:10-07:00
 
 ## Issue context
 
@@ -45,7 +45,7 @@ The complete evidence is in `plans/planning/eng-47-simplify-simplify-simplify/re
 - Bun 1.3.11 frozen install, frontend typecheck, and production build pass.
 - Baseline production output is one JavaScript application asset and one CSS asset.
 - Existing local and public Factory health match main commit `e5034d6208fbc7cfaa41fc24aa4793f2c8870c4b` with lifecycle contract 1.
-- The connected in-app browser is unavailable and the `agent-browser` CLI is not installed. Browser verification will use an available authenticated UI surface, with macOS Computer Use as the fallback, rather than starting an unauthorized alternative server or skipping visual acceptance.
+- The connected in-app browser is unavailable and the `agent-browser` CLI is not installed. Browser verification will use macOS Computer Use against a bounded candidate fixture on a distinct loopback port. The already-running port 8092 and public deployment remain read-only baseline and post-deploy surfaces.
 
 ## Root cause
 
@@ -91,7 +91,7 @@ The global stylesheet remains byte-for-byte unchanged. Static imports remain eag
 ## Non-goals
 
 - No product redesign, new task capability, copy change, route change, styling change, or accessibility redesign.
-- No Go API, server route, authorization, lifecycle, persistence, settings, workflow, trigger, deployment, or rollback change.
+- No production Go API, server route, authorization, lifecycle, persistence, settings, workflow, trigger, deployment, or rollback change. One environment-gated test fixture may compose existing production handlers for browser verification only.
 - No package or lockfile change.
 - No migration, compatibility alias, feature flag, or staged rollout.
 - No refactor of Workflows, Triggers, Wire, Settings, Agents, or their state machines beyond importing the exact shared symbols moved from the entrypoint.
@@ -108,7 +108,8 @@ The global stylesheet remains byte-for-byte unchanged. Static imports remain eag
 | `frontend/src/http.ts` | New shared read-only JSON helper, preserving cache, credential, status, and JSON behavior. |
 | `frontend/src/styles.css` | Must not change. |
 | `frontend/package.json`, `frontend/bun.lock` | Must not change. |
-| `internal/server/tasks_test.go`, `internal/server/server_test.go` | Verification evidence only; no planned edits. Existing tests prove the backend invariants consumed by the moved client code. |
+| `internal/server/tasks_test.go`, `internal/server/server_test.go` | Existing verification evidence for backend invariants consumed by the moved client code. |
+| `internal/server/browser_fixture_test.go` | New environment-gated browser fixture. Serve this worktree's built `frontend/dist` through the production handler on a caller-selected loopback port, local auth, and disposable stores; seed native and managed Linear tasks; provide deterministic native success plus a fixture-only revision-advance control for a real stale-form conflict. The fixture is not a production route or binary. |
 
 ### Public and internal interface rules
 
@@ -145,9 +146,9 @@ Success criteria: no broad detail union or runtime `"task" in value` discriminat
 1. Review the base diff with moved-code detection for accidental edits, duplicated code, stale exports, circular imports, debug output, secrets, generated assets, and unrelated churn.
 2. Confirm `styles.css`, `package.json`, and `bun.lock` have no diff.
 3. Run focused server tests and every required Factory publication command.
-4. Exercise the browser matrix at desktop and mobile sizes. Use an existing authenticated browser surface; if the connected browser remains unavailable, use macOS Computer Use. Do not expose cookies or credentials.
-5. Check keyboard focus/navigation, console errors, failed network requests, and loading, empty, offline/error, conflict, and success behavior. Production browser inspection is read-only. Exercise mutation success and conflict through existing automated server tests or a disposable local fixture only; never create or modify production task data for verification.
-6. Stop any process started during verification. The current managed server already owns port 8092, so do not start a duplicate unless a separate bounded local run is genuinely necessary.
+4. Build the candidate frontend, then run `TestCandidateBrowserFixture` on `127.0.0.1:18092` with a temporary `HOME` and fixture root. The test must compose the production server handler, serve this worktree's exact `frontend/dist`, use local viewer authentication and disposable stores, seed one native task and one read-only managed Linear task, and remain alive only while `FACTORY_BROWSER_FIXTURE=1` is set.
+5. Exercise the candidate browser matrix with macOS Computer Use at desktop and mobile sizes. Verify the built JavaScript and CSS assets are loaded from the candidate fixture. Check keyboard focus/navigation, console and network failures, native mutation success, a real stale-revision `409` induced through the fixture-only revision-advance control, managed Linear read-only behavior, and loading, empty, offline/error, conflict, and recovery states. Port 8092 and the public deployment remain read-only baseline surfaces.
+6. Record the fixture PID, install a cleanup trap, stop and wait for the fixture, remove its temporary root, and assert port 18092 is free. Refuse to start if that port is already occupied. Never create or modify production task data for verification.
 
 Success criteria: the complete matrix passes, the worktree contains only the planned source and artifact changes, and no temporary process remains.
 
@@ -188,6 +189,43 @@ curl -fsS https://factory.nags.cloud/api/healthz | jq .
 
 Do not stash, reset, deploy from the issue worktree, or delete branches to hide a failed deployment.
 
+### Candidate browser fixture lifecycle
+
+Run the candidate fixture only after the frontend production build has completed. It must fail closed unless `FACTORY_BROWSER_FIXTURE=1`, bind only the caller-selected loopback address, use disposable state, and serve this worktree's built assets through the production handler. Start and stop it with this bounded lifecycle:
+
+```sh
+if lsof -nP -iTCP:18092 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "candidate browser fixture port is occupied" >&2
+  exit 1
+fi
+fixture_root="$(mktemp -d)"
+mkdir -p "$fixture_root/home" "$fixture_root/state"
+fixture_pid=
+cleanup_fixture() {
+  if [ -n "$fixture_pid" ]; then
+    kill "$fixture_pid" 2>/dev/null || true
+    wait "$fixture_pid" 2>/dev/null || true
+    fixture_pid=
+  fi
+  if [ -d "$fixture_root" ]; then
+    rm -R "$fixture_root"
+  fi
+}
+trap cleanup_fixture EXIT INT TERM
+HOME="$fixture_root/home" \
+FACTORY_BROWSER_FIXTURE=1 \
+FACTORY_BROWSER_FIXTURE_ADDR=127.0.0.1:18092 \
+FACTORY_BROWSER_FIXTURE_ROOT="$fixture_root/state" \
+go test ./internal/server -run '^TestCandidateBrowserFixture$' -count=1 -timeout=15m >"$fixture_root/fixture.log" 2>&1 &
+fixture_pid=$!
+until curl -fsS http://127.0.0.1:18092/api/healthz >/dev/null; do
+  kill -0 "$fixture_pid"
+  sleep 0.2
+done
+```
+
+Use `POST /__fixture/advance` between loading and saving the seeded native task form to advance its authoritative revision and make the browser exercise the real production conflict path. After the matrix, invoke `cleanup_fixture`, clear the trap, and require `lsof -nP -iTCP:18092 -sTCP:LISTEN` to report no listener.
+
 ## Verification matrix
 
 | Acceptance criterion or risk | Exact verification |
@@ -203,10 +241,11 @@ Do not stash, reset, deploy from the issue worktree, or delete branches to hide 
 | Static correctness remains intact | `go vet ./...` |
 | Public page parity | At desktop and mobile widths, load `/` and `/home`; confirm title, navigation, health state, and responsive layout. |
 | Authenticated route parity | Load `/wire`, `/agents`, `/tasks`, `/workflows`, `/triggers`, `/settings`, one canonical agent observer, one native task detail, and one managed Linear detail. Confirm active navigation and no route/auth regression. |
-| Native Tasks success path | Use the focused server tests and, only if a disposable local fixture exists, browser interaction to verify create/edit/message/link/gate request behavior, idempotency, and authoritative revision refresh. Production browser inspection remains read-only. |
-| Conflict path | Use the existing safe server conflict fixture and, only if a disposable local fixture exists, a stale browser revision; confirm `409` causes authoritative refetch and the established conflict/error semantics. |
-| Managed Linear read-only path | Confirm live description/discussion/external link render and that no mutation controls appear. |
-| Loading, empty, error, and offline states | Observe a naturally empty filtered list; use bounded request blocking or a stopped disposable local surface for loading/error/offline without mutating production data. Restore connectivity and confirm recovery. |
+| Candidate asset identity | Build first, run the environment-gated fixture on port 18092, and confirm browser network activity loads the JavaScript and CSS asset names present in this worktree's `frontend/dist`. Port 8092 and the public deployment are not candidate evidence. |
+| Native Tasks success path | On the disposable candidate fixture, exercise create/edit/message/link/gate request behavior and confirm authoritative revision refresh. Retain focused server tests for idempotency and request-contract coverage. Production browser inspection remains read-only. |
+| Conflict path | Load the seeded native edit form on the candidate fixture, call its fixture-only revision-advance control, submit the stale form, and confirm the real production `409` path refetches authoritative state and preserves the established conflict/error semantics. |
+| Managed Linear read-only path | On the candidate fixture, confirm seeded description/discussion/external link render and no mutation controls appear. |
+| Loading, empty, error, and offline states | On the candidate fixture, observe the seeded and empty filtered lists; use bounded request blocking or stop/restart the disposable fixture for loading/error/offline, then restore connectivity and confirm recovery. |
 | Accessibility and browser diagnostics | Keyboard through navigation and forms, inspect visible focus, desktop/mobile layout, console errors, and failed network requests. |
 | Diff hygiene | `git diff --check`; `git status --short`; inspect `git diff --stat origin/main...HEAD` and `git diff --color-moved=dimmed-zebra origin/main...HEAD -- frontend/src`. |
 
