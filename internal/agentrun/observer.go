@@ -495,6 +495,16 @@ func normalizedStepUpdates(event agentEvent, source json.RawMessage) []stepUpdat
 			updates = append(updates, claudeToolResultUpdate(event, content, source, index))
 		}
 		return updates
+	case "error":
+		message := firstNonEmpty(event.Message.Text, rawErrorText(event.Error), "Agent error")
+		return []stepUpdate{{view: StepView{
+			ID:      eventStepID(event, source, 0),
+			Type:    "error",
+			Status:  "failed",
+			Action:  "Failed",
+			Summary: summarizeStep(message),
+			Error:   message,
+		}}}
 	case "result":
 		if event.Result == "" {
 			return []stepUpdate{{view: fallbackStep(event, source, 0)}}
@@ -528,10 +538,35 @@ type agentContent struct {
 	IsError   bool            `json:"is_error"`
 }
 
+type agentMessage struct {
+	ID      string         `json:"id"`
+	Content []agentContent `json:"content"`
+	Text    string         `json:"-"`
+}
+
+func (m *agentMessage) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+	var text string
+	if json.Unmarshal(data, &text) == nil {
+		m.Text = text
+		return nil
+	}
+	type messageAlias agentMessage
+	var decoded messageAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*m = agentMessage(decoded)
+	return nil
+}
+
 type agentEvent struct {
-	Type string `json:"type"`
-	UUID string `json:"uuid"`
-	Item struct {
+	Type  string          `json:"type"`
+	UUID  string          `json:"uuid"`
+	Error json.RawMessage `json:"error"`
+	Item  struct {
 		ID               string          `json:"id"`
 		Type             string          `json:"type"`
 		Status           string          `json:"status"`
@@ -548,11 +583,8 @@ type agentEvent struct {
 		Action           json.RawMessage `json:"action"`
 		Changes          []agentChange   `json:"changes"`
 	} `json:"item"`
-	Message struct {
-		ID      string         `json:"id"`
-		Content []agentContent `json:"content"`
-	} `json:"message"`
-	Result string `json:"result"`
+	Message agentMessage `json:"message"`
+	Result  string       `json:"result"`
 }
 
 func lifecycleEvent(eventType string) bool {
@@ -590,7 +622,7 @@ func codexStep(event agentEvent, source json.RawMessage) StepView {
 		step.Summary = mcpSummary(item.Server, item.Tool)
 		step.Detail = rawValuePretty(item.Arguments)
 		step.Output = rawValueText(item.Result)
-		step.Error = rawValueText(item.Error)
+		step.Error = rawErrorText(item.Error)
 	case "web_search":
 		step.Action = "Searched"
 		step.Summary = summarizeStep(firstNonEmpty(item.Query, rawObjectString(item.Action, "query"), rawValueText(item.Action)))
@@ -837,6 +869,13 @@ func rawValueText(value json.RawMessage) string {
 		}
 	}
 	return rawValuePretty(value)
+}
+
+func rawErrorText(value json.RawMessage) string {
+	if bytes.Equal(bytes.TrimSpace(value), []byte("false")) {
+		return ""
+	}
+	return rawValueText(value)
 }
 
 func rawObjectString(value json.RawMessage, keys ...string) string {

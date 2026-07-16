@@ -115,17 +115,18 @@ func TestAgentStepsNormalizeCodexActions(t *testing.T) {
 		`{"type":"thread.started","thread_id":"thread-1"}`,
 		`{"type":"item.started","item":{"id":"command-1","type":"command_execution","status":"in_progress","command":"/bin/zsh -lc 'printf \"done\"'"}}`,
 		`{"type":"item.completed","item":{"id":"command-1","type":"command_execution","status":"completed","command":"/bin/zsh -lc 'printf \"done\"'","aggregated_output":"done"}}`,
-		`{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","status":"completed","server":"linear","tool":"get_issue","arguments":{"id":"ENG-56"},"result":{"content":[{"type":"text","text":"issue loaded"}]}}}`,
+		`{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","status":"completed","server":"linear","tool":"get_issue","arguments":{"id":"ENG-56"},"result":{"content":[{"type":"text","text":"issue loaded"}]},"error":false}}`,
 		`{"type":"item.completed","item":{"id":"search-1","type":"web_search","status":"completed","query":"Factory observer patterns","action":{"type":"search","query":"Factory observer patterns"}}}`,
 		`{"type":"item.completed","item":{"id":"file-1","type":"file_change","status":"completed","changes":[{"path":"internal/agentrun/observer.go","kind":"update"},{"path":"frontend/src/index.tsx","kind":"update"}]}}`,
 		`{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"The observer contract is ready."}}`,
 		`{"type":"item.completed","item":{"id":"error-1","type":"error","message":"provider connection failed"}}`,
+		`{"type":"error","uuid":"error-event-1","message":"turn stream failed"}`,
 		`{"type":"item.completed","item":{"id":"future-1","type":"future_widget","status":"completed","text":"future evidence"}}`,
 	}, "\n")
 	redact := func(value string) string { return value }
 	steps := agentSteps(stream, redact)
 
-	if len(steps) != 7 {
+	if len(steps) != 8 {
 		t.Fatalf("steps = %#v", steps)
 	}
 	command := steps[0]
@@ -133,7 +134,7 @@ func TestAgentStepsNormalizeCodexActions(t *testing.T) {
 		t.Fatalf("command step = %#v", command)
 	}
 	mcp := steps[1]
-	if mcp.Action != "Used" || mcp.Summary != "linear · get_issue" || !strings.Contains(mcp.Detail, `"id": "ENG-56"`) || mcp.Output != "issue loaded" {
+	if mcp.Action != "Used" || mcp.Summary != "linear · get_issue" || !strings.Contains(mcp.Detail, `"id": "ENG-56"`) || mcp.Output != "issue loaded" || mcp.Status != "completed" || mcp.Error != "" {
 		t.Fatalf("MCP step = %#v", mcp)
 	}
 	search := steps[2]
@@ -150,7 +151,10 @@ func TestAgentStepsNormalizeCodexActions(t *testing.T) {
 	if failure := steps[5]; failure.Action != "Failed" || failure.Status != "failed" || failure.Error != "provider connection failed" {
 		t.Fatalf("error step = %#v", failure)
 	}
-	if future := steps[6]; future.Action != "Observed" || future.Summary != "future evidence" || !strings.Contains(future.Payload, `"type": "future_widget"`) {
+	if failure := steps[6]; failure.ID != "event:error-event-1:0" || failure.Action != "Failed" || failure.Status != "failed" || failure.Summary != "turn stream failed" || failure.Error != "turn stream failed" {
+		t.Fatalf("top-level error step = %#v", failure)
+	}
+	if future := steps[7]; future.Action != "Observed" || future.Summary != "future evidence" || !strings.Contains(future.Payload, `"type": "future_widget"`) {
 		t.Fatalf("future step = %#v", future)
 	}
 	if again := agentSteps(stream, redact); again[0].ID != command.ID {
