@@ -79,7 +79,7 @@ type TaskSummary = {
   projectName?: string;
   stateName?: string;
   messages?: TaskMessage[];
-  latestRun?: AgentRun;
+  latestRun?: AgentActivityRun;
 };
 
 type TaskRecord = {
@@ -97,6 +97,20 @@ type TaskRecord = {
   messageCount: number;
   linkCount: number;
   gateCount: number;
+  completedAt?: string;
+  routing?: {
+    projectId: string;
+    repository: string;
+    baseBranch: string;
+    workflowId: string;
+    workflowDigest: string;
+    admittedAt: string;
+  };
+  completion?: {
+    runId: string;
+    evidenceRef: string;
+    completedAt: string;
+  };
 };
 
 type TaskMessage = {
@@ -137,6 +151,7 @@ type NativeTaskDetail = {
   messages: { messages: TaskMessage[]; nextAfter?: number };
   links: TaskLink[];
   gates: TaskGate[];
+  latestRun?: AgentActivityRun;
 };
 
 type TasksResponse = {
@@ -2785,6 +2800,14 @@ function TaskDetailPage(props: { provider: string; id: string }): JSX.Element {
                           <dl class="task-metadata"><div><dt>State</dt><dd>{runStateLabel(task().state)}</dd></div><div><dt>Approval</dt><dd>{runStateLabel(task().approvalMode)}</dd></div><div><dt>Updated</dt><dd>{formatTime(task().updatedAt)}</dd></div><div><dt>Messages</dt><dd>{task().messageCount}</dd></div></dl>
                           <button class="primary-button" type="button" disabled={busy() !== "" || !["open", "in_progress"].includes(task().state)} onClick={() => void mutate("Starting workflow", "/start", {})}>Start workflow</button>
                           <Show when={["open", "in_progress"].includes(task().state)}><button class="secondary-button danger-button task-cancel-button" type="button" disabled={busy() !== ""} onClick={() => void mutate("Canceling task", "/state", { expectedRevision: task().revision, state: "canceled" })}>Cancel task</button></Show>
+                        </section>
+
+                        <section class="task-panel" aria-labelledby="lifecycle-evidence-title">
+                          <div class="task-section-heading"><div><p class="section-label">Mechanical record</p><h2 id="lifecycle-evidence-title">Lifecycle evidence</h2></div></div>
+                          <Show when={task().routing}>{(routing) => <dl class="task-metadata"><div><dt>Repository</dt><dd>{routing().repository}</dd></div><div><dt>Workflow</dt><dd>{routing().workflowId}</dd></div><div><dt>Base branch</dt><dd>{routing().baseBranch}</dd></div><div><dt>Admitted</dt><dd>{formatTime(routing().admittedAt)}</dd></div></dl>}</Show>
+                          <Show when={snapshot().latestRun}>{(run) => <><dl class="task-metadata"><div><dt>Latest Run</dt><dd>{runStateLabel(run().state)}</dd></div><div><dt>Run updated</dt><dd>{formatTime(run().updatedAt)}</dd></div></dl><div class="task-lifecycle-links"><Show when={agentRunHref(run())}>{(href) => <a class="text-link" href={href()}>Open Run</a>}</Show><Show when={run().ready}>{(ready) => <a class="text-link" href={`https://github.com/${ready().repository}/pull/${ready().pullRequest}`} target="_blank" rel="noreferrer">Open pull request</a>}</Show></div></> }</Show>
+                          <Show when={task().completion}>{(completion) => <div class="task-completion-evidence"><strong>Completion verified</strong><p>{completion().evidenceRef}</p><time datetime={completion().completedAt}>{formatTime(completion().completedAt)}</time></div>}</Show>
+                          <Show when={!task().routing && !snapshot().latestRun && !task().completion}><p class="task-limit-note">Lifecycle evidence appears after this task is admitted.</p></Show>
                         </section>
 
                         <section class="task-panel" aria-labelledby="gates-title">

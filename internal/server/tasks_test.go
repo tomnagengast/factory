@@ -24,6 +24,7 @@ import (
 
 type testTaskController struct {
 	create taskservice.CreateRequest
+	detail taskservice.Detail
 }
 
 type testLinearTaskController struct {
@@ -62,6 +63,9 @@ func (c *testTaskController) List(string, int) (taskstore.TaskPage, error) {
 	return taskstore.TaskPage{}, nil
 }
 func (c *testTaskController) Detail(string, uint64, int) (taskservice.Detail, error) {
+	if c.detail.Task.Ref.ProviderID != "" {
+		return c.detail, nil
+	}
 	return taskservice.Detail{}, taskstore.ErrNotFound
 }
 func (c *testTaskController) Create(_ context.Context, request taskservice.CreateRequest) (taskstore.Result, error) {
@@ -158,6 +162,23 @@ func TestManagedLinearDetailLoadsLiveWithoutAdmittingWorkspaceBacklog(t *testing
 	unmanaged := authenticatedJSONRequest(t, handler, http.MethodGet, "/api/tasks/linear/ENG-999", nil, "")
 	if unmanaged.Code != http.StatusNotFound || linear.reads != 1 {
 		t.Fatalf("unmanaged detail = %d %s reads=%d", unmanaged.Code, unmanaged.Body.String(), linear.reads)
+	}
+}
+
+func TestNativeTaskDetailIncludesLatestLifecycleRun(t *testing.T) {
+	ref := taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-0123456789abcdef", Identifier: "FAC-1"}
+	controller := &testTaskController{detail: taskservice.Detail{Task: taskstore.Task{
+		Ref: ref, Sequence: 1, Title: "Native lifecycle", ProjectID: "project-factory", ApprovalMode: taskstore.ApprovalGated,
+		State: taskstore.StateInProgress, Revision: 2, CreatedBy: taskstore.Actor{ID: "human", Kind: taskstore.AuthorHuman},
+		CreatedAt: testNow, UpdatedAt: testNow, LatestActivityAt: testNow,
+	}}}
+	handler, runs := testTaskAPIHandlerWithLinear(t, controller, nil)
+	if _, _, err := runs.Claim(agentrun.Trigger{DeliveryID: "factory-managed", Task: ref, Kind: agentrun.TriggerKindRule}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	detail := authenticatedJSONRequest(t, handler, http.MethodGet, "/api/tasks/factory/task-0123456789abcdef", nil, "")
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), `"latestRun"`) || !strings.Contains(detail.Body.String(), `"identifier":"FAC-1"`) {
+		t.Fatalf("native lifecycle detail = %d %s", detail.Code, detail.Body.String())
 	}
 }
 

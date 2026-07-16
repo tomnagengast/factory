@@ -1954,6 +1954,37 @@ select {
   width: 100%;
 }
 
+.task-lifecycle-links {
+  margin-top: 20px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 22px;
+}
+
+.task-completion-evidence {
+  margin-top: 24px;
+  padding: 18px;
+  border: 1px solid color-mix(in srgb, var(--success) 42%, var(--border));
+}
+
+.task-completion-evidence strong,
+.task-completion-evidence time {
+  font: 600 0.63rem/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.task-completion-evidence p {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.6;
+}
+
+.task-completion-evidence time {
+  color: var(--quiet);
+}
+
 .task-metadata {
   margin: 0;
   display: grid;

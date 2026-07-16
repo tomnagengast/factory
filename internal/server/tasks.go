@@ -45,6 +45,11 @@ type tasksResponse struct {
 	NextCursor string        `json:"nextCursor,omitempty"`
 }
 
+type nativeTaskDetailResponse struct {
+	taskservice.Detail
+	LatestRun *agentrun.ActivityRun `json:"latestRun,omitempty"`
+}
+
 func (s *appServer) getTaskProjects(w http.ResponseWriter, _ *http.Request) {
 	if !s.tasksAvailable(w) {
 		return
@@ -251,7 +256,8 @@ func (s *appServer) getTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, detail)
+	latestRuns, _ := s.taskActivityIndex()
+	writeJSON(w, http.StatusOK, nativeTaskDetailResponse{Detail: detail, LatestRun: latestRuns[detail.Task.Ref.OwnershipKey()]})
 }
 
 func (s *appServer) postTask(w http.ResponseWriter, r *http.Request) {
