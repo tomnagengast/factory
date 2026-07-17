@@ -237,6 +237,17 @@ func TestSelectedGenerationPathRejectsBoundaryMismatch(t *testing.T) {
 func finalizerFixture(t *testing.T) (FinalizerConfig, migration.Generation) {
 	t.Helper()
 	dataRoot, generation := buildActivationFixture(t)
+	return finalizerFixtureForGeneration(t, dataRoot, generation)
+}
+
+func terminalFinalizerFixture(t *testing.T) (FinalizerConfig, migration.Generation) {
+	t.Helper()
+	dataRoot, generation := buildTerminalActivationFixture(t)
+	return finalizerFixtureForGeneration(t, dataRoot, generation)
+}
+
+func finalizerFixtureForGeneration(t *testing.T, dataRoot string, generation migration.Generation) (FinalizerConfig, migration.Generation) {
+	t.Helper()
 	stateRoot := filepath.Dir(dataRoot)
 	home := filepath.Dir(filepath.Dir(filepath.Dir(stateRoot)))
 	identity := BuildIdentity{

@@ -4,13 +4,18 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/tomnagengast/factory/internal/agentrun"
+	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/migration"
 	"github.com/tomnagengast/factory/internal/repositories"
 	"github.com/tomnagengast/factory/internal/taskstore"
+	"github.com/tomnagengast/factory/internal/triggerrouter"
 )
 
 var activationNow = time.Date(2026, time.July, 16, 18, 0, 0, 0, time.UTC)
@@ -138,6 +143,14 @@ func TestPublishSelectionRejectsChangedLegacySource(t *testing.T) {
 }
 
 func buildActivationFixture(t *testing.T) (string, migration.Generation) {
+	return buildActivationFixtureWithTerminalRun(t, false)
+}
+
+func buildTerminalActivationFixture(t *testing.T) (string, migration.Generation) {
+	return buildActivationFixtureWithTerminalRun(t, true)
+}
+
+func buildActivationFixtureWithTerminalRun(t *testing.T, terminal bool) (string, migration.Generation) {
 	t.Helper()
 	source := filepath.Join("..", "migration", "testdata", "current-shape")
 	home := privateTemp(t)
@@ -176,6 +189,56 @@ func buildActivationFixture(t *testing.T) (string, migration.Generation) {
 	}
 	if err := os.Mkdir(filepath.Join(dataRoot, "task-operations"), 0o700); err != nil {
 		t.Fatal(err)
+	}
+	if terminal {
+		runStore, err := agentrun.Open(filepath.Join(dataRoot, "agent-runs.json"), 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		run := runStore.Snapshot().Runs[0]
+		finishedAt := activationNow.Add(time.Minute)
+		if err := runStore.Finish(run.ID, agentrun.StateSucceeded, run.Attempts, "complete", finishedAt); err != nil {
+			t.Fatal(err)
+		}
+		router, err := triggerrouter.Open(filepath.Join(dataRoot, "trigger-routing.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		invocation := router.Snapshot().Invocations[0]
+		if _, err := router.TransitionInvocation(invocation.ID, triggerrouter.StateSucceeded, run.ID, "complete", &finishedAt, finishedAt); err != nil {
+			t.Fatal(err)
+		}
+		if err := runStore.MarkInvocationReflected(run.ID, finishedAt); err != nil {
+			t.Fatal(err)
+		}
+		finished := runStore.Snapshot().Runs[0]
+		transition := finished.Transitions[len(finished.Transitions)-1]
+		wire, err := eventwire.OpenExisting(filepath.Join(dataRoot, "system-events.jsonl"), 100, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, _, err := wire.Add(eventwire.Event{
+			ID:      "factory:run-transition:" + transition.ID,
+			Source:  eventwire.SourceFactory,
+			Type:    "agent-run",
+			Action:  string(transition.State),
+			Subject: finished.IssueIdentifier,
+			Attributes: map[string][]string{
+				"runId": {finished.ID}, "attempts": {strconv.Itoa(transition.Attempts)},
+				"taskSource": {string(finished.Task.Source)}, "taskProviderId": {finished.Task.ProviderID}, "taskIdentifier": {finished.Task.Identifier},
+				eventwire.AttributeProducer: {"agent-collector"}, eventwire.AttributeProvenance: {"factory"},
+			},
+			RootEventID: finished.InvocationRootEventID, ParentInvocationID: finished.InvocationID,
+			ParentRunID: finished.ID, Hop: finished.InvocationHop,
+			AncestorRuleIDs: slices.Clone(finished.InvocationAncestorRuleIDs), ReceivedAt: transition.At,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, channelAcks, _ := wire.Snapshot()
+		if err := wire.Acknowledge(record.Sequence, channelAcks); err != nil {
+			t.Fatal(err)
+		}
 	}
 	generationRoot := filepath.Join(stateRoot, "generations")
 	generation, err := migration.BuildGeneration(dataRoot, generationRoot, migration.Options{
