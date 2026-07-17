@@ -19,13 +19,14 @@ import (
 )
 
 const (
-	operationCheckpoint     = "checkpoint"
-	operationAdmissionBatch = "admission-batch"
-	operationTransition     = "lifecycle-transition"
-	operationReconcile      = "reconcile-schedule"
-	operationPublish        = "delivery-publish"
-	operationAcknowledge    = "delivery-acknowledge"
-	maxJournalBytes         = 64 << 20
+	operationCheckpoint      = "checkpoint"
+	operationAdmissionBatch  = "admission-batch"
+	operationTransition      = "lifecycle-transition"
+	operationReconcile       = "reconcile-schedule"
+	operationPullRequestWake = "pull-request-wake"
+	operationPublish         = "delivery-publish"
+	operationAcknowledge     = "delivery-acknowledge"
+	maxJournalBytes          = 64 << 20
 )
 
 var (
@@ -44,6 +45,7 @@ type diskOperation struct {
 	RateIncrements   []RateBucket             `json:"rateIncrements,omitempty"`
 	Transition       *Run                     `json:"transition,omitempty"`
 	Reconcile        *ReconcileSchedule       `json:"reconcile,omitempty"`
+	PullRequestWake  *PullRequestWake         `json:"pullRequestWake,omitempty"`
 	Publication      *DeliveryPublication     `json:"publication,omitempty"`
 	Acknowledgement  *DeliveryAcknowledgement `json:"acknowledgement,omitempty"`
 }
@@ -71,6 +73,20 @@ type ReconcileSchedule struct {
 	RemediationRequested bool                 `json:"remediationRequested,omitempty"`
 	DeliveryID           string               `json:"deliveryId,omitempty"`
 	Detail               *string              `json:"detail,omitempty"`
+}
+
+// PullRequestWake is an external GitHub wake matched against canonical parked
+// Run identity. It deliberately has no RunID or ExpectedUpdatedAt: webhook
+// dispatch knows repository/PR/branch identity, and the Store selects and
+// updates the matching awaiting Run atomically under its journal lock.
+type PullRequestWake struct {
+	Repository           string    `json:"repository"`
+	PullRequest          int       `json:"pullRequest,omitempty"`
+	HeadBranch           string    `json:"headBranch,omitempty"`
+	DeliveryID           string    `json:"deliveryId"`
+	Cursor               uint64    `json:"cursor"`
+	RemediationRequested bool      `json:"remediationRequested,omitempty"`
+	At                   time.Time `json:"at"`
 }
 
 // DeliveryPublication records that one pending Run transition delivery was
@@ -371,6 +387,55 @@ func (s *Store) ScheduleReconcile(schedule ReconcileSchedule) error {
 	return s.compactIfNeededLocked()
 }
 
+// SchedulePullRequestReconcile atomically wakes the first canonical parked Run
+// matching repository plus optional pull-request and branch identity. A match
+// journals an immediate same-state wake, cursor maximum, remediation OR-latch,
+// and coalesced delivery evidence. No match is a read-only false result.
+func (s *Store) SchedulePullRequestReconcile(repository string, pullRequest int, headBranch, deliveryID string, cursor uint64, remediation bool, at time.Time) (bool, error) {
+	wake := PullRequestWake{
+		Repository: repository, PullRequest: pullRequest, HeadBranch: headBranch,
+		DeliveryID: deliveryID, Cursor: cursor, RemediationRequested: remediation, At: at.UTC(),
+	}
+	if err := validatePullRequestWake(wake); err != nil {
+		return false, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.healthyLocked(); err != nil {
+		return false, err
+	}
+	index := matchingPullRequestWake(s.state.model.Runs, wake)
+	if index < 0 {
+		return false, nil
+	}
+	if !wake.At.After(s.state.model.Runs[index].UpdatedAt) {
+		wake.At = s.state.model.Runs[index].UpdatedAt.Add(time.Nanosecond)
+	}
+	sequence, err := nextSequence(s.state.model.JournalSequence)
+	if err != nil {
+		return false, err
+	}
+	operation := diskOperation{
+		Kind: operationPullRequestWake, Version: JournalVersion, Sequence: sequence,
+		PullRequestWake: &wake,
+	}
+	if _, err := applyOperation(s.state.model, operation); err != nil {
+		return false, err
+	}
+	if err := s.appendOperationLocked(operation); err != nil {
+		return false, err
+	}
+	state, err := s.apply(s.state.model, operation)
+	if err != nil {
+		s.poisoned = err
+		return false, fmt.Errorf("runs: apply persisted pull request wake: %w", err)
+	}
+	s.state = state
+	s.operationsSinceCheckpoint++
+	return true, s.compactIfNeededLocked()
+}
+
 // RecordPublication marks one pending Run transition delivery published with
 // the authoritative wire sequence returned by the event wire. It never
 // rewrites an already-published delivery; the store derives delivery state so
@@ -478,6 +543,8 @@ func applyOperation(current Model, operation diskOperation) (Snapshot, error) {
 		return applyTransition(current, operation)
 	case operationReconcile:
 		return applyReconcileSchedule(current, operation)
+	case operationPullRequestWake:
+		return applyPullRequestWake(current, operation)
 	case operationPublish:
 		return applyPublish(current, operation)
 	case operationAcknowledge:
@@ -786,6 +853,62 @@ func applyReconcileSchedule(current Model, operation diskOperation) (Snapshot, e
 	return NewSnapshot(nextModel)
 }
 
+func applyPullRequestWake(current Model, operation diskOperation) (Snapshot, error) {
+	wake := *operation.PullRequestWake
+	index := matchingPullRequestWake(current.Runs, wake)
+	if index < 0 {
+		return Snapshot{}, errors.New("runs: pull request wake has no matching awaiting Run")
+	}
+	run := cloneRun(current.Runs[index])
+	if !wake.At.After(run.UpdatedAt) {
+		return Snapshot{}, errors.New("runs: pull request wake time must advance UpdatedAt")
+	}
+	run.UpdatedAt = wake.At
+	next := wake.At
+	run.GitHub.NextReconcileAt = &next
+	if wake.Cursor > run.GitHub.LastCursor {
+		run.GitHub.LastCursor = wake.Cursor
+	}
+	if wake.RemediationRequested {
+		run.GitHub.RemediationRequested = true
+	}
+	if !slices.Contains(run.DeliveryIDs, wake.DeliveryID) {
+		run.DeliveryIDs = append(run.DeliveryIDs, wake.DeliveryID)
+		slices.Sort(run.DeliveryIDs)
+		run.DuplicateDeliveries = uint64(len(run.DeliveryIDs) - 1)
+	}
+	nextModel := cloneModel(current)
+	nextModel.JournalSequence = operation.Sequence
+	nextModel.Runs[index] = run
+	return NewSnapshot(nextModel)
+}
+
+func matchingPullRequestWake(runs []Run, wake PullRequestWake) int {
+	for index, run := range runs {
+		if run.State != StateAwaitingHumanMerge || run.Ready == nil || run.Ready.Repository != wake.Repository {
+			continue
+		}
+		if wake.PullRequest > 0 && run.Ready.PullRequest != wake.PullRequest {
+			continue
+		}
+		if wake.HeadBranch != "" && run.Ready.HeadBranch != wake.HeadBranch {
+			continue
+		}
+		return index
+	}
+	return -1
+}
+
+func validatePullRequestWake(wake PullRequestWake) error {
+	if !repositoryPattern.MatchString(wake.Repository) || wake.PullRequest < 0 ||
+		(wake.PullRequest == 0 && !validBranch(wake.HeadBranch)) ||
+		(wake.HeadBranch != "" && !validBranch(wake.HeadBranch)) ||
+		!validIdentity(wake.DeliveryID) || wake.Cursor == 0 || wake.At.IsZero() || wake.At.Location() != time.UTC {
+		return errors.New("runs: invalid pull request wake")
+	}
+	return nil
+}
+
 func applyPublish(current Model, operation diskOperation) (Snapshot, error) {
 	publication := *operation.Publication
 	index := -1
@@ -963,23 +1086,23 @@ func validateOperationShape(operation diskOperation) error {
 	switch operation.Kind {
 	case operationCheckpoint:
 		if operation.Schema != SchemaVersion || operation.Checkpoint == nil || len(operation.AdmissionBatches) != 0 || operation.Transition != nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
-			operation.Reconcile != nil || operation.Publication != nil || operation.Acknowledgement != nil ||
+			operation.Reconcile != nil || operation.PullRequestWake != nil || operation.Publication != nil || operation.Acknowledgement != nil ||
 			operation.Checkpoint.Schema != operation.Schema || operation.Checkpoint.JournalSequence != operation.Sequence {
 			return errors.New("runs: invalid checkpoint operation")
 		}
 	case operationAdmissionBatch:
 		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) == 0 || operation.Transition != nil ||
-			operation.Reconcile != nil || operation.Publication != nil || operation.Acknowledgement != nil {
+			operation.Reconcile != nil || operation.PullRequestWake != nil || operation.Publication != nil || operation.Acknowledgement != nil {
 			return errors.New("runs: invalid admission-batch operation")
 		}
 	case operationTransition:
 		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 0 || operation.Transition == nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
-			operation.Reconcile != nil || operation.Publication != nil || operation.Acknowledgement != nil {
+			operation.Reconcile != nil || operation.PullRequestWake != nil || operation.Publication != nil || operation.Acknowledgement != nil {
 			return errors.New("runs: invalid lifecycle-transition operation")
 		}
 	case operationReconcile:
 		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 0 || operation.Transition != nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
-			operation.Publication != nil || operation.Acknowledgement != nil || operation.Reconcile == nil ||
+			operation.PullRequestWake != nil || operation.Publication != nil || operation.Acknowledgement != nil || operation.Reconcile == nil ||
 			!validIdentity(operation.Reconcile.RunID) || operation.Reconcile.ExpectedUpdatedAt.IsZero() || operation.Reconcile.At.IsZero() || operation.Reconcile.NextReconcileAt.IsZero() ||
 			operation.Reconcile.ExpectedUpdatedAt.Location() != time.UTC || operation.Reconcile.At.Location() != time.UTC || operation.Reconcile.NextReconcileAt.Location() != time.UTC ||
 			!operation.Reconcile.At.After(operation.Reconcile.ExpectedUpdatedAt) || operation.Reconcile.NextReconcileAt.Before(operation.Reconcile.At) ||
@@ -988,15 +1111,21 @@ func validateOperationShape(operation diskOperation) error {
 			operation.Reconcile.Detail != nil && !validOptionalText(*operation.Reconcile.Detail, maximumTextBytes) {
 			return errors.New("runs: invalid reconcile-schedule operation")
 		}
+	case operationPullRequestWake:
+		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 0 || operation.Transition != nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
+			operation.Reconcile != nil || operation.Publication != nil || operation.Acknowledgement != nil || operation.PullRequestWake == nil ||
+			validatePullRequestWake(*operation.PullRequestWake) != nil {
+			return errors.New("runs: invalid pull-request-wake operation")
+		}
 	case operationPublish:
 		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 0 || operation.Transition != nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
-			operation.Reconcile != nil || operation.Acknowledgement != nil || operation.Publication == nil ||
+			operation.Reconcile != nil || operation.PullRequestWake != nil || operation.Acknowledgement != nil || operation.Publication == nil ||
 			operation.Publication.RunID == "" || operation.Publication.TransitionID == "" || operation.Publication.Sequence == 0 {
 			return errors.New("runs: invalid delivery-publish operation")
 		}
 	case operationAcknowledge:
 		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 0 || operation.Transition != nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
-			operation.Reconcile != nil || operation.Publication != nil || operation.Acknowledgement == nil ||
+			operation.Reconcile != nil || operation.PullRequestWake != nil || operation.Publication != nil || operation.Acknowledgement == nil ||
 			operation.Acknowledgement.RunID == "" || operation.Acknowledgement.Count < 1 {
 			return errors.New("runs: invalid delivery-acknowledge operation")
 		}
@@ -1115,6 +1244,11 @@ func canonicalOperation(operation diskOperation) diskOperation {
 			reconcile.Detail = &detail
 		}
 		canonical.Reconcile = &reconcile
+	}
+	if operation.PullRequestWake != nil {
+		wake := *operation.PullRequestWake
+		wake.At = wake.At.UTC()
+		canonical.PullRequestWake = &wake
 	}
 	return canonical
 }
