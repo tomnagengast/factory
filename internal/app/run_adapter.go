@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/agentrun"
+	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/runs"
 	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
@@ -36,8 +37,32 @@ func (a *RunAdapter) Claim(agentrun.Trigger, time.Time) (agentrun.Run, bool, err
 	return agentrun.Run{}, false, errors.New("app run adapter: legacy direct admission is disabled")
 }
 
-func (a *RunAdapter) ClaimContinuation(agentrun.ContinuationClaim, time.Time) (agentrun.Run, bool, error) {
-	return agentrun.Run{}, false, errors.New("app run adapter: legacy continuation admission is disabled")
+func (a *RunAdapter) ClaimContinuation(claim agentrun.ContinuationClaim, _ time.Time) (agentrun.Run, bool, error) {
+	task, err := taskmodel.ResolveCompatibilityIdentity(claim.Trigger.Task, claim.Trigger.IssueIdentifier)
+	if err != nil {
+		return agentrun.Run{}, false, err
+	}
+	eventID := "linear:" + claim.Trigger.DeliveryID
+	model, ok := a.model()
+	if !ok {
+		return agentrun.Run{}, false, errors.New("app run adapter: canonical Runs are unavailable")
+	}
+	for _, candidate := range model.Runs {
+		if candidate.Causation.EventID != eventID || candidate.Causation.EventSource != eventwire.SourceLinear || candidate.TriggerKind != "comment" ||
+			!candidate.Causation.Task.Equal(task) {
+			continue
+		}
+		if candidate.Causation.ParentRunID != "" {
+			for _, owner := range model.Runs {
+				if owner.ID == candidate.Causation.ParentRunID {
+					return legacyRun(owner), false, nil
+				}
+			}
+			return agentrun.Run{}, false, errors.New("app run adapter: canonical continuation owner is unavailable")
+		}
+		return legacyRun(candidate), false, nil
+	}
+	return agentrun.Run{}, false, errors.New("app run adapter: canonical Linear continuation was not admitted")
 }
 
 func (a *RunAdapter) PublicSnapshot() agentrun.PublicSnapshot {
