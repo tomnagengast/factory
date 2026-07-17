@@ -60,8 +60,9 @@ func TestTaskListDefaultsToDescendingIDs(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
 	handler := testServer(t, wire).Handler()
-	requestJSON(t, handler, http.MethodPost, "/api/tasks", `{"title":"First","status":"backlog"}`)
-	requestJSON(t, handler, http.MethodPost, "/api/tasks", `{"title":"Second","status":"backlog"}`)
+	requestJSON(t, handler, http.MethodPost, "/api/projects", `{"name":"Factory"}`)
+	requestJSON(t, handler, http.MethodPost, "/api/tasks", `{"title":"First","status":"backlog","projectId":1}`)
+	requestJSON(t, handler, http.MethodPost, "/api/tasks", `{"title":"Second","status":"backlog","projectId":1}`)
 	response := requestJSON(t, handler, http.MethodGet, "/api/tasks", "")
 	var result struct {
 		Tasks []state.Task `json:"tasks"`
@@ -71,6 +72,21 @@ func TestTaskListDefaultsToDescendingIDs(t *testing.T) {
 	}
 	if len(result.Tasks) != 2 || result.Tasks[0].ID < result.Tasks[1].ID {
 		t.Fatalf("tasks are not descending: %#v", result.Tasks)
+	}
+}
+
+func TestTaskRequiresExistingProject(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	for _, body := range []string{
+		`{"title":"Missing"}`,
+		`{"title":"Unknown","projectId":99}`,
+	} {
+		response := requestJSON(t, handler, http.MethodPost, "/api/tasks", body)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body)
+		}
 	}
 }
 

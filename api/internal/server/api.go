@@ -41,7 +41,7 @@ func (s *Server) project(writer http.ResponseWriter, request *http.Request) {
 	}
 	tasks := make([]state.Task, 0)
 	for _, task := range view.Tasks {
-		if task.ProjectID != nil && *task.ProjectID == id && task.DeletedAt == nil {
+		if task.ProjectID == id && task.DeletedAt == nil {
 			tasks = append(tasks, task)
 		}
 	}
@@ -138,7 +138,11 @@ func (s *Server) taskCreate(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if err := validateTask(&input); err != nil {
+	view, ok := s.snapshot(writer)
+	if !ok {
+		return
+	}
+	if err := validateTask(&input, view); err != nil {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
@@ -147,7 +151,7 @@ func (s *Server) taskCreate(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	view, _ := state.ProjectEvents(s.wire.Events(0))
+	view, _ = state.ProjectEvents(s.wire.Events(0))
 	task, _ := view.Task(event.ID)
 	writeJSON(writer, http.StatusCreated, task)
 }
@@ -164,7 +168,11 @@ func (s *Server) taskUpdate(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	input.ID = id
-	if err := validateTask(&input); err != nil {
+	view, ok := s.snapshot(writer)
+	if !ok {
+		return
+	}
+	if err := validateTask(&input, view); err != nil {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
@@ -172,7 +180,7 @@ func (s *Server) taskUpdate(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	view, _ := state.ProjectEvents(s.wire.Events(0))
+	view, _ = state.ProjectEvents(s.wire.Events(0))
 	task, found := view.Task(id)
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("task not found"))
@@ -185,7 +193,7 @@ func (s *Server) taskDelete(writer http.ResponseWriter, request *http.Request) {
 	s.delete(writer, request, "task", state.TaskDeleted)
 }
 
-func validateTask(input *state.TaskData) error {
+func validateTask(input *state.TaskData, view state.Snapshot) error {
 	input.Title = strings.TrimSpace(input.Title)
 	if input.Title == "" {
 		return errors.New("task title is required")
@@ -195,6 +203,13 @@ func validateTask(input *state.TaskData) error {
 	}
 	if !slices.Contains(state.TaskStatuses, input.Status) {
 		return errors.New("unknown task status")
+	}
+	if input.ProjectID < 1 {
+		return errors.New("task project is required")
+	}
+	project, found := view.Project(input.ProjectID)
+	if !found || project.DeletedAt != nil {
+		return errors.New("task project not found")
 	}
 	return nil
 }

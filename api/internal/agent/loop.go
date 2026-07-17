@@ -153,7 +153,13 @@ func (l *Loop) runTrigger(
 		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
 		return err
 	}
-	output, runErr := l.workflows.Run(ctx, selected.Name, map[string]any{
+	directory, directoryErr := taskDirectory(view, source)
+	if directoryErr != nil {
+		run.Error = directoryErr.Error()
+		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
+		return err
+	}
+	output, runErr := l.workflows.Run(ctx, directory, selected.Name, stringValue(selected.Path), map[string]any{
 		"event": source, "trigger": trigger,
 	})
 	if ctx.Err() != nil {
@@ -167,6 +173,35 @@ func (l *Loop) runTrigger(
 	}
 	_, err := l.wire.Publish(state.WorkflowRunCompleted, run)
 	return err
+}
+
+func taskDirectory(view state.Snapshot, event eventwire.Event) (string, error) {
+	var projectID int64
+	switch event.Type {
+	case state.TaskCreated, state.TaskUpdated:
+		var data state.TaskData
+		if json.Unmarshal(event.Data, &data) != nil {
+			return "", errors.New("decode task event")
+		}
+		projectID = data.ProjectID
+	case state.TaskDeleted:
+		var data state.IDData
+		if json.Unmarshal(event.Data, &data) != nil {
+			return "", errors.New("decode task event")
+		}
+		task, found := view.Task(data.ID)
+		if !found {
+			return "", errors.New("task project not found")
+		}
+		projectID = task.ProjectID
+	default:
+		return "", nil
+	}
+	project, found := view.Project(projectID)
+	if !found || project.Path == nil || strings.TrimSpace(*project.Path) == "" {
+		return "", errors.New("task project path is required")
+	}
+	return strings.TrimSpace(*project.Path), nil
 }
 
 func (l *Loop) syncWorkflows(ctx context.Context) error {

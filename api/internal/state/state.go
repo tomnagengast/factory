@@ -68,7 +68,7 @@ type Task struct {
 	Description  *string    `json:"description,omitempty"`
 	ParentTaskID *int64     `json:"parentTaskId,omitempty"`
 	Status       TaskStatus `json:"status"`
-	ProjectID    *int64     `json:"projectId,omitempty"`
+	ProjectID    int64      `json:"projectId"`
 }
 
 type Comment struct {
@@ -121,7 +121,7 @@ type TaskData struct {
 	Description  *string    `json:"description,omitempty"`
 	ParentTaskID *int64     `json:"parentTaskId,omitempty"`
 	Status       TaskStatus `json:"status"`
-	ProjectID    *int64     `json:"projectId,omitempty"`
+	ProjectID    int64      `json:"projectId"`
 }
 
 type CommentData struct {

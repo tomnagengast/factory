@@ -21,7 +21,7 @@ export type Task = Record & {
   description?: string;
   parentTaskId?: number;
   status: TaskStatus;
-  projectId?: number;
+  projectId: number;
 };
 
 export type Comment = Record & {

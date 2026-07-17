@@ -145,7 +145,7 @@ created afterward.
 Factory calls:
 
 ```text
-workflow --cwd <workflow-workspace> run <name> \
+workflow --cwd <event-working-directory> run <name> \
   --args <event-and-trigger-json> \
   --backend codex \
   --allow-mutating \
@@ -156,6 +156,27 @@ workflow --cwd <workflow-workspace> run <name> \
 The workflow receives `args.event` and `args.trigger`. Run progress is
 recorded as `workflow.run.started`, `workflow.run.completed`, or
 `workflow.run.failed`.
+
+### Task event triggers
+
+For `task.created`, `task.updated`, and `task.deleted`, the event working
+directory is the task project's configured local `path`. This also becomes
+the working directory of agents started by the workflow. Factory records a
+failed run when the project has no path. Factory temporarily links the
+selected untracked workflow into the project's workflow catalog for the run,
+then removes the link.
+
+A trigger matches the event type only. Put finer conditions in the workflow:
+
+```js
+if (args.event.type === 'task.updated' && args.event.data.status !== 'todo') {
+  return 'Ignored task outside todo.'
+}
+```
+
+Deleted tasks remain in the projection, so Factory can still resolve the
+project path for cleanup workflows triggered by `task.deleted`. Other event
+types run from the configured workflow workspace.
 
 ## Cron triggers
 

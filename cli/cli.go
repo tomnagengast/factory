@@ -207,7 +207,7 @@ Resources:
   workflow  list, get, create, update, delete, comment
 
 Examples:
-  factory task create '{"title":"Review the PR","status":"todo"}'
+  factory task create '{"title":"Review the PR","status":"todo","projectId":1}'
   factory task comment 12 '{"content":"The build passed."}'
   factory artifact get 18
   factory workflow create '{"message":"Build a review-panel workflow."}'

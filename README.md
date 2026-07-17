@@ -143,7 +143,7 @@ Examples:
 
 ```sh
 factory project list
-factory task create '{"title":"Review the PR","status":"todo"}'
+factory task create '{"title":"Review the PR","status":"todo","projectId":1}'
 factory task comment 12 '{"content":"The build passed."}'
 factory artifact get 18
 factory workflow create '{"message":"Build a review-panel workflow."}'
@@ -170,7 +170,7 @@ file, and Factory appends the agent reply. Trigger execution is also explicit
 Codex:
 
 ```text
-workflow --cwd <workspace> run <name> \
+workflow --cwd <task.project.path-or-workspace> run <name> \
   --backend codex \
   --allow-mutating \
   --no-validate \
@@ -180,6 +180,8 @@ workflow --cwd <workspace> run <name> \
 
 Event triggers match events received after the trigger's latest update. Cron
 triggers append a targeted `cron` event and follow the same execution path.
+Task events resolve their required project and run from its configured local
+path, so workflow agents operate in the task's repository.
 Workflow conversations and trigger runs share one sequential worker.
 
 ## Verify

@@ -140,10 +140,10 @@ The CLI performs the same operations:
 
 ```sh
 ./factory project create \
-  '{"name":"Factory demo","description":"First local project"}'
+  '{"name":"Factory demo","description":"First local project","path":"/path/to/project"}'
 
 ./factory task create \
-  '{"title":"Try the event wire","status":"todo"}'
+  '{"title":"Try the event wire","status":"todo","projectId":1}'
 
 ./factory event create \
   '{"type":"demo.started","data":{"source":"getting-started"}}'

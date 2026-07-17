@@ -72,8 +72,8 @@ events consume IDs too.
 
 ## Task intake
 
-A task is a domain record, not an agent job. It carries a title, optional
-description and project, optional parent task, and one of five statuses:
+A task is a domain record, not an agent job. It carries a title, required
+project, optional description and parent task, and one of five statuses:
 
 ```text
 backlog, todo, in progress, done, canceled
@@ -156,6 +156,12 @@ The run receives:
 
 Cron uses the same path. A due schedule appends a targeted `cron` event, and
 the normal event-trigger logic runs its workflow.
+
+For `task.created`, `task.updated`, and `task.deleted`, Factory resolves the
+task and its required project before running the workflow. The workflow CLI
+and every agent it starts use the project's configured local `path` as their
+working directory. A workflow can inspect `args.event.data`, such as a
+`task.updated` status, and return without acting when its condition is not met.
 
 ## Deliberate trust model
 

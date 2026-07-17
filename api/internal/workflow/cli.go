@@ -24,7 +24,7 @@ type Definition struct {
 
 type Runner interface {
 	List(context.Context) ([]Definition, error)
-	Run(context.Context, string, any) (string, error)
+	Run(context.Context, string, string, string, any) (string, error)
 	LocalPath(int64) string
 }
 
@@ -52,15 +52,33 @@ func (c CLI) List(ctx context.Context) ([]Definition, error) {
 	return definitions, nil
 }
 
-func (c CLI) Run(ctx context.Context, name string, args any) (string, error) {
+func (c CLI) Run(ctx context.Context, directory, name, source string, args any) (string, error) {
 	encoded, err := json.Marshal(args)
 	if err != nil {
 		return "", fmt.Errorf("encode workflow arguments: %w", err)
 	}
+	if directory == "" {
+		directory = c.Workspace
+	} else {
+		workflowDirectory := filepath.Join(directory, ".claude", "workflows")
+		if err := os.MkdirAll(workflowDirectory, 0o777); err != nil {
+			return "", fmt.Errorf("prepare project workflows: %w", err)
+		}
+		link, err := os.CreateTemp(workflowDirectory, "~factory-*.js")
+		if err != nil {
+			return "", fmt.Errorf("prepare project workflow: %w", err)
+		}
+		link.Close()
+		os.Remove(link.Name())
+		if err := os.Symlink(source, link.Name()); err != nil {
+			return "", fmt.Errorf("link project workflow: %w", err)
+		}
+		defer os.Remove(link.Name())
+	}
 	command := exec.CommandContext(
 		ctx,
 		c.Command,
-		"--cwd", c.Workspace,
+		"--cwd", directory,
 		"run", name,
 		"--args", string(encoded),
 		"--backend", "codex",
