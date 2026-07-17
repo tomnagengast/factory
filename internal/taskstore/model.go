@@ -141,15 +141,25 @@ type OperationOutcome struct {
 	Gate        *Gate    `json:"gate,omitempty"`
 }
 
+// LinearBinding is the one-to-one provider identity attached to a Linear
+// task. Bindings belong to the task artifact even when no retained native task
+// refers to them, so migration never has to reconstruct provider identity from
+// incomplete task history.
+type LinearBinding struct {
+	Identifier string `json:"identifier"`
+	UUID       string `json:"uuid"`
+}
+
 type Snapshot struct {
-	Schema       int                `json:"schema"`
-	NextSequence uint64             `json:"nextSequence"`
-	Tasks        []Task             `json:"tasks"`
-	Messages     []Message          `json:"messages"`
-	Links        []Link             `json:"links"`
-	Gates        []Gate             `json:"gates"`
-	Outcomes     []OperationOutcome `json:"outcomes"`
-	Operations   []TaskOperation    `json:"operations,omitempty"`
+	Schema         int                `json:"schema"`
+	NextSequence   uint64             `json:"nextSequence"`
+	Tasks          []Task             `json:"tasks"`
+	Messages       []Message          `json:"messages"`
+	Links          []Link             `json:"links"`
+	Gates          []Gate             `json:"gates"`
+	Outcomes       []OperationOutcome `json:"outcomes"`
+	Operations     []TaskOperation    `json:"operations,omitempty"`
+	LinearBindings []LinearBinding    `json:"linearBindings,omitempty"`
 }
 
 type TaskPage struct {
@@ -348,6 +358,7 @@ func (s Snapshot) Clone() Snapshot {
 	for i := range s.Operations {
 		clone.Operations[i] = s.Operations[i].Clone()
 	}
+	clone.LinearBindings = slices.Clone(s.LinearBindings)
 	return clone
 }
 

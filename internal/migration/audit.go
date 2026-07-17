@@ -312,7 +312,7 @@ func auditSources(state sourceState, canonical canonicalEvidence) (Audit, map[st
 		AgentEventCursors:             uint64(len(state.agentCursors.Offsets)),
 		CompiledRepositoryInputDigest: canonical.CompiledRepositoryInputDigest,
 		CanonicalPolicy:               canonical.Policy, CanonicalRepositories: canonical.Repositories,
-		CanonicalRuns: canonical.Runs,
+		CanonicalRuns: canonical.Runs, CanonicalTasks: canonical.Tasks, CanonicalEvents: canonical.Events,
 		TargetSchemas: canonical.TargetSchemas,
 	}
 	totals := map[string]uint64{

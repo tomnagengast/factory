@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	manifestSchema      = 3
+	manifestSchema      = 4
 	backupReceiptSchema = 1
-	dryRunReportSchema  = 3
+	dryRunReportSchema  = 4
 )
 
 // SourceHash is immutable evidence for one source artifact observed by a dry run.
@@ -58,6 +58,8 @@ type TargetSchemas struct {
 	Policy       int `json:"policy"`
 	Repositories int `json:"repositories"`
 	Runs         int `json:"runs"`
+	Tasks        int `json:"tasks"`
+	Events       int `json:"events"`
 }
 
 type CanonicalPolicyAudit struct {
@@ -83,6 +85,23 @@ type CanonicalRepositoryAudit struct {
 	Admitted   uint64 `json:"admitted"`
 	Awaiting   uint64 `json:"awaiting"`
 	Routable   uint64 `json:"routable"`
+}
+
+type CanonicalTaskAudit struct {
+	Schema         int    `json:"schema"`
+	Digest         string `json:"digest"`
+	Tasks          uint64 `json:"tasks"`
+	Outcomes       uint64 `json:"outcomes"`
+	Operations     uint64 `json:"operations"`
+	LinearBindings uint64 `json:"linearBindings"`
+}
+
+type CanonicalEventAudit struct {
+	Schema           int    `json:"schema"`
+	Digest           string `json:"digest"`
+	ActivityLifetime uint64 `json:"activityLifetime"`
+	ActivityRetained uint64 `json:"activityRetained"`
+	PrivatePayloads  uint64 `json:"privatePayloads"`
 }
 
 // CanonicalRunsAudit is body-free evidence for the complete legacy-to-Runs
@@ -166,6 +185,8 @@ type Audit struct {
 	CanonicalPolicy               CanonicalPolicyAudit     `json:"canonicalPolicy"`
 	CanonicalRepositories         CanonicalRepositoryAudit `json:"canonicalRepositories"`
 	CanonicalRuns                 CanonicalRunsAudit       `json:"canonicalRuns"`
+	CanonicalTasks                CanonicalTaskAudit       `json:"canonicalTasks"`
+	CanonicalEvents               CanonicalEventAudit      `json:"canonicalEvents"`
 	TargetSchemas                 TargetSchemas            `json:"targetSchemas"`
 }
 
@@ -193,7 +214,7 @@ func (m MigrationManifest) validate() error {
 	if err := validateHashes(m.Sources); err != nil {
 		return err
 	}
-	if m.TargetSchemas.Policy <= 0 || m.TargetSchemas.Repositories <= 0 || m.TargetSchemas.Runs <= 0 {
+	if m.TargetSchemas.Policy <= 0 || m.TargetSchemas.Repositories <= 0 || m.TargetSchemas.Runs <= 0 || m.TargetSchemas.Tasks <= 0 || m.TargetSchemas.Events <= 0 {
 		return errors.New("migration: target schemas are required")
 	}
 	return validateDirectories(m.Directories)
@@ -229,19 +250,24 @@ func (r DryRunReport) validate() error {
 }
 
 func (a Audit) validate() error {
-	if len(a.CompiledRepositoryInputDigest) != 64 || len(a.CanonicalPolicy.Digest) != 64 || len(a.CanonicalRepositories.Digest) != 64 ||
+	if len(a.CompiledRepositoryInputDigest) != 64 || len(a.CanonicalPolicy.Digest) != 64 || len(a.CanonicalRepositories.Digest) != 64 || len(a.CanonicalTasks.Digest) != 64 || len(a.CanonicalEvents.Digest) != 64 ||
 		len(a.CanonicalRuns.Digest) != 64 || len(a.CanonicalRuns.MigrationOperationID) != 64 {
 		return errors.New("migration: canonical audit digests are invalid")
 	}
-	if a.TargetSchemas.Policy <= 0 || a.TargetSchemas.Repositories <= 0 || a.TargetSchemas.Runs <= 0 ||
+	if a.TargetSchemas.Policy <= 0 || a.TargetSchemas.Repositories <= 0 || a.TargetSchemas.Runs <= 0 || a.TargetSchemas.Tasks <= 0 || a.TargetSchemas.Events <= 0 ||
 		a.CanonicalPolicy.Schema != a.TargetSchemas.Policy ||
 		a.CanonicalRepositories.Schema != a.TargetSchemas.Repositories ||
-		a.CanonicalRuns.Schema != a.TargetSchemas.Runs {
+		a.CanonicalRuns.Schema != a.TargetSchemas.Runs ||
+		a.CanonicalTasks.Schema != a.TargetSchemas.Tasks ||
+		a.CanonicalEvents.Schema != a.TargetSchemas.Events {
 		return errors.New("migration: canonical audit schemas disagree")
 	}
 	if a.CanonicalPolicy.Generation == 0 || a.CanonicalRepositories.Generation == 0 ||
 		!a.CanonicalPolicy.CompatibilityValidated || a.CanonicalPolicy.Workflows == 0 ||
-		a.CanonicalRepositories.Compiled == 0 {
+		a.CanonicalRepositories.Compiled == 0 || a.CanonicalTasks.LinearBindings != a.LinearBindings ||
+		a.CanonicalTasks.Tasks != a.NativeTasks || a.CanonicalTasks.Outcomes != a.NativeOutcomes ||
+		a.CanonicalEvents.ActivityLifetime != a.ActivityLifetime || a.CanonicalEvents.ActivityRetained != a.ActivityRetained ||
+		a.CanonicalEvents.PrivatePayloads != a.PrivatePayloads {
 		return errors.New("migration: canonical audit evidence is incomplete")
 	}
 	for _, digest := range []string{

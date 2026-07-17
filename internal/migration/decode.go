@@ -130,8 +130,16 @@ type sourceState struct {
 	linearComments       linearState
 	taskBoundary         taskcompat.Marker
 	payloadHashes        map[string]string
+	payloadBodies        map[string][]byte
+	pendingTask          *pendingTaskStage
 	hashes               []SourceHash
 	directories          []SourceDirectory
+}
+
+type pendingTaskStage struct {
+	OperationID string
+	Command     taskstore.CommandEnvelope
+	RecordIndex int
 }
 
 func readSources(root string, options Options) (sourceState, error) {
@@ -158,7 +166,7 @@ func readSources(root string, options Options) (sourceState, error) {
 	}
 
 	state := sourceState{
-		hashes: hashes, directories: directories, payloadHashes: make(map[string]string),
+		hashes: hashes, directories: directories, payloadHashes: make(map[string]string), payloadBodies: make(map[string][]byte),
 		compiledRepositories: slices.Clone(options.CompiledRepositories),
 	}
 	if err := inject(options, "before-decode"); err != nil {
@@ -263,9 +271,6 @@ func readSources(root string, options Options) (sourceState, error) {
 	}); err != nil {
 		return sourceState{}, err
 	}
-	if state.wireTotal != state.wireDispatched {
-		return sourceState{}, fmt.Errorf("migration: pending wire records: total=%d dispatched=%d", state.wireTotal, state.wireDispatched)
-	}
 	cursorPath := filepath.Join(root, "trigger-cursors.json")
 	if _, err := os.Lstat(cursorPath); errors.Is(err, os.ErrNotExist) {
 		state.cursors = cursorState{Schema: 1, Cursors: []triggerscheduler.Cursor{}}
@@ -301,7 +306,8 @@ func readSources(root string, options Options) (sourceState, error) {
 	if state.taskBoundary.Version != 1 || state.taskBoundary.Boundary != "source-neutral-task-v1" || state.taskBoundary.CrossedAt.IsZero() {
 		return sourceState{}, errors.New("migration: invalid task compatibility boundary")
 	}
-	if err := ensureEmptyStages(root); err != nil {
+	state.pendingTask, err = readPendingTaskStage(root, state.tasks, state.wireDispatched, state.wireRecords)
+	if err != nil {
 		return sourceState{}, err
 	}
 	if err := inject(options, "after-decode"); err != nil {
@@ -484,6 +490,7 @@ func readPayloads(root string, state *sourceState) error {
 		}
 		hash := sha256.Sum256(data)
 		state.payloadHashes[record.DeliveryID] = hex.EncodeToString(hash[:])
+		state.payloadBodies[record.DeliveryID] = slices.Clone(data)
 	}
 	entries, err := os.ReadDir(payloadRoot)
 	if err != nil {
@@ -512,23 +519,51 @@ func readPayload(root, name string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-func ensureEmptyStages(root string) error {
+func readPendingTaskStage(root string, snapshot taskstore.Snapshot, dispatched uint64, records []eventwire.Record) (*pendingTaskStage, error) {
 	path := filepath.Join(root, "task-operations")
 	info, err := os.Lstat(path)
 	if err != nil {
-		return fmt.Errorf("migration: inspect task stages: %w", err)
+		return nil, fmt.Errorf("migration: inspect task stages: %w", err)
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
-		return errors.New("migration: task stage directory must be private and nonsymlinked")
+		return nil, errors.New("migration: task stage directory must be private and nonsymlinked")
 	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if len(entries) != 0 {
-		return errors.New("migration: incomplete native task stage")
+	var pending []int
+	for index, record := range records {
+		if record.Sequence > dispatched {
+			pending = append(pending, index)
+		}
 	}
-	return nil
+	if len(entries) == 0 && len(pending) == 0 {
+		return nil, nil
+	}
+	if len(entries) == 0 || len(pending) != 1 {
+		if len(entries) != 0 && len(pending) == 0 {
+			return nil, errors.New("migration: incomplete native task stage")
+		}
+		return nil, fmt.Errorf("migration: pending wire records are not exactly one staged task mutation: pending=%d stages=%d", len(pending), len(entries))
+	}
+	if len(entries) != 1 {
+		return nil, errors.New("migration: incomplete native task stage")
+	}
+	entry := entries[0]
+	if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || filepath.Ext(entry.Name()) != ".json" {
+		return nil, errors.New("migration: incomplete native task stage")
+	}
+	operationID := strings.TrimSuffix(entry.Name(), ".json")
+	command, err := taskstore.ReadLegacyStagedCommand(path, operationID)
+	if err != nil {
+		return nil, fmt.Errorf("migration: invalid pending native task stage: %w", err)
+	}
+	recordIndex := pending[0]
+	if _, _, err := taskstore.ConvertLegacyPendingOperation(snapshot, operationID, command, records[recordIndex]); err != nil {
+		return nil, fmt.Errorf("migration: pending wire record conflicts with native task stage: %w", err)
+	}
+	return &pendingTaskStage{OperationID: operationID, Command: command, RecordIndex: recordIndex}, nil
 }
 
 func hashTree(root string) ([]SourceHash, error) {

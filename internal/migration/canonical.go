@@ -3,13 +3,18 @@ package migration
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"slices"
 	"time"
 
+	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/policy"
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/repositories"
 	"github.com/tomnagengast/factory/internal/runs"
+	"github.com/tomnagengast/factory/internal/taskstore"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 )
 
@@ -18,9 +23,17 @@ type canonicalEvidence struct {
 	Policy                        CanonicalPolicyAudit
 	Repositories                  CanonicalRepositoryAudit
 	Runs                          CanonicalRunsAudit
+	Tasks                         CanonicalTaskAudit
+	Events                        CanonicalEventAudit
 	TargetSchemas                 TargetSchemas
 	policySnapshot                policy.Snapshot
 	repositoryState               repositories.SourceState
+	taskSnapshot                  taskstore.Snapshot
+	activityProjection            eventwire.ActivityProjection
+	activityCorpus                map[string][]byte
+	wireRecords                   []eventwire.Record
+	wireTotal                     uint64
+	wireDispatched                uint64
 }
 
 func convertCanonicalSources(state sourceState, options Options) (canonicalEvidence, error) {
@@ -80,6 +93,68 @@ func convertCanonicalSources(state sourceState, options Options) (canonicalEvide
 		return canonicalEvidence{}, err
 	}
 
+	if err := inject(options, "before-task-conversion"); err != nil {
+		return canonicalEvidence{}, err
+	}
+	bindings := make([]taskstore.LinearBinding, len(state.identities.Bindings))
+	for index, binding := range state.identities.Bindings {
+		bindings[index] = taskstore.LinearBinding{Identifier: binding.Identifier, UUID: binding.UUID}
+	}
+	taskSnapshot, err := taskstore.ConvertLinearBindings(state.tasks, bindings)
+	if err != nil {
+		return canonicalEvidence{}, fmt.Errorf("migration: convert canonical task identities: %w", err)
+	}
+	canonicalWireRecords := slices.Clone(state.wireRecords)
+	if state.pendingTask != nil {
+		var canonicalRecord eventwire.Record
+		taskSnapshot, canonicalRecord, err = taskstore.ConvertLegacyPendingOperation(
+			taskSnapshot, state.pendingTask.OperationID, state.pendingTask.Command, state.wireRecords[state.pendingTask.RecordIndex],
+		)
+		if err != nil {
+			return canonicalEvidence{}, fmt.Errorf("migration: convert pending canonical task operation: %w", err)
+		}
+		canonicalWireRecords[state.pendingTask.RecordIndex] = canonicalRecord
+	}
+	if err := taskstore.ValidateSnapshot(taskSnapshot); err != nil {
+		return canonicalEvidence{}, fmt.Errorf("migration: validate canonical task artifact: %w", err)
+	}
+	if err := inject(options, "after-task-conversion"); err != nil {
+		return canonicalEvidence{}, err
+	}
+	if err := inject(options, "before-event-conversion"); err != nil {
+		return canonicalEvidence{}, err
+	}
+	activityRecords := make([]eventwire.ActivitySourceRecord, len(state.activity.Events))
+	for index, record := range state.activity.Events {
+		activityRecords[index] = eventwire.ActivitySourceRecord{
+			DeliveryID: record.DeliveryID, PayloadAvailable: record.PayloadAvailable,
+			Event: eventwire.ActivityEvent{Type: record.Type, Action: record.Action, ReceivedAt: record.ReceivedAt},
+		}
+	}
+	activityProjection, activityCorpus, err := eventwire.ConvertActivity(state.activity.Total, activityRecords, state.payloadBodies)
+	if err != nil {
+		return canonicalEvidence{}, fmt.Errorf("migration: convert canonical event activity: %w", err)
+	}
+	validationRoot, err := os.MkdirTemp("", "factory-event-conversion-*")
+	if err != nil {
+		return canonicalEvidence{}, fmt.Errorf("migration: create event conversion fixture: %w", err)
+	}
+	defer os.RemoveAll(validationRoot)
+	activityRoot := filepath.Join(validationRoot, "events")
+	if err := eventwire.MaterializeActivity(activityRoot, activityProjection, activityCorpus); err != nil {
+		return canonicalEvidence{}, fmt.Errorf("migration: materialize canonical event activity: %w", err)
+	}
+	reopenedActivity, reopenedCorpus, err := eventwire.ReadActivity(activityRoot)
+	if err != nil {
+		return canonicalEvidence{}, fmt.Errorf("migration: reopen canonical event activity: %w", err)
+	}
+	if !reflect.DeepEqual(reopenedActivity, activityProjection) || !reflect.DeepEqual(reopenedCorpus, activityCorpus) {
+		return canonicalEvidence{}, errors.New("migration: canonical event activity changed during disposable materialization")
+	}
+	if err := inject(options, "after-event-conversion"); err != nil {
+		return canonicalEvidence{}, err
+	}
+
 	if err := inject(options, "before-canonical-evidence"); err != nil {
 		return canonicalEvidence{}, err
 	}
@@ -95,6 +170,14 @@ func convertCanonicalSources(state sourceState, options Options) (canonicalEvide
 	if err != nil {
 		return canonicalEvidence{}, fmt.Errorf("migration: digest canonical repositories: %w", err)
 	}
+	taskDigest, err := digestJSON(taskSnapshot)
+	if err != nil {
+		return canonicalEvidence{}, fmt.Errorf("migration: digest canonical tasks: %w", err)
+	}
+	activityDigest, err := digestJSON(activityProjection)
+	if err != nil {
+		return canonicalEvidence{}, fmt.Errorf("migration: digest canonical event activity: %w", err)
+	}
 	policyRegistry := policySnapshot.Registry()
 	policyControl := policySnapshot.TaskControl()
 	evidence := canonicalEvidence{
@@ -107,10 +190,25 @@ func convertCanonicalSources(state sourceState, options Options) (canonicalEvide
 			Rules: uint64(len(policyRegistry.Rules)), Schedules: uint64(len(policyRegistry.Schedules)),
 			EnabledProjects: uint64(len(policyControl.EnabledProjectIDs)),
 		},
-		Repositories:    repositoryAudit(repositorySnapshot, repositoryDigest),
-		TargetSchemas:   TargetSchemas{Policy: policy.SchemaVersion, Repositories: repositories.SchemaVersion, Runs: runs.SchemaVersion},
-		policySnapshot:  policySnapshot,
-		repositoryState: repositorySnapshot,
+		Repositories: repositoryAudit(repositorySnapshot, repositoryDigest),
+		Tasks: CanonicalTaskAudit{
+			Schema: taskSnapshot.Schema, Digest: taskDigest, Tasks: uint64(len(taskSnapshot.Tasks)),
+			Outcomes: uint64(len(taskSnapshot.Outcomes)), Operations: uint64(len(taskSnapshot.Operations)),
+			LinearBindings: uint64(len(taskSnapshot.LinearBindings)),
+		},
+		Events: CanonicalEventAudit{
+			Schema: activityProjection.Schema, Digest: activityDigest, ActivityLifetime: activityProjection.Total,
+			ActivityRetained: uint64(len(activityProjection.Events)), PrivatePayloads: uint64(len(activityCorpus)),
+		},
+		TargetSchemas:      TargetSchemas{Policy: policy.SchemaVersion, Repositories: repositories.SchemaVersion, Runs: runs.SchemaVersion, Tasks: taskstore.SchemaVersion, Events: eventwire.ActivitySchemaVersion},
+		policySnapshot:     policySnapshot,
+		repositoryState:    repositorySnapshot,
+		taskSnapshot:       taskSnapshot,
+		activityProjection: activityProjection,
+		activityCorpus:     activityCorpus,
+		wireRecords:        canonicalWireRecords,
+		wireTotal:          state.wireTotal,
+		wireDispatched:     state.wireDispatched,
 	}
 	if err := inject(options, "after-canonical-evidence"); err != nil {
 		return canonicalEvidence{}, err

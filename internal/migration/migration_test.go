@@ -74,13 +74,13 @@ func TestDryRunCharacterizesCurrentShapeWithoutActivation(t *testing.T) {
 	if !slices.Equal(beforeDirectories, afterDirectories) {
 		t.Fatal("dry run changed source directories")
 	}
-	if report.Schema != 3 || report.Activates || report.Manifest.Schema != 3 || report.Backup.Schema != 1 {
+	if report.Schema != 4 || report.Activates || report.Manifest.Schema != 4 || report.Backup.Schema != 1 {
 		t.Fatalf("activating or invalid report: %#v", report)
 	}
 	if report.Manifest.MigrationID != "migration-739285404f873b4621049f0e909b0432" {
 		t.Fatalf("pre-audit migration ID = %s", report.Manifest.MigrationID)
 	}
-	if report.Manifest.TargetSchemas != (TargetSchemas{Policy: 1, Repositories: 1, Runs: 5}) || report.Audit.TargetSchemas != report.Manifest.TargetSchemas {
+	if report.Manifest.TargetSchemas != (TargetSchemas{Policy: 1, Repositories: 1, Runs: 5, Tasks: 1, Events: 1}) || report.Audit.TargetSchemas != report.Manifest.TargetSchemas {
 		t.Fatalf("target schemas = manifest %#v audit %#v", report.Manifest.TargetSchemas, report.Audit.TargetSchemas)
 	}
 	if report.Audit.Decisions != 1 || report.Audit.Invocations != 1 || report.Audit.Runs != 1 || report.Audit.ActiveRuns != 1 || report.Audit.WorkflowPins != 1 {
@@ -110,12 +110,22 @@ func TestDryRunCharacterizesCurrentShapeWithoutActivation(t *testing.T) {
 		runsAudit.CanonicalRunsRetained != 1 || runsAudit.CanonicalRunsLifetime != 1 || runsAudit.CanonicalRateBuckets != 1 {
 		t.Fatalf("canonical Runs audit = %#v", runsAudit)
 	}
+	taskAudit := report.Audit.CanonicalTasks
+	if taskAudit.Schema != 1 || taskAudit.Tasks != 1 || taskAudit.Outcomes != 2 || taskAudit.Operations != 0 || taskAudit.LinearBindings != 1 {
+		t.Fatalf("canonical task audit = %#v", taskAudit)
+	}
+	eventAudit := report.Audit.CanonicalEvents
+	if eventAudit.Schema != 1 || eventAudit.ActivityLifetime != 2 || eventAudit.ActivityRetained != 2 || eventAudit.PrivatePayloads != 1 {
+		t.Fatalf("canonical event audit = %#v", eventAudit)
+	}
 	if report.Audit.CompiledRepositoryInputDigest != "520744fb78f49dc36b45cf4b8d38efeeb72049a7f775ab9e04177b29981ff8cf" ||
 		policyAudit.Digest != "e3132827aa4041394ba294fd59d521263313f9e60120de968083dbdf86f97e20" ||
 		repositoryAudit.Digest != "cf98d2b7b573d66a1b051dc9e81fc587262c7a10bd77abfdda648adf9b6c16eb" ||
 		runsAudit.Digest != "a18ea602a4c712a837660626c77ea1d87006f4694f7f5e128de1a7c0beb44640" ||
-		report.AuditDigest != "59faea7372ec4bd47c14a2f14eb6c598c75cdb875919f8db81652b0427634cf7" {
-		t.Fatalf("canonical digests = compiled %s policy %s repositories %s Runs %s audit %s", report.Audit.CompiledRepositoryInputDigest, policyAudit.Digest, repositoryAudit.Digest, runsAudit.Digest, report.AuditDigest)
+		taskAudit.Digest != "bf8fbe00985e95f2f53f90bf5d9bda57a630df2df445358d9385915345ce4e09" ||
+		eventAudit.Digest != "9e1d50a19e01473247d345daeb1f4edaa628e936ca7a73e7727c02d586b875c6" ||
+		report.AuditDigest != "590f5fbb5730588b3526997c9b61d830a4fbd0a33023ed79aa122ac0801e27e2" {
+		t.Fatalf("canonical digests = compiled %s policy %s repositories %s Runs %s tasks %s events %s audit %s", report.Audit.CompiledRepositoryInputDigest, policyAudit.Digest, repositoryAudit.Digest, runsAudit.Digest, taskAudit.Digest, eventAudit.Digest, report.AuditDigest)
 	}
 	auditJSON, err := json.Marshal(report.Audit)
 	if err != nil {
@@ -130,6 +140,52 @@ func TestDryRunCharacterizesCurrentShapeWithoutActivation(t *testing.T) {
 		t.Fatalf("verify report: %v", err)
 	}
 	assertNoCanonicalState(t, root)
+}
+
+func TestDryRunConvertsExactlyMatchedPendingTaskStage(t *testing.T) {
+	root := copyGolden(t)
+	command := taskstore.CreateEnvelope(taskstore.CreateCommand{
+		Actor: taskstore.Actor{ID: "human-sanitized", Kind: taskstore.AuthorHuman}, Title: "Pending conversion",
+		ProjectID: "project-sanitized", ApprovalMode: taskstore.ApprovalGated, IdempotencyKey: "pending-conversion",
+	})
+	stager, err := taskstore.NewStager(filepath.Join(root, "task-operations"), filepath.Join(root, "native-tasks.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := stager.Stage(command, fixtureNow.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := eventwire.Open(filepath.Join(root, "system-events.jsonl"), validationLimit, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, added, err := journal.Add(staged.Event)
+	if err != nil || !added {
+		t.Fatalf("add pending event = %#v, %t, %v", record, added, err)
+	}
+
+	report, err := DryRun(root, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Audit.WireTotal != 6 || report.Audit.WireDispatched != 5 || report.Audit.CanonicalTasks.Operations != 1 {
+		t.Fatalf("pending conversion audit = %#v", report.Audit)
+	}
+	state, err := readSources(root, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := convertCanonicalSources(state, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := canonical.taskSnapshot.Operations[0]
+	convertedRecord := canonical.wireRecords[state.pendingTask.RecordIndex]
+	if operation.State != taskstore.TaskOperationPublished || operation.EventSequence != record.Sequence || convertedRecord.Event.ID != operation.EventID ||
+		convertedRecord.Event.ID == "factory:task:"+staged.OperationID || canonical.wireTotal != 6 || canonical.wireDispatched != 5 {
+		t.Fatalf("canonical pending operation = %#v record=%#v total=%d dispatched=%d", operation, convertedRecord, canonical.wireTotal, canonical.wireDispatched)
+	}
 }
 
 func TestDryRunAcceptsImplicitRegistryAndAbsentScheduleCursors(t *testing.T) {
@@ -275,6 +331,7 @@ func TestDryRunFailureInjection(t *testing.T) {
 	for _, point := range []string{
 		"before-hash", "hash:settings.json", "after-hash", "before-decode", "read:settings.json", "after-decode",
 		"before-policy-conversion", "after-policy-conversion", "before-repository-conversion", "after-repository-conversion",
+		"before-task-conversion", "after-task-conversion", "before-event-conversion", "after-event-conversion",
 		"before-canonical-evidence", "after-canonical-evidence", "before-runs-conversion", "after-runs-conversion",
 		"before-runs-evidence", "after-runs-evidence", "before-audit", "after-audit", "report", "after-report",
 	} {

@@ -36,6 +36,7 @@ const (
 	operationCompletion = "completion"
 	operationTaskSubmit = "task-operation-submit"
 	operationTaskUpdate = "task-operation-transition"
+	operationLinearBind = "linear-identity-bind"
 )
 
 var (
@@ -157,6 +158,7 @@ type diskOperation struct {
 	Link          *Link             `json:"link,omitempty"`
 	Gate          *Gate             `json:"gate,omitempty"`
 	TaskOperation *TaskOperation    `json:"taskOperation,omitempty"`
+	LinearBinding *LinearBinding    `json:"linearBinding,omitempty"`
 }
 
 type Store struct {
@@ -169,6 +171,8 @@ type Store struct {
 	outcomes     map[string]OperationOutcome
 	operations   map[string]TaskOperation
 	operationIDs map[string]string
+	linearByID   map[string]string
+	linearByUUID map[string]string
 	nextSequence uint64
 	poisoned     error
 	random       io.Reader
@@ -233,6 +237,8 @@ func (s *Store) reset() {
 	s.outcomes = make(map[string]OperationOutcome)
 	s.operations = make(map[string]TaskOperation)
 	s.operationIDs = make(map[string]string)
+	s.linearByID = make(map[string]string)
+	s.linearByUUID = make(map[string]string)
 	s.nextSequence = 1
 }
 
@@ -665,8 +671,14 @@ func (s *Store) applyLocked(operation diskOperation) error {
 	if operation.Kind == operationTaskSubmit || operation.Kind == operationTaskUpdate {
 		return s.applyTaskOperationLocked(operation)
 	}
+	if operation.Kind == operationLinearBind {
+		return s.applyLinearBindingLocked(operation)
+	}
 	if operation.TaskOperation != nil {
 		return errors.New("task store: task operation evidence belongs only to its journal operation")
+	}
+	if operation.LinearBinding != nil {
+		return errors.New("task store: Linear binding belongs only to its journal operation")
 	}
 	if operation.Task == nil || operation.Outcome == nil || operation.Outcome.Task == nil || operation.Outcome.Kind != operation.Kind || operation.Outcome.Scope == "" || operation.Outcome.CommandHash == "" || !reflect.DeepEqual(*operation.Task, *operation.Outcome.Task) {
 		return errors.New("task store: invalid operation envelope")
@@ -741,7 +753,7 @@ func (s *Store) applyLocked(operation diskOperation) error {
 
 func (s *Store) applyCheckpointLocked(operation diskOperation) error {
 	if operation.Checkpoint == nil || operation.Checkpoint.Schema != SchemaVersion || operation.Checkpoint.NextSequence == 0 ||
-		operation.Outcome != nil || operation.Task != nil || operation.Message != nil || operation.Link != nil || operation.Gate != nil || operation.TaskOperation != nil {
+		operation.Outcome != nil || operation.Task != nil || operation.Message != nil || operation.Link != nil || operation.Gate != nil || operation.TaskOperation != nil || operation.LinearBinding != nil {
 		return errors.New("task store: invalid checkpoint projection")
 	}
 	s.reset()
@@ -790,6 +802,11 @@ func (s *Store) applyCheckpointLocked(operation diskOperation) error {
 	}
 	for _, taskOperation := range operation.Checkpoint.Operations {
 		if err := s.installCheckpointTaskOperation(taskOperation); err != nil {
+			return err
+		}
+	}
+	for _, binding := range operation.Checkpoint.LinearBindings {
+		if err := s.installCheckpointLinearBinding(binding); err != nil {
 			return err
 		}
 	}
@@ -1031,6 +1048,12 @@ func (s *Store) snapshotLocked() Snapshot {
 		snapshot.Operations = append(snapshot.Operations, operation.Clone())
 	}
 	sort.Slice(snapshot.Operations, func(i, j int) bool { return snapshot.Operations[i].ID < snapshot.Operations[j].ID })
+	for identifier, uuid := range s.linearByID {
+		snapshot.LinearBindings = append(snapshot.LinearBindings, LinearBinding{Identifier: identifier, UUID: uuid})
+	}
+	sort.Slice(snapshot.LinearBindings, func(i, j int) bool {
+		return snapshot.LinearBindings[i].Identifier < snapshot.LinearBindings[j].Identifier
+	})
 	return snapshot
 }
 

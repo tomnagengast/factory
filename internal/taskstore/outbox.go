@@ -464,7 +464,7 @@ func (f TaskOperationFailure) Error() error {
 
 func (s *Store) applyTaskOperationLocked(operation diskOperation) error {
 	if operation.Schema != 0 || operation.Checkpoint != nil || operation.Outcome != nil || operation.Task != nil || operation.Message != nil ||
-		operation.Link != nil || operation.Gate != nil || operation.TaskOperation == nil {
+		operation.Link != nil || operation.Gate != nil || operation.TaskOperation == nil || operation.LinearBinding != nil {
 		return errors.New("task store: invalid task operation envelope")
 	}
 	next := operation.TaskOperation.Clone()
