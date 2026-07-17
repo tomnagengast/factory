@@ -592,7 +592,14 @@ func compactWorkflow(pin workflow.Pinned) bool {
 func validateTransitions(run Run) error {
 	baseline := run.MigratedBaseline
 	if len(run.Transitions) == 0 {
-		if baseline == nil || baseline.State != run.State || baseline.ObservedAt != run.UpdatedAt {
+		// A migrated baseline anchors an empty canonical history: State must still
+		// equal the baseline state (no lifecycle change can occur without an
+		// appended transition), but a same-state ScheduleReconcile advances
+		// UpdatedAt without minting a transition or an outbox delivery. Requiring
+		// only ObservedAt <= UpdatedAt (already guaranteed by
+		// validateMigratedBaseline) lets a migrated Running/awaiting Run take its
+		// first same-state wake while keeping ObservedAt immutable.
+		if baseline == nil || baseline.State != run.State || baseline.ObservedAt.After(run.UpdatedAt) {
 			return errors.New("Run transition history is incomplete")
 		}
 		return nil
@@ -736,9 +743,10 @@ func validateReady(ready ReadyCheckpoint, run Run, migrationBacked bool) error {
 	if !repositoryMatches {
 		return errors.New("Run ready checkpoint conflicts with its repository route")
 	}
-	if run.State == StateAwaitingHumanMerge && run.SegmentStartedAt != nil && ready.CreatedAt.Before(*run.SegmentStartedAt) {
-		return errors.New("Run ready checkpoint predates its lifecycle segment")
-	}
+	// Ready can predate SegmentStartedAt after a post-merge worker is resumed and
+	// then re-parked. Store transition-delta validation proves freshness whenever
+	// a checkpoint is first introduced or replaced; an unchanged Ready remains
+	// durable evidence across later segments.
 	if ready.CreatedAt.Before(run.CreatedAt) || !ready.ValidatedAt.IsZero() && ready.ValidatedAt.Before(ready.CreatedAt) {
 		return errors.New("Run ready checkpoint timestamps conflict")
 	}

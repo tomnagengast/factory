@@ -23,19 +23,24 @@ import (
 // concurrent writer that already advanced a Run fails this manager's transition
 // closed rather than clobbering durable state.
 //
-// This slice deliberately excludes merge parking, awaiting-merge/GitHub
-// reconciliation, post-merge resume durable backoff, feedback coalescing, and
-// the native/continuation admission paths. Those require either a later
-// same-state store operation or the deferred runs.Continue owner.
+// This slice owns the admission→execution→direct-terminal spine plus the merge
+// lifecycle: ready-checkpoint parking, awaiting-merge/GitHub reconciliation,
+// merged/closed resume, post-merge start-retry backoff, and rejected-terminal
+// re-park. It deliberately excludes feedback coalescing, the
+// native/continuation admission paths, and the external match-by-repository
+// GitHub remediation wake, which needs its own store operation.
 type Manager struct {
 	store         *Store
 	dispatch      EventDispatchGate
 	resolver      RepositoryResolver
 	launcher      Launcher
+	pullRequests  PullRequestReader
 	terminal      TerminalValidator
 	collector     RunCollector
 	stateRoot     string
 	maxConcurrent func() int
+	pollInterval  time.Duration
+	mergeInterval time.Duration
 	now           func() time.Time
 	logger        *slog.Logger
 }
@@ -60,14 +65,38 @@ type RepositoryResolver interface {
 // Launcher owns the worker session lifecycle. The dormant manager depends only
 // on this narrow interface; the production tmux launcher (environment
 // allowlist, task-capability token, LINEAR_API_KEY withholding, lifecycle
-// artifact cleanup) is wired in Phase 4. ReadReadyCheckpoint is intentionally
-// absent: ready-checkpoint parking belongs to a later slice.
+// artifact cleanup) is wired in Phase 4. ReadReadyCheckpoint reads the
+// body-free ready-for-merge checkpoint a worker leaves in its run directory.
 type Launcher interface {
 	Prepare(ctx context.Context) error
 	CleanupWorktrees(ctx context.Context) error
 	Start(ctx context.Context, run Run, sessionName, runDirectory string) error
 	SessionExists(ctx context.Context, sessionName string) (bool, error)
 	ReadResult(runDirectory string) (ProcessResult, error)
+	ReadReadyCheckpoint(runDirectory string) (ReadyCheckpoint, error)
+}
+
+// PullRequestReader is the read-only authority over a parked pull request's live
+// state. The dormant manager depends only on this narrow interface; the concrete
+// GitHub CLI port is wired in a later slice. It mirrors the legacy
+// agentrun.PullRequestReader contract so a faithful port classifies snapshots
+// identically.
+type PullRequestReader interface {
+	Snapshot(ctx context.Context, checkpoint ReadyCheckpoint) (PullRequestSnapshot, error)
+}
+
+// PullRequestSnapshot is the body-free live view of a parked pull request. It
+// mirrors the legacy agentrun.PullRequestSnapshot shape.
+type PullRequestSnapshot struct {
+	Number              int
+	State               string
+	IsDraft             bool
+	BaseBranch          string
+	HeadBranch          string
+	HeadOID             string
+	MergeCommitOID      string
+	SafeguardRegression bool
+	UpdatedAt           time.Time
 }
 
 // RunCollector observes the current Run set at the start and end of each
@@ -89,8 +118,7 @@ type ProcessResult struct {
 }
 
 // ResultReadyForMerge is the worker status that signals a ready-for-merge
-// checkpoint. Parking such a result is a later slice, so this manager leaves the
-// Run untouched when it observes one.
+// checkpoint.
 const ResultReadyForMerge = "ready_for_human_merge"
 
 // TerminalValidator is the narrow, fail-closed authority for turning one
@@ -104,10 +132,14 @@ type TerminalValidator interface {
 
 // TerminalDecision is the validator's ruling for one terminal process result.
 // State is the terminal lifecycle the Run must reach. Validation is the durable
-// completion evidence; the manager owns its ValidatedAt.
+// completion evidence; the manager owns its ValidatedAt. Repark asks the manager
+// to return a still-parkable Run (one that still holds a ready checkpoint) to
+// awaiting_human_merge instead of finishing it, matching legacy
+// CompletionDecision.Repark.
 type TerminalDecision struct {
 	State      LifecycleState
 	Detail     string
+	Repark     bool
 	Validation CompletionValidation
 }
 
@@ -118,10 +150,13 @@ func NewManager(
 	dispatch EventDispatchGate,
 	resolver RepositoryResolver,
 	launcher Launcher,
+	pullRequests PullRequestReader,
 	terminal TerminalValidator,
 	collector RunCollector,
 	stateRoot string,
 	maxConcurrent func() int,
+	pollInterval time.Duration,
+	mergeInterval time.Duration,
 	now func() time.Time,
 	logger *slog.Logger,
 ) (*Manager, error) {
@@ -137,6 +172,9 @@ func NewManager(
 	if launcher == nil {
 		return nil, errors.New("runs: manager launcher is required")
 	}
+	if pullRequests == nil {
+		return nil, errors.New("runs: manager pull request reader is required")
+	}
 	if terminal == nil {
 		return nil, errors.New("runs: manager terminal validator is required")
 	}
@@ -149,6 +187,12 @@ func NewManager(
 	if maxConcurrent == nil || maxConcurrent() < 1 {
 		return nil, errors.New("runs: manager max concurrency must be positive")
 	}
+	if pollInterval <= 0 {
+		return nil, errors.New("runs: manager poll interval must be positive")
+	}
+	if mergeInterval <= 0 {
+		return nil, errors.New("runs: manager merge interval must be positive")
+	}
 	if now == nil {
 		return nil, errors.New("runs: manager clock is required")
 	}
@@ -156,9 +200,9 @@ func NewManager(
 		return nil, errors.New("runs: manager logger is required")
 	}
 	return &Manager{
-		store: store, dispatch: dispatch, resolver: resolver, launcher: launcher, terminal: terminal,
-		collector: collector, stateRoot: stateRoot, maxConcurrent: maxConcurrent,
-		now: now, logger: logger,
+		store: store, dispatch: dispatch, resolver: resolver, launcher: launcher, pullRequests: pullRequests,
+		terminal: terminal, collector: collector, stateRoot: stateRoot, maxConcurrent: maxConcurrent,
+		pollInterval: pollInterval, mergeInterval: mergeInterval, now: now, logger: logger,
 	}, nil
 }
 
@@ -202,11 +246,15 @@ func (m *Manager) Reconcile(ctx context.Context) {
 	dispatched := m.dispatch.Status().Dispatched
 
 	// Worker-bound work first, counting active segments toward the limit.
+	// Awaiting-merge Runs are polled here but do not consume a worker slot.
 	running := 0
 	for _, run := range runs {
-		if run.State == StateStarting || run.State == StateRunning {
+		switch run.State {
+		case StateStarting, StateRunning:
 			running++
 			m.reconcileActive(ctx, run)
+		case StateAwaitingHumanMerge:
+			m.reconcileAwaitingMerge(ctx, run)
 		}
 	}
 
@@ -230,6 +278,11 @@ func (m *Manager) Reconcile(ctx context.Context) {
 		}
 		if running >= maxConcurrent {
 			return
+		}
+		// A post-merge start-retry (or resume) records a durable backoff timer;
+		// skip the Run until it elapses so a failing start does not spin.
+		if run.GitHub.NextReconcileAt != nil && m.now().Before(*run.GitHub.NextReconcileAt) {
+			continue
 		}
 		if !prepared {
 			if err := m.launcher.Prepare(ctx); err != nil {
@@ -314,8 +367,8 @@ func (m *Manager) resolveRouting(ctx context.Context, run Run) {
 // start binds session, run-directory, and segment identity (pending or
 // post_merge_pending → starting), launches the worker, and marks it running.
 // A first-segment start failure of a pending Run is terminal; a post-merge
-// start failure returns to post_merge_pending for a later attempt (its durable
-// backoff is deferred). start returns true when a worker slot was consumed.
+// start failure returns to post_merge_pending with a durable retry backoff.
+// start returns true when a worker slot was consumed.
 func (m *Manager) start(ctx context.Context, run Run) bool {
 	origin := run.State
 	sessionName := taskSessionName(run)
@@ -344,8 +397,14 @@ func (m *Manager) start(ctx context.Context, run Run) bool {
 			if next.Attempts < 1 {
 				next.Attempts = 1
 			}
-			started := at
-			next.StartedAt = &started
+			// StartedAt is set once, on the first segment. A post-merge restart of
+			// a Run that already ran keeps its original start time, matching legacy
+			// MarkRunning and the store's immutable-start-timestamp rule.
+			if next.StartedAt == nil {
+				started := at
+				next.StartedAt = &started
+			}
+			next.GitHub.ReconcileFailures = 0
 			next.Detail = ""
 		}); err != nil {
 			m.logger.Error("mark launched run running", "run_id", run.ID, "error", err)
@@ -356,17 +415,22 @@ func (m *Manager) start(ctx context.Context, run Run) bool {
 
 // finishStartFailure resolves a start failure from the starting state. A
 // pending origin is terminal (legacy: first-segment start failure). A
-// post-merge origin returns to post_merge_pending; the durable reconcile
-// backoff legacy applied here is a deferred store-op concern.
+// post-merge origin returns to post_merge_pending with a durable exponential
+// reconcile backoff (legacy RetryPostMergeStart) so a repeatedly failing start
+// does not spin. It keeps the deterministic SessionName the store treats as
+// immutable and clears the segment for a fresh attempt.
 func (m *Manager) finishStartFailure(runID string, origin LifecycleState, detail string) {
 	current, ok := m.reload(runID)
 	if !ok || current.State != StateStarting {
 		return
 	}
 	if origin == StatePostMergePending {
-		if err := m.transition(current, StatePostMergePending, func(next *Run, _ time.Time) {
+		if err := m.transition(current, StatePostMergePending, func(next *Run, at time.Time) {
 			next.SegmentStartedAt = nil
-			next.Detail = detail
+			next.GitHub.ReconcileFailures = current.GitHub.ReconcileFailures + 1
+			reconcile := at.Add(reconcileDelay(m.pollInterval, current.GitHub.ReconcileFailures))
+			next.GitHub.NextReconcileAt = &reconcile
+			next.Detail = truncateText(detail, maximumTextBytes)
 		}); err != nil {
 			m.logger.Error("defer post-merge start", "run_id", runID, "error", err)
 		}
@@ -381,12 +445,18 @@ func (m *Manager) finishStartFailure(runID string, origin LifecycleState, detail
 	}
 }
 
-// reconcileActive recovers a worker and drives non-PR terminal completion. A
-// live session advances starting → running (crash recovery). A gone session
-// with no readable result, or a stale/unbound result, fails closed. A
-// ready-for-merge result is left for the deferred parking slice. Every other
-// terminal intent is ruled on by the TerminalValidator.
+// reconcileActive recovers a worker and drives completion. A live session
+// advances starting → running (crash recovery). A gone session with a readable
+// ready-for-merge checkpoint parks to awaiting_human_merge; with no readable
+// result and no checkpoint it fails closed; a stale/unbound result fails closed.
+// A ready-for-merge result parks; a plain process failure that left a checkpoint
+// also parks (the validator decides its terminal fate later). Every other
+// terminal intent is ruled on by the TerminalValidator, whose Repark ruling on a
+// still-parked Run re-parks it instead of finishing it.
 func (m *Manager) reconcileActive(ctx context.Context, run Run) {
+	if run.GitHub.NextReconcileAt != nil && m.now().Before(*run.GitHub.NextReconcileAt) {
+		return
+	}
 	exists, err := m.launcher.SessionExists(ctx, run.SessionName)
 	if err != nil {
 		m.logger.Warn("inspect run session", "run_id", run.ID, "error", err)
@@ -402,6 +472,7 @@ func (m *Manager) reconcileActive(ctx context.Context, run Run) {
 					started := at
 					next.StartedAt = &started
 				}
+				next.GitHub.ReconcileFailures = 0
 				next.Detail = ""
 			}); err != nil {
 				m.logger.Error("mark run running", "run_id", run.ID, "error", err)
@@ -412,6 +483,14 @@ func (m *Manager) reconcileActive(ctx context.Context, run Run) {
 
 	result, err := m.launcher.ReadResult(run.RunDirectory)
 	if err != nil {
+		if _, checkpointErr := m.launcher.ReadReadyCheckpoint(run.RunDirectory); checkpointErr == nil {
+			m.parkReadyRun(ctx, run, ProcessResult{
+				Status:     ResultReadyForMerge,
+				Attempts:   max(run.Attempts, run.SegmentAttempt+1),
+				FinishedAt: m.now(),
+			})
+			return
+		}
 		m.finishActive(run.ID, StateFailed, "tmux session ended without a process result", 0, nil)
 		return
 	}
@@ -420,12 +499,21 @@ func (m *Manager) reconcileActive(ctx context.Context, run Run) {
 		return
 	}
 	if result.Status == ResultReadyForMerge {
-		// Ready-for-merge parking is a later slice; leave the Run for its owner.
-		m.logger.Debug("ready-for-merge parking deferred", "run_id", run.ID)
+		m.parkReadyRun(ctx, run, result)
 		return
+	}
+	if result.Status == string(StateFailed) {
+		if _, checkpointErr := m.launcher.ReadReadyCheckpoint(run.RunDirectory); checkpointErr == nil {
+			m.parkReadyRun(ctx, run, result)
+			return
+		}
 	}
 
 	decision := m.terminal.ValidateTerminal(ctx, run, result)
+	if decision.Repark && run.Ready != nil {
+		m.repark(run, result, decision)
+		return
+	}
 	if !decision.State.Terminal() || !decision.Validation.Accepted && decision.State != StateFailed {
 		const reason = "terminal validator returned an unsafe ruling"
 		intent := strings.TrimSpace(result.Status)

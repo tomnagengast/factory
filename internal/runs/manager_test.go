@@ -39,11 +39,12 @@ func (f fakeResolver) ResolveRoute(ctx context.Context, run Run) (repositories.R
 }
 
 type fakeLauncher struct {
-	prepare func(context.Context) error
-	cleanup func(context.Context) error
-	start   func(context.Context, Run, string, string) error
-	exists  func(context.Context, string) (bool, error)
-	result  func(string) (ProcessResult, error)
+	prepare    func(context.Context) error
+	cleanup    func(context.Context) error
+	start      func(context.Context, Run, string, string) error
+	exists     func(context.Context, string) (bool, error)
+	result     func(string) (ProcessResult, error)
+	checkpoint func(string) (ReadyCheckpoint, error)
 }
 
 func (f fakeLauncher) Prepare(ctx context.Context) error {
@@ -81,12 +82,32 @@ func (f fakeLauncher) ReadResult(directory string) (ProcessResult, error) {
 	return ProcessResult{}, errors.New("no result")
 }
 
+func (f fakeLauncher) ReadReadyCheckpoint(directory string) (ReadyCheckpoint, error) {
+	if f.checkpoint != nil {
+		return f.checkpoint(directory)
+	}
+	return ReadyCheckpoint{}, errors.New("no checkpoint")
+}
+
 type fakeTerminal struct {
 	fn func(context.Context, Run, ProcessResult) TerminalDecision
 }
 
 func (f fakeTerminal) ValidateTerminal(ctx context.Context, run Run, result ProcessResult) TerminalDecision {
 	return f.fn(ctx, run, result)
+}
+
+// fakePullRequests answers the parked pull request read with a caller-supplied
+// snapshot or error, so merge-lifecycle tests drive every GitHub branch.
+type fakePullRequests struct {
+	fn func(context.Context, ReadyCheckpoint) (PullRequestSnapshot, error)
+}
+
+func (f fakePullRequests) Snapshot(ctx context.Context, checkpoint ReadyCheckpoint) (PullRequestSnapshot, error) {
+	if f.fn != nil {
+		return f.fn(ctx, checkpoint)
+	}
+	return PullRequestSnapshot{}, errors.New("no pull request")
 }
 
 type recordingCollector struct {
@@ -106,21 +127,32 @@ func (permanentTestError) Permanent() bool { return true }
 // ---- harness ------------------------------------------------------------
 
 type managerHarness struct {
-	t         *testing.T
-	store     *Store
-	manager   *Manager
-	dispatch  *fakeDispatchGate
-	resolver  *fakeResolver
-	launcher  *fakeLauncher
-	terminal  *fakeTerminal
-	collector *recordingCollector
-	clock     time.Time
-	stateRoot string
+	t             *testing.T
+	store         *Store
+	manager       *Manager
+	dispatch      *fakeDispatchGate
+	resolver      *fakeResolver
+	launcher      *fakeLauncher
+	pullRequests  *fakePullRequests
+	terminal      *fakeTerminal
+	collector     *recordingCollector
+	clock         time.Time
+	pollInterval  time.Duration
+	mergeInterval time.Duration
+	stateRoot     string
 }
 
 func newManagerHarness(t *testing.T, maxConcurrent int) *managerHarness {
 	t.Helper()
 	store := createEmptyStore(t, filepath.Join(t.TempDir(), "runs.jsonl"), 64)
+	return newManagerHarnessWithStore(t, store, t.TempDir(), maxConcurrent)
+}
+
+// newManagerHarnessWithStore builds a manager harness over a caller-supplied
+// store and state root, so migrated-projection fixtures can be installed before
+// the manager runs.
+func newManagerHarnessWithStore(t *testing.T, store *Store, stateRoot string, maxConcurrent int) *managerHarness {
+	t.Helper()
 	harness := &managerHarness{
 		t:        t,
 		store:    store,
@@ -128,17 +160,21 @@ func newManagerHarness(t *testing.T, maxConcurrent int) *managerHarness {
 		resolver: &fakeResolver{fn: func(context.Context, Run) (repositories.Route, error) {
 			return repositories.Route{}, errors.New("unset resolver")
 		}},
-		launcher: &fakeLauncher{},
+		launcher:     &fakeLauncher{},
+		pullRequests: &fakePullRequests{},
 		terminal: &fakeTerminal{fn: func(context.Context, Run, ProcessResult) TerminalDecision {
 			return TerminalDecision{State: StateFailed}
 		}},
-		collector: &recordingCollector{},
-		clock:     modelTestNow.Add(time.Hour),
-		stateRoot: t.TempDir(),
+		collector:     &recordingCollector{},
+		clock:         modelTestNow.Add(time.Hour),
+		pollInterval:  time.Minute,
+		mergeInterval: 5 * time.Minute,
+		stateRoot:     stateRoot,
 	}
 	manager, err := NewManager(
-		store, harness.dispatch, harness.resolver, harness.launcher, harness.terminal, harness.collector,
-		harness.stateRoot, func() int { return maxConcurrent }, harness.nowFunc(), discardLogger(),
+		store, harness.dispatch, harness.resolver, harness.launcher, harness.pullRequests, harness.terminal,
+		harness.collector, harness.stateRoot, func() int { return maxConcurrent },
+		harness.pollInterval, harness.mergeInterval, harness.nowFunc(), discardLogger(),
 	)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -601,22 +637,6 @@ func TestManagerRejectsStaleProcessResult(t *testing.T) {
 	}
 }
 
-func TestManagerLeavesReadyForMergeForLaterSlice(t *testing.T) {
-	h := newManagerHarness(t, 2)
-	batch, run, rate := runningProjection(t, h.stateRoot)
-	h.install(batch, run, rate)
-	installed := h.run(run.ID)
-	h.launcher.exists = func(context.Context, string) (bool, error) { return false, nil }
-	h.launcher.result = func(string) (ProcessResult, error) {
-		return ProcessResult{Status: ResultReadyForMerge, Attempts: installed.SegmentAttempt + 1, FinishedAt: installed.SegmentStartedAt.Add(time.Second)}, nil
-	}
-
-	h.reconcile()
-	if got := h.run(run.ID).State; got != StateRunning {
-		t.Fatalf("ready-for-merge result changed state to %q, want running (parking deferred)", got)
-	}
-}
-
 // ---- non-PR terminal completion ----------------------------------------
 
 func TestManagerAcceptsProcessFailure(t *testing.T) {
@@ -828,38 +848,50 @@ func TestNewManagerRequiresCollaboratorsAndHasNoProductionCaller(t *testing.T) {
 	}}
 	collector := &recordingCollector{}
 	dispatch := &fakeDispatchGate{dispatched: ^uint64(0)}
+	pullRequests := fakePullRequests{}
 	stateRoot := t.TempDir()
 	positive := func() int { return 1 }
 	clock := func() time.Time { return modelTestNow }
+	const poll = time.Minute
+	const merge = 5 * time.Minute
 
-	if _, err := NewManager(nil, dispatch, resolver, launcher, terminal, collector, stateRoot, positive, clock, discardLogger()); err == nil {
+	if _, err := NewManager(nil, dispatch, resolver, launcher, pullRequests, terminal, collector, stateRoot, positive, poll, merge, clock, discardLogger()); err == nil {
 		t.Fatal("nil store accepted")
 	}
-	if _, err := NewManager(store, nil, resolver, launcher, terminal, collector, stateRoot, positive, clock, discardLogger()); err == nil {
+	if _, err := NewManager(store, nil, resolver, launcher, pullRequests, terminal, collector, stateRoot, positive, poll, merge, clock, discardLogger()); err == nil {
 		t.Fatal("nil dispatch gate accepted")
 	}
-	if _, err := NewManager(store, dispatch, nil, launcher, terminal, collector, stateRoot, positive, clock, discardLogger()); err == nil {
+	if _, err := NewManager(store, dispatch, nil, launcher, pullRequests, terminal, collector, stateRoot, positive, poll, merge, clock, discardLogger()); err == nil {
 		t.Fatal("nil resolver accepted")
 	}
-	if _, err := NewManager(store, dispatch, resolver, nil, terminal, collector, stateRoot, positive, clock, discardLogger()); err == nil {
+	if _, err := NewManager(store, dispatch, resolver, nil, pullRequests, terminal, collector, stateRoot, positive, poll, merge, clock, discardLogger()); err == nil {
 		t.Fatal("nil launcher accepted")
 	}
-	if _, err := NewManager(store, dispatch, resolver, launcher, nil, collector, stateRoot, positive, clock, discardLogger()); err == nil {
+	if _, err := NewManager(store, dispatch, resolver, launcher, nil, terminal, collector, stateRoot, positive, poll, merge, clock, discardLogger()); err == nil {
+		t.Fatal("nil pull request reader accepted")
+	}
+	if _, err := NewManager(store, dispatch, resolver, launcher, pullRequests, nil, collector, stateRoot, positive, poll, merge, clock, discardLogger()); err == nil {
 		t.Fatal("nil terminal validator accepted")
 	}
-	if _, err := NewManager(store, dispatch, resolver, launcher, terminal, nil, stateRoot, positive, clock, discardLogger()); err == nil {
+	if _, err := NewManager(store, dispatch, resolver, launcher, pullRequests, terminal, nil, stateRoot, positive, poll, merge, clock, discardLogger()); err == nil {
 		t.Fatal("nil collector accepted")
 	}
-	if _, err := NewManager(store, dispatch, resolver, launcher, terminal, collector, "relative/path", positive, clock, discardLogger()); err == nil {
+	if _, err := NewManager(store, dispatch, resolver, launcher, pullRequests, terminal, collector, "relative/path", positive, poll, merge, clock, discardLogger()); err == nil {
 		t.Fatal("non-canonical state root accepted")
 	}
-	if _, err := NewManager(store, dispatch, resolver, launcher, terminal, collector, stateRoot, func() int { return 0 }, clock, discardLogger()); err == nil {
+	if _, err := NewManager(store, dispatch, resolver, launcher, pullRequests, terminal, collector, stateRoot, func() int { return 0 }, poll, merge, clock, discardLogger()); err == nil {
 		t.Fatal("non-positive concurrency accepted")
 	}
-	if _, err := NewManager(store, dispatch, resolver, launcher, terminal, collector, stateRoot, positive, nil, discardLogger()); err == nil {
+	if _, err := NewManager(store, dispatch, resolver, launcher, pullRequests, terminal, collector, stateRoot, positive, 0, merge, clock, discardLogger()); err == nil {
+		t.Fatal("non-positive poll interval accepted")
+	}
+	if _, err := NewManager(store, dispatch, resolver, launcher, pullRequests, terminal, collector, stateRoot, positive, poll, 0, clock, discardLogger()); err == nil {
+		t.Fatal("non-positive merge interval accepted")
+	}
+	if _, err := NewManager(store, dispatch, resolver, launcher, pullRequests, terminal, collector, stateRoot, positive, poll, merge, nil, discardLogger()); err == nil {
 		t.Fatal("nil clock accepted")
 	}
-	if _, err := NewManager(store, dispatch, resolver, launcher, terminal, collector, stateRoot, positive, clock, nil); err == nil {
+	if _, err := NewManager(store, dispatch, resolver, launcher, pullRequests, terminal, collector, stateRoot, positive, poll, merge, clock, nil); err == nil {
 		t.Fatal("nil logger accepted")
 	}
 

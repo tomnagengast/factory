@@ -889,9 +889,26 @@ func validateTransitionDelta(current, next Run, transition LifecycleTransition) 
 	if current.SegmentAttempt != next.SegmentAttempt && (next.State != StateStarting || next.SegmentAttempt < current.SegmentAttempt) {
 		return errors.New("runs: lifecycle transition rewrote segment attempt identity")
 	}
-	if current.Ready != nil && !reflect.DeepEqual(current.Ready, next.Ready) ||
-		current.Ready == nil && next.Ready != nil && next.State != StateAwaitingHumanMerge {
+	// The ready checkpoint may be set on the first park and replaced on a later
+	// park (remediation stamps a fresh ValidatedAt and can carry a new verified
+	// head), but only while transitioning into awaiting_human_merge. Clearing a
+	// ready checkpoint is always forbidden, and any replacement outside a park is
+	// rejected. validateReady still re-checks the new checkpoint against the Run's
+	// repository route and segment, so a bad replacement fails closed anyway.
+	readyChanged := !reflect.DeepEqual(current.Ready, next.Ready)
+	if current.Ready != nil {
+		if readyChanged && (next.Ready == nil || next.State != StateAwaitingHumanMerge) {
+			return errors.New("runs: lifecycle transition rewrote ready checkpoint")
+		}
+	} else if next.Ready != nil && next.State != StateAwaitingHumanMerge {
 		return errors.New("runs: lifecycle transition rewrote ready checkpoint")
+	}
+	// A checkpoint newly introduced or replaced by a park must belong to the
+	// current worker segment. An unchanged checkpoint is historical evidence and
+	// may legitimately predate a later post-merge segment that is being re-parked.
+	if readyChanged && next.Ready != nil && next.State == StateAwaitingHumanMerge &&
+		(next.SegmentStartedAt == nil || next.Ready.CreatedAt.Before(*next.SegmentStartedAt)) {
+		return errors.New("runs: ready checkpoint predates the current lifecycle segment")
 	}
 	if current.MergeCommitOID != "" && next.MergeCommitOID != current.MergeCommitOID {
 		return errors.New("runs: lifecycle transition rewrote merge identity")
