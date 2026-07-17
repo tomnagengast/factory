@@ -115,6 +115,54 @@ func TestAdmissionDerivesExactlyOnePendingDeliveryPerInitialTransition(t *testin
 	}
 }
 
+func TestApplyAdmissionBatchDerivesDeliveryStateInsteadOfTrustingCaller(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		forge func(*Run)
+	}{
+		{
+			name: "pre-acknowledged",
+			forge: func(run *Run) {
+				run.DeliveredThrough = len(run.Transitions)
+				run.TransitionDeliveries = nil
+			},
+		},
+		{
+			name: "published with forged sequence",
+			forge: func(run *Run) {
+				run.DeliveredThrough = 0
+				transition := run.Transitions[0]
+				run.TransitionDeliveries = []TransitionDelivery{{
+					TransitionID: transition.ID,
+					EventID:      RunTransitionEventID(transition.ID),
+					State:        DeliveryPublished,
+					Sequence:     99,
+				}}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := trustedTestRoot(t, t.TempDir())
+			store := createEmptyStore(t, filepath.Join(root, "runs.jsonl"), 10)
+			batch, run, rate := testAdmissionProjection(t, root, 1, StatePending)
+			test.forge(&run)
+			if err := store.ApplyAdmissionBatch([]AdmissionBatch{batch}, []Run{run}, []RateBucket{rate}); err != nil {
+				t.Fatal(err)
+			}
+			stored := runByID(t, store, run.ID)
+			if stored.DeliveredThrough != 0 || len(stored.TransitionDeliveries) != 1 {
+				t.Fatalf("store trusted caller delivery state: %#v", stored)
+			}
+			delivery := stored.TransitionDeliveries[0]
+			if delivery.TransitionID != stored.Transitions[0].ID ||
+				delivery.EventID != RunTransitionEventID(stored.Transitions[0].ID) ||
+				delivery.State != DeliveryPending || delivery.Sequence != 0 {
+				t.Fatalf("store did not derive the pending delivery: %#v", delivery)
+			}
+		})
+	}
+}
+
 func TestAdmissionDerivesNoDeliveryForNonRunnableOrMigratedBaseline(t *testing.T) {
 	t.Run("non-runnable batch derives no delivery", func(t *testing.T) {
 		store := createEmptyStore(t, filepath.Join(t.TempDir(), "runs.jsonl"), 10)
@@ -603,6 +651,7 @@ func TestCompactionRetainsUnacknowledgedTerminalRunsAndPrunesAcknowledged(t *tes
 		if err := store.ApplyAdmissionBatch([]AdmissionBatch{batch}, []Run{run}, []RateBucket{rate}); err != nil {
 			t.Fatal(err)
 		}
+		acknowledgeRunDeliveries(t, store, run.ID)
 	}
 
 	if err := store.Compact(time.Time{}); err != nil {

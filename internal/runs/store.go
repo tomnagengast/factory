@@ -197,6 +197,7 @@ func (s *Store) ApplyAdmissionBatch(batches []AdmissionBatch, runs []Run, increm
 	runs = cloneRuns(runs)
 	for index := range runs {
 		canonicalizeRun(&runs[index])
+		deriveAdmissionDeliveries(&runs[index])
 	}
 	slices.SortFunc(runs, compareRuns)
 	if len(runs) == 0 {
@@ -241,6 +242,27 @@ func (s *Store) ApplyAdmissionBatch(batches []AdmissionBatch, runs []Run, increm
 	s.state = next
 	s.operationsSinceCheckpoint++
 	return s.compactIfNeededLocked()
+}
+
+// deriveAdmissionDeliveries makes the Store the sole owner of fresh Run
+// delivery state. Admission callers provide lifecycle history, never a trusted
+// watermark or wire publication claim; the journal operation deterministically
+// creates one pending delivery for every non-migrated transition it persists.
+// A migrated baseline with no transition history has no delivery obligation.
+func deriveAdmissionDeliveries(run *Run) {
+	run.DeliveredThrough = 0
+	run.TransitionDeliveries = nil
+	if len(run.Transitions) == 0 {
+		return
+	}
+	run.TransitionDeliveries = make([]TransitionDelivery, len(run.Transitions))
+	for index, transition := range run.Transitions {
+		run.TransitionDeliveries[index] = TransitionDelivery{
+			TransitionID: transition.ID,
+			EventID:      RunTransitionEventID(transition.ID),
+			State:        DeliveryPending,
+		}
+	}
 }
 
 // Transition appends one legal lifecycle transition as a complete next Run

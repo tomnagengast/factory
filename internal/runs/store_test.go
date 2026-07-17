@@ -418,6 +418,7 @@ func TestAdmissionOperationExactRetrySurvivesTransitionsAndCompaction(t *testing
 	if err := store.ApplyAdmissionBatch([]AdmissionBatch{thirdBatch}, []Run{thirdRun}, []RateBucket{thirdRate}); err != nil {
 		t.Fatal(err)
 	}
+	acknowledgeRunDeliveries(t, store, thirdRun.ID)
 	if err := store.Compact(modelTestNow.Add(4 * time.Minute)); err != nil {
 		t.Fatal(err)
 	}
@@ -1038,6 +1039,9 @@ func TestCheckpointCompactionRetentionAndFailureBoundaries(t *testing.T) {
 			if err := store.ApplyAdmissionBatch([]AdmissionBatch{batch}, []Run{run}, []RateBucket{rate}); err != nil {
 				t.Fatalf("append %d: %v", number+1, err)
 			}
+			if state.Terminal() {
+				acknowledgeRunDeliveries(t, store, run.ID)
+			}
 		}
 		if err := store.Compact(modelTestNow.Add(time.Minute)); err != nil {
 			t.Fatalf("compact: %v", err)
@@ -1118,6 +1122,7 @@ func TestCheckpointCompactionRetentionAndFailureBoundaries(t *testing.T) {
 			if err := store.ApplyAdmissionBatch([]AdmissionBatch{batch}, []Run{run}, []RateBucket{rate}); err != nil {
 				t.Fatal(err)
 			}
+			acknowledgeRunDeliveries(t, store, run.ID)
 		}
 		injected := errors.New("injected directory sync failure")
 		store.checkpoint = func(location *storeLocation, operation diskOperation, create bool, _ func(*os.File) error) (bool, error) {
@@ -1424,23 +1429,36 @@ func acknowledgeAllDeliveries(t *testing.T, store *Store) {
 		t.Fatal(err)
 	}
 	for _, run := range snapshot.Model().Runs {
-		for _, delivery := range run.TransitionDeliveries {
-			if delivery.State == DeliveryPending {
-				if err := store.RecordPublication(run.ID, delivery.TransitionID, 1); err != nil {
-					t.Fatal(err)
-				}
-			}
-		}
+		acknowledgeRunDeliveries(t, store, run.ID)
 	}
-	snapshot, err = store.Snapshot()
+}
+
+func acknowledgeRunDeliveries(t *testing.T, store *Store, runID string) {
+	t.Helper()
+	snapshot, err := store.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
+	var found Run
 	for _, run := range snapshot.Model().Runs {
-		if count := len(run.TransitionDeliveries); count > 0 {
-			if err := store.AcknowledgeDeliveries(run.ID, count); err != nil {
+		if run.ID == runID {
+			found = run
+			break
+		}
+	}
+	if found.ID == "" {
+		t.Fatalf("Run %q not found", runID)
+	}
+	for index, delivery := range found.TransitionDeliveries {
+		if delivery.State == DeliveryPending {
+			if err := store.RecordPublication(runID, delivery.TransitionID, uint64(index+1)); err != nil {
 				t.Fatal(err)
 			}
+		}
+	}
+	if count := len(found.TransitionDeliveries); count > 0 {
+		if err := store.AcknowledgeDeliveries(runID, count); err != nil {
+			t.Fatal(err)
 		}
 	}
 }
