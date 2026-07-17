@@ -1,16 +1,16 @@
 import { render } from "solid-js/web";
 import {
   ActivityPage,
-  AgentActivityPage,
-  AgentPage,
-  getAgentByReference,
   HomePage,
-  SettingsPage,
-  TriggersPage,
-  WirePage,
-  WorkflowsPage,
-} from "./app";
+} from "./home";
+import { AgentPage, getAgentByReference } from "./agent-detail";
+import { AgentActivityPage } from "./agent-activity";
+import { SettingsPage } from "./settings";
 import { LinearTaskDetailPage, NativeTaskDetailPage, TasksPage } from "./tasks";
+import { TriggersPage } from "./triggers";
+import { WorkflowsPage } from "./workflows";
+import { WirePage } from "./wire";
+import "./styles.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Root element not found");

@@ -117,6 +117,10 @@ export function formatTime(value: string | null | undefined): string {
   return timeFormatter.format(new Date(value));
 }
 
+export function shortOID(value: string | undefined): string {
+  return value ? value.slice(0, 12) : "unknown";
+}
+
 export function resourceState(
   loading: boolean,
   error: unknown,
