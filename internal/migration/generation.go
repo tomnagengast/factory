@@ -696,16 +696,20 @@ func activationInventory(snapshot runs.Snapshot) ActivationInventory {
 		NonterminalRuns: []ActivationRun{},
 		LiveSessions:    []string{},
 	}
+	sessions := make(map[string]bool)
 	for _, run := range model.Runs {
+		if run.SessionName != "" {
+			sessions[run.SessionName] = true
+		}
 		if !run.State.Nonterminal() {
 			continue
 		}
 		inventory.NonterminalRuns = append(inventory.NonterminalRuns, ActivationRun{
 			RunID: run.ID, State: run.State, SessionName: run.SessionName,
 		})
-		if run.SessionName != "" {
-			inventory.LiveSessions = append(inventory.LiveSessions, run.SessionName)
-		}
+	}
+	for session := range sessions {
+		inventory.LiveSessions = append(inventory.LiveSessions, session)
 	}
 	slices.SortFunc(inventory.NonterminalRuns, func(left, right ActivationRun) int {
 		return compare(left.RunID, right.RunID)

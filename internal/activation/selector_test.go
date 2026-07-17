@@ -1,6 +1,7 @@
 package activation
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -143,14 +144,18 @@ func TestPublishSelectionRejectsChangedLegacySource(t *testing.T) {
 }
 
 func buildActivationFixture(t *testing.T) (string, migration.Generation) {
-	return buildActivationFixtureWithTerminalRun(t, false)
+	return buildActivationFixtureWithTerminalRun(t, false, false)
 }
 
 func buildTerminalActivationFixture(t *testing.T) (string, migration.Generation) {
-	return buildActivationFixtureWithTerminalRun(t, true)
+	return buildActivationFixtureWithTerminalRun(t, true, false)
 }
 
-func buildActivationFixtureWithTerminalRun(t *testing.T, terminal bool) (string, migration.Generation) {
+func buildRetainedTerminalSessionActivationFixture(t *testing.T) (string, migration.Generation) {
+	return buildActivationFixtureWithTerminalRun(t, true, true)
+}
+
+func buildActivationFixtureWithTerminalRun(t *testing.T, terminal, retainTerminalSession bool) (string, migration.Generation) {
 	t.Helper()
 	source := filepath.Join("..", "migration", "testdata", "current-shape")
 	home := privateTemp(t)
@@ -239,6 +244,9 @@ func buildActivationFixtureWithTerminalRun(t *testing.T, terminal bool) (string,
 		if err := wire.Acknowledge(record.Sequence, channelAcks); err != nil {
 			t.Fatal(err)
 		}
+		if !retainTerminalSession {
+			clearTerminalSessionFixture(t, filepath.Join(dataRoot, "agent-runs.json"))
+		}
 	}
 	generationRoot := filepath.Join(stateRoot, "generations")
 	generation, err := migration.BuildGeneration(dataRoot, generationRoot, migration.Options{
@@ -254,4 +262,42 @@ func buildActivationFixtureWithTerminalRun(t *testing.T, terminal bool) (string,
 		t.Fatal(err)
 	}
 	return dataRoot, generation
+}
+
+func clearTerminalSessionFixture(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Version int            `json:"version"`
+		Total   uint64         `json:"total"`
+		Runs    []agentrun.Run `json:"runs"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Runs) != 1 || state.Runs[0].State.Nonterminal() {
+		t.Fatalf("terminal fixture Runs = %#v", state.Runs)
+	}
+	state.Runs[0].SessionName = ""
+	data, err = json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerationRetainsTerminalSessionInActivationInventory(t *testing.T) {
+	t.Parallel()
+	_, generation := buildRetainedTerminalSessionActivationFixture(t)
+	if len(generation.Manifest.Activation.NonterminalRuns) != 0 {
+		t.Fatalf("nonterminal Runs = %#v", generation.Manifest.Activation.NonterminalRuns)
+	}
+	if want := []string{"factory-eng-47"}; !slices.Equal(generation.Manifest.Activation.LiveSessions, want) {
+		t.Fatalf("activation sessions = %#v, want %#v", generation.Manifest.Activation.LiveSessions, want)
+	}
 }
