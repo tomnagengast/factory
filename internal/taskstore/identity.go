@@ -143,8 +143,19 @@ func ConvertLinearBindings(snapshot Snapshot, bindings []LinearBinding) (Snapsho
 // without creating a file. Migration uses it to reject a prospective task
 // artifact before a generation is ever written or selected.
 func ValidateSnapshot(snapshot Snapshot) error {
+	_, err := CanonicalSnapshot(snapshot)
+	return err
+}
+
+// CanonicalSnapshot returns the deterministic projection a checkpoint reopen
+// exposes. This removes nil-versus-empty collection differences before an
+// immutable migration digest is calculated.
+func CanonicalSnapshot(snapshot Snapshot) (Snapshot, error) {
 	store := &Store{}
 	store.reset()
 	clone := snapshot.Clone()
-	return store.applyCheckpointLocked(diskOperation{Kind: operationCheckpoint, Schema: SchemaVersion, Checkpoint: &clone})
+	if err := store.applyCheckpointLocked(diskOperation{Kind: operationCheckpoint, Schema: SchemaVersion, Checkpoint: &clone}); err != nil {
+		return Snapshot{}, err
+	}
+	return store.snapshotLocked(), nil
 }

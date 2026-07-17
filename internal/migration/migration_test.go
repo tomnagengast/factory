@@ -122,9 +122,9 @@ func TestDryRunCharacterizesCurrentShapeWithoutActivation(t *testing.T) {
 		policyAudit.Digest != "e3132827aa4041394ba294fd59d521263313f9e60120de968083dbdf86f97e20" ||
 		repositoryAudit.Digest != "cf98d2b7b573d66a1b051dc9e81fc587262c7a10bd77abfdda648adf9b6c16eb" ||
 		runsAudit.Digest != "a18ea602a4c712a837660626c77ea1d87006f4694f7f5e128de1a7c0beb44640" ||
-		taskAudit.Digest != "bf8fbe00985e95f2f53f90bf5d9bda57a630df2df445358d9385915345ce4e09" ||
+		taskAudit.Digest != "a5cdcc01c81845d09447c7c67f2b82b6d710ad5a712d7c86887e93482d57a0ce" ||
 		eventAudit.Digest != "9e1d50a19e01473247d345daeb1f4edaa628e936ca7a73e7727c02d586b875c6" ||
-		report.AuditDigest != "590f5fbb5730588b3526997c9b61d830a4fbd0a33023ed79aa122ac0801e27e2" {
+		report.AuditDigest != "05c4571137453ea225681cfefc36decfa8a788643ea3e839dbc6d91be198dc91" {
 		t.Fatalf("canonical digests = compiled %s policy %s repositories %s Runs %s tasks %s events %s audit %s", report.Audit.CompiledRepositoryInputDigest, policyAudit.Digest, repositoryAudit.Digest, runsAudit.Digest, taskAudit.Digest, eventAudit.Digest, report.AuditDigest)
 	}
 	auditJSON, err := json.Marshal(report.Audit)

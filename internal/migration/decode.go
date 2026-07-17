@@ -124,6 +124,7 @@ type sourceState struct {
 	wireTotal            uint64
 	wireDispatched       uint64
 	wireRecords          []eventwire.Record
+	wireState            eventwire.State
 	cursors              cursorState
 	agentCursors         agentCursorState
 	githubEvents         githubState
@@ -265,7 +266,8 @@ func readSources(root string, options Options) (sourceState, error) {
 	if err := replayCopy(root, "system-events.jsonl", func(path string) error {
 		journal, err := eventwire.Open(path, validationLimit, nil)
 		if err == nil {
-			state.wireTotal, state.wireDispatched, _, state.wireRecords = journal.Snapshot()
+			state.wireState = journal.State()
+			state.wireTotal, state.wireDispatched, state.wireRecords = state.wireState.Total, state.wireState.Dispatched, state.wireState.Records
 		}
 		return err
 	}); err != nil {

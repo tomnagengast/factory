@@ -115,7 +115,8 @@ func convertCanonicalSources(state sourceState, options Options) (canonicalEvide
 		}
 		canonicalWireRecords[state.pendingTask.RecordIndex] = canonicalRecord
 	}
-	if err := taskstore.ValidateSnapshot(taskSnapshot); err != nil {
+	taskSnapshot, err = taskstore.CanonicalSnapshot(taskSnapshot)
+	if err != nil {
 		return canonicalEvidence{}, fmt.Errorf("migration: validate canonical task artifact: %w", err)
 	}
 	if err := inject(options, "after-task-conversion"); err != nil {
