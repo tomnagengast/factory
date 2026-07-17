@@ -26,9 +26,9 @@ import (
 // This slice owns the admission→execution→direct-terminal spine plus the merge
 // lifecycle: ready-checkpoint parking, awaiting-merge/GitHub reconciliation,
 // merged/closed resume, post-merge start-retry backoff, and rejected-terminal
-// re-park. It deliberately excludes feedback coalescing, the
-// native/continuation admission paths, and the external match-by-repository
-// GitHub remediation wake, which needs its own store operation.
+// re-park. Admission entrypoints and feedback coalescing are owned by Admitter
+// and the Store; the external match-by-repository GitHub remediation wake also
+// uses its own Store operation.
 type Manager struct {
 	store         *Store
 	dispatch      EventDispatchGate

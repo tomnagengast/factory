@@ -38,8 +38,8 @@ type admissionRecord struct {
 // ApplyAdmissionBatch. It can only advance an existing nonterminal Run or make
 // it terminal; it cannot create Runs or rate increments. Admission therefore
 // remains conservative if outstanding work decreases during that interval.
-// Every admission path, including future native starts and continuations, must
-// use the same Admitter and policy.Coordinator owner.
+// Event batches, native starts, and protected continuations all use the same
+// Admitter and policy.Coordinator owner.
 type Admitter struct {
 	mu    sync.Mutex
 	store *Store

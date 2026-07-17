@@ -13,6 +13,7 @@ import (
 const (
 	triggerKindGitHub    = "github-update"
 	triggerKindPostMerge = "post-merge"
+	triggerKindComment   = "comment"
 )
 
 // reconcileDelay is the legacy exponential backoff for a same-state retry:

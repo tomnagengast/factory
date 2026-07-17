@@ -17,7 +17,7 @@ import (
 
 const (
 	SchemaVersion  = 5
-	JournalVersion = 6
+	JournalVersion = 7
 )
 
 // runTransitionEventIDPrefix is the immutable legacy-compatible wire event ID
