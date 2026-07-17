@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/tomnagengast/factory/internal/migration"
@@ -76,6 +77,64 @@ func RollbackPreflight(dataRoot, toDeployment string, lease *Lease) error {
 	return nil
 }
 
+// PrepareRollback removes only a selected generation whose monotonic write
+// boundary was never established. Selected state with a boundary must cross
+// the explicit whole-state restoration proof instead.
+func PrepareRollback(dataRoot string, lease *Lease) error {
+	dataRoot = filepath.Clean(dataRoot)
+	if err := validateRecoveryRoot(dataRoot); err != nil {
+		return err
+	}
+	if err := requireLease(dataRoot, lease); err != nil {
+		return err
+	}
+	if _, err := ReadSelection(dataRoot); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	generationPath, err := selectedRecoveryGenerationPath(filepath.Dir(dataRoot), dataRoot)
+	if err != nil {
+		return err
+	}
+	if err := DeactivatePreWrite(dataRoot, generationPath, lease); err != nil {
+		if strings.Contains(err.Error(), "writes started") {
+			return errors.New("activation: canonical state changed; state-restore is required before rollback")
+		}
+		return err
+	}
+	return nil
+}
+
+func selectedRecoveryGenerationPath(stateRoot, dataRoot string) (string, error) {
+	selection, err := ReadSelection(dataRoot)
+	if err != nil {
+		return "", err
+	}
+	var acknowledgement ProviderAcknowledgement
+	if err := readExactJSON(filepath.Join(dataRoot, providerAcknowledgementFile), &acknowledgement); err != nil {
+		return "", err
+	}
+	if acknowledgement.ContractVersion != selection.ContractVersion || acknowledgement.StateGeneration != selection.StateGeneration ||
+		acknowledgement.MigrationID == "" || acknowledgement.DeploymentID == "" || !hex40Pattern.MatchString(acknowledgement.SourceCommit) ||
+		!hex40Pattern.MatchString(acknowledgement.SourceTree) || acknowledgement.BuildID == "" || acknowledgement.FinalizedAt.IsZero() ||
+		acknowledgement.FinalizedAt.Location() != time.UTC || !hex64Pattern.MatchString(acknowledgement.ReceiptSHA256) {
+		return "", errors.New("activation: provider acknowledgement is invalid")
+	}
+	path := filepath.Join(stateRoot, "generations", acknowledgement.MigrationID)
+	generation, err := migration.OpenStagedGeneration(path)
+	if err != nil {
+		if _, boundaryErr := ReadWriteBoundary(path); boundaryErr == nil {
+			return path, nil
+		}
+		return "", err
+	}
+	if generation.Manifest.MigrationID != acknowledgement.MigrationID || generation.Manifest.StateGeneration != selection.StateGeneration {
+		return "", errors.New("activation: selected generation conflicts with provider acknowledgement")
+	}
+	return path, nil
+}
+
 // RestoreState is deliberately narrow: it can deactivate generation 1 only
 // when its immutable activation inventory was empty, no live agent session
 // exists, every mutable canonical artifact still equals its initial staged
@@ -98,14 +157,51 @@ func RestoreState(options RestoreOptions) (RestorationReceipt, error) {
 		filepath.Dir(generationPath) != filepath.Join(filepath.Dir(dataRoot), "generations") {
 		return RestorationReceipt{}, errors.New("activation: migration receipt is outside the selected generation")
 	}
-	selectedPath, err := SelectedGenerationPath(filepath.Dir(dataRoot), dataRoot)
-	if err != nil {
+	stateRoot := filepath.Dir(dataRoot)
+	archiveRoot := filepath.Join(stateRoot, "restorations")
+	pendingPath := filepath.Join(dataRoot, restorationPendingFile)
+	var receipt RestorationReceipt
+	resuming := false
+	if err := readExactJSON(pendingPath, &receipt); err == nil {
+		resuming = true
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return RestorationReceipt{}, err
 	}
-	if selectedPath != generationPath {
-		return RestorationReceipt{}, errors.New("activation: migration receipt does not own the selected generation")
+	candidatePath := generationPath
+	if resuming {
+		if err := validatePrivateRecoveryDirectory(archiveRoot); err != nil {
+			return RestorationReceipt{}, err
+		}
+		wantArchive := filepath.Join(archiveRoot, receipt.MigrationID)
+		if receipt.ContractVersion != selectionContractVersion || receipt.StateGeneration != 1 ||
+			receipt.MigrationID == "" || receipt.SourceRootDigest == "" || receipt.ArchivedPath != wantArchive ||
+			receipt.RestoredAt.IsZero() || receipt.RestoredAt.Location() != time.UTC {
+			return RestorationReceipt{}, errors.New("activation: pending restoration receipt is invalid")
+		}
+		originalExists, err := generationDirectoryExists(generationPath)
+		if err != nil {
+			return RestorationReceipt{}, err
+		}
+		archiveExists, err := generationDirectoryExists(receipt.ArchivedPath)
+		if err != nil {
+			return RestorationReceipt{}, err
+		}
+		if originalExists == archiveExists {
+			return RestorationReceipt{}, errors.New("activation: pending restoration generation location is ambiguous")
+		}
+		if archiveExists {
+			candidatePath = receipt.ArchivedPath
+		}
+	} else {
+		selectedPath, err := SelectedGenerationPath(stateRoot, dataRoot)
+		if err != nil {
+			return RestorationReceipt{}, err
+		}
+		if selectedPath != generationPath {
+			return RestorationReceipt{}, errors.New("activation: migration receipt does not own the selected generation")
+		}
 	}
-	generation, err := migration.OpenStagedGeneration(generationPath)
+	generation, err := migration.OpenStagedGeneration(candidatePath)
 	if err != nil {
 		return RestorationReceipt{}, fmt.Errorf("activation: canonical state changed after activation: %w", err)
 	}
@@ -122,36 +218,40 @@ func RestoreState(options RestoreOptions) (RestorationReceipt, error) {
 	if err := migration.VerifySourceSnapshot(dataRoot, generation.Report); err != nil {
 		return RestorationReceipt{}, fmt.Errorf("activation: retained source state changed: %w", err)
 	}
-	boundary, err := ReadWriteBoundary(generationPath)
+	boundary, err := ReadWriteBoundary(candidatePath)
 	if err != nil {
 		return RestorationReceipt{}, err
 	}
-	stateRoot := filepath.Dir(dataRoot)
-	archiveRoot := filepath.Join(stateRoot, "restorations")
-	archivePath := filepath.Join(archiveRoot, generation.Manifest.MigrationID)
-	if err := ensurePrivateRecoveryDirectory(archiveRoot); err != nil {
-		return RestorationReceipt{}, err
-	}
-	if _, err := os.Lstat(archivePath); !errors.Is(err, os.ErrNotExist) {
-		if err == nil {
-			err = errors.New("archive already exists")
+	if resuming {
+		if receipt.StateGeneration != generation.Manifest.StateGeneration || receipt.MigrationID != generation.Manifest.MigrationID ||
+			receipt.SourceRootDigest != generation.Manifest.SourceRootDigest || receipt.Boundary != boundary {
+			return RestorationReceipt{}, errors.New("activation: pending restoration receipt conflicts with generation evidence")
 		}
-		return RestorationReceipt{}, fmt.Errorf("activation: inspect restoration archive: %w", err)
-	}
-	receipt := RestorationReceipt{
-		ContractVersion: selectionContractVersion, StateGeneration: generation.Manifest.StateGeneration,
-		MigrationID: generation.Manifest.MigrationID, SourceRootDigest: generation.Manifest.SourceRootDigest,
-		ArchivedPath: archivePath, Boundary: boundary, RestoredAt: options.Now,
-	}
-	pendingPath := filepath.Join(dataRoot, restorationPendingFile)
-	if err := installExactJSON(pendingPath, receipt); err != nil {
-		return RestorationReceipt{}, err
-	}
-	if err := injectRestore(options, "after-pending-receipt"); err != nil {
-		return RestorationReceipt{}, err
+	} else {
+		if err := ensurePrivateRecoveryDirectory(archiveRoot); err != nil {
+			return RestorationReceipt{}, err
+		}
+		archivePath := filepath.Join(archiveRoot, generation.Manifest.MigrationID)
+		if _, err := os.Lstat(archivePath); !errors.Is(err, os.ErrNotExist) {
+			if err == nil {
+				err = errors.New("archive already exists")
+			}
+			return RestorationReceipt{}, fmt.Errorf("activation: inspect restoration archive: %w", err)
+		}
+		receipt = RestorationReceipt{
+			ContractVersion: selectionContractVersion, StateGeneration: generation.Manifest.StateGeneration,
+			MigrationID: generation.Manifest.MigrationID, SourceRootDigest: generation.Manifest.SourceRootDigest,
+			ArchivedPath: archivePath, Boundary: boundary, RestoredAt: options.Now,
+		}
+		if err := installExactJSON(pendingPath, receipt); err != nil {
+			return RestorationReceipt{}, err
+		}
+		if err := injectRestore(options, "after-pending-receipt"); err != nil {
+			return RestorationReceipt{}, err
+		}
 	}
 	for _, path := range []string{filepath.Join(dataRoot, selectionFileName), filepath.Join(dataRoot, providerAcknowledgementFile)} {
-		if err := os.Remove(path); err != nil {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return RestorationReceipt{}, err
 		}
 	}
@@ -161,14 +261,16 @@ func RestoreState(options RestoreOptions) (RestorationReceipt, error) {
 	if err := injectRestore(options, "after-deactivation"); err != nil {
 		return RestorationReceipt{}, err
 	}
-	if err := os.Rename(generationPath, archivePath); err != nil {
-		return RestorationReceipt{}, err
-	}
-	if err := syncDirectory(filepath.Dir(generationPath)); err != nil {
-		return RestorationReceipt{}, err
-	}
-	if err := syncDirectory(archiveRoot); err != nil {
-		return RestorationReceipt{}, err
+	if candidatePath == generationPath {
+		if err := os.Rename(generationPath, receipt.ArchivedPath); err != nil {
+			return RestorationReceipt{}, err
+		}
+		if err := syncDirectory(filepath.Dir(generationPath)); err != nil {
+			return RestorationReceipt{}, err
+		}
+		if err := syncDirectory(archiveRoot); err != nil {
+			return RestorationReceipt{}, err
+		}
 	}
 	if err := injectRestore(options, "after-generation-archive"); err != nil {
 		return RestorationReceipt{}, err
@@ -176,13 +278,30 @@ func RestoreState(options RestoreOptions) (RestorationReceipt, error) {
 	if err := installExactJSON(filepath.Join(dataRoot, restorationReceiptFile), receipt); err != nil {
 		return RestorationReceipt{}, err
 	}
-	if err := os.Remove(pendingPath); err != nil {
+	if err := injectRestore(options, "after-final-receipt"); err != nil {
+		return RestorationReceipt{}, err
+	}
+	if err := os.Remove(pendingPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return RestorationReceipt{}, err
 	}
 	if err := syncDirectory(dataRoot); err != nil {
 		return RestorationReceipt{}, err
 	}
 	return receipt, nil
+}
+
+func generationDirectoryExists(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false, errors.New("activation: restoration generation path is unsafe")
+	}
+	return true, nil
 }
 
 func validateRecoveryRoot(dataRoot string) error {
@@ -196,6 +315,10 @@ func ensurePrivateRecoveryDirectory(path string) error {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return err
 	}
+	return validatePrivateRecoveryDirectory(path)
+}
+
+func validatePrivateRecoveryDirectory(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
 		return errors.New("activation: restoration archive directory is unsafe")

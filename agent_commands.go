@@ -22,9 +22,7 @@ import (
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
 	"github.com/tomnagengast/factory/internal/settings"
-	"github.com/tomnagengast/factory/internal/taskcompat"
 	"github.com/tomnagengast/factory/internal/taskmodel"
-	"github.com/tomnagengast/factory/internal/triggerregistry"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
 
@@ -57,8 +55,12 @@ func runAgentCommand(ctx context.Context, args []string) (int, bool) {
 		return runChild(ctx, args[1:]), true
 	case "agent":
 		return runAgentHelper(ctx, args[1:]), true
-	case "workflow-rollback-preflight":
-		return runWorkflowRollbackPreflight(args[1:]), true
+	case "state-rollback-preflight":
+		return runStateRollbackPreflight(args[1:], os.Stdout, os.Stderr), true
+	case "state-rollback":
+		return runStateRollback(ctx, args[1:], os.Stdout, os.Stderr), true
+	case "state-restore":
+		return runStateRestore(ctx, args[1:], os.Stdout, os.Stderr), true
 	default:
 		fmt.Fprintf(os.Stderr, "unknown Factory command %q\n", args[0])
 		return 2, true
@@ -318,33 +320,6 @@ func callTaskHelper(ctx context.Context, payload taskHelperRequest, output io.Wr
 		return response.StatusCode, err
 	}
 	return response.StatusCode, nil
-}
-
-func runWorkflowRollbackPreflight(args []string) int {
-	flags := flag.NewFlagSet("workflow-rollback-preflight", flag.ContinueOnError)
-	settingsBackup := flags.String("settings-backup", "", "schema-1 settings backup")
-	triggerRegistry := flags.String("trigger-registry", "", "retained trigger registry")
-	if flags.Parse(args) != nil || *settingsBackup == "" || *triggerRegistry == "" || flags.NArg() != 0 {
-		return 2
-	}
-	configuration, err := settings.ReadSchema1Backup(*settingsBackup)
-	if err == nil {
-		_, err = triggerregistry.Read(*triggerRegistry, configuration)
-	}
-	if err == nil {
-		markerPath := taskcompat.PathFor(*settingsBackup)
-		if _, markerErr := taskcompat.Read(markerPath); markerErr == nil {
-			err = errors.New("source-neutral task marker is present; task-unaware rollback is unavailable")
-		} else if !errors.Is(markerErr, os.ErrNotExist) {
-			err = markerErr
-		}
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "workflow rollback preflight failed: %v\n", err)
-		return 1
-	}
-	fmt.Fprintln(os.Stdout, `{"status":"ready"}`)
-	return 0
 }
 
 func runLinearGraphQLHelper(ctx context.Context, input io.Reader, output io.Writer) int {

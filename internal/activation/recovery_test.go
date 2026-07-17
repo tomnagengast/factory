@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRollbackPreflightValidatesTargetAndRefusesSelectedState(t *testing.T) {
@@ -41,6 +42,32 @@ func TestRollbackPreflightValidatesTargetAndRefusesSelectedState(t *testing.T) {
 	}
 }
 
+func TestPrepareRollbackDeactivatesOnlyPreWriteSelection(t *testing.T) {
+	t.Parallel()
+	config, _ := finalizerFixture(t)
+	config.Inject = func(point string) error {
+		if point == "after-selection" {
+			return errors.New("stop")
+		}
+		return nil
+	}
+	if active, err := Finalize(context.Background(), config); err == nil {
+		active.Close()
+		t.Fatal("injected finalization succeeded")
+	}
+	lease, err := AcquireLease(filepath.Join(config.DataRoot, "state-transition.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	if err := PrepareRollback(config.DataRoot, lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadSelection(config.DataRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pre-write selection remained: %v", err)
+	}
+}
+
 func TestRestoreStateRefusesActivationSpanningRunWithoutMutation(t *testing.T) {
 	t.Parallel()
 	config, _ := finalizerFixture(t)
@@ -66,6 +93,9 @@ func TestRestoreStateRefusesActivationSpanningRunWithoutMutation(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(config.DataRoot, restorationPendingFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("refusal wrote pending restoration: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(config.StateRoot, "restorations")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refusal created restoration archive: %v", err)
 	}
 }
 
@@ -139,6 +169,54 @@ func TestRestoreStatePendingReceiptBlocksRollbackAfterInterruptedRestore(t *test
 	if err := RollbackPreflight(config.DataRoot, config.Identity.DeploymentID, lease); err == nil ||
 		!strings.Contains(err.Error(), "incomplete") {
 		t.Fatalf("interrupted preflight error = %v", err)
+	}
+}
+
+func TestRestoreStateResumesEveryDurableCrashBoundary(t *testing.T) {
+	t.Parallel()
+	for _, point := range []string{"after-pending-receipt", "after-deactivation", "after-generation-archive", "after-final-receipt"} {
+		point := point
+		t.Run(point, func(t *testing.T) {
+			config, generation := terminalFinalizerFixture(t)
+			active, err := Finalize(context.Background(), config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			active.Close()
+			lease, err := AcquireLease(filepath.Join(config.DataRoot, "state-transition.lock"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lease.Close()
+			options := RestoreOptions{
+				DataRoot: config.DataRoot, MigrationReceipt: filepath.Join(config.GenerationPath, "backup-receipt.json"),
+				Lease: lease, LiveSessions: func() ([]string, error) { return []string{}, nil }, Now: activationNow.Add(time.Minute),
+				Inject: func(at string) error {
+					if at == point {
+						return errors.New("stop")
+					}
+					return nil
+				},
+			}
+			if _, err := RestoreState(options); err == nil || !strings.Contains(err.Error(), point) {
+				t.Fatalf("injected restore error = %v", err)
+			}
+			options.Inject = nil
+			options.Now = activationNow.Add(2 * time.Minute)
+			receipt, err := RestoreState(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if receipt.MigrationID != generation.Manifest.MigrationID || !receipt.RestoredAt.Equal(activationNow.Add(time.Minute)) {
+				t.Fatalf("resumed restoration receipt = %#v", receipt)
+			}
+			if _, err := os.Stat(receipt.ArchivedPath); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(config.DataRoot, restorationPendingFile)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("pending restoration remained: %v", err)
+			}
+		})
 	}
 }
 

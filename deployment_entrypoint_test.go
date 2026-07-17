@@ -24,7 +24,13 @@ func TestNetworkAppCompatibilityEntrypointTranslatesExactCommands(t *testing.T) 
 	if err := os.MkdirAll(filepath.Dir(current), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	preflightScript := "#!/bin/sh\nexit 0\n"
+	preflightScript := `#!/bin/sh
+printf '%s\n' "$@" > "$HOME/factory-args"
+[ "$1" = "state-rollback" ] || exit 1
+while [ "$1" != "--" ]; do shift; done
+shift
+exec "$HOME/.local/bin/nags" rollback factory "$@"
+`
 	if err := os.WriteFile(current, []byte(preflightScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +66,20 @@ func TestNetworkAppCompatibilityEntrypointTranslatesExactCommands(t *testing.T) 
 			if !reflect.DeepEqual(got, test.want) {
 				t.Fatalf("provider args = %#v, want %#v", got, test.want)
 			}
+			if test.args[0] == "rollback" {
+				factoryData, err := os.ReadFile(filepath.Join(home, "factory-args"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				factoryArgs := strings.Fields(string(factoryData))
+				wantFactory := []string{
+					"state-rollback", "--data-root", filepath.Join(home, ".local", "share", "factory", "data"),
+					"--provider", provider, "--", "--to", "deployment-1",
+				}
+				if !reflect.DeepEqual(factoryArgs, wantFactory) {
+					t.Fatalf("Factory args = %#v, want %#v", factoryArgs, wantFactory)
+				}
+			}
 		})
 	}
 
@@ -85,13 +105,13 @@ func TestNetworkAppRollbackRequiresSuccessfulFactoryPreflight(t *testing.T) {
 	if err := os.WriteFile(provider, []byte("#!/bin/sh\nprintf invoked > \"$HOME/provider-invoked\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(current, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+	if err := os.WriteFile(current, []byte("#!/bin/sh\nprintf '%s\\n' 'state rollback failed: refused' >&2\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	command := exec.Command("bin/network-app", "rollback", "factory", "--to", "deployment-1")
 	command.Env = append(os.Environ(), "HOME="+home)
 	output, err := command.CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "Rollback refused") {
+	if err == nil || !strings.Contains(string(output), "state rollback failed") {
 		t.Fatalf("rollback error=%v output=%q", err, output)
 	}
 	if _, err := os.Stat(filepath.Join(home, "provider-invoked")); !errors.Is(err, os.ErrNotExist) {

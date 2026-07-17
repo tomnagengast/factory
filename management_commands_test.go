@@ -32,7 +32,7 @@ func TestManagementHelpAndVersion(t *testing.T) {
 			t.Fatalf("help omits %q:\n%s", command, output.String())
 		}
 	}
-	for _, internal := range []string{"agent-exec", "child-exec", "workflow-rollback-preflight"} {
+	for _, internal := range []string{"agent-exec", "child-exec", "state-rollback", "state-rollback-preflight", "state-restore"} {
 		if strings.Contains(output.String(), internal) {
 			t.Fatalf("help exposes internal command %q", internal)
 		}
