@@ -336,7 +336,7 @@ func TestMigratedBaselinePreservesAcknowledgedLegacyShapes(t *testing.T) {
 		}
 	})
 
-	t.Run("active baseline accepts first canonical transition", func(t *testing.T) {
+	t.Run("event-linked active baseline accepts first canonical transition", func(t *testing.T) {
 		root := privateModelTestRoot(t)
 		batch, run, rate := testAdmissionProjection(t, root, 1, StatePending)
 		run.State = StateRunning
@@ -347,7 +347,6 @@ func TestMigratedBaselinePreservesAcknowledgedLegacyShapes(t *testing.T) {
 		run.SegmentStartedAt = pointerTime(run.UpdatedAt)
 		run.Transitions = nil
 		run.MigratedBaseline = &MigratedBaseline{State: StateRunning, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true}
-		makeMigratedDirect(&batch, &run)
 		snapshot, err := NewSnapshot(testSingleAdmissionModel(batch, run, rate))
 		if err != nil {
 			t.Fatal(err)
@@ -367,6 +366,52 @@ func TestMigratedBaselinePreservesAcknowledgedLegacyShapes(t *testing.T) {
 			t.Fatalf("transitioned migrated Run = %#v", got.Model().Runs[0])
 		}
 	})
+
+	for _, test := range []struct {
+		name   string
+		state  LifecycleState
+		mutate func(*Run)
+	}{
+		{name: "unavailable workflow pin", state: StateRunning, mutate: func(run *Run) {
+			run.Causation.Workflow = nil
+			run.Causation.WorkflowDigest = ""
+			run.MigratedBaseline.WorkflowPinUnavailable = true
+		}},
+		{name: "unavailable workflow digest", state: StateSucceeded, mutate: func(run *Run) {
+			run.Causation.Workflow = pointerPin(workflow.Pinned{ID: "full-sdlc", Revision: 3})
+			run.Causation.WorkflowDigest = ""
+			run.MigratedBaseline.WorkflowDigestUnavailable = true
+		}},
+		{name: "unavailable repository route", state: StateRunning, mutate: func(run *Run) {
+			run.Repository = nil
+			run.MigratedBaseline.RepositoryRouteUnavailable = true
+		}},
+		{name: "historical repository route", state: StateRunning, mutate: func(run *Run) {
+			route := run.Repository
+			run.Repository = nil
+			run.MigratedBaseline.HistoricalRepository = &HistoricalRepository{
+				Repository: route.Repository, Origin: route.Origin, ManagedPath: route.ManagedPath,
+				ManagedRoot: route.ManagedRoot, DefaultBranch: route.DefaultBranch, CloudURL: route.CloudURL,
+			}
+		}},
+	} {
+		t.Run("event-linked Run rejects "+test.name, func(t *testing.T) {
+			root := privateModelTestRoot(t)
+			batch, run, rate := testAdmissionProjection(t, root, 1, test.state)
+			if test.state == StateRunning {
+				batch, run, rate = runningProjection(t, root)
+			}
+			run.Transitions = nil
+			run.MigratedBaseline = &MigratedBaseline{
+				State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true,
+			}
+			test.mutate(&run)
+			_, err := NewSnapshot(testSingleAdmissionModel(batch, run, rate))
+			if err == nil || !strings.Contains(err.Error(), "migrated direct admission") {
+				t.Fatalf("event-linked migration escape error = %v", err)
+			}
+		})
+	}
 
 	for _, state := range []LifecycleState{StatePending, StateRunning} {
 		t.Run("active direct source without pin or route "+string(state), func(t *testing.T) {

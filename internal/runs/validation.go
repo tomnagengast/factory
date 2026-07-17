@@ -190,8 +190,11 @@ func validateRetainedProjection(model Model) error {
 			run.Causation.AdmittedAt.Before(batch.DecidedAt) {
 			return fmt.Errorf("runs: Run %q admission linkage conflicts", run.ID)
 		}
-		if run.MigratedBaseline != nil && batch.Origin != AdmissionOriginMigratedDirect {
-			return fmt.Errorf("runs: Run %q migrated baseline is not linked to a migrated direct admission", run.ID)
+		baseline := run.MigratedBaseline
+		if baseline != nil && batch.Origin != AdmissionOriginMigratedDirect &&
+			(baseline.WorkflowPinUnavailable || baseline.WorkflowDigestUnavailable ||
+				baseline.RepositoryRouteUnavailable || baseline.HistoricalRepository != nil) {
+			return fmt.Errorf("runs: Run %q migrated baseline escape evidence is not linked to a migrated direct admission", run.ID)
 		}
 	}
 	if len(seenRuns) != len(runnable) {
