@@ -62,7 +62,7 @@ type RepositoryResolver interface {
 	ResolveRoute(ctx context.Context, run Run) (repositories.Route, error)
 }
 
-// Launcher owns the worker session lifecycle. The dormant manager depends only
+// Launcher owns the worker session lifecycle. The manager depends only
 // on this narrow interface; the production tmux launcher (environment
 // allowlist, task-capability token, LINEAR_API_KEY withholding, lifecycle
 // artifact cleanup) is wired in Phase 4. ReadReadyCheckpoint reads the
@@ -77,7 +77,7 @@ type Launcher interface {
 }
 
 // PullRequestReader is the read-only authority over a parked pull request's live
-// state. The dormant manager depends only on this narrow interface; the concrete
+// state. The manager depends only on this narrow interface; the concrete
 // GitHub CLI port is wired in a later slice. It mirrors the legacy
 // agentrun.PullRequestReader contract so a faithful port classifies snapshots
 // identically.

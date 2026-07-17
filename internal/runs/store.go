@@ -123,7 +123,7 @@ type storeLocation struct {
 	name      string
 }
 
-// Store is a dormant projection journal. Its exported mutations accept only
+// Store is the canonical projection journal. Its exported mutations accept only
 // already-decided admission batches and already-constructed lifecycle
 // projections; it performs no matching, routing, publication, or ownership
 // arbitration.

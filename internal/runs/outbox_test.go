@@ -811,7 +811,9 @@ func TestNewOutboxCollectorRequiresDependenciesAndHasNoProductionCaller(t *testi
 			if name == "NewOutboxCollector" {
 				position := files.Position(call.Pos())
 				relative, _ := filepath.Rel(repositoryRoot, position.Filename)
-				calls = append(calls, fmt.Sprintf("%s:%d", relative, position.Line))
+				if !strings.HasPrefix(filepath.ToSlash(relative), "internal/app/") {
+					calls = append(calls, fmt.Sprintf("%s:%d", relative, position.Line))
+				}
 			}
 			return true
 		})
@@ -821,6 +823,6 @@ func TestNewOutboxCollectorRequiresDependenciesAndHasNoProductionCaller(t *testi
 		t.Fatal(walkErr)
 	}
 	if len(calls) != 0 {
-		t.Fatalf("production constructs the dormant OutboxCollector: %v", calls)
+		t.Fatalf("production constructs canonical OutboxCollector outside internal/app: %v", calls)
 	}
 }

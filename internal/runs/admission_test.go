@@ -553,7 +553,7 @@ func TestAdmitBatchFailureBoundaries(t *testing.T) {
 	})
 }
 
-func TestNewAdmitterRequiresStoreAndHasNoProductionCaller(t *testing.T) {
+func TestNewAdmitterRequiresStoreAndIsComposedOnlyByApp(t *testing.T) {
 	if _, err := NewAdmitter(nil); err == nil {
 		t.Fatal("nil admission Store was accepted")
 	}
@@ -597,7 +597,9 @@ func TestNewAdmitterRequiresStoreAndHasNoProductionCaller(t *testing.T) {
 			if name == "NewAdmitter" {
 				position := files.Position(call.Pos())
 				relative, _ := filepath.Rel(repositoryRoot, position.Filename)
-				calls = append(calls, fmt.Sprintf("%s:%d", relative, position.Line))
+				if !strings.HasPrefix(filepath.ToSlash(relative), "internal/app/") {
+					calls = append(calls, fmt.Sprintf("%s:%d", relative, position.Line))
+				}
 			}
 			return true
 		})
@@ -607,7 +609,7 @@ func TestNewAdmitterRequiresStoreAndHasNoProductionCaller(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(calls) != 0 {
-		t.Fatalf("production constructs dormant Admitter: %v", calls)
+		t.Fatalf("production constructs canonical Admitter outside internal/app: %v", calls)
 	}
 }
 

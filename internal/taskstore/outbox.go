@@ -586,7 +586,7 @@ func (s *Store) validateTaskOperationResultLocked(operation TaskOperation) error
 	return nil
 }
 
-// TaskOutbox is the dormant single-journal submission and recovery path. Its
+// TaskOutbox is the single-journal submission and recovery path. Its
 // handler is registered before callers can publish, so the wire cannot globally
 // acknowledge a task mutation before the task journal has recorded an applied
 // result or typed failure.

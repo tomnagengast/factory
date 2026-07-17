@@ -356,7 +356,7 @@ func TestTaskOperationCheckpointRejectsTamperedEvidence(t *testing.T) {
 	}
 }
 
-func TestNewTaskOutboxRequiresDependenciesAndHasNoProductionCaller(t *testing.T) {
+func TestNewTaskOutboxRequiresDependenciesAndIsComposedOnlyByApp(t *testing.T) {
 	store, wire, _ := newTaskOutboxStoreAndWire(t)
 	if _, err := NewTaskOutbox(nil, wire); err == nil {
 		t.Fatal("nil task store was accepted")
@@ -404,7 +404,9 @@ func TestNewTaskOutboxRequiresDependenciesAndHasNoProductionCaller(t *testing.T)
 			if name == "NewTaskOutbox" {
 				position := files.Position(call.Pos())
 				relative, _ := filepath.Rel(repositoryRoot, position.Filename)
-				calls = append(calls, fmt.Sprintf("%s:%d", relative, position.Line))
+				if !strings.HasPrefix(filepath.ToSlash(relative), "internal/app/") {
+					calls = append(calls, fmt.Sprintf("%s:%d", relative, position.Line))
+				}
 			}
 			return true
 		})
@@ -414,7 +416,7 @@ func TestNewTaskOutboxRequiresDependenciesAndHasNoProductionCaller(t *testing.T)
 		t.Fatal(err)
 	}
 	if len(calls) != 0 {
-		t.Fatalf("production constructs dormant task outbox: %v", calls)
+		t.Fatalf("production constructs canonical task outbox outside internal/app: %v", calls)
 	}
 }
 
