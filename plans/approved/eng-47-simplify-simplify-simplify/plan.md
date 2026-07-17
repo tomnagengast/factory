@@ -1,12 +1,12 @@
-# ENG-47 First-Principles Simplification Plan, Revision 2
+# ENG-47 First-Principles Simplification Plan, Revision 3
 
-> updated: 2026-07-17T00:08:04Z
+> updated: 2026-07-17T02:16:40Z
 
 ## Issue context and outcome
 
 ENG-47 originally approved and implemented a conservative provider-typed Tasks frontend extraction. Tom's later reply changes the governing scope: Factory is unreleased greenfield software at its explicit first-principles rewrite stage, and high-risk consolidation plus legacy deletion is preferred over a safe narrow patch.
 
-This revision keeps the completed Tasks extraction but replaces the revision-1 endpoint. The implementation will make Factory's architecture express one owner for each durable concept:
+This revision keeps the completed Tasks extraction but replaces the revision-1 endpoint. Revision 3 also corrects an implementation-discovered sequencing contradiction: canonical owners and their non-activating conversion evidence are built in Phases 1 through 3, while all live caller cutover, legacy-owner retirement, generation selection, and rollback-preflight replacement occur together at the Phase 4 activation boundary. The implementation will make Factory's architecture express one owner for each durable concept:
 
 1. one authoritative event ledger;
 2. one admission and Run lifecycle;
@@ -61,6 +61,8 @@ Both branches use the required `eng-47-` prefix. Both diffs are covered by the s
 - Native task mutation persists a private filesystem stage, publishes a body-free wire record, applies the command through dispatch, then calls the task store a second time to recover the result.
 - Published policy is split across settings, workflows, registry, schedules, and task control despite coordinated mutation requirements.
 - Repository identity is translated among setup specs, existing repositories, run configs, resolvers, registrar adapters, and completion readers.
+- Implementation audit proved the dormant canonical policy coordinator is sound, but production still reads settings and registry independently and the migration dry run does not call either Phase 1 converter. An actor-only reserved-rule ambiguity can therefore pass the old dry run while `policy.ConvertSources` correctly rejects it.
+- The same audit proved that retiring live legacy stores in Phase 1 would remove load-bearing rollback latches and task markers before the Phase 4 selector, state-transition lease, provider acknowledgement, `canonicalWritesStarted`, and generation-aware preflight exist. The only safe pre-activation work is pure conversion, validation, compatibility characterization, and dormant owner implementation.
 - `serveConfigured` opens the stores and starts five post-readiness loops without a join-owning runtime supervisor.
 - After the revision-1 Tasks extraction, `index.tsx` is still 2,584 lines with 35 feature types, four write transports, three copied optimistic-save machines, four polling loops, and repeated route shells.
 - Live state has 59 retained Runs and one active ENG-47 Run. Settings are schema 2. The wire has no pending records, task staging is empty, workflow drafts are empty, and no registry file exists. These facts make a fail-closed one-shot migration possible, but the code must also reject non-empty or ambiguous variants safely.
@@ -229,44 +231,42 @@ Focused checks: source decoder/audit tests with injected read/hash/report failur
 
 ### Phase 1: consolidate policy and repositories
 
-- Implement the canonical policy snapshot/store and migrate settings, workflows, protected binding, registry, schedules, agent/runtime settings, and project activation.
-- Preserve current API JSON and independent settings, registry, task-control, workflow, rule, and schedule conflict revisions through adapters backed by one policy snapshot, then simplify internal callers to the canonical owner.
+- Implement the dormant canonical policy snapshot/store and pure converter for settings, workflows, protected binding, registry, schedules, agent/runtime settings, and project activation. Do not construct it from production startup or write a live canonical artifact in this phase.
+- Preserve current API JSON and independent settings, registry, task-control, workflow, rule, and schedule conflict revisions through non-aliasing compatibility projections. Characterize legacy and canonical admission equivalence, but defer live caller cutover until the Phase 4 selector activates one complete generation.
 - Publish one provider-neutral default and remove only the recognized compiled duplicate workflow/default generic comment rule.
 - Keep existing immutable pins and the legacy pin executor; new policy never emits legacy pins.
-- Implement the canonical repository model/catalog and migrate compiled plus admitted project/setup state.
-- Replace setup, task, launch, and completion resolver conversions with catalog lookups.
-- Replace `workflow-rollback-preflight` with `state-rollback-preflight` before deleting schema-specific rollback code. In the same commit, update `bin/network-app` and its tests so every rollback acquires the state-transition lease before quiescence and retains it across generation validation, proof-bounded optional restore, manifest deactivation, `nags rollback`, health, and receipt finalization. The application receipt transition uses the same exclusion, closing the gap between preflight and the provider's later deployment lock.
-- Delete schema-1 settings migration/backup preflight, rollback latches, task-control store, default registry seeding from legacy settings, and the legacy repository fallback only after the generation-aware preflight and canonical fixtures pass.
-- Keep the old compatibility marker files untouched on disk for archival/old-release refusal; the new runtime does not consult or update them.
+- Implement the dormant canonical repository model/catalog, pure compiled-plus-admitted converter, strict artifact store, and typed onboarding operations. Characterize setup, task, launch, and completion lookup equivalence without replacing production resolvers in this phase.
+- Add both owner converters and validators to the non-activating migration dry run. Preserve explicit versus absent registry provenance; require exact pre-overlay compiled repository inputs; report body-free canonical schema, generation, count, and digest evidence; bind compiled-input evidence into verification; and reject any source accepted by legacy decoding but rejected by either canonical owner.
+- Keep the legacy settings, trigger-registry, task-control, project-setup, and repository resolution owners authoritative in production until Phase 4. Retain `ReconcileCompiledDefaults`, workflow and registry rollback latches, task compatibility markers, schema-1 backup validation, `workflow-rollback-preflight`, and every marker writer unchanged.
+- Keep all old compatibility marker and source files untouched on disk for archival and old-release refusal. Phase 1 does not create `policy.json`, `repositories.json`, a generation manifest, a selector, or `canonicalWritesStarted`.
 
-Focused checks: policy pending-admission serialization, workflow publish/delete/binding conflicts, schedule CRUD/status, project activation, exact default migration, custom preservation/conflict, repository origin/path/routing/completion fixtures, current API contract tests.
+Focused checks: policy pending-admission serialization, workflow publish/delete/binding conflicts, schedule CRUD/status, project activation, exact default migration, custom preservation/conflict, repository origin/path/routing/completion/onboarding fixtures, explicit and absent registry conversion, compiled-input mutation, stable canonical evidence digests, source-tree non-mutation, `Activates == false`, and current API contract tests.
 
 ### Phase 2: unify admission and Runs
 
-- Introduce the canonical Run journal, admission outcomes, rates, state transitions, compaction, retention, and poison behavior.
-- Migrate every old routing decision/invocation and every retained Run into the canonical model. Merge linked pairs; retain direct historical Runs; create a routed Run for a recoverable queued/claiming invocation; reject ambiguous links or duplicate active ownership.
-- Move registry batch admission under the policy/wire lock to `runs.AdmitBatch`.
+- Implement the dormant canonical Run journal, admission outcomes, rates, state transitions, compaction, retention, and poison behavior. Do not construct it from production startup, write a live canonical artifact, or replace a production caller in this phase.
+- Implement the pure converter for every old routing decision/invocation and every retained Run. Merge linked pairs; retain direct historical Runs; create a routed Run for a recoverable queued/claiming invocation; reject ambiguous links or duplicate active ownership.
+- Implement `runs.AdmitBatch` and characterize registry batch admission equivalence against the legacy policy/wire-lock path without moving production admission.
 - Preserve each old Invocation ID as the Run's immutable admission/causation ID; generate the same identity deterministically for new admissions and keep derived wire `parentInvocationId` compatibility.
 - Add the Run-transition outbox. Transition and pending event append atomically; publication is idempotent; acknowledgement waits for the global dispatched cursor; terminal event publication requires durable terminal state and admission outcome.
-- Move repository resolution, oldest-per-task ownership, starting/running lifecycle, retries, feedback coalescing, merge parking, GitHub reconciliation, and terminal completion into one manager.
-- Replace native start/continuation synthetic invocations with `runs.AdmitNative` and `runs.Continue` using deterministic event/idempotency identity but no synthetic event sequence.
+- Implement the dormant unified manager for repository resolution, oldest-per-task ownership, starting/running lifecycle, retries, feedback coalescing, merge parking, GitHub reconciliation, and terminal completion, and prove behavior against the legacy managers.
+- Implement dormant `runs.AdmitNative` and `runs.Continue` paths using deterministic event/idempotency identity but no synthetic event sequence, and characterize them against native start/continuation synthetic invocations.
 - Preserve active ENG-47 session, segment, attempts, pin, delivery IDs, invocation causation, checkpoint, and completion fields through fixture and live-shape migration.
-- Delete `triggerrouter.Manager`, invocation transition/reflection APIs, `EnsureInvocationRun`, duplicated `IssueIdentifier` writes, `GenericTriggers`, and the old routing store after the canonical manager passes restart/fault tests.
+- Keep `triggerrouter.Manager`, invocation transition/reflection APIs, `EnsureInvocationRun`, duplicated `IssueIdentifier` writes, `GenericTriggers`, the old routing store, and every marker-producing admission path authoritative in production until the single Phase 4 activation-bound composition change.
 
 Focused checks: all old admission and Run manager/completion suites translated to one store; multi-match and suppression; rate/hop/cycle/global limits; routing transient/permanent failure; crash at every transition; duplicate/coalesced feedback; ready/post-merge/terminal rejection; exact G1-G8 negative matrix.
 
-### Phase 3: fold task operations into the task journal and delete event projections
+### Phase 3: implement and characterize dormant task and event owners
 
-- Add task `pending-unpublished`, `published`, `applied-result`, and `acknowledged` operations keyed by idempotency scope/hash, plus strict replay validation.
-- Replace stager/coordinator/dispatcher with one task submission/outbox API and one wire apply handler.
-- Add the task-outbox reconciler that republishes unpublished operations after startup/live transient failures, records authoritative event identity/sequence, reuses durable results, and cancels only with proof that publication never occurred. Acknowledgement waits for global dispatch, not merely the task apply handler.
+- Add dormant task `pending-unpublished`, `published`, `applied-result`, and `acknowledged` operations keyed by idempotency scope/hash, plus strict replay validation. Do not construct them from production startup, write a live canonical artifact, or replace a production caller in this phase.
+- Implement one dormant task submission/outbox API and one wire apply handler, and characterize them against the legacy stager/coordinator/dispatcher without replacing those production paths.
+- Implement the dormant task-outbox reconciler that republishes unpublished operations in disposable fault fixtures, records authoritative event identity/sequence, reuses durable results, and cancels only with proof that publication never occurred. Acknowledgement waits for global dispatch, not merely the task apply handler.
 - Require deployment migration to find no unaccounted staged file. Convert a valid pending file only when one exact pending wire record references it; otherwise fail.
 - Preserve task API response, replay flag, idempotency scope/hash, expected revision, entity IDs, human feedback continuation, gates, routing snapshot, and completion evidence.
 - Fold every Linear identifier/UUID binding into the canonical task artifact in the same generation transaction. Preserve exact one-to-one conflict rejection at webhook and provider lookup boundaries; do not reconstruct bindings only from retained tasks.
-- Delete `task-operations/` runtime creation and staging code after fault-injection tests pass.
-- Migrate `linear-activity.json` into the canonical event activity projection without changing its lifetime total, retained order, delivery IDs, or pruning semantics. Copy its retained private payload files into the canonical corpus with `0600` modes and exact hash/reference validation. Historical authenticated detail and project-setup replay read that owner; bodies never enter the global wire or logs.
-- Delete GitHub/Linear journal implementations, store interfaces, startup open/seed, dispatch mirror writes, and provider journal tests. Keep hook event parsing and unified-wire helper adapters. Activity and private payload state are distinct from those deletable provider projections.
-- Remove the unreachable direct label claim path and build label event metadata only once for generic admission.
+- Keep `task-operations/` runtime creation and staging code authoritative until Phase 4; prove the dormant replacement with fault injection.
+- Implement pure conversion of `linear-activity.json` into the canonical event activity projection without changing its lifetime total, retained order, delivery IDs, or pruning semantics. Copy retained private payload files only inside disposable conversion fixtures, with `0600` modes and exact hash/reference validation. Characterize historical authenticated detail and project-setup replay against that dormant owner; bodies never enter the global wire or logs.
+- Keep GitHub/Linear journal implementations, store interfaces, startup open/seed, dispatch mirror writes, provider journal tests, and the unreachable direct label claim path unchanged in production until Phase 4. Characterize the provider projections, unified-wire helper adapters, and single-build generic label metadata without deleting or moving a live path.
 
 Focused checks: task command crash matrix; private-body scans; idempotent result replay; stale conflicts; human continuation; helper cursor golden tests; event-wire sequence/ack/reject/recovery; server webhook and GitHub remediation tests.
 
@@ -274,12 +274,14 @@ Focused checks: task command crash matrix; private-body scans; idempotent result
 
 - Move construction and recovery to `internal/app` with explicit dependency groups.
 - Complete the sibling generation build with every canonical converter/reader/writer, full cross-artifact validation, fsync, immutable audit hashes, receipt-gated atomic manifest activation, abandoned/interrupted-generation cleanup, and idempotent reopen. Mutable stores validate by replay rather than against their initial audit hashes.
+- At the one activation-bound composition change, replace production policy, repository, Run, task, activity, identity, and event callers with the selected canonical owners. Admission callbacks receive exactly one immutable policy snapshot and perform all policy-derived selection plus the durable admission append before returning; scheduler ticks and server views likewise project once per operation.
 - Add a supervisor for HTTP, unified Run manager, task outbox, repository onboarding, and clock work. Migration recovery and health identity may be served while advancing endpoints and managers remain gated. Canonical writes cannot begin until `deployments/current.json` is a successful receipt for the exact running deployment ID and the service acquires the unopposed state-transition lease.
 - Before the first post-receipt mutation, acquire the state-transition lease and then the provider's existing deployment lock. Revalidate the exact receipt, selected release, runtime artifact set, unchanged source hashes, and staged generation; recursively fsync the release/runtime/receipt graph and parent directories; write and fsync the exact provider-finalization acknowledgement; publish and fsync the manifest; fsync the monotonic `canonicalWritesStarted` boundary; and only then start advancing managers. Recovery and `state-rollback-preflight` use that boundary and acknowledgement to choose safe manifest deactivation versus proof-bounded whole-backup restoration.
 - Propagate component failure through cancellation and join all in-process loops and ephemeral subprocesses with bounded shutdown evidence. Never signal, kill, or join durable Run-owned `factory-agents` tmux sessions; reconcile them after restart.
 - Move schedules and heartbeat to one clock component.
 - Introduce the narrow atomic replacement primitive and migrate only stores whose byte/permission/sync behavior is identical under golden tests.
 - Move CLI parsing and agent helpers to `internal/cli`; keep the current helper command names required by retained workflow pins. Add generation-aware `state-rollback-preflight` and fail-closed `state-restore` commands and update `bin/network-app` to use the preflight.
+- In that same activation-bound change, replace `workflow-rollback-preflight`, then retire schema-1 settings migration/backup preflight, live rollback latches, the task-control store, legacy default registry seeding, project-setup persistence, legacy repository fallback, `triggerrouter.Manager` and routing storage, invocation compatibility APIs, task staging/runtime creation, provider projection journals, and their marker-producing admission paths only after selected-generation validation and all new rollback tests pass. Leave archival source and compatibility marker files on disk, but the selected canonical runtime no longer consults or updates them.
 - Reduce root `main` to command dispatch and `app.Run`.
 - Delete dead helpers and obsolete adapters after exact-call searches.
 
@@ -315,6 +317,7 @@ Focused checks: `rg` for obsolete paths/symbols, `go list` import boundaries, `g
 - Tests create and destroy only disposable state roots.
 - The production data root remains read-only during implementation and PR verification.
 - A migration dry-run reads a copied current-state fixture, never the live directory, and emits the manifest/audit comparison.
+- The dry run receives the exact pre-overlay compiled repository configuration as an explicit immutable input, exercises both canonical owner converters entirely in memory, and binds their schemas, prospective generation-1 digests, counts, and compiled-input digest into the audit. It writes no canonical artifact or selector.
 
 ### Deployment cutover
 
