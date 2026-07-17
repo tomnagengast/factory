@@ -60,7 +60,7 @@ func NewCatalog(state SourceState) (*Catalog, error) {
 	return &Catalog{index: index}, nil
 }
 
-func (c *Catalog) Replace(state SourceState) error {
+func (c *Catalog) replace(state SourceState) error {
 	index, err := buildIndex(state)
 	if err != nil {
 		return err
@@ -75,6 +75,16 @@ func (c *Catalog) Replace(state SourceState) error {
 }
 
 func validateReplacement(current, candidate catalogIndex) error {
+	if current.state.Generation == ^uint64(0) {
+		return errors.New("repository catalog: generation exhausted")
+	}
+	if candidate.state.Generation != current.state.Generation+1 {
+		return fmt.Errorf(
+			"repository catalog: generation is %d, want %d",
+			candidate.state.Generation,
+			current.state.Generation+1,
+		)
+	}
 	for repository, baseline := range current.compiledBaseline {
 		replacement, found := candidate.byRepository[repository]
 		if !found {

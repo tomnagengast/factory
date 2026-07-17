@@ -46,6 +46,9 @@ func TestConvertSourcesPreservesCompiledAndAdmittedRepositoryIdentity(t *testing
 	if err != nil {
 		t.Fatalf("ConvertSources: %v", err)
 	}
+	if state.Schema != SchemaVersion || state.Generation != 1 {
+		t.Fatalf("schema/generation = %d/%d", state.Schema, state.Generation)
+	}
 	if len(state.Records) != 3 || len(state.Awaiting) != 1 {
 		t.Fatalf("state = %#v", state)
 	}

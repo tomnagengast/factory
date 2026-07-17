@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const SchemaVersion = 1
+
 // CompiledSource is the caller-neutral shape of Factory's compiled repository
 // configuration. It intentionally lives here so the canonical owner never
 // imports the packages it will replace.
@@ -56,12 +58,17 @@ type AwaitingProject struct {
 }
 
 type SourceState struct {
-	Records  []Record          `json:"records"`
-	Awaiting []AwaitingProject `json:"awaiting,omitempty"`
+	Schema     int               `json:"schema"`
+	Generation uint64            `json:"generation"`
+	Records    []Record          `json:"records"`
+	Awaiting   []AwaitingProject `json:"awaiting,omitempty"`
 }
 
 func (s SourceState) Clone() SourceState {
-	clone := SourceState{Records: slices.Clone(s.Records), Awaiting: slices.Clone(s.Awaiting)}
+	clone := SourceState{
+		Schema: s.Schema, Generation: s.Generation,
+		Records: slices.Clone(s.Records), Awaiting: slices.Clone(s.Awaiting),
+	}
 	for index := range clone.Records {
 		clone.Records[index].Setup = cloneSetup(clone.Records[index].Setup)
 	}
@@ -72,7 +79,10 @@ func (s SourceState) Clone() SourceState {
 }
 
 func ConvertSources(compiled []CompiledSource, setups []SetupSource) (SourceState, error) {
-	state := SourceState{Records: make([]Record, 0, len(compiled)+len(setups))}
+	state := SourceState{
+		Schema: SchemaVersion, Generation: 1,
+		Records: make([]Record, 0, len(compiled)+len(setups)),
+	}
 	compiledByRepository := make(map[string]int, len(compiled))
 	for _, source := range compiled {
 		record, err := convertCompiled(source)
@@ -253,6 +263,12 @@ func convertSetupIdentity(source SetupSource) (ProjectIdentity, Setup, error) {
 }
 
 func validateSourceState(state SourceState) error {
+	if state.Schema != SchemaVersion {
+		return fmt.Errorf("repository catalog: schema is %d, want %d", state.Schema, SchemaVersion)
+	}
+	if state.Generation == 0 {
+		return errors.New("repository catalog: generation is required")
+	}
 	if len(state.Records) == 0 {
 		return errors.New("repository catalog: at least one repository is required")
 	}

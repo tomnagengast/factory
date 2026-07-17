@@ -202,7 +202,7 @@ func TestCatalogReplaceIsAtomicOnConflict(t *testing.T) {
 	duplicate := broken.Records[0]
 	duplicate.App = "other"
 	broken.Records = append(broken.Records, duplicate)
-	if err := catalog.Replace(broken); err == nil {
+	if err := replaceCatalog(catalog, broken); err == nil {
 		t.Fatal("Replace accepted duplicate repository")
 	}
 	if snapshot := catalog.Snapshot(); len(snapshot.Records) != 1 || snapshot.Records[0].Repository != "tomnagengast/factory" {
@@ -275,7 +275,7 @@ func TestCatalogReplacePreservesAdmittedIdentity(t *testing.T) {
 			if _, err := NewCatalog(candidate); err != nil {
 				t.Fatalf("candidate is independently invalid: %v", err)
 			}
-			if err := catalog.Replace(candidate); err == nil {
+			if err := replaceCatalog(catalog, candidate); err == nil {
 				t.Fatal("Replace accepted an admitted identity change")
 			}
 			if got := catalog.Snapshot(); !reflect.DeepEqual(got, initial) {
@@ -382,7 +382,7 @@ func TestCatalogReplacePreservesCompiledBaselineBeforeAndAfterProjectOverlay(t *
 					if _, err := NewCatalog(candidate); err != nil {
 						t.Fatalf("candidate is independently invalid: %v", err)
 					}
-					if err := catalog.Replace(candidate); err == nil {
+					if err := replaceCatalog(catalog, candidate); err == nil {
 						t.Fatal("Replace accepted a compiled baseline change")
 					} else {
 						assertPermanent(t, err)
@@ -414,7 +414,7 @@ func TestCatalogReplaceAllowsCompiledProjectSetupOverlay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := catalog.Replace(overlaid); err != nil {
+	if err := replaceCatalog(catalog, overlaid); err != nil {
 		t.Fatalf("initial project overlay: %v", err)
 	}
 
@@ -425,7 +425,7 @@ func TestCatalogReplaceAllowsCompiledProjectSetupOverlay(t *testing.T) {
 	record.Setup.State = SetupStatePending
 	record.Setup.ProviderCoordinated = false
 	record.Setup.UpdatedAt = now.Add(time.Minute)
-	if err := catalog.Replace(candidate); err != nil {
+	if err := replaceCatalog(catalog, candidate); err != nil {
 		t.Fatalf("project name, setup, and Cloud overlay: %v", err)
 	}
 
@@ -434,7 +434,7 @@ func TestCatalogReplaceAllowsCompiledProjectSetupOverlay(t *testing.T) {
 	record.CloudURL = "https://network-next.nags.cloud"
 	record.Setup.State = SetupStateSucceeded
 	record.Setup.ProviderCoordinated = true
-	if err := catalog.Replace(invalid); err == nil {
+	if err := replaceCatalog(catalog, invalid); err == nil {
 		t.Fatal("Replace accepted a coordinated Cloud URL change")
 	} else {
 		assertPermanent(t, err)
@@ -459,7 +459,7 @@ func TestCatalogReplaceRejectsCompiledCloudChangeBeforeProjectOverlay(t *testing
 	if _, err := NewCatalog(candidate); err != nil {
 		t.Fatalf("candidate is independently invalid: %v", err)
 	}
-	if err := catalog.Replace(candidate); err == nil {
+	if err := replaceCatalog(catalog, candidate); err == nil {
 		t.Fatal("Replace accepted a Cloud URL change without a project overlay")
 	} else {
 		assertPermanent(t, err)
@@ -484,7 +484,7 @@ func TestCatalogReplaceCloudChangeClearsProjectCoordination(t *testing.T) {
 
 	coordinated := initial.Clone()
 	recordForMutation(t, &coordinated, "tomnagengast/cellar").CloudURL = "https://cellar.nags.cloud"
-	if err := catalog.Replace(coordinated); err == nil {
+	if err := replaceCatalog(catalog, coordinated); err == nil {
 		t.Fatal("Replace accepted a coordinated project Cloud URL change")
 	} else {
 		assertPermanent(t, err)
@@ -496,7 +496,7 @@ func TestCatalogReplaceCloudChangeClearsProjectCoordination(t *testing.T) {
 	record.Setup.State = SetupStatePending
 	record.Setup.ProviderCoordinated = false
 	record.Setup.UpdatedAt = now.Add(time.Minute)
-	if err := catalog.Replace(pending); err != nil {
+	if err := replaceCatalog(catalog, pending); err != nil {
 		t.Fatalf("Replace project Cloud URL recoordination: %v", err)
 	}
 	if got, found := catalog.Record("tomnagengast/cellar"); !found || got.Routable() || got.CloudURL != "https://cellar.nags.cloud" {
@@ -558,7 +558,7 @@ func TestCatalogReplaceAllowsLegacySetupLifecycleProgression(t *testing.T) {
 	for index, transition := range transitions {
 		candidate := catalog.Snapshot()
 		transition(&candidate.Records[0])
-		if err := catalog.Replace(candidate); err != nil {
+		if err := replaceCatalog(catalog, candidate); err != nil {
 			t.Fatalf("transition %d: %v", index, err)
 		}
 	}
@@ -585,7 +585,7 @@ func TestCatalogReplacePreservesAndAdmitsAwaitingProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := catalog.Replace(deleted); err == nil {
+	if err := replaceCatalog(catalog, deleted); err == nil {
 		t.Fatal("Replace deleted an awaiting project")
 	}
 
@@ -597,7 +597,7 @@ func TestCatalogReplacePreservesAndAdmitsAwaitingProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := catalog.Replace(candidate); err != nil {
+	if err := replaceCatalog(catalog, candidate); err != nil {
 		t.Fatalf("Replace awaiting project admission: %v", err)
 	}
 	if got, found := catalog.Record("tomnagengast/cellar"); !found || got.Project.ID != awaiting.ProjectID || got.Setup.State != SetupStatePending {
@@ -676,6 +676,11 @@ func assertPermanent(t *testing.T, err error) {
 	if !errors.As(err, &classified) || !classified.Permanent() {
 		t.Fatalf("error is not permanent: %v", err)
 	}
+}
+
+func replaceCatalog(catalog *Catalog, state SourceState) error {
+	state.Generation = catalog.Snapshot().Generation + 1
+	return catalog.replace(state)
 }
 
 func recordForMutation(t *testing.T, state *SourceState, repository string) *Record {
