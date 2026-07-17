@@ -66,7 +66,7 @@ func DryRun(root string, options Options) (DryRunReport, error) {
 			"taskControl": state.taskControl.Version, "linearIdentities": state.identities.Version,
 			"workflowDrafts": state.drafts.Schema, "triggerCursors": state.cursors.Schema,
 			"agentEventCursors": state.agentCursors.Version, "githubEvents": state.githubEvents.Version,
-			"linearComments": state.linearComments.Version,
+			"linearComments": state.linearComments.Version, "taskCompatibility": state.taskBoundary.Version,
 		},
 		RetainedTotals: totals,
 	}

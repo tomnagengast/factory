@@ -22,6 +22,7 @@ import (
 	"github.com/tomnagengast/factory/internal/linearhook"
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/taskcompat"
 	"github.com/tomnagengast/factory/internal/taskcontrol"
 	"github.com/tomnagengast/factory/internal/taskstore"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
@@ -123,6 +124,7 @@ type sourceState struct {
 	agentCursors   agentCursorState
 	githubEvents   githubState
 	linearComments linearState
+	taskBoundary   taskcompat.Marker
 	payloadHashes  map[string]string
 	hashes         []SourceHash
 	directories    []SourceDirectory
@@ -278,6 +280,12 @@ func readSources(root string, options Options) (sourceState, error) {
 	}
 	if err := validateProviderJournal(state.linearComments.Version, state.linearComments.Total, linearSequences(state.linearComments.Events)); err != nil {
 		return sourceState{}, fmt.Errorf("migration: Linear journal: %w", err)
+	}
+	if err := decodeFile(root, "task-source-neutral.json", &state.taskBoundary); err != nil {
+		return sourceState{}, err
+	}
+	if state.taskBoundary.Version != 1 || state.taskBoundary.Boundary != "source-neutral-task-v1" || state.taskBoundary.CrossedAt.IsZero() {
+		return sourceState{}, errors.New("migration: invalid task compatibility boundary")
 	}
 	if err := ensureEmptyStages(root); err != nil {
 		return sourceState{}, err
