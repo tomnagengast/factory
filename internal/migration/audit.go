@@ -26,8 +26,39 @@ func DryRun(root string, options Options) (DryRunReport, error) {
 	if err != nil {
 		return DryRunReport{}, err
 	}
+	rootDigest, err := digestJSON(struct {
+		Files       []SourceHash      `json:"files"`
+		Directories []SourceDirectory `json:"directories"`
+	}{Files: state.hashes, Directories: state.directories})
+	if err != nil {
+		return DryRunReport{}, err
+	}
+	// Migration identity must exist before canonical Runs evidence because the
+	// immutable Runs receipt binds it. Audit evidence is bound later by the
+	// manifest and report; it is deliberately not an input to this identity.
+	migrationID := preAuditMigrationID(rootDigest)
 	canonical, err := convertCanonicalSources(state, options)
 	if err != nil {
+		return DryRunReport{}, err
+	}
+	if err := inject(options, "before-runs-conversion"); err != nil {
+		return DryRunReport{}, err
+	}
+	runSnapshot, runMetrics, err := convertRunSources(state, canonical, migrationID, rootDigest)
+	if err != nil {
+		return DryRunReport{}, err
+	}
+	if err := inject(options, "after-runs-conversion"); err != nil {
+		return DryRunReport{}, err
+	}
+	if err := inject(options, "before-runs-evidence"); err != nil {
+		return DryRunReport{}, err
+	}
+	canonical.Runs, err = canonicalRunsEvidence(runSnapshot, runMetrics)
+	if err != nil {
+		return DryRunReport{}, err
+	}
+	if err := inject(options, "after-runs-evidence"); err != nil {
 		return DryRunReport{}, err
 	}
 	if err := inject(options, "before-audit"); err != nil {
@@ -55,14 +86,6 @@ func DryRun(root string, options Options) (DryRunReport, error) {
 	if !slices.Equal(state.hashes, secondHashes) || !slices.Equal(state.directories, secondDirectories) {
 		return DryRunReport{}, errors.New("migration: source changed during dry run")
 	}
-	rootDigest, err := digestJSON(struct {
-		Files       []SourceHash      `json:"files"`
-		Directories []SourceDirectory `json:"directories"`
-	}{Files: state.hashes, Directories: state.directories})
-	if err != nil {
-		return DryRunReport{}, err
-	}
-	migrationID := "migration-" + rootDigest[:16] + "-" + auditDigest[:16]
 	registrySchema := 0
 	if state.registryPresent {
 		registrySchema = state.registry.Schema
@@ -111,7 +134,9 @@ func VerifyDryRun(root string, options Options, report DryRunReport) error {
 	if err != nil {
 		return err
 	}
-	if observed.Manifest.SourceRootDigest != report.Manifest.SourceRootDigest || observed.AuditDigest != report.AuditDigest || !slices.Equal(observed.Manifest.Sources, report.Manifest.Sources) || !slices.Equal(observed.Manifest.Directories, report.Manifest.Directories) {
+	if observed.Manifest.MigrationID != report.Manifest.MigrationID || observed.Manifest.SourceRootDigest != report.Manifest.SourceRootDigest ||
+		observed.AuditDigest != report.AuditDigest || !slices.Equal(observed.Manifest.Sources, report.Manifest.Sources) ||
+		!slices.Equal(observed.Manifest.Directories, report.Manifest.Directories) {
 		return errors.New("migration: source or audit evidence changed")
 	}
 	return nil
@@ -210,27 +235,6 @@ func auditSources(state sourceState, canonical canonicalEvidence) (Audit, map[st
 		}
 		runs[run.ID] = run
 	}
-	for _, invocation := range invocations {
-		if invocation.RunID == "" {
-			if invocation.State != triggerrouter.StateQueued {
-				return Audit{}, nil, fmt.Errorf("migration: invocation %s is missing a Run", invocation.ID)
-			}
-			continue
-		}
-		run, found := runs[invocation.RunID]
-		if !found {
-			return Audit{}, nil, fmt.Errorf("migration: invocation %s references a missing Run", invocation.ID)
-		}
-		if run.InvocationID != invocation.ID || !run.Task.Equal(invocation.Task) || run.PinnedWorkflowDigest != invocation.WorkflowDigest || run.PinnedPolicyRevision != invocation.PolicyRevision {
-			return Audit{}, nil, fmt.Errorf("migration: invocation %s and Run %s disagree", invocation.ID, run.ID)
-		}
-	}
-	for _, run := range runs {
-		if err := validateRunInvocation(run, invocations); err != nil {
-			return Audit{}, nil, err
-		}
-	}
-
 	bindingsByIdentifier := make(map[string]string, len(state.identities.Bindings))
 	bindingsByUUID := make(map[string]string, len(state.identities.Bindings))
 	for _, binding := range state.identities.Bindings {
@@ -308,6 +312,7 @@ func auditSources(state sourceState, canonical canonicalEvidence) (Audit, map[st
 		AgentEventCursors:             uint64(len(state.agentCursors.Offsets)),
 		CompiledRepositoryInputDigest: canonical.CompiledRepositoryInputDigest,
 		CanonicalPolicy:               canonical.Policy, CanonicalRepositories: canonical.Repositories,
+		CanonicalRuns: canonical.Runs,
 		TargetSchemas: canonical.TargetSchemas,
 	}
 	totals := map[string]uint64{

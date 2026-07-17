@@ -3,10 +3,12 @@ package migration
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -72,10 +74,13 @@ func TestDryRunCharacterizesCurrentShapeWithoutActivation(t *testing.T) {
 	if !slices.Equal(beforeDirectories, afterDirectories) {
 		t.Fatal("dry run changed source directories")
 	}
-	if report.Schema != 2 || report.Activates || report.Manifest.Schema != 2 || report.Backup.Schema != 1 {
+	if report.Schema != 3 || report.Activates || report.Manifest.Schema != 3 || report.Backup.Schema != 1 {
 		t.Fatalf("activating or invalid report: %#v", report)
 	}
-	if report.Manifest.TargetSchemas != (TargetSchemas{Policy: 1, Repositories: 1}) || report.Audit.TargetSchemas != report.Manifest.TargetSchemas {
+	if report.Manifest.MigrationID != "migration-739285404f873b4621049f0e909b0432" {
+		t.Fatalf("pre-audit migration ID = %s", report.Manifest.MigrationID)
+	}
+	if report.Manifest.TargetSchemas != (TargetSchemas{Policy: 1, Repositories: 1, Runs: 3}) || report.Audit.TargetSchemas != report.Manifest.TargetSchemas {
 		t.Fatalf("target schemas = manifest %#v audit %#v", report.Manifest.TargetSchemas, report.Audit.TargetSchemas)
 	}
 	if report.Audit.Decisions != 1 || report.Audit.Invocations != 1 || report.Audit.Runs != 1 || report.Audit.ActiveRuns != 1 || report.Audit.WorkflowPins != 1 {
@@ -98,11 +103,19 @@ func TestDryRunCharacterizesCurrentShapeWithoutActivation(t *testing.T) {
 		repositoryAudit.Admitted != 1 || repositoryAudit.Awaiting != 0 || repositoryAudit.Routable != 1 {
 		t.Fatalf("canonical repository audit = %#v", repositoryAudit)
 	}
+	runsAudit := report.Audit.CanonicalRuns
+	if runsAudit.Schema != 3 || runsAudit.SourceDecisions != 1 || runsAudit.SourceInvocations != 1 || runsAudit.SourceRunsRetained != 1 ||
+		runsAudit.LinkedPairs != 1 || runsAudit.SynthesizedRuns != 0 || runsAudit.DirectRuns != 0 || runsAudit.TransitionReceipts != 4 ||
+		runsAudit.CanonicalBatchesRetained != 1 || runsAudit.CanonicalBatchesLifetime != 1 || !runsAudit.BatchLifetimeMigrationBaseline ||
+		runsAudit.CanonicalRunsRetained != 1 || runsAudit.CanonicalRunsLifetime != 1 || runsAudit.CanonicalRateBuckets != 1 {
+		t.Fatalf("canonical Runs audit = %#v", runsAudit)
+	}
 	if report.Audit.CompiledRepositoryInputDigest != "520744fb78f49dc36b45cf4b8d38efeeb72049a7f775ab9e04177b29981ff8cf" ||
 		policyAudit.Digest != "e3132827aa4041394ba294fd59d521263313f9e60120de968083dbdf86f97e20" ||
 		repositoryAudit.Digest != "cf98d2b7b573d66a1b051dc9e81fc587262c7a10bd77abfdda648adf9b6c16eb" ||
-		report.AuditDigest != "dcd47255dce5e81f85e7cf8729682f6a694e1d6f6c44f7bf3676048981aa4eae" {
-		t.Fatalf("canonical digests = compiled %s policy %s repositories %s audit %s", report.Audit.CompiledRepositoryInputDigest, policyAudit.Digest, repositoryAudit.Digest, report.AuditDigest)
+		runsAudit.Digest != "2ec1bd5d887c4c057e6e55c4b2217a85606d8bc104a0e9320f7193f0a5fc6d4c" ||
+		report.AuditDigest != "5389d5650c955dbde1524c55ea404be944cf0ce9781bdd73087875753bd75193" {
+		t.Fatalf("canonical digests = compiled %s policy %s repositories %s Runs %s audit %s", report.Audit.CompiledRepositoryInputDigest, policyAudit.Digest, repositoryAudit.Digest, runsAudit.Digest, report.AuditDigest)
 	}
 	auditJSON, err := json.Marshal(report.Audit)
 	if err != nil {
@@ -262,7 +275,8 @@ func TestDryRunFailureInjection(t *testing.T) {
 	for _, point := range []string{
 		"before-hash", "hash:settings.json", "after-hash", "before-decode", "read:settings.json", "after-decode",
 		"before-policy-conversion", "after-policy-conversion", "before-repository-conversion", "after-repository-conversion",
-		"before-canonical-evidence", "after-canonical-evidence", "before-audit", "after-audit", "report", "after-report",
+		"before-canonical-evidence", "after-canonical-evidence", "before-runs-conversion", "after-runs-conversion",
+		"before-runs-evidence", "after-runs-evidence", "before-audit", "after-audit", "report", "after-report",
 	} {
 		point := point
 		t.Run(point, func(t *testing.T) {
@@ -372,12 +386,12 @@ func TestDryRunRejectsAmbiguousCrossArtifactState(t *testing.T) {
 			mutateJSON(t, root, "settings.json", func(value map[string]any) { value["schema"] = 99.0 })
 		}, want: "schema"},
 		{name: "custom reserved workflow", mutate: customReservedWorkflow, want: "reserved workflow"},
-		{name: "duplicate active task", mutate: duplicateActiveRun, want: "duplicate active task"},
+		{name: "duplicate active task", mutate: duplicateActiveRun, want: "active Run"},
 		{name: "duplicate identifier", mutate: func(t *testing.T, root string) { duplicateBinding(t, root, true, false) }, want: "duplicate Linear identifier"},
 		{name: "duplicate UUID", mutate: func(t *testing.T, root string) { duplicateBinding(t, root, false, true) }, want: "duplicate Linear UUID"},
 		{name: "orphan invocation", mutate: orphanInvocation, want: "orphan"},
-		{name: "missing Run", mutate: missingRun, want: "missing Run"},
-		{name: "conflicting route", mutate: conflictingRoute, want: "conflicting repository route"},
+		{name: "missing Run", mutate: missingRun, want: "missing its Run"},
+		{name: "conflicting route", mutate: conflictingRoute, want: "not exactly admitted"},
 		{name: "incomplete stage", mutate: incompleteStage, want: "incomplete native task stage"},
 		{name: "missing payload", mutate: missingPayload, want: "missing private payload"},
 		{name: "orphan payload", mutate: orphanPayload, want: "orphan private payload"},
@@ -460,6 +474,18 @@ func TestDryRunDetectsAlteredSourceAndAuditEvidence(t *testing.T) {
 			t.Fatalf("altered audit error = %v", err)
 		}
 	})
+	t.Run("pre-audit migration identity", func(t *testing.T) {
+		root := copyGolden(t)
+		report, err := DryRun(root, testOptions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		report.Manifest.MigrationID = "migration-altered"
+		report.Backup.MigrationID = report.Manifest.MigrationID
+		if err := VerifyDryRun(root, testOptions(), report); err == nil || !strings.Contains(err.Error(), "source root") {
+			t.Fatalf("altered migration identity error = %v", err)
+		}
+	})
 	t.Run("Linear mapping after audit", func(t *testing.T) {
 		root := copyGolden(t)
 		report, err := DryRun(root, testOptions())
@@ -496,7 +522,7 @@ func TestDryRunDetectsAlteredSourceAndAuditEvidence(t *testing.T) {
 func assertNoCanonicalState(t *testing.T, root string) {
 	t.Helper()
 	for _, name := range []string{
-		"policy.json", "repositories.json", "generation-manifest.json", "state-generation.json",
+		"policy.json", "repositories.json", "runs.jsonl", "generation-manifest.json", "state-generation.json",
 		"canonicalWritesStarted", "canonical-writes-started", "generations",
 	} {
 		if _, err := os.Stat(filepath.Join(root, name)); !errors.Is(err, os.ErrNotExist) {
@@ -812,6 +838,39 @@ func generateGolden(root string) error {
 	if err := runStore.MarkAwaitingMerge(run.ID, ready, fixtureNow.Add(time.Hour), 1, fixtureNow.Add(7*time.Second)); err != nil {
 		return err
 	}
+	retainedRuns := runStore.Snapshot().Runs
+	if len(retainedRuns) != 1 {
+		return fmt.Errorf("generated Run fixture retained %d Runs", len(retainedRuns))
+	}
+	lastWireSequence := record.Sequence
+	for _, transition := range retainedRuns[0].Transitions {
+		transitionRecord, _, addErr := wireJournal.Add(eventwire.Event{
+			ID:      "factory:run-transition:" + transition.ID,
+			Source:  eventwire.SourceFactory,
+			Type:    "agent-run",
+			Action:  string(transition.State),
+			Subject: retainedRuns[0].IssueIdentifier,
+			Attributes: map[string][]string{
+				"runId":                       {retainedRuns[0].ID},
+				"attempts":                    {strconv.Itoa(transition.Attempts)},
+				"taskSource":                  {string(retainedRuns[0].Task.Source)},
+				"taskProviderId":              {retainedRuns[0].Task.ProviderID},
+				"taskIdentifier":              {retainedRuns[0].Task.Identifier},
+				eventwire.AttributeProducer:   {"agent-collector"},
+				eventwire.AttributeProvenance: {"factory"},
+			},
+			RootEventID:        retainedRuns[0].InvocationRootEventID,
+			ParentInvocationID: retainedRuns[0].InvocationID,
+			ParentRunID:        retainedRuns[0].ID,
+			Hop:                retainedRuns[0].InvocationHop,
+			AncestorRuleIDs:    slices.Clone(retainedRuns[0].InvocationAncestorRuleIDs),
+			ReceivedAt:         transition.At,
+		})
+		if addErr != nil {
+			return addErr
+		}
+		lastWireSequence = transitionRecord.Sequence
+	}
 
 	tasks, err := taskstore.Open(filepath.Join(root, "native-tasks.jsonl"))
 	if err != nil {
@@ -890,7 +949,7 @@ func generateGolden(root string) error {
 	if err := writeGoldenJSON(filepath.Join(root, "linear-comments.json"), linearState{Version: 1, Events: []linearRecord{}}); err != nil {
 		return err
 	}
-	if err := wireJournal.Acknowledge(record.Sequence, map[string]uint64{"linear": 1}); err != nil {
+	if err := wireJournal.Acknowledge(lastWireSequence, map[string]uint64{"linear": 1}); err != nil {
 		return err
 	}
 	marker := map[string]any{"version": 1, "boundary": "source-neutral-task-v1", "crossedAt": fixtureNow}

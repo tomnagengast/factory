@@ -9,6 +9,7 @@ import (
 	"github.com/tomnagengast/factory/internal/policy"
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/repositories"
+	"github.com/tomnagengast/factory/internal/runs"
 	"github.com/tomnagengast/factory/internal/triggerregistry"
 )
 
@@ -16,7 +17,10 @@ type canonicalEvidence struct {
 	CompiledRepositoryInputDigest string
 	Policy                        CanonicalPolicyAudit
 	Repositories                  CanonicalRepositoryAudit
+	Runs                          CanonicalRunsAudit
 	TargetSchemas                 TargetSchemas
+	policySnapshot                policy.Snapshot
+	repositoryState               repositories.SourceState
 }
 
 func convertCanonicalSources(state sourceState, options Options) (canonicalEvidence, error) {
@@ -103,8 +107,10 @@ func convertCanonicalSources(state sourceState, options Options) (canonicalEvide
 			Rules: uint64(len(policyRegistry.Rules)), Schedules: uint64(len(policyRegistry.Schedules)),
 			EnabledProjects: uint64(len(policyControl.EnabledProjectIDs)),
 		},
-		Repositories:  repositoryAudit(repositorySnapshot, repositoryDigest),
-		TargetSchemas: TargetSchemas{Policy: policy.SchemaVersion, Repositories: repositories.SchemaVersion},
+		Repositories:    repositoryAudit(repositorySnapshot, repositoryDigest),
+		TargetSchemas:   TargetSchemas{Policy: policy.SchemaVersion, Repositories: repositories.SchemaVersion, Runs: runs.SchemaVersion},
+		policySnapshot:  policySnapshot,
+		repositoryState: repositorySnapshot,
 	}
 	if err := inject(options, "after-canonical-evidence"); err != nil {
 		return canonicalEvidence{}, err

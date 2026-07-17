@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	manifestSchema      = 2
+	manifestSchema      = 3
 	backupReceiptSchema = 1
-	dryRunReportSchema  = 2
+	dryRunReportSchema  = 3
 )
 
 // SourceHash is immutable evidence for one source artifact observed by a dry run.
@@ -53,10 +53,11 @@ type BackupReceipt struct {
 }
 
 // TargetSchemas declares the prospective canonical artifacts proven by the
-// dry run. The harness reports these values but never creates either artifact.
+// dry run. The harness reports these values but never creates the artifacts.
 type TargetSchemas struct {
 	Policy       int `json:"policy"`
 	Repositories int `json:"repositories"`
+	Runs         int `json:"runs"`
 }
 
 type CanonicalPolicyAudit struct {
@@ -82,6 +83,52 @@ type CanonicalRepositoryAudit struct {
 	Admitted   uint64 `json:"admitted"`
 	Awaiting   uint64 `json:"awaiting"`
 	Routable   uint64 `json:"routable"`
+}
+
+// CanonicalRunsAudit is body-free evidence for the complete legacy-to-Runs
+// conversion. Source and canonical counts remain separate because legacy
+// pruning makes their lifetime conventions intentionally different.
+type CanonicalRunsAudit struct {
+	Schema               int    `json:"schema"`
+	Digest               string `json:"digest"`
+	MigrationOperationID string `json:"migrationOperationId"`
+
+	SourceDecisions        uint64 `json:"sourceDecisions"`
+	SourceInvocations      uint64 `json:"sourceInvocations"`
+	SourceRateBuckets      uint64 `json:"sourceRateBuckets"`
+	SourceRunsRetained     uint64 `json:"sourceRunsRetained"`
+	SourceRunsLifetime     uint64 `json:"sourceRunsLifetime"`
+	SourceDecisionDigest   string `json:"sourceDecisionDigest"`
+	SourceInvocationDigest string `json:"sourceInvocationDigest"`
+	SourceRateDigest       string `json:"sourceRateDigest"`
+	SourceRunDigest        string `json:"sourceRunDigest"`
+
+	LinkedPairs             uint64 `json:"linkedPairs"`
+	LinkedPairDigest        string `json:"linkedPairDigest"`
+	SynthesizedRuns         uint64 `json:"synthesizedRuns"`
+	SynthesizedRunDigest    string `json:"synthesizedRunDigest"`
+	DirectRuns              uint64 `json:"directRuns"`
+	DirectRunDigest         string `json:"directRunDigest"`
+	TransitionReceipts      uint64 `json:"transitionReceipts"`
+	TransitionReceiptDigest string `json:"transitionReceiptDigest"`
+	ReflectionReceipts      uint64 `json:"reflectionReceipts"`
+	ReflectionReceiptDigest string `json:"reflectionReceiptDigest"`
+	ActiveOwnership         uint64 `json:"activeOwnership"`
+	ActiveOwnershipDigest   string `json:"activeOwnershipDigest"`
+	WorkflowPins            uint64 `json:"workflowPins"`
+	WorkflowPinDigest       string `json:"workflowPinDigest"`
+	RepositoryRoutes        uint64 `json:"repositoryRoutes"`
+	RepositoryRouteDigest   string `json:"repositoryRouteDigest"`
+
+	CanonicalBatchesRetained       uint64 `json:"canonicalBatchesRetained"`
+	CanonicalBatchesLifetime       uint64 `json:"canonicalBatchesLifetime"`
+	BatchLifetimeMigrationBaseline bool   `json:"batchLifetimeMigrationBaseline"`
+	CanonicalRunsRetained          uint64 `json:"canonicalRunsRetained"`
+	CanonicalRunsLifetime          uint64 `json:"canonicalRunsLifetime"`
+	CanonicalRateBuckets           uint64 `json:"canonicalRateBuckets"`
+	CanonicalBatchDigest           string `json:"canonicalBatchDigest"`
+	CanonicalRunDigest             string `json:"canonicalRunDigest"`
+	CanonicalRateDigest            string `json:"canonicalRateDigest"`
 }
 
 // Audit is a body-free, deterministic cross-artifact characterization.
@@ -118,6 +165,7 @@ type Audit struct {
 	CompiledRepositoryInputDigest string                   `json:"compiledRepositoryInputDigest"`
 	CanonicalPolicy               CanonicalPolicyAudit     `json:"canonicalPolicy"`
 	CanonicalRepositories         CanonicalRepositoryAudit `json:"canonicalRepositories"`
+	CanonicalRuns                 CanonicalRunsAudit       `json:"canonicalRuns"`
 	TargetSchemas                 TargetSchemas            `json:"targetSchemas"`
 }
 
@@ -136,13 +184,16 @@ func (m MigrationManifest) validate() error {
 	if m.Schema != manifestSchema || m.MigrationID == "" || m.ObservedAt.IsZero() || m.SourceRootDigest == "" || m.AuditDigest == "" || len(m.Sources) == 0 || len(m.Directories) == 0 {
 		return errors.New("migration: invalid manifest identity")
 	}
+	if m.MigrationID != preAuditMigrationID(m.SourceRootDigest) {
+		return errors.New("migration: manifest migration identity conflicts with its source root")
+	}
 	if !slices.IsSortedFunc(m.Sources, func(a, b SourceHash) int { return compare(a.Path, b.Path) }) {
 		return errors.New("migration: manifest sources are not canonical")
 	}
 	if err := validateHashes(m.Sources); err != nil {
 		return err
 	}
-	if m.TargetSchemas.Policy <= 0 || m.TargetSchemas.Repositories <= 0 {
+	if m.TargetSchemas.Policy <= 0 || m.TargetSchemas.Repositories <= 0 || m.TargetSchemas.Runs <= 0 {
 		return errors.New("migration: target schemas are required")
 	}
 	return validateDirectories(m.Directories)
@@ -178,18 +229,40 @@ func (r DryRunReport) validate() error {
 }
 
 func (a Audit) validate() error {
-	if len(a.CompiledRepositoryInputDigest) != 64 || len(a.CanonicalPolicy.Digest) != 64 || len(a.CanonicalRepositories.Digest) != 64 {
+	if len(a.CompiledRepositoryInputDigest) != 64 || len(a.CanonicalPolicy.Digest) != 64 || len(a.CanonicalRepositories.Digest) != 64 ||
+		len(a.CanonicalRuns.Digest) != 64 || len(a.CanonicalRuns.MigrationOperationID) != 64 {
 		return errors.New("migration: canonical audit digests are invalid")
 	}
-	if a.TargetSchemas.Policy <= 0 || a.TargetSchemas.Repositories <= 0 ||
+	if a.TargetSchemas.Policy <= 0 || a.TargetSchemas.Repositories <= 0 || a.TargetSchemas.Runs <= 0 ||
 		a.CanonicalPolicy.Schema != a.TargetSchemas.Policy ||
-		a.CanonicalRepositories.Schema != a.TargetSchemas.Repositories {
+		a.CanonicalRepositories.Schema != a.TargetSchemas.Repositories ||
+		a.CanonicalRuns.Schema != a.TargetSchemas.Runs {
 		return errors.New("migration: canonical audit schemas disagree")
 	}
 	if a.CanonicalPolicy.Generation == 0 || a.CanonicalRepositories.Generation == 0 ||
 		!a.CanonicalPolicy.CompatibilityValidated || a.CanonicalPolicy.Workflows == 0 ||
 		a.CanonicalRepositories.Compiled == 0 {
 		return errors.New("migration: canonical audit evidence is incomplete")
+	}
+	for _, digest := range []string{
+		a.CanonicalRuns.SourceDecisionDigest, a.CanonicalRuns.SourceInvocationDigest,
+		a.CanonicalRuns.SourceRateDigest, a.CanonicalRuns.SourceRunDigest,
+		a.CanonicalRuns.LinkedPairDigest, a.CanonicalRuns.SynthesizedRunDigest,
+		a.CanonicalRuns.DirectRunDigest, a.CanonicalRuns.TransitionReceiptDigest,
+		a.CanonicalRuns.ReflectionReceiptDigest, a.CanonicalRuns.ActiveOwnershipDigest,
+		a.CanonicalRuns.WorkflowPinDigest, a.CanonicalRuns.RepositoryRouteDigest,
+		a.CanonicalRuns.CanonicalBatchDigest, a.CanonicalRuns.CanonicalRunDigest,
+		a.CanonicalRuns.CanonicalRateDigest,
+	} {
+		if len(digest) != 64 {
+			return errors.New("migration: canonical Runs audit digests are invalid")
+		}
+	}
+	if !a.CanonicalRuns.BatchLifetimeMigrationBaseline ||
+		a.CanonicalRuns.SourceRunsLifetime < a.CanonicalRuns.SourceRunsRetained ||
+		a.CanonicalRuns.CanonicalBatchesLifetime != a.CanonicalRuns.CanonicalBatchesRetained ||
+		a.CanonicalRuns.CanonicalRunsLifetime < a.CanonicalRuns.CanonicalRunsRetained {
+		return errors.New("migration: canonical Runs audit totals are invalid")
 	}
 	return nil
 }
