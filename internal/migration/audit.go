@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/agentrun"
+	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/projectsetup"
 	"github.com/tomnagengast/factory/internal/taskmodel"
 	"github.com/tomnagengast/factory/internal/taskstore"
@@ -123,23 +124,35 @@ func auditSources(state sourceState) (Audit, map[string]uint64, error) {
 
 	invocations := make(map[string]triggerrouter.Invocation, len(state.routing.Invocations))
 	referencedInvocations := make(map[string]bool, len(state.routing.Invocations))
+	nativeTasks := make(map[string]taskstore.Task, len(state.tasks.Tasks))
+	for _, task := range state.tasks.Tasks {
+		nativeTasks[task.Ref.OwnershipKey()] = task
+	}
 	for _, invocation := range state.routing.Invocations {
 		if invocation.ID == "" || invocations[invocation.ID].ID != "" {
 			return Audit{}, nil, errors.New("migration: duplicate invocation")
 		}
-		if wireByID[invocation.EventID] != invocation.EventSequence {
+		if legacyNativeInvocation(invocation) {
+			task, found := nativeTasks[invocation.Task.OwnershipKey()]
+			if !found || task.Routing == nil || task.Routing.WorkflowDigest != invocation.WorkflowDigest {
+				return Audit{}, nil, fmt.Errorf("migration: native invocation %s has no matching routed task", invocation.ID)
+			}
+		} else if wireByID[invocation.EventID] != invocation.EventSequence {
 			return Audit{}, nil, fmt.Errorf("migration: invocation %s has an invalid event sequence", invocation.ID)
 		}
 		if invocation.PolicyRevision == 0 || invocation.PolicyRevision > state.settings.Revision {
 			return Audit{}, nil, fmt.Errorf("migration: invocation %s has an invalid policy revision", invocation.ID)
 		}
-		if err := auditPinned(invocation.Workflow, invocation.WorkflowDigest); err != nil {
+		if err := auditPinned(invocation.Workflow, invocation.WorkflowDigest, invocation.Nonterminal()); err != nil {
 			return Audit{}, nil, fmt.Errorf("migration: invocation %s: %w", invocation.ID, err)
 		}
 		invocations[invocation.ID] = invocation
 	}
 	for _, decision := range state.routing.Decisions {
-		if wireByID[decision.EventID] != decision.EventSequence || decision.SettingsRevision == 0 || decision.SettingsRevision > state.settings.Revision || decision.RegistryRevision > state.registry.Revision {
+		if !legacyNativeDecision(decision, invocations) && wireByID[decision.EventID] != decision.EventSequence {
+			return Audit{}, nil, fmt.Errorf("migration: decision %s has invalid event causation", decision.EventID)
+		}
+		if decision.SettingsRevision == 0 || decision.SettingsRevision > state.settings.Revision || decision.RegistryRevision > state.registry.Revision {
 			return Audit{}, nil, fmt.Errorf("migration: decision %s has invalid event or policy causation", decision.EventID)
 		}
 		for _, outcome := range decision.Outcomes {
@@ -159,7 +172,6 @@ func auditSources(state sourceState) (Audit, map[string]uint64, error) {
 
 	runs := make(map[string]agentrun.Run, len(state.runs.Runs))
 	activeTasks := make(map[string]string)
-	linearIdentifiers := make(map[string]bool)
 	workflowPins := uint64(0)
 	repositoryRoutes := uint64(0)
 	active := uint64(0)
@@ -178,17 +190,14 @@ func auditSources(state sourceState) (Audit, map[string]uint64, error) {
 			activeTasks[key] = run.ID
 			active++
 		}
-		if run.Task.Source == taskmodel.SourceLinear {
-			linearIdentifiers[run.Task.Identifier] = true
-		}
 		if run.PinnedWorkflow != nil {
-			if err := auditPinned(*run.PinnedWorkflow, run.PinnedWorkflowDigest); err != nil {
+			if err := auditPinned(*run.PinnedWorkflow, run.PinnedWorkflowDigest, run.State.Nonterminal()); err != nil {
 				return Audit{}, nil, fmt.Errorf("migration: Run %s: %w", run.ID, err)
 			}
 			workflowPins++
 		}
 		if run.Repository != "" {
-			if err := validateRunRoute(run, state.projects.Entries); err != nil {
+			if err := validateRunRoute(run, state.projects.Entries, run.State.Nonterminal()); err != nil {
 				return Audit{}, nil, err
 			}
 			repositoryRoutes++
@@ -211,11 +220,8 @@ func auditSources(state sourceState) (Audit, map[string]uint64, error) {
 		}
 	}
 	for _, run := range runs {
-		if run.InvocationID != "" {
-			invocation, found := invocations[run.InvocationID]
-			if !found || invocation.RunID != run.ID {
-				return Audit{}, nil, fmt.Errorf("migration: Run %s has no matching invocation", run.ID)
-			}
+		if err := validateRunInvocation(run, invocations); err != nil {
+			return Audit{}, nil, err
 		}
 	}
 
@@ -236,12 +242,6 @@ func auditSources(state sourceState) (Audit, map[string]uint64, error) {
 		bindingsByIdentifier[identifier] = uuid
 		bindingsByUUID[uuid] = identifier
 	}
-	for identifier := range linearIdentifiers {
-		if bindingsByIdentifier[identifier] == "" {
-			return Audit{}, nil, fmt.Errorf("migration: changed or missing Linear mapping for %s", identifier)
-		}
-	}
-
 	for _, task := range state.tasks.Tasks {
 		if task.Routing != nil {
 			if err := validateTaskRoute(task, state.projects.Entries); err != nil {
@@ -257,13 +257,11 @@ func auditSources(state sourceState) (Audit, map[string]uint64, error) {
 	}
 
 	seenDeliveries := make(map[string]bool, len(state.activity.Events))
-	var previous time.Time
 	for _, record := range state.activity.Events {
-		if record.DeliveryID == "" || seenDeliveries[record.DeliveryID] || record.ReceivedAt.IsZero() || (!previous.IsZero() && record.ReceivedAt.After(previous)) {
+		if record.DeliveryID == "" || seenDeliveries[record.DeliveryID] || record.ReceivedAt.IsZero() {
 			return Audit{}, nil, errors.New("migration: activity history is invalid")
 		}
 		seenDeliveries[record.DeliveryID] = true
-		previous = record.ReceivedAt
 		if record.PayloadAvailable && state.payloadHashes[record.DeliveryID] == "" {
 			return Audit{}, nil, fmt.Errorf("migration: activity payload %s is missing or altered", record.DeliveryID)
 		}
@@ -327,6 +325,39 @@ func auditSources(state sourceState) (Audit, map[string]uint64, error) {
 	audit.PayloadCorpusDigest = digests["payloads"]
 	audit.RetainedTotalsDigest = digests["totals"]
 	return audit, totals, nil
+}
+
+func legacyNativeInvocation(invocation triggerrouter.Invocation) bool {
+	if invocation.Task.Source != taskmodel.SourceFactory || invocation.EventSequence == 0 || invocation.RootEventID != invocation.EventID || invocation.Hop != 1 || !triggerrouter.NativeInvocationMatches(invocation, invocation.Task, invocation.WorkflowDigest) {
+		return false
+	}
+	startID := "factory:native-start:" + invocation.Task.ProviderID
+	return invocation.EventID == startID || triggerrouter.NativeFeedbackInvocation(invocation)
+}
+
+func legacyNativeDecision(decision triggerrouter.Decision, invocations map[string]triggerrouter.Invocation) bool {
+	if decision.Source != eventwire.SourceFactory || decision.EventSequence == 0 || len(decision.Outcomes) != 1 || decision.Outcomes[0].Kind != triggerrouter.OutcomeInvocation {
+		return false
+	}
+	invocation, found := invocations[decision.Outcomes[0].InvocationID]
+	return found && legacyNativeInvocation(invocation) && invocation.EventID == decision.EventID && invocation.EventSequence == decision.EventSequence
+}
+
+func validateRunInvocation(run agentrun.Run, invocations map[string]triggerrouter.Invocation) error {
+	if run.InvocationID == "" {
+		return nil
+	}
+	invocation, found := invocations[run.InvocationID]
+	if !found {
+		if run.State.Nonterminal() {
+			return fmt.Errorf("migration: active Run %s has no matching invocation", run.ID)
+		}
+		return nil
+	}
+	if invocation.RunID != run.ID {
+		return fmt.Errorf("migration: Run %s has no matching invocation", run.ID)
+	}
+	return nil
 }
 
 func validateRetainedRun(run agentrun.Run) error {
@@ -449,11 +480,11 @@ func auditReservedWorkflows(state sourceState) error {
 	return nil
 }
 
-func auditPinned(pin workflow.Pinned, expected string) error {
-	if expected == "" {
-		return errors.New("workflow digest is missing")
-	}
+func auditPinned(pin workflow.Pinned, expected string, requireComplete bool) error {
 	if pin.Complete() {
+		if expected == "" {
+			return errors.New("workflow digest is missing")
+		}
 		if err := pin.Validate(); err != nil {
 			return err
 		}
@@ -463,20 +494,26 @@ func auditPinned(pin workflow.Pinned, expected string) error {
 		}
 		return nil
 	}
-	if pin.ID == "" || pin.Revision == 0 {
+	if requireComplete || pin.ID == "" {
 		return errors.New("compacted workflow pin is incomplete")
 	}
 	return nil
 }
 
-func validateRunRoute(run agentrun.Run, projects []projectsetup.Entry) error {
+func validateRunRoute(run agentrun.Run, projects []projectsetup.Entry, requireAdmitted bool) error {
 	for _, entry := range projects {
 		if entry.Repository != run.Repository {
 			continue
 		}
 		if entry.RepoURL != run.RepositoryURL || entry.LocalPath != run.RepositoryPath || entry.ManagedRoot != run.ManagedRoot || entry.BaseBranch != run.BaseBranch || entry.Bootstrap != run.Bootstrap || entry.CloudURL != run.CloudURL {
+			if !requireAdmitted {
+				return nil
+			}
 			return fmt.Errorf("migration: Run %s has a conflicting repository route", run.ID)
 		}
+		return nil
+	}
+	if !requireAdmitted {
 		return nil
 	}
 	return fmt.Errorf("migration: Run %s repository route is not admitted", run.ID)

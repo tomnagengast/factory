@@ -257,7 +257,12 @@ func readSources(root string, options Options) (sourceState, error) {
 	if state.wireTotal != state.wireDispatched {
 		return sourceState{}, fmt.Errorf("migration: pending wire records: total=%d dispatched=%d", state.wireTotal, state.wireDispatched)
 	}
-	if err := decodeFile(root, "trigger-cursors.json", &state.cursors); err != nil {
+	cursorPath := filepath.Join(root, "trigger-cursors.json")
+	if _, err := os.Lstat(cursorPath); errors.Is(err, os.ErrNotExist) {
+		state.cursors = cursorState{Schema: 1, Cursors: []triggerscheduler.Cursor{}}
+	} else if err != nil {
+		return sourceState{}, fmt.Errorf("migration: inspect trigger-cursors.json: %w", err)
+	} else if err := decodeFile(root, "trigger-cursors.json", &state.cursors); err != nil {
 		return sourceState{}, err
 	}
 	if state.cursors.Schema != 1 {
@@ -622,8 +627,8 @@ func validateProviderJournal(version int, total uint64, sequences []uint64) erro
 		return errors.New("invalid version or retained total")
 	}
 	var previous uint64
-	for _, sequence := range sequences {
-		if sequence == 0 || sequence <= previous || sequence > total {
+	for index, sequence := range sequences {
+		if sequence == 0 || sequence > total || (index > 0 && sequence >= previous) {
 			return errors.New("invalid retained sequence")
 		}
 		previous = sequence

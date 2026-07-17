@@ -74,6 +74,128 @@ func TestDryRunCharacterizesCurrentShapeWithoutActivation(t *testing.T) {
 	}
 }
 
+func TestDryRunAcceptsImplicitRegistryAndAbsentScheduleCursors(t *testing.T) {
+	root := copyGolden(t)
+	if err := os.Remove(filepath.Join(root, "triggers.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "trigger-cursors.json")); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "trigger-routing.jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = []byte(strings.ReplaceAll(string(data), `"registryRevision":4`, `"registryRevision":0`))
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := DryRun(root, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Audit.ScheduleCursors != 0 || report.Manifest.SourceSchemas["registry"] != triggerregistry.SchemaVersion || report.Manifest.SourceSchemas["triggerCursors"] != 1 {
+		t.Fatalf("implicit policy audit = %#v schemas=%#v", report.Audit, report.Manifest.SourceSchemas)
+	}
+}
+
+func TestDryRunAcceptsLegacyNativeSyntheticAdmissions(t *testing.T) {
+	root := copyGolden(t)
+	store, err := triggerrouter.Open(filepath.Join(root, "trigger-routing.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition := workflow.Definition{ID: "custom-review", Revision: 3, Name: "Custom review", Enabled: true, Markdown: "# Custom review\n\nSanitized fixture workflow.\n", UpdatedAt: fixtureNow}
+	pinned := workflow.Pin(definition)
+	digest, err := pinned.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission := triggerrouter.NativeAdmission{
+		Task:     taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-0123456789abcdef", Identifier: "FAC-1"},
+		Workflow: pinned, WorkflowDigest: digest, PolicyRevision: 7, RegistryRevision: 4, AdmittedAt: fixtureNow.Add(10 * time.Minute),
+	}
+	if _, created, err := store.AdmitNative(admission); err != nil || !created {
+		t.Fatalf("native admission created=%t err=%v", created, err)
+	}
+	if _, created, err := store.AdmitNativeContinuation(admission, "message:msg-0123456789abcdef"); err != nil || !created {
+		t.Fatalf("native continuation created=%t err=%v", created, err)
+	}
+	report, err := DryRun(root, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Audit.Decisions != 3 || report.Audit.Invocations != 3 {
+		t.Fatalf("native audit = %#v", report.Audit)
+	}
+}
+
+func TestProviderJournalSequencesAreNewestFirst(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		total     uint64
+		sequences []uint64
+		wantError bool
+	}{
+		{name: "complete", total: 4, sequences: []uint64{4, 3, 2, 1}},
+		{name: "retained with gaps", total: 8, sequences: []uint64{8, 6, 2}},
+		{name: "ascending", total: 4, sequences: []uint64{1, 2, 3, 4}, wantError: true},
+		{name: "duplicate", total: 4, sequences: []uint64{4, 4}, wantError: true},
+		{name: "past total", total: 4, sequences: []uint64{5}, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateProviderJournal(1, test.total, test.sequences)
+			if (err != nil) != test.wantError {
+				t.Fatalf("error = %v, wantError=%t", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestCompactedWorkflowPinsAreTerminalOnly(t *testing.T) {
+	legacy := workflow.Pinned{ID: workflow.DefaultID}
+	if err := auditPinned(legacy, "", false); err != nil {
+		t.Fatalf("terminal legacy pin: %v", err)
+	}
+	if err := auditPinned(legacy, strings.Repeat("a", 64), true); err == nil {
+		t.Fatal("active compacted pin passed")
+	}
+}
+
+func TestHistoricalRunRouteDoesNotRequireCurrentAdmission(t *testing.T) {
+	run := agentrun.Run{ID: "run-historical", Repository: "tomnagengast/retired"}
+	if err := validateRunRoute(run, nil, false); err != nil {
+		t.Fatalf("historical route: %v", err)
+	}
+	if err := validateRunRoute(run, nil, true); err == nil {
+		t.Fatal("active unadmitted route passed")
+	}
+}
+
+func TestHistoricalRunMayOutliveCompactedInvocation(t *testing.T) {
+	run := agentrun.Run{ID: "run-historical", InvocationID: "invocation-pruned", State: agentrun.StateFailed}
+	if err := validateRunInvocation(run, nil); err != nil {
+		t.Fatalf("historical invocation: %v", err)
+	}
+	run.State = agentrun.StateRunning
+	if err := validateRunInvocation(run, nil); err == nil {
+		t.Fatal("active Run without invocation passed")
+	}
+}
+
+func TestActivityAuditPreservesInsertionOrderWithoutChronologyAssumption(t *testing.T) {
+	root := copyGolden(t)
+	mutateJSON(t, root, "linear-activity.json", func(value map[string]any) {
+		events := value["events"].([]any)
+		events[0].(map[string]any)["receivedAt"] = "2026-07-16T16:00:00Z"
+		events[1].(map[string]any)["receivedAt"] = "2026-07-16T17:00:00Z"
+	})
+	if _, err := DryRun(root, testOptions()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDryRunFailureInjection(t *testing.T) {
 	for _, point := range []string{"before-hash", "hash:settings.json", "after-hash", "before-decode", "read:settings.json", "after-decode", "before-audit", "after-audit", "report", "after-report"} {
 		point := point
@@ -106,7 +228,6 @@ func TestDryRunRejectsAmbiguousCrossArtifactState(t *testing.T) {
 		{name: "duplicate active task", mutate: duplicateActiveRun, want: "duplicate active task"},
 		{name: "duplicate identifier", mutate: func(t *testing.T, root string) { duplicateBinding(t, root, true, false) }, want: "duplicate Linear identifier"},
 		{name: "duplicate UUID", mutate: func(t *testing.T, root string) { duplicateBinding(t, root, false, true) }, want: "duplicate Linear UUID"},
-		{name: "changed mapping", mutate: changedBinding, want: "changed or missing Linear mapping"},
 		{name: "orphan invocation", mutate: orphanInvocation, want: "orphan"},
 		{name: "missing Run", mutate: missingRun, want: "missing Run"},
 		{name: "conflicting route", mutate: conflictingRoute, want: "conflicting repository route"},
@@ -190,6 +311,17 @@ func TestDryRunDetectsAlteredSourceAndAuditEvidence(t *testing.T) {
 		report.Audit.Runs++
 		if err := VerifyDryRun(root, testOptions(), report); err == nil || !strings.Contains(err.Error(), "audit evidence changed") {
 			t.Fatalf("altered audit error = %v", err)
+		}
+	})
+	t.Run("Linear mapping after audit", func(t *testing.T) {
+		root := copyGolden(t)
+		report, err := DryRun(root, testOptions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		changedBinding(t, root)
+		if err := VerifyDryRun(root, testOptions(), report); err == nil || !strings.Contains(err.Error(), "changed") {
+			t.Fatalf("changed mapping error = %v", err)
 		}
 	})
 }
