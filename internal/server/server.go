@@ -68,7 +68,7 @@ type ProjectSetupController interface {
 }
 
 type RunStore interface {
-	Claim(trigger agentrun.Trigger, now time.Time) (agentrun.Run, bool, error)
+	Claim(claim agentrun.InitialClaim, now time.Time) (agentrun.Run, bool, error)
 	ClaimContinuation(claim agentrun.ContinuationClaim, now time.Time) (agentrun.Run, bool, error)
 	PublicSnapshot() agentrun.PublicSnapshot
 	ActivitySnapshot() agentrun.ActivitySnapshot
@@ -1012,7 +1012,8 @@ func (s *appServer) dispatchLinear(ctx context.Context, record eventwire.Record)
 		if err != nil {
 			return fmt.Errorf("server: resolve Linear run repository: %w", err)
 		}
-		_, created, err := s.runStore.Claim(trigger, record.Event.ReceivedAt)
+		candidate := resolveInitialWorkflowCandidate(s.settings, agentrun.TriggerKindLabel, record.Event.ReceivedAt)
+		_, created, err := s.runStore.Claim(agentrun.InitialClaim{Trigger: trigger, Workflow: candidate}, record.Event.ReceivedAt)
 		if err != nil {
 			return fmt.Errorf("server: claim Linear run: %w", err)
 		}
@@ -1022,6 +1023,28 @@ func (s *appServer) dispatchLinear(ctx context.Context, record eventwire.Record)
 	}
 
 	return nil
+}
+
+func resolveInitialWorkflowCandidate(store SettingsStore, triggerKind string, now time.Time) agentrun.WorkflowCandidate {
+	configuration := store.Snapshot()
+	definition, err := configuration.WorkflowForTrigger(triggerKind)
+	if err != nil {
+		return agentrun.FailedWorkflowCandidate(fmt.Errorf("select %s workflow: %w", triggerKind, err))
+	}
+	pinned := workflow.Pin(definition)
+	digest, err := pinned.Digest()
+	if err != nil {
+		return agentrun.FailedWorkflowCandidate(fmt.Errorf("digest %s workflow: %w", triggerKind, err))
+	}
+	if marker, ok := store.(interface {
+		MarkWorkflowRollbackIncompatible(time.Time) (settings.Snapshot, error)
+	}); ok {
+		configuration, err = marker.MarkWorkflowRollbackIncompatible(now)
+		if err != nil {
+			return agentrun.FailedWorkflowCandidate(fmt.Errorf("mark workflow rollback boundary: %w", err))
+		}
+	}
+	return agentrun.ResolvedWorkflowCandidate(pinned, digest, configuration.Revision)
 }
 
 func addedLabels(payload linearPayload) ([]string, []string) {

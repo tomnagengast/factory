@@ -581,6 +581,9 @@ func (l *TmuxLauncher) Start(ctx context.Context, run Run, sessionName, runDirec
 	} else if run.InvocationID != "" {
 		return errors.New("start invocation Run: pinned workflow is missing")
 	}
+	// A nil workflow beyond this point is retained compatibility for a
+	// pre-pinning initial Run. Store.Claim no longer creates this shape;
+	// agent-exec resolves its legacy live binding.
 	args := []string{
 		"-L", launcher.config.TmuxSocket,
 		"new-session", "-d",

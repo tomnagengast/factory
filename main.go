@@ -463,6 +463,7 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 		providerCoordinator,
 		runStore,
 		manager,
+		settingsStore,
 		providerRepositoryConfig,
 		time.Now,
 	)

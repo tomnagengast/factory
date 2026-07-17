@@ -13,6 +13,8 @@ import (
 
 	"github.com/tomnagengast/factory/internal/agentrun"
 	"github.com/tomnagengast/factory/internal/projectsetup"
+	"github.com/tomnagengast/factory/internal/settings"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 type repositoryRegistrar struct {
@@ -161,10 +163,16 @@ type agentRunNotifier interface {
 	Notify()
 }
 
+type providerWorkflowSettings interface {
+	Snapshot() settings.Snapshot
+	MarkWorkflowRollbackIncompatible(time.Time) (settings.Snapshot, error)
+}
+
 type providerAgentStarter struct {
 	coordinator projectsetup.ProviderCoordinator
 	store       *agentrun.Store
 	notifier    agentRunNotifier
+	settings    providerWorkflowSettings
 	repository  agentrun.RepositoryConfig
 	now         func() time.Time
 }
@@ -173,17 +181,18 @@ func newProviderAgentStarter(
 	coordinator projectsetup.ProviderCoordinator,
 	store *agentrun.Store,
 	notifier agentRunNotifier,
+	workflowSettings providerWorkflowSettings,
 	repository agentrun.RepositoryConfig,
 	now func() time.Time,
 ) (*providerAgentStarter, error) {
-	if coordinator == nil || store == nil || notifier == nil || now == nil {
-		return nil, fmt.Errorf("provider agent starter: coordinator, run store, notifier, and clock are required")
+	if coordinator == nil || store == nil || notifier == nil || workflowSettings == nil || now == nil {
+		return nil, fmt.Errorf("provider agent starter: coordinator, run store, notifier, workflow settings, and clock are required")
 	}
 	if repository.Repository == "" || repository.RepoURL == "" || !filepath.IsAbs(repository.RepoPath) || !filepath.IsAbs(repository.ManagedRoot) || repository.BaseBranch == "" {
 		return nil, fmt.Errorf("provider agent starter: complete provider repository routing is required")
 	}
 	return &providerAgentStarter{
-		coordinator: coordinator, store: store, notifier: notifier,
+		coordinator: coordinator, store: store, notifier: notifier, settings: workflowSettings,
 		repository: repository, now: now,
 	}, nil
 }
@@ -197,7 +206,9 @@ func (s *providerAgentStarter) Start(ctx context.Context, spec projectsetup.Spec
 		return fmt.Errorf("provider agent starter: coordinator returned an invalid Linear issue")
 	}
 	config := s.repository
-	_, created, err := s.store.Claim(agentrun.Trigger{
+	now := s.now()
+	candidate := providerWorkflowCandidate(s.settings, now)
+	_, created, err := s.store.Claim(agentrun.InitialClaim{Trigger: agentrun.Trigger{
 		DeliveryID:      providerAgentDeliveryID(issue.ID, spec),
 		IssueIdentifier: issue.Identifier,
 		Kind:            agentrun.TriggerKindLabel,
@@ -208,7 +219,7 @@ func (s *providerAgentStarter) Start(ctx context.Context, spec projectsetup.Spec
 		BaseBranch:      config.BaseBranch,
 		Bootstrap:       config.Bootstrap,
 		CloudURL:        config.CloudURL,
-	}, s.now())
+	}, Workflow: candidate}, now)
 	if err != nil {
 		return fmt.Errorf("provider agent starter: claim run: %w", err)
 	}
@@ -216,6 +227,24 @@ func (s *providerAgentStarter) Start(ctx context.Context, spec projectsetup.Spec
 		s.notifier.Notify()
 	}
 	return nil
+}
+
+func providerWorkflowCandidate(store providerWorkflowSettings, now time.Time) agentrun.WorkflowCandidate {
+	configuration := store.Snapshot()
+	definition, err := configuration.WorkflowForTrigger(agentrun.TriggerKindLabel)
+	if err != nil {
+		return agentrun.FailedWorkflowCandidate(fmt.Errorf("select provider workflow: %w", err))
+	}
+	pinned := workflow.Pin(definition)
+	digest, err := pinned.Digest()
+	if err != nil {
+		return agentrun.FailedWorkflowCandidate(fmt.Errorf("digest provider workflow: %w", err))
+	}
+	configuration, err = store.MarkWorkflowRollbackIncompatible(now)
+	if err != nil {
+		return agentrun.FailedWorkflowCandidate(fmt.Errorf("mark workflow rollback boundary: %w", err))
+	}
+	return agentrun.ResolvedWorkflowCandidate(pinned, digest, configuration.Revision)
 }
 
 func providerAgentDeliveryID(issueID string, spec projectsetup.Spec) string {

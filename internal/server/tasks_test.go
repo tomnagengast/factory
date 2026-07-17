@@ -153,7 +153,7 @@ func TestManagedLinearDetailLoadsLiveWithoutAdmittingWorkspaceBacklog(t *testing
 		State: "in_progress", StateName: "In Progress", UpdatedAt: testNow, ExternalURL: "https://linear.app/nags/issue/ENG-46/live",
 	}}
 	handler, runs := testTaskAPIHandlerWithLinear(t, &testTaskController{}, linear)
-	if _, _, err := runs.Claim(agentrun.Trigger{DeliveryID: "linear-managed", IssueIdentifier: "ENG-46", Kind: agentrun.TriggerKindLabel}, testNow); err != nil {
+	if _, _, err := runs.Claim(testInitialClaim(agentrun.Trigger{DeliveryID: "linear-managed", IssueIdentifier: "ENG-46", Kind: agentrun.TriggerKindLabel}), testNow); err != nil {
 		t.Fatal(err)
 	}
 	active := authenticatedJSONRequest(t, handler, http.MethodGet, "/api/tasks?provider=linear&activity=active", nil, "")
@@ -184,7 +184,7 @@ func TestManagedLinearDetailReportsIdentityConflict(t *testing.T) {
 		err:   linearidentity.ErrConflict,
 	}
 	handler, runs := testTaskAPIHandlerWithLinear(t, &testTaskController{}, linear)
-	if _, _, err := runs.Claim(agentrun.Trigger{DeliveryID: "linear-managed", IssueIdentifier: "ENG-46", Kind: agentrun.TriggerKindLabel}, testNow); err != nil {
+	if _, _, err := runs.Claim(testInitialClaim(agentrun.Trigger{DeliveryID: "linear-managed", IssueIdentifier: "ENG-46", Kind: agentrun.TriggerKindLabel}), testNow); err != nil {
 		t.Fatal(err)
 	}
 	response := authenticatedJSONRequest(t, handler, http.MethodGet, "/api/tasks/linear/ENG-46", nil, "")
@@ -201,7 +201,7 @@ func TestNativeTaskDetailIncludesLatestLifecycleRun(t *testing.T) {
 		CreatedAt: testNow, UpdatedAt: testNow, LatestActivityAt: testNow,
 	}}}
 	handler, runs := testTaskAPIHandlerWithLinear(t, controller, nil)
-	if _, _, err := runs.Claim(agentrun.Trigger{DeliveryID: "factory-managed", Task: ref, Kind: agentrun.TriggerKindRule}, testNow); err != nil {
+	if _, _, err := runs.Claim(testInitialClaim(agentrun.Trigger{DeliveryID: "factory-managed", Task: ref, Kind: agentrun.TriggerKindRule}), testNow); err != nil {
 		t.Fatal(err)
 	}
 	detail := authenticatedJSONRequest(t, handler, http.MethodGet, "/api/tasks/factory/task-0123456789abcdef", nil, "")

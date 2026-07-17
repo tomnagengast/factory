@@ -1,6 +1,7 @@
 package agentrun
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,11 +15,12 @@ func TestStoreCoalescesActiveIssueTriggers(t *testing.T) {
 
 	store := openTestStore(t, 10)
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
-	first, created, err := store.Claim(Trigger{
+	first, created, err := store.Claim(testInitialClaim(Trigger{
 		DeliveryID:      "delivery-1",
 		IssueIdentifier: "ENG-123",
 		Kind:            "linear-comment",
-	}, now)
+	}), now)
+
 	if err != nil {
 		t.Fatalf("claim first trigger: %v", err)
 	}
@@ -26,11 +28,12 @@ func TestStoreCoalescesActiveIssueTriggers(t *testing.T) {
 		t.Fatal("first trigger did not create a run")
 	}
 
-	duplicate, created, err := store.Claim(Trigger{
+	duplicate, created, err := store.Claim(testInitialClaim(Trigger{
 		DeliveryID:      "delivery-2",
 		IssueIdentifier: "ENG-123",
 		Kind:            "linear-comment",
-	}, now.Add(time.Second))
+	}), now.Add(time.Second))
+
 	if err != nil {
 		t.Fatalf("claim duplicate trigger: %v", err)
 	}
@@ -52,11 +55,12 @@ func TestStoreAllowsNewTriggerAfterTerminalRun(t *testing.T) {
 
 	store := openTestStore(t, 10)
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
-	first, _, err := store.Claim(Trigger{
+	first, _, err := store.Claim(testInitialClaim(Trigger{
 		DeliveryID:      "delivery-1",
 		IssueIdentifier: "ENG-123",
 		Kind:            "linear-comment",
-	}, now)
+	}), now)
+
 	if err != nil {
 		t.Fatalf("claim first trigger: %v", err)
 	}
@@ -70,11 +74,12 @@ func TestStoreAllowsNewTriggerAfterTerminalRun(t *testing.T) {
 		t.Fatalf("finish: %v", err)
 	}
 
-	second, created, err := store.Claim(Trigger{
+	second, created, err := store.Claim(testInitialClaim(Trigger{
 		DeliveryID:      "delivery-2",
 		IssueIdentifier: "ENG-123",
 		Kind:            "linear-comment",
-	}, now.Add(3*time.Second))
+	}), now.Add(3*time.Second))
+
 	if err != nil {
 		t.Fatalf("claim second trigger: %v", err)
 	}
@@ -93,7 +98,7 @@ func TestStoreDoesNotRestartTerminalRunForRetriedDelivery(t *testing.T) {
 		IssueIdentifier: "ENG-123",
 		Kind:            "linear-comment",
 	}
-	run, _, err := store.Claim(trigger, now)
+	run, _, err := store.Claim(testInitialClaim(trigger), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -104,7 +109,7 @@ func TestStoreDoesNotRestartTerminalRunForRetriedDelivery(t *testing.T) {
 		t.Fatalf("finish: %v", err)
 	}
 
-	retried, created, err := store.Claim(trigger, now.Add(2*time.Second))
+	retried, created, err := store.Claim(testInitialClaim(trigger), now.Add(2*time.Second))
 	if err != nil {
 		t.Fatalf("claim retry: %v", err)
 	}
@@ -113,12 +118,99 @@ func TestStoreDoesNotRestartTerminalRunForRetriedDelivery(t *testing.T) {
 	}
 }
 
+func TestStoreInitialClaimPersistsImmutableWorkflowPin(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "runs.json")
+	store, err := Open(path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := workflow.Pin(workflow.Default(time.Time{}))
+	digest, err := pinned.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := InitialClaim{
+		Trigger:  Trigger{DeliveryID: "delivery-pinned", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel},
+		Workflow: ResolvedWorkflowCandidate(pinned, digest, 0),
+	}
+	run, created, err := store.Claim(claim, time.Now())
+	if err != nil || !created {
+		t.Fatalf("claim: run=%#v created=%t err=%v", run, created, err)
+	}
+	claim.Workflow.Workflow.Markdown = "mutated after claim"
+	claim.Workflow.Workflow.Steps = append(claim.Workflow.Workflow.Steps, "mutated")
+	reopened, err := Open(path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, found := reopened.Find(run.ID)
+	if !found || got.PinnedWorkflow == nil || !workflowEqual(*got.PinnedWorkflow, pinned) || got.PinnedWorkflowDigest != digest || got.PinnedPolicyRevision != 0 {
+		t.Fatalf("persisted run = %#v", got)
+	}
+}
+
+func TestStoreInitialClaimRejectsInvalidCandidateWithoutCreatingState(t *testing.T) {
+	t.Parallel()
+
+	pinned := workflow.Pin(workflow.Default(time.Time{}))
+	digest, err := pinned.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name      string
+		candidate WorkflowCandidate
+	}{
+		{name: "resolution", candidate: FailedWorkflowCandidate(errors.New("binding unavailable"))},
+		{name: "missing", candidate: WorkflowCandidate{}},
+		{name: "disabled", candidate: ResolvedWorkflowCandidate(func() workflow.Pinned { value := pinned; value.Enabled = false; return value }(), digest, 1)},
+		{name: "digest", candidate: ResolvedWorkflowCandidate(pinned, "mismatch", 1)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := openTestStore(t, 10)
+			_, created, err := store.Claim(InitialClaim{
+				Trigger:  Trigger{DeliveryID: "delivery-invalid", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel},
+				Workflow: test.candidate,
+			}, time.Now())
+			if err == nil || created || store.Snapshot().Total != 0 {
+				t.Fatalf("created=%t total=%d err=%v", created, store.Snapshot().Total, err)
+			}
+		})
+	}
+}
+
+func TestStoreInitialClaimDeduplicatesBeforeCandidateValidation(t *testing.T) {
+	t.Parallel()
+
+	store := openTestStore(t, 10)
+	now := time.Now()
+	firstClaim := testInitialClaim(Trigger{DeliveryID: "delivery-first", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel})
+	first, _, err := store.Claim(firstClaim, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry := InitialClaim{Trigger: firstClaim.Trigger, Workflow: FailedWorkflowCandidate(errors.New("binding removed"))}
+	got, created, err := store.Claim(retry, now.Add(time.Second))
+	if err != nil || created || got.ID != first.ID || !workflowEqual(*got.PinnedWorkflow, firstClaim.Workflow.Workflow) {
+		t.Fatalf("delivery retry: got=%#v created=%t err=%v", got, created, err)
+	}
+	coalescedClaim := retry
+	coalescedClaim.Trigger.DeliveryID = "delivery-second"
+	got, created, err = store.Claim(coalescedClaim, now.Add(2*time.Second))
+	if err != nil || created || got.ID != first.ID || got.DuplicateTriggers != 1 || !workflowEqual(*got.PinnedWorkflow, firstClaim.Workflow.Workflow) {
+		t.Fatalf("active coalesce: got=%#v created=%t err=%v", got, created, err)
+	}
+}
+
 func TestStoreClaimContinuationIgnoresIssueWithoutHistory(t *testing.T) {
 	t.Parallel()
 
 	store := openTestStore(t, 10)
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
-	if _, _, err := store.Claim(Trigger{DeliveryID: "other-label", IssueIdentifier: "ENG-999", Kind: TriggerKindLabel}, now); err != nil {
+	if _, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "other-label", IssueIdentifier: "ENG-999", Kind: TriggerKindLabel}), now); err != nil {
 		t.Fatalf("seed other issue: %v", err)
 	}
 
@@ -147,7 +239,7 @@ func TestStoreClaimContinuationStartsAfterTerminalHistory(t *testing.T) {
 			t.Parallel()
 			store := openTestStore(t, 10)
 			now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
-			prior, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+			prior, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 			if err != nil {
 				t.Fatalf("seed run: %v", err)
 			}
@@ -182,7 +274,7 @@ func TestStoreClaimContinuationCoalescesActiveAndDeduplicatesRetry(t *testing.T)
 			t.Parallel()
 			store := openTestStore(t, 10)
 			now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
-			active, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+			active, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 			if err != nil {
 				t.Fatalf("seed active run: %v", err)
 			}
@@ -202,7 +294,8 @@ func TestStoreClaimContinuationCoalescesActiveAndDeduplicatesRetry(t *testing.T)
 			if err != nil {
 				t.Fatalf("claim active continuation: %v", err)
 			}
-			if created || coalesced.ID != active.ID || coalesced.DuplicateTriggers != 1 {
+			if created || coalesced.ID != active.ID || coalesced.DuplicateTriggers != 1 || coalesced.PinnedWorkflow == nil ||
+				!workflowEqual(*coalesced.PinnedWorkflow, *active.PinnedWorkflow) || coalesced.PinnedWorkflowDigest != active.PinnedWorkflowDigest {
 				t.Fatalf("coalesced = %#v, created=%t", coalesced, created)
 			}
 
@@ -229,11 +322,12 @@ func TestStorePersistsPrivateAndPublicState(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
-	run, _, err := store.Claim(Trigger{
+	run, _, err := store.Claim(testInitialClaim(Trigger{
 		DeliveryID:      "delivery-1",
 		IssueIdentifier: "ENG-123",
 		Kind:            "linear-comment",
-	}, now)
+	}), now)
+
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -257,7 +351,7 @@ func TestStoreFindsNewestRunByIssueAndStartedMillisecond(t *testing.T) {
 
 	store := openTestStore(t, 10)
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 123456789, time.UTC)
-	first, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, now)
+	first, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}), now)
 	if err != nil {
 		t.Fatalf("claim first run: %v", err)
 	}
@@ -271,7 +365,7 @@ func TestStoreFindsNewestRunByIssueAndStartedMillisecond(t *testing.T) {
 		t.Fatalf("finish first run: %v", err)
 	}
 
-	second, _, err := store.Claim(Trigger{DeliveryID: "delivery-2", IssueIdentifier: "ENG-123", Kind: "test"}, now.Add(2*time.Second))
+	second, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-2", IssueIdentifier: "ENG-123", Kind: "test"}), now.Add(2*time.Second))
 	if err != nil {
 		t.Fatalf("claim second run: %v", err)
 	}
@@ -313,7 +407,7 @@ func TestStoreFindObserverRunSeparatesTaskSources(t *testing.T) {
 
 	store := openTestStore(t, 10)
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 123456789, time.UTC)
-	factory, _, err := store.Claim(Trigger{
+	factory, _, err := store.Claim(testInitialClaim(Trigger{
 		DeliveryID: "factory-delivery",
 		Task: taskmodel.TaskRef{
 			Source:     taskmodel.SourceFactory,
@@ -321,7 +415,8 @@ func TestStoreFindObserverRunSeparatesTaskSources(t *testing.T) {
 			Identifier: "FAC-1",
 		},
 		Kind: "test",
-	}, now)
+	}), now)
+
 	if err != nil {
 		t.Fatalf("claim Factory run: %v", err)
 	}
@@ -332,7 +427,7 @@ func TestStoreFindObserverRunSeparatesTaskSources(t *testing.T) {
 		t.Fatalf("mark Factory run running: %v", err)
 	}
 
-	linear, _, err := store.Claim(Trigger{DeliveryID: "linear-delivery", IssueIdentifier: "FAC-1", Kind: "test"}, now.Add(time.Second))
+	linear, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "linear-delivery", IssueIdentifier: "FAC-1", Kind: "test"}), now.Add(time.Second))
 	if err != nil {
 		t.Fatalf("claim Linear run: %v", err)
 	}
@@ -359,7 +454,7 @@ func TestStorePersistsAndAcknowledgesLifecycleTransitions(t *testing.T) {
 
 	store := openTestStore(t, 10)
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
-	run, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -396,7 +491,7 @@ func TestStorePersistsTerminalValidationReceipt(t *testing.T) {
 
 	store := openTestStore(t, 10)
 	now := time.Date(2026, time.July, 11, 22, 0, 0, 0, time.UTC)
-	run, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -423,7 +518,7 @@ func TestStoreParksAndCoalescesAwaitingMergeRun(t *testing.T) {
 
 	store := openTestStore(t, 10)
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
@@ -459,7 +554,7 @@ func TestStoreSchedulesMatchingPullRequestAndResumesOnce(t *testing.T) {
 
 	store := openTestStore(t, 10)
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
@@ -508,14 +603,14 @@ func TestStorePruningRetainsRunsWithPendingTransitions(t *testing.T) {
 
 	store := openTestStore(t, 1)
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
-	first, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, now)
+	first, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}), now)
 	if err != nil {
 		t.Fatalf("claim first: %v", err)
 	}
 	if err := store.Finish(first.ID, StateSucceeded, 0, "done", now.Add(time.Second)); err != nil {
 		t.Fatalf("finish first: %v", err)
 	}
-	second, _, err := store.Claim(Trigger{DeliveryID: "delivery-2", IssueIdentifier: "ENG-124", Kind: "test"}, now.Add(2*time.Second))
+	second, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-2", IssueIdentifier: "ENG-124", Kind: "test"}), now.Add(2*time.Second))
 	if err != nil {
 		t.Fatalf("claim second: %v", err)
 	}

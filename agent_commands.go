@@ -95,6 +95,9 @@ func runPrincipal(ctx context.Context, args []string) int {
 	if *workflowFile != "" {
 		pinned, _, err = agentrun.ReadWorkflowSnapshot(*runDirectory, *workflowFile)
 	} else {
+		// Compatibility only for a run persisted before initial claims required
+		// workflow snapshots. Every run admitted by the current store supplies
+		// --workflow-file on every lifecycle segment.
 		var definition workflow.Definition
 		definition, err = configuration.WorkflowForTrigger(*triggerKind)
 		pinned = workflow.Pin(definition)

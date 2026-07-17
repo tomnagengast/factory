@@ -21,7 +21,7 @@ func TestCollectorPublishesCompleteAgentRecordsAndLifecycle(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
-	run, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestCollectorRetainsOutboxWhenPublicationFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	_, _, err = store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, time.Now())
+	_, _, err = store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}), time.Now())
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}

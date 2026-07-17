@@ -68,10 +68,10 @@ func TestStoreSeparatesSameDisplayIdentifierAcrossProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 	factory := taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-1", Identifier: "FAC-1"}
-	if _, created, err := store.Claim(Trigger{DeliveryID: "linear", Task: linear, Kind: TriggerKindComment}, now); err != nil || !created {
+	if _, created, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "linear", Task: linear, Kind: TriggerKindComment}), now); err != nil || !created {
 		t.Fatalf("claim Linear task: created=%t err=%v", created, err)
 	}
-	if _, created, err := store.Claim(Trigger{DeliveryID: "factory", Task: factory, Kind: TriggerKindComment}, now); err != nil || !created {
+	if _, created, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "factory", Task: factory, Kind: TriggerKindComment}), now); err != nil || !created {
 		t.Fatalf("claim Factory task: created=%t err=%v", created, err)
 	}
 	if got := store.Snapshot(); got.Active != 2 || got.Total != 2 {

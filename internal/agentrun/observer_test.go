@@ -22,7 +22,7 @@ func TestObserverCapturesAndRedactsLiveWindows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	run, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, observerTestNow)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}), observerTestNow)
 	if err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestObserverReturnsTerminalRunWithoutCallingTmux(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	run, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, observerTestNow)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}), observerTestNow)
 	if err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestObserverTreatsMissingTmuxSessionAsNotLive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	run, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, observerTestNow)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}), observerTestNow)
 	if err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestObserverRejectsUnparseableLiveWindows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	run, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, observerTestNow)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}), observerTestNow)
 	if err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestObserverReadsRealTmuxSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	run, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, observerTestNow)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}), observerTestNow)
 	if err != nil {
 		t.Fatalf("claim run: %v", err)
 	}

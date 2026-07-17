@@ -149,6 +149,29 @@ type ContinuationClaim struct {
 	PolicyRevision uint64
 }
 
+// WorkflowCandidate carries either an admission-time workflow snapshot or the
+// error that prevented resolving one. Claim examines it only after durable
+// delivery deduplication and active-task coalescing.
+type WorkflowCandidate struct {
+	Workflow       workflow.Pinned
+	WorkflowDigest string
+	PolicyRevision uint64
+	ResolutionErr  error
+}
+
+type InitialClaim struct {
+	Trigger  Trigger
+	Workflow WorkflowCandidate
+}
+
+func ResolvedWorkflowCandidate(pinned workflow.Pinned, digest string, policyRevision uint64) WorkflowCandidate {
+	return WorkflowCandidate{Workflow: pinned, WorkflowDigest: digest, PolicyRevision: policyRevision}
+}
+
+func FailedWorkflowCandidate(err error) WorkflowCandidate {
+	return WorkflowCandidate{ResolutionErr: err}
+}
+
 var ErrInvocationIssueOwned = errors.New("agent run store: issue already has an active run")
 
 type PublicRun struct {
@@ -250,12 +273,13 @@ func Open(path string, limit int) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) Claim(trigger Trigger, now time.Time) (Run, bool, error) {
-	return s.claim(trigger, workflow.Pinned{}, "", 0, now, false)
+func (s *Store) Claim(claim InitialClaim, now time.Time) (Run, bool, error) {
+	return s.claim(claim.Trigger, claim.Workflow, now, false)
 }
 
 func (s *Store) ClaimContinuation(claim ContinuationClaim, now time.Time) (Run, bool, error) {
-	return s.claim(claim.Trigger, claim.Workflow, claim.WorkflowDigest, claim.PolicyRevision, now, true)
+	candidate := ResolvedWorkflowCandidate(claim.Workflow, claim.WorkflowDigest, claim.PolicyRevision)
+	return s.claim(claim.Trigger, candidate, now, true)
 }
 
 func (s *Store) EnsureInvocationRun(claim InvocationClaim, now time.Time) (Run, bool, error) {
@@ -424,7 +448,7 @@ func (s *Store) MarkInvocationReflected(id string, at time.Time) error {
 	})
 }
 
-func (s *Store) claim(trigger Trigger, pinned workflow.Pinned, digest string, policyRevision uint64, now time.Time, requireHistory bool) (Run, bool, error) {
+func (s *Store) claim(trigger Trigger, candidate WorkflowCandidate, now time.Time, requireHistory bool) (Run, bool, error) {
 	if trigger.DeliveryID == "" {
 		return Run{}, false, errors.New("agent run store: delivery ID is required")
 	}
@@ -474,10 +498,15 @@ func (s *Store) claim(trigger Trigger, pinned workflow.Pinned, digest string, po
 	if requireHistory && !hasHistory {
 		return Run{}, false, nil
 	}
+	workflowContext := "initial workflow"
 	if requireHistory {
-		if err := validatePinnedWorkflow(pinned, digest, policyRevision); err != nil {
-			return Run{}, false, fmt.Errorf("agent run store: continuation workflow: %w", err)
-		}
+		workflowContext = "continuation workflow"
+	}
+	if candidate.ResolutionErr != nil {
+		return Run{}, false, fmt.Errorf("agent run store: %s: %w", workflowContext, candidate.ResolutionErr)
+	}
+	if err := validatePinnedWorkflow(candidate.Workflow, candidate.WorkflowDigest, candidate.PolicyRevision); err != nil {
+		return Run{}, false, fmt.Errorf("agent run store: %s: %w", workflowContext, err)
 	}
 
 	id, err := newID()
@@ -502,12 +531,10 @@ func (s *Store) claim(trigger Trigger, pinned workflow.Pinned, digest string, po
 		UpdatedAt:       now,
 		Transitions:     []Transition{newTransition(id, StatePending, 0, now)},
 	}
-	if requireHistory {
-		pinned = pinned.Clone()
-		run.PinnedWorkflow = &pinned
-		run.PinnedWorkflowDigest = digest
-		run.PinnedPolicyRevision = policyRevision
-	}
+	pinned := candidate.Workflow.Clone()
+	run.PinnedWorkflow = &pinned
+	run.PinnedWorkflowDigest = candidate.WorkflowDigest
+	run.PinnedPolicyRevision = candidate.PolicyRevision
 	next := s.state
 	next.Total++
 	next.Runs = append([]Run{run}, next.Runs...)

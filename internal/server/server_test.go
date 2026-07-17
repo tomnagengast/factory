@@ -332,9 +332,10 @@ func TestLinearCommentLegacyDisableCannotDisableProtectedContinuation(t *testing
 	t.Parallel()
 
 	handler, runStore, notifier, journalPath, configuration := testHandlerWithLinearCommentsAndSettings(t)
-	prior, _, err := runStore.Claim(agentrun.Trigger{
+	prior, _, err := runStore.Claim(testInitialClaim(agentrun.Trigger{
 		DeliveryID: "label-delivery", IssueIdentifier: "ENG-123", Kind: agentrun.TriggerKindLabel,
-	}, testNow.Add(-time.Minute))
+	}), testNow.Add(-time.Minute))
+
 	if err != nil {
 		t.Fatalf("seed prior run: %v", err)
 	}
@@ -547,7 +548,7 @@ func TestAuthenticatedAgentActivityAndReference(t *testing.T) {
 
 	observer := &testObserver{}
 	handler, store := testHandlerWithObserverAndStore(t, observer)
-	run, _, err := store.Claim(agentrun.Trigger{DeliveryID: "delivery-agent", IssueIdentifier: "ENG-23", Kind: "test"}, testNow)
+	run, _, err := store.Claim(testInitialClaim(agentrun.Trigger{DeliveryID: "delivery-agent", IssueIdentifier: "ENG-23", Kind: "test"}), testNow)
 	if err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
@@ -557,7 +558,7 @@ func TestAuthenticatedAgentActivityAndReference(t *testing.T) {
 	if err := store.MarkRunning(run.ID, 1, testNow); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
-	native, _, err := store.Claim(agentrun.Trigger{
+	native, _, err := store.Claim(testInitialClaim(agentrun.Trigger{
 		DeliveryID: "delivery-native-agent",
 		Task: taskmodel.TaskRef{
 			Source:     taskmodel.SourceFactory,
@@ -565,7 +566,8 @@ func TestAuthenticatedAgentActivityAndReference(t *testing.T) {
 			Identifier: "FAC-1",
 		},
 		Kind: "test",
-	}, testNow)
+	}), testNow)
+
 	if err != nil {
 		t.Fatalf("claim native run: %v", err)
 	}
@@ -630,15 +632,16 @@ func TestAgentReferenceSourceCollisionAndInvalidSourceFailClosed(t *testing.T) {
 	observer := &testObserver{}
 	handler, store := testHandlerWithObserverAndStore(t, observer)
 	now := testNow
-	factory, _, err := store.Claim(agentrun.Trigger{
+	factory, _, err := store.Claim(testInitialClaim(agentrun.Trigger{
 		DeliveryID: "factory-collision",
 		Task:       taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-collision", Identifier: "FAC-1"},
 		Kind:       "test",
-	}, now)
+	}), now)
+
 	if err != nil {
 		t.Fatal(err)
 	}
-	linear, _, err := store.Claim(agentrun.Trigger{DeliveryID: "linear-collision", IssueIdentifier: "FAC-1", Kind: "test"}, now.Add(time.Second))
+	linear, _, err := store.Claim(testInitialClaim(agentrun.Trigger{DeliveryID: "linear-collision", IssueIdentifier: "FAC-1", Kind: "test"}), now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,7 +772,7 @@ func TestHealthzReportsFailedProjectSetupAsDegraded(t *testing.T) {
 func TestLinearFactoryLabelStartsOneRunPerActiveIssue(t *testing.T) {
 	t.Parallel()
 
-	handler, runStore, notifier := testHandlerWithRuns(t)
+	handler, runStore, notifier, configuration := testHandlerWithRunsAndSettings(t)
 	for i, deliveryID := range []string{"delivery-1", "delivery-2"} {
 		body := fmt.Sprintf(
 			`{"type":"Issue","action":"update","webhookTimestamp":%d,"actor":{"id":"%s"},"data":{"identifier":"ENG-123","labelIds":["label-other","label-factory"],"labels":[{"id":"label-other","name":"other"},{"id":"label-factory","name":"Factory"}]},"updatedFrom":{"labelIds":["label-other"]}}`,
@@ -781,13 +784,20 @@ func TestLinearFactoryLabelStartsOneRunPerActiveIssue(t *testing.T) {
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("webhook %d status = %d, want %d", i, recorder.Code, http.StatusOK)
 		}
+		if i == 0 {
+			candidate := configuration.Snapshot()
+			candidate.Triggers.LinearLabel.WorkflowID = "unavailable-workflow"
+			if _, err := configuration.Update(candidate.Revision, candidate, testNow.Add(time.Second)); err != nil {
+				t.Fatalf("remove current label binding: %v", err)
+			}
+		}
 	}
 
 	snapshot := runStore.Snapshot()
 	if snapshot.Total != 1 || snapshot.Active != 1 || len(snapshot.Runs) != 1 {
 		t.Fatalf("run snapshot = %#v", snapshot)
 	}
-	if got := snapshot.Runs[0]; got.IssueIdentifier != "ENG-123" || got.TriggerKind != "linear-label" || got.DuplicateTriggers != 1 {
+	if got := snapshot.Runs[0]; got.IssueIdentifier != "ENG-123" || got.TriggerKind != "linear-label" || got.DuplicateTriggers != 1 || got.PinnedWorkflow == nil || got.PinnedWorkflowDigest == "" {
 		t.Fatalf("run = %#v", got)
 	}
 	if got := notifier.count.Load(); got != 1 {
@@ -1052,11 +1062,12 @@ func TestLinearCommentStartsOneContinuationAfterTerminalRun(t *testing.T) {
 	t.Parallel()
 
 	handler, runStore, notifier, journalPath := testHandlerWithLinearComments(t)
-	prior, _, err := runStore.Claim(agentrun.Trigger{
+	prior, _, err := runStore.Claim(testInitialClaim(agentrun.Trigger{
 		DeliveryID:      "label-delivery",
 		IssueIdentifier: "ENG-123",
 		Kind:            agentrun.TriggerKindLabel,
-	}, testNow.Add(-2*time.Second))
+	}), testNow.Add(-2*time.Second))
+
 	if err != nil {
 		t.Fatalf("seed prior run: %v", err)
 	}
@@ -1094,11 +1105,12 @@ func TestLinearCommentCoalescesIntoActiveRunWithoutNotification(t *testing.T) {
 	t.Parallel()
 
 	handler, runStore, notifier, _ := testHandlerWithLinearComments(t)
-	active, _, err := runStore.Claim(agentrun.Trigger{
+	active, _, err := runStore.Claim(testInitialClaim(agentrun.Trigger{
 		DeliveryID:      "label-delivery",
 		IssueIdentifier: "ENG-123",
 		Kind:            agentrun.TriggerKindLabel,
-	}, testNow.Add(-time.Second))
+	}), testNow.Add(-time.Second))
+
 	if err != nil {
 		t.Fatalf("seed active run: %v", err)
 	}
@@ -1121,11 +1133,12 @@ func TestLinearCommentResumesParkedRunAndNotifiesManager(t *testing.T) {
 	t.Parallel()
 
 	handler, runStore, notifier, _ := testHandlerWithLinearComments(t)
-	run, _, err := runStore.Claim(agentrun.Trigger{
+	run, _, err := runStore.Claim(testInitialClaim(agentrun.Trigger{
 		DeliveryID:      "label-delivery",
 		IssueIdentifier: "ENG-123",
 		Kind:            agentrun.TriggerKindLabel,
-	}, testNow.Add(-2*time.Second))
+	}), testNow.Add(-2*time.Second))
+
 	if err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
@@ -1178,7 +1191,7 @@ func TestLinearCommentWakeFiltersFactoryAndUnsupportedComments(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			handler, runStore, notifier, journalPath := testHandlerWithLinearComments(t)
-			prior, _, err := runStore.Claim(agentrun.Trigger{DeliveryID: "label-delivery", IssueIdentifier: "ENG-123", Kind: agentrun.TriggerKindLabel}, testNow.Add(-2*time.Second))
+			prior, _, err := runStore.Claim(testInitialClaim(agentrun.Trigger{DeliveryID: "label-delivery", IssueIdentifier: "ENG-123", Kind: agentrun.TriggerKindLabel}), testNow.Add(-2*time.Second))
 			if err != nil {
 				t.Fatalf("seed prior run: %v", err)
 			}
@@ -1264,7 +1277,7 @@ func TestGitHubBranchOnlyFailureWakeSchedulesParkedRun(t *testing.T) {
 	t.Parallel()
 
 	handler, runStore, notifier := testHandlerWithRuns(t)
-	run, _, err := runStore.Claim(agentrun.Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: agentrun.TriggerKindLabel}, testNow.Add(-2*time.Second))
+	run, _, err := runStore.Claim(testInitialClaim(agentrun.Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: agentrun.TriggerKindLabel}), testNow.Add(-2*time.Second))
 	if err != nil {
 		t.Fatalf("claim run: %v", err)
 	}

@@ -131,11 +131,12 @@ func TestManagerStartsPendingRunAndRecordsCompletion(t *testing.T) {
 
 	store := openTestStore(t, 10)
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
-	run, _, err := store.Claim(Trigger{
+	run, _, err := store.Claim(testInitialClaim(Trigger{
 		DeliveryID:      "delivery-1",
 		IssueIdentifier: "ENG-123",
 		Kind:            "linear-comment",
-	}, now)
+	}), now)
+
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -178,11 +179,12 @@ func TestManagerLeavesPendingRunWhenWorkspacePreparationFails(t *testing.T) {
 
 	store := openTestStore(t, 10)
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
-	_, _, err := store.Claim(Trigger{
+	_, _, err := store.Claim(testInitialClaim(Trigger{
 		DeliveryID:      "delivery-1",
 		IssueIdentifier: "ENG-123",
 		Kind:            "linear-comment",
-	}, now)
+	}), now)
+
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -204,11 +206,12 @@ func TestManagerHonorsConcurrencyLimit(t *testing.T) {
 	store := openTestStore(t, 10)
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
 	for i, issue := range []string{"ENG-123", "ENG-124"} {
-		_, _, err := store.Claim(Trigger{
+		_, _, err := store.Claim(testInitialClaim(Trigger{
 			DeliveryID:      "delivery-" + strconv.Itoa(i+1),
 			IssueIdentifier: issue,
 			Kind:            "linear-comment",
-		}, now)
+		}), now)
+
 		if err != nil {
 			t.Fatalf("claim %s: %v", issue, err)
 		}
@@ -237,11 +240,12 @@ func TestManagerSkipsWorktreeCleanupWhileRunIsActive(t *testing.T) {
 
 	store := openTestStore(t, 10)
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
-	active, _, err := store.Claim(Trigger{
+	active, _, err := store.Claim(testInitialClaim(Trigger{
 		DeliveryID:      "delivery-1",
 		IssueIdentifier: "ENG-123",
 		Kind:            "linear-comment",
-	}, now)
+	}), now)
+
 	if err != nil {
 		t.Fatalf("claim active: %v", err)
 	}
@@ -252,11 +256,12 @@ func TestManagerSkipsWorktreeCleanupWhileRunIsActive(t *testing.T) {
 	if err := store.MarkRunning(active.ID, 1, now); err != nil {
 		t.Fatalf("mark active running: %v", err)
 	}
-	_, _, err = store.Claim(Trigger{
+	_, _, err = store.Claim(testInitialClaim(Trigger{
 		DeliveryID:      "delivery-2",
 		IssueIdentifier: "ENG-124",
 		Kind:            "linear-comment",
-	}, now.Add(time.Second))
+	}), now.Add(time.Second))
+
 	if err != nil {
 		t.Fatalf("claim pending: %v", err)
 	}
@@ -284,7 +289,7 @@ func TestManagerCollectsFinalAgentOutputAndTerminalTransition(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	now := time.Date(2026, time.July, 10, 9, 0, 0, 0, time.UTC)
-	run, _, err := store.Claim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "delivery-1", IssueIdentifier: "ENG-123", Kind: "test"}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -333,7 +338,7 @@ func TestManagerParksValidatedReadyRun(t *testing.T) {
 
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 	store := openTestStore(t, 10)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -362,7 +367,7 @@ func TestManagerResumesMergeThatWinsReadyParkingRace(t *testing.T) {
 
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 	store := openTestStore(t, 10)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -395,7 +400,7 @@ func TestManagerRejectsForgedReadyCheckpoint(t *testing.T) {
 
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 	store := openTestStore(t, 10)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -420,7 +425,7 @@ func TestManagerParksValidCheckpointAfterProcessFailure(t *testing.T) {
 
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 	store := openTestStore(t, 10)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -449,7 +454,7 @@ func TestManagerParksValidCheckpointWithoutProcessResult(t *testing.T) {
 
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 	store := openTestStore(t, 10)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -475,7 +480,7 @@ func TestManagerRetriesReadyCheckpointAfterTransientRefreshFailure(t *testing.T)
 
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 	store := openTestStore(t, 10)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -523,7 +528,7 @@ func TestManagerRejectsCheckpointOutsideConfiguredLifecycle(t *testing.T) {
 			t.Parallel()
 			now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 			store := openTestStore(t, 10)
-			run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+			run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 			if err != nil {
 				t.Fatalf("claim: %v", err)
 			}
@@ -553,7 +558,7 @@ func TestManagerResumesMergedParkedRun(t *testing.T) {
 
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 	store := openTestStore(t, 10)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -589,7 +594,7 @@ func TestManagerResumesSameHeadForGitHubRemediationWake(t *testing.T) {
 
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 	store := openTestStore(t, 10)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -622,7 +627,7 @@ func TestManagerPeriodicSweepResumesDroppedSameHeadFeedback(t *testing.T) {
 
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 	store := openTestStore(t, 10)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -654,7 +659,7 @@ func TestManagerRejectsTerminalIntentWhilePullRequestOpen(t *testing.T) {
 
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 	store := openTestStore(t, 10)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -711,7 +716,7 @@ func TestManagerRequiresVerifiedMergeBeforeTerminalSuccess(t *testing.T) {
 			t.Parallel()
 			now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 			store := openTestStore(t, 10)
-			run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+			run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 			if err != nil {
 				t.Fatalf("claim: %v", err)
 			}
@@ -746,7 +751,7 @@ func TestManagerRejectsStaleSegmentResult(t *testing.T) {
 
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 	store := openTestStore(t, 10)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -769,7 +774,7 @@ func TestManagerReparksPostMergeProcessFailure(t *testing.T) {
 
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 	store := openTestStore(t, 10)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -802,7 +807,7 @@ func TestManagerRetriesPostMergeStartFailure(t *testing.T) {
 
 	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
 	store := openTestStore(t, 10)
-	run, _, err := store.Claim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}, now)
+	run, _, err := store.Claim(testInitialClaim(Trigger{DeliveryID: "label-1", IssueIdentifier: "ENG-123", Kind: TriggerKindLabel}), now)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}

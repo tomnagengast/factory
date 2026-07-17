@@ -395,7 +395,7 @@ func TestTmuxLauncherStartPreservesWorktreesWhenCleanupIsDisabled(t *testing.T) 
 	}
 }
 
-func TestTmuxLauncherPropagatesTriggerKind(t *testing.T) {
+func TestTmuxLauncherRetainsPrePinningRunFallback(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -446,6 +446,12 @@ func TestTmuxLauncherPropagatesTriggerKind(t *testing.T) {
 			t.Fatalf("arguments missing %q:\n%s", expected, arguments)
 		}
 	}
+	if strings.Contains(arguments, "--workflow-file") {
+		t.Fatalf("legacy unpinned run unexpectedly received a workflow snapshot:\n%s", arguments)
+	}
+	if _, err := os.Stat(filepath.Join(runDirectory, WorkflowSnapshotFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy unpinned run wrote a workflow snapshot: %v", err)
+	}
 }
 
 func TestTmuxLauncherScopesEveryProviderNeutralRunWithoutLinearKey(t *testing.T) {
@@ -485,8 +491,12 @@ func TestTmuxLauncherScopesEveryProviderNeutralRunWithoutLinearKey(t *testing.T)
 				t.Fatal(err)
 			}
 			captured := string(data)
-			if strings.Contains(captured, "LINEAR_API_KEY") || !strings.Contains(captured, "FACTORY_TASK_CAPABILITY_FILE=") || !strings.Contains(captured, "FACTORY_TASK_ENDPOINT=") {
+			if strings.Contains(captured, "LINEAR_API_KEY") || !strings.Contains(captured, "FACTORY_TASK_CAPABILITY_FILE=") ||
+				!strings.Contains(captured, "FACTORY_TASK_ENDPOINT=") || !strings.Contains(captured, "--workflow-file") {
 				t.Fatalf("provider-neutral launch capture:\n%s", captured)
+			}
+			if _, _, err := ReadWorkflowSnapshot(runDirectory, filepath.Join(runDirectory, WorkflowSnapshotFileName)); err != nil {
+				t.Fatalf("read pinned launch workflow: %v", err)
 			}
 			if _, err := ReadTaskCapability(runDirectory); err != nil {
 				t.Fatalf("read task capability: %v", err)

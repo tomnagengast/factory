@@ -21,7 +21,7 @@ func TestRunPersistsResolvedRepositoryIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	run, created, err := store.Claim(Trigger{
+	run, created, err := store.Claim(testInitialClaim(Trigger{
 		DeliveryID:      "delivery-1",
 		IssueIdentifier: "ENG-31",
 		Kind:            TriggerKindLabel,
@@ -31,7 +31,8 @@ func TestRunPersistsResolvedRepositoryIdentity(t *testing.T) {
 		ManagedRoot:     "/Users/tom/repos/tomnagengast",
 		BaseBranch:      "main",
 		Bootstrap:       true,
-	}, time.Unix(1, 0))
+	}), time.Unix(1, 0))
+
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
