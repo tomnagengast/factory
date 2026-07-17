@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,19 +17,21 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tomnagengast/factory/internal/agent"
-	"github.com/tomnagengast/factory/internal/eventwire"
-	"github.com/tomnagengast/factory/internal/server"
+	"github.com/tomnagengast/factory/api/internal/agent"
+	"github.com/tomnagengast/factory/api/internal/eventwire"
+	"github.com/tomnagengast/factory/api/internal/server"
+	"github.com/tomnagengast/factory/api/internal/workflow"
 )
 
-//go:embed frontend/index.html frontend/src/index.js frontend/src/styles.css
+//go:embed all:dist
 var frontend embed.FS
 
 type config struct {
-	Address      string
-	DataPath     string
-	Workspace    string
-	AgentCommand string
+	Address           string
+	DataPath          string
+	WorkflowWorkspace string
+	AgentCommand      string
+	WorkflowCommand   string
 }
 
 type componentResult struct {
@@ -39,7 +42,6 @@ type componentResult struct {
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
 	configuration, err := parseConfig(os.Args[1:], os.Stderr)
 	if err != nil {
 		if !errors.Is(err, flag.ErrHelp) {
@@ -59,31 +61,32 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 	if err != nil {
 		return config{}, fmt.Errorf("resolve home directory: %w", err)
 	}
-	workspace, err := os.Getwd()
-	if err != nil {
-		return config{}, fmt.Errorf("resolve workspace: %w", err)
-	}
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8092"
 	}
-
-	flags := flag.NewFlagSet("factory", flag.ContinueOnError)
+	flags := flag.NewFlagSet("factory-api", flag.ContinueOnError)
 	flags.SetOutput(output)
 	var configuration config
 	flags.StringVar(&configuration.Address, "addr", "127.0.0.1:"+port, "HTTP listen address")
 	flags.StringVar(
 		&configuration.DataPath,
 		"data",
-		filepath.Join(home, ".local", "share", "factory", "events.jsonl"),
+		filepath.Join(home, ".local", "share", "factory", "wire.jsonl"),
 		"append-only event wire path",
 	)
-	flags.StringVar(&configuration.Workspace, "workspace", workspace, "agent working directory")
+	flags.StringVar(
+		&configuration.WorkflowWorkspace,
+		"workflow-workspace",
+		filepath.Join(home, ".local", "share", "factory", "workflow-workspace"),
+		"untracked dynamic workflow workspace",
+	)
 	flags.StringVar(&configuration.AgentCommand, "agent", "codex", "Codex executable")
+	flags.StringVar(&configuration.WorkflowCommand, "workflow", "workflow", "workflow CLI executable")
 	flags.Usage = func() {
-		fmt.Fprintln(output, "Factory turns prompts into observable agent runs on one event wire.")
+		fmt.Fprintln(output, "Factory serves the event wire, resource API, Solid UI, and sequential Codex loop.")
 		fmt.Fprintln(output)
-		fmt.Fprintln(output, "Usage: factory [options]")
+		fmt.Fprintln(output, "Usage: factory-api [options]")
 		fmt.Fprintln(output)
 		flags.PrintDefaults()
 	}
@@ -91,21 +94,12 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 		return config{}, err
 	}
 	if flags.NArg() != 0 {
-		return config{}, errors.New("factory accepts options only")
+		return config{}, errors.New("factory-api accepts options only")
 	}
-	configuration.Workspace, err = filepath.Abs(configuration.Workspace)
-	if err != nil {
-		return config{}, fmt.Errorf("resolve workspace: %w", err)
-	}
-	info, err := os.Stat(configuration.Workspace)
-	if err != nil {
-		return config{}, fmt.Errorf("inspect workspace: %w", err)
-	}
-	if !info.IsDir() {
-		return config{}, errors.New("workspace must be a directory")
-	}
-	if configuration.Address == "" || configuration.DataPath == "" || configuration.AgentCommand == "" {
-		return config{}, errors.New("address, data path, and agent command are required")
+	if configuration.Address == "" || configuration.DataPath == "" ||
+		configuration.WorkflowWorkspace == "" || configuration.AgentCommand == "" ||
+		configuration.WorkflowCommand == "" {
+		return config{}, errors.New("all serve options require values")
 	}
 	return configuration, nil
 }
@@ -117,13 +111,23 @@ func run(ctx context.Context, configuration config) error {
 	}
 	defer wire.Close()
 
+	workflowCLI := workflow.CLI{
+		Command: configuration.WorkflowCommand, Workspace: configuration.WorkflowWorkspace,
+	}
+	if err := workflowCLI.Prepare(); err != nil {
+		return err
+	}
 	loop, err := agent.NewLoop(wire, agent.CommandRunner{
-		Command: configuration.AgentCommand, Workspace: configuration.Workspace,
-	})
+		Command: configuration.AgentCommand, Workspace: configuration.WorkflowWorkspace,
+	}, workflowCLI)
 	if err != nil {
 		return err
 	}
-	app, err := server.New(wire, frontend, filepath.Base(configuration.AgentCommand))
+	assets, err := fs.Sub(frontend, "dist")
+	if err != nil {
+		return fmt.Errorf("open embedded web bundle: %w", err)
+	}
+	app, err := server.New(wire, assets, "codex")
 	if err != nil {
 		return err
 	}
@@ -133,21 +137,19 @@ func run(ctx context.Context, configuration config) error {
 	}
 	defer listener.Close()
 
-	httpServer := &http.Server{
-		Handler:           app.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	httpServer := &http.Server{Handler: app.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan componentResult, 2)
 	go func() { results <- componentResult{name: "agent loop", err: loop.Run(runContext)} }()
-	go func() { results <- componentResult{name: "http server", err: httpServer.Serve(listener)} }()
+	go func() { results <- componentResult{name: "HTTP server", err: httpServer.Serve(listener)} }()
 
 	slog.Info(
 		"factory listening",
 		"address", "http://"+listener.Addr().String(),
-		"workspace", configuration.Workspace,
 		"wire", configuration.DataPath,
+		"workflowWorkspace", configuration.WorkflowWorkspace,
+		"backend", "codex",
 	)
 
 	first := <-results
@@ -156,7 +158,6 @@ func run(ctx context.Context, configuration config) error {
 	shutdownErr := httpServer.Shutdown(shutdownContext)
 	shutdownCancel()
 	second := <-results
-
 	if err := operationalError(first); err != nil {
 		return err
 	}

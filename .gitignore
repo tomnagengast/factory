@@ -1,4 +1,6 @@
 factory
-frontend/dist/
-frontend/node_modules/
-
+factory-api
+api/dist/*
+!api/dist/.keep
+web/dist/
+web/node_modules/

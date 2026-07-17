@@ -39,7 +39,10 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(args), "--allow-mutating") || !strings.Contains(string(args), "--claude-yolo") {
+	if !strings.Contains(string(args), "--backend") ||
+		!strings.Contains(string(args), "codex") ||
+		!strings.Contains(string(args), "--allow-mutating") ||
+		!strings.Contains(string(args), "--codex-yolo") {
 		t.Fatalf("unrestricted flags missing: %s", args)
 	}
 	if got := cli.LocalPath(42); !strings.HasSuffix(got, "workflow-42.js") {

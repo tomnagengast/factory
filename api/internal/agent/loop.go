@@ -12,9 +12,9 @@ import (
 
 	"github.com/robfig/cron/v3"
 
-	"github.com/tomnagengast/factory/internal/eventwire"
-	"github.com/tomnagengast/factory/internal/state"
-	"github.com/tomnagengast/factory/internal/workflow"
+	"github.com/tomnagengast/factory/api/internal/eventwire"
+	"github.com/tomnagengast/factory/api/internal/state"
+	"github.com/tomnagengast/factory/api/internal/workflow"
 )
 
 const (

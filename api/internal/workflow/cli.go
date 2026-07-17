@@ -63,9 +63,10 @@ func (c CLI) Run(ctx context.Context, name string, args any) (string, error) {
 		"--cwd", c.Workspace,
 		"run", name,
 		"--args", string(encoded),
+		"--backend", "codex",
 		"--allow-mutating",
 		"--no-validate",
-		"--claude-yolo",
+		"--codex-yolo",
 	)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr

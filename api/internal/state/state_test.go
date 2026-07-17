@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tomnagengast/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/api/internal/eventwire"
 )
 
 func TestProjectEventsBuildsDomainState(t *testing.T) {

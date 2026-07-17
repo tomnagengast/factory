@@ -6,7 +6,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/tomnagengast/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/api/internal/eventwire"
 )
 
 const (
@@ -17,8 +17,10 @@ const (
 	TaskUpdated          = "task.updated"
 	TaskDeleted          = "task.deleted"
 	CommentCreated       = "comment.created"
+	CommentUpdated       = "comment.updated"
 	CommentDeleted       = "comment.deleted"
 	ArtifactCreated      = "artifact.created"
+	ArtifactUpdated      = "artifact.updated"
 	ArtifactDeleted      = "artifact.deleted"
 	TriggerCreated       = "trigger.created"
 	TriggerUpdated       = "trigger.updated"
@@ -268,6 +270,16 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 				Record: newRecord(event), RelationType: data.RelationType, RelationID: data.RelationID,
 				ParentCommentID: data.ParentCommentID, Author: data.Author, Content: data.Content,
 			})
+		case CommentUpdated:
+			var data CommentData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := commentIndex[data.ID]; found {
+				comment := &view.Comments[index]
+				comment.ParentCommentID, comment.Content = data.ParentCommentID, data.Content
+				comment.UpdatedAt = event.At
+			}
 		case CommentDeleted:
 			var data IDData
 			if err := decode(event, &data); err != nil {
@@ -287,6 +299,17 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 				Record: newRecord(event), Name: data.Name, Type: data.Type, Content: data.Content,
 				RelationType: data.RelationType, RelationID: data.RelationID,
 			})
+		case ArtifactUpdated:
+			var data ArtifactData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := artifactIndex[data.ID]; found {
+				artifact := &view.Artifacts[index]
+				artifact.Name, artifact.Type, artifact.Content = data.Name, data.Type, data.Content
+				artifact.RelationType, artifact.RelationID = data.RelationType, data.RelationID
+				artifact.UpdatedAt = event.At
+			}
 		case ArtifactDeleted:
 			var data IDData
 			if err := decode(event, &data); err != nil {
@@ -410,6 +433,15 @@ func (s Snapshot) Trigger(id int64) (Trigger, bool) {
 		}
 	}
 	return Trigger{}, false
+}
+
+func (s Snapshot) Artifact(id int64) (Artifact, bool) {
+	for _, artifact := range s.Artifacts {
+		if artifact.ID == id {
+			return artifact, true
+		}
+	}
+	return Artifact{}, false
 }
 
 func (s Snapshot) Workflow(id int64) (Workflow, bool) {
