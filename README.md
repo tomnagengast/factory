@@ -365,6 +365,25 @@ Optional variables:
 - `FACTORY_REPO_URL`, default `git@github.com:tomnagengast/network.git`.
 - `FACTORY_REPO_PATH`, default `~/.local/share/factory/workspace/network`.
 - `FACTORY_TMUX_SOCKET`, default `factory-agents`.
+- `FACTORY_API_TOKEN`, optional; overrides the generated operator API token.
+
+### Operator API token
+
+When `FACTORY_API_TOKEN` is not set, startup loads or creates a private random
+token at `~/.local/share/factory/data/api-token` (regular `0600` file). A
+request carrying `Authorization: Bearer <token>` is authorized for the
+protected `/api/*` routes as the human operator identity
+`token:local-operator`, so local automation and agents on this machine can use
+the task, trigger, settings, and workflow APIs without a browser session:
+
+```bash
+curl -fsS https://factory.nags.cloud/api/task-projects \
+  -H "Authorization: Bearer $(cat ~/.local/share/factory/data/api-token)" | jq .
+```
+
+Browser pages, sign-in, and sign-out never accept the token. Rotate it by
+deleting the file and restarting Factory. The token authorizes the same
+surface as an allowed Google operator; keep the file private.
 
 ### Runtime settings
 

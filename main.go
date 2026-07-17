@@ -147,6 +147,17 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 	}
 	stateRoot := filepath.Join(home, ".local", "share", "factory")
 	dataRoot := filepath.Join(stateRoot, "data")
+	apiToken := strings.TrimSpace(os.Getenv("FACTORY_API_TOKEN"))
+	if apiToken == "" {
+		apiToken, err = viewerauth.LoadOrCreateToken(filepath.Join(dataRoot, "api-token"))
+		if err != nil {
+			return err
+		}
+	}
+	viewerAuth, err = viewerauth.NewToken(viewerAuth, apiToken)
+	if err != nil {
+		return err
+	}
 	linearIdentities, err := linearidentity.Open(filepath.Join(dataRoot, "linear-task-identities.json"))
 	if err != nil {
 		return err
