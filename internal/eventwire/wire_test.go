@@ -3,113 +3,80 @@ package eventwire
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
-	"slices"
 	"testing"
+	"time"
 )
 
-func TestWireDispatchesOneBatchBeforePerRecordRoutes(t *testing.T) {
-	t.Parallel()
-	journal, err := Open(filepath.Join(t.TempDir(), "events.jsonl"), 10, nil)
+func TestWirePublishesWaitsAndReplays(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	wire, err := Open(path)
 	if err != nil {
-		t.Fatalf("open: %v", err)
+		t.Fatal(err)
 	}
-	wire, err := New(journal)
+
+	first, err := wire.Publish(TaskSubmitted, "task-1", "", map[string]string{"prompt": "test"})
 	if err != nil {
-		t.Fatalf("new wire: %v", err)
+		t.Fatal(err)
 	}
-	var order []string
-	if err := wire.HandleBatch(func(_ context.Context, records []Record) error {
-		order = append(order, "batch")
-		if len(records) != 3 || records[0].Sequence != 1 || records[2].Sequence != 3 {
-			t.Fatalf("batch = %#v", records)
+	if first.Sequence != 1 {
+		t.Fatalf("sequence = %d, want 1", first.Sequence)
+	}
+
+	result := make(chan []Event, 1)
+	go func() {
+		events, _ := wire.Wait(context.Background(), 1)
+		result <- events
+	}()
+	second, err := wire.Publish(RunStarted, "task-1", "run-1", struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case events := <-result:
+		if len(events) != 1 || events[0].ID != second.ID {
+			t.Fatalf("wait events = %#v", events)
 		}
-		records[0].Event.Attributes = map[string][]string{"mutated": {"true"}}
-		return nil
-	}); err != nil {
-		t.Fatalf("handle batch: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("wait did not observe the published event")
 	}
-	if err := wire.Handle(Filter{}, func(_ context.Context, record Record) error {
-		if record.Event.Has("mutated", "true") {
-			t.Fatal("batch handler mutated per-record input")
-		}
-		order = append(order, record.Event.ID)
-		return nil
-	}); err != nil {
-		t.Fatalf("handle: %v", err)
+
+	if err := wire.Close(); err != nil {
+		t.Fatal(err)
 	}
-	events := []Event{
-		testEvent("factory:one", SourceFactory, "service"),
-		testEvent("factory:two", SourceFactory, "service"),
-		testEvent("factory:three", SourceFactory, "service"),
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := wire.PublishBatch(context.Background(), events); err != nil {
-		t.Fatalf("publish batch: %v", err)
-	}
-	want := []string{"batch", "factory:one", "factory:two", "factory:three"}
-	if !slices.Equal(order, want) {
-		t.Fatalf("order = %#v, want %#v", order, want)
+	defer reopened.Close()
+	events := reopened.Events(0)
+	if len(events) != 2 || events[0].Type != TaskSubmitted || events[1].Type != RunStarted {
+		t.Fatalf("replayed events = %#v", events)
 	}
 }
 
-func TestWireBatchFailureLeavesWholePrefixPending(t *testing.T) {
-	t.Parallel()
-	journal, err := Open(filepath.Join(t.TempDir(), "events.jsonl"), 10, nil)
+func TestWireWaitStopsWithContext(t *testing.T) {
+	wire, err := Open(filepath.Join(t.TempDir(), "events.jsonl"))
 	if err != nil {
-		t.Fatalf("open: %v", err)
+		t.Fatal(err)
 	}
-	wire, err := New(journal)
-	if err != nil {
-		t.Fatalf("new wire: %v", err)
-	}
-	fail := true
-	batchCalls := 0
-	routeCalls := 0
-	if err := wire.HandleBatch(func(context.Context, []Record) error {
-		batchCalls++
-		if fail {
-			fail = false
-			return errors.New("routing store unavailable")
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("handle batch: %v", err)
-	}
-	if err := wire.Handle(Filter{}, func(context.Context, Record) error {
-		routeCalls++
-		return nil
-	}); err != nil {
-		t.Fatalf("handle: %v", err)
-	}
-	events := []Event{
-		testEvent("factory:one", SourceFactory, "service"),
-		testEvent("factory:two", SourceFactory, "service"),
-	}
-	if _, err := wire.PublishBatch(context.Background(), events); err == nil {
-		t.Fatal("batch failure was ignored")
-	}
-	if got := wire.Status(); got.Pending != 2 || got.Dispatched != 0 || routeCalls != 0 {
-		t.Fatalf("after failure status=%#v routeCalls=%d", got, routeCalls)
-	}
-	if err := wire.CatchUp(context.Background()); err != nil {
-		t.Fatalf("catch up: %v", err)
-	}
-	if got := wire.Status(); got.Pending != 0 || got.Dispatched != 2 || batchCalls != 2 || routeCalls != 2 {
-		t.Fatalf("after replay status=%#v batchCalls=%d routeCalls=%d", got, batchCalls, routeCalls)
+	defer wire.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = wire.Wait(ctx, 0)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context cancellation", err)
 	}
 }
 
-func TestWireRejectsNilBatchHandler(t *testing.T) {
-	t.Parallel()
-	journal, err := Open(filepath.Join(t.TempDir(), "events.jsonl"), 10, nil)
-	if err != nil {
-		t.Fatalf("open: %v", err)
+func TestWireRejectsMalformedHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	if err := os.WriteFile(path, []byte(`{"sequence":2}`+"\n"), 0o666); err != nil {
+		t.Fatal(err)
 	}
-	wire, err := New(journal)
-	if err != nil {
-		t.Fatalf("new wire: %v", err)
-	}
-	if err := wire.HandleBatch(nil); err == nil {
-		t.Fatal("nil batch handler was accepted")
+	if _, err := Open(path); err == nil {
+		t.Fatal("expected malformed history to fail")
 	}
 }

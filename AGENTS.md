@@ -1,11 +1,11 @@
 # Factory agent instructions
 
-- Preserve human-only merge authority and exact verified-head deployment gates.
-- Route every run's primary repository through allowlisted Linear project
-  metadata; runs carry machine-wide authority for coordinated changes across
-  admitted repositories.
-- Keep repository-specific clones, worktrees, checkpoints, receipts, and
-  completion evidence isolated.
+- Keep Factory focused on its three mechanisms: the event wire, task intake,
+  and the sequential agent loop.
+- Factory is an intentionally unsafe trusted-environment demonstrator. Do not
+  add authentication, permissions, policy, routing, migration, or deployment
+  lifecycle machinery without explicit product direction.
+- Humans retain merge authority for this repository.
 - Run `go test ./...`, `go test -race ./...`, `go vet ./...`, and the
   frozen Bun frontend build before publication.
 - Deploy only clean, merged `main` commits from

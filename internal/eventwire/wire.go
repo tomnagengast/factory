@@ -1,177 +1,208 @@
 package eventwire
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
 
-type Handler func(context.Context, Record) error
+const (
+	TaskSubmitted = "task.submitted"
+	RunStarted    = "run.started"
+	AgentOutput   = "agent.output"
+	RunCompleted  = "run.completed"
+	RunFailed     = "run.failed"
+)
 
-type BatchHandler func(context.Context, []Record) error
+var ErrClosed = errors.New("event wire is closed")
 
-type route struct {
-	filter  Filter
-	handler Handler
+// Event is the only durable fact in Factory. Task and Run state are projections
+// of these ordered records.
+type Event struct {
+	Sequence uint64          `json:"sequence"`
+	ID       string          `json:"id"`
+	Type     string          `json:"type"`
+	At       time.Time       `json:"at"`
+	TaskID   string          `json:"taskId,omitempty"`
+	RunID    string          `json:"runId,omitempty"`
+	Data     json.RawMessage `json:"data"`
 }
 
+// Wire owns one append-only JSONL file and broadcasts a wake whenever a record
+// is appended. Consumers always catch up from the log, so a wake carries no
+// payload and may be coalesced safely.
 type Wire struct {
-	journal    *Journal
-	dispatchMu sync.Mutex
-	routesMu   sync.RWMutex
-	routes     []route
-	batchMu    sync.RWMutex
-	batch      []BatchHandler
-	now        func() time.Time
+	mu      sync.RWMutex
+	file    *os.File
+	events  []Event
+	changed chan struct{}
+	closed  bool
 }
 
-func New(journal *Journal) (*Wire, error) {
-	if journal == nil {
-		return nil, errors.New("event wire: journal is required")
+func Open(path string) (*Wire, error) {
+	if path == "" {
+		return nil, errors.New("event wire path is required")
 	}
-	return &Wire{journal: journal, now: time.Now}, nil
-}
-
-type permanentError struct{ error }
-
-func (permanentError) Permanent() bool { return true }
-
-func Permanent(err error) error {
-	if err == nil {
-		return nil
+	if err := os.MkdirAll(filepath.Dir(path), 0o777); err != nil {
+		return nil, fmt.Errorf("create event wire directory: %w", err)
 	}
-	return permanentError{error: err}
-}
 
-func isPermanent(err error) bool {
-	var classified interface{ Permanent() bool }
-	return errors.As(err, &classified) && classified.Permanent()
-}
-
-func (w *Wire) Handle(filter Filter, handler Handler) error {
-	if handler == nil {
-		return errors.New("event wire: handler is required")
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read event wire: %w", err)
 	}
-	w.routesMu.Lock()
-	defer w.routesMu.Unlock()
-	w.routes = append(w.routes, route{filter: filter, handler: handler})
-	return nil
-}
-
-func (w *Wire) HandleBatch(handler BatchHandler) error {
-	if handler == nil {
-		return errors.New("event wire: batch handler is required")
-	}
-	w.batchMu.Lock()
-	defer w.batchMu.Unlock()
-	w.batch = append(w.batch, handler)
-	return nil
-}
-
-func (w *Wire) Publish(ctx context.Context, event Event) (Record, bool, error) {
-	w.dispatchMu.Lock()
-	defer w.dispatchMu.Unlock()
-	if err := w.catchUpLocked(ctx); err != nil {
-		return Record{}, false, err
-	}
-	record, added, err := w.journal.Add(event)
-	if err != nil {
-		return record, added, err
-	}
-	if err := w.catchUpLocked(ctx); err != nil {
-		return record, added, err
-	}
-	return record, added, nil
-}
-
-func (w *Wire) PublishBatch(ctx context.Context, events []Event) ([]Record, error) {
-	w.dispatchMu.Lock()
-	defer w.dispatchMu.Unlock()
-	if err := w.catchUpLocked(ctx); err != nil {
-		return nil, err
-	}
-	records, err := w.journal.AddBatch(events)
+	events, err := decode(data)
 	if err != nil {
 		return nil, err
 	}
-	if err := w.catchUpLocked(ctx); err != nil {
-		return records, err
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o666)
+	if err != nil {
+		return nil, fmt.Errorf("open event wire: %w", err)
 	}
-	return records, nil
+	return &Wire{file: file, events: events, changed: make(chan struct{})}, nil
 }
 
-func (w *Wire) CatchUp(ctx context.Context) error {
-	w.dispatchMu.Lock()
-	defer w.dispatchMu.Unlock()
-	return w.catchUpLocked(ctx)
-}
-
-func (w *Wire) Status() Status { return w.journal.Status() }
-
-func (w *Wire) Query(query Query) (Page, error) { return w.journal.Query(query) }
-
-func (w *Wire) Record(sequence uint64) (Record, bool) { return w.journal.Record(sequence) }
-
-func (w *Wire) RetainedEventIDs() map[string]bool {
-	_, _, _, records := w.journal.Snapshot()
-	ids := make(map[string]bool, len(records))
-	for _, record := range records {
-		ids[record.Event.ID] = true
+func decode(data []byte) ([]Event, error) {
+	lines := bytes.Split(data, []byte{'\n'})
+	events := make([]Event, 0, len(lines))
+	for index, line := range lines {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var event Event
+		if err := json.Unmarshal(line, &event); err != nil {
+			return nil, fmt.Errorf("decode event wire line %d: %w", index+1, err)
+		}
+		expected := uint64(len(events) + 1)
+		if event.Sequence != expected || event.ID == "" || event.Type == "" || event.At.IsZero() {
+			return nil, fmt.Errorf("event wire line %d is invalid", index+1)
+		}
+		events = append(events, event)
 	}
-	return ids
+	return events, nil
 }
 
-func (w *Wire) catchUpLocked(ctx context.Context) error {
-	pending := w.journal.Pending()
-	if len(pending) == 0 {
+func (w *Wire) Publish(eventType, taskID, runID string, payload any) (Event, error) {
+	if eventType == "" {
+		return Event{}, errors.New("event type is required")
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return Event{}, fmt.Errorf("encode event payload: %w", err)
+	}
+	id, err := NewID("evt")
+	if err != nil {
+		return Event{}, err
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return Event{}, ErrClosed
+	}
+	event := Event{
+		Sequence: uint64(len(w.events) + 1),
+		ID:       id,
+		Type:     eventType,
+		At:       time.Now().UTC(),
+		TaskID:   taskID,
+		RunID:    runID,
+		Data:     data,
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return Event{}, fmt.Errorf("encode event: %w", err)
+	}
+	encoded = append(encoded, '\n')
+	if _, err := w.file.Write(encoded); err != nil {
+		return Event{}, fmt.Errorf("append event: %w", err)
+	}
+	w.events = append(w.events, event)
+	close(w.changed)
+	w.changed = make(chan struct{})
+	return cloneEvent(event), nil
+}
+
+func (w *Wire) Events(after uint64) []Event {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return eventsAfter(w.events, after)
+}
+
+func (w *Wire) LastSequence() uint64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if len(w.events) == 0 {
+		return 0
+	}
+	return w.events[len(w.events)-1].Sequence
+}
+
+// Wait returns every event after the requested sequence, waiting for the next
+// append when the caller is current.
+func (w *Wire) Wait(ctx context.Context, after uint64) ([]Event, error) {
+	for {
+		w.mu.RLock()
+		events := eventsAfter(w.events, after)
+		changed := w.changed
+		closed := w.closed
+		w.mu.RUnlock()
+
+		if len(events) > 0 {
+			return events, nil
+		}
+		if closed {
+			return nil, ErrClosed
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+func (w *Wire) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
 		return nil
 	}
-	_, _, channelAcks, _ := w.journal.Snapshot()
-	w.batchMu.RLock()
-	batchHandlers := append([]BatchHandler(nil), w.batch...)
-	w.batchMu.RUnlock()
-	w.routesMu.RLock()
-	routes := append([]route(nil), w.routes...)
-	w.routesMu.RUnlock()
-	for _, handler := range batchHandlers {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := handler(ctx, cloneRecords(pending)); err != nil {
-			return fmt.Errorf("event wire: batch dispatch: %w", err)
-		}
-	}
+	w.closed = true
+	close(w.changed)
+	return w.file.Close()
+}
 
-	var last uint64
-	for _, record := range pending {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		for _, route := range routes {
-			if !route.filter.Matches(record.Event) {
-				continue
-			}
-			if err := route.handler(ctx, cloneRecord(record)); err != nil {
-				wrapped := fmt.Errorf("event wire: dispatch %s: %w", record.Event.ID, err)
-				if !isPermanent(err) {
-					return wrapped
-				}
-				for channel, sequence := range record.ChannelSequences {
-					channelAcks[channel] = max(channelAcks[channel], sequence)
-				}
-				if rejectErr := w.journal.Reject(record, channelAcks, wrapped.Error(), w.now().UTC()); rejectErr != nil {
-					return fmt.Errorf("event wire: reject %s: %w", record.Event.ID, rejectErr)
-				}
-				last = record.Sequence
-				break
-			}
-		}
-		last = record.Sequence
-		for channel, sequence := range record.ChannelSequences {
-			channelAcks[channel] = max(channelAcks[channel], sequence)
-		}
+func eventsAfter(events []Event, after uint64) []Event {
+	index := sort.Search(len(events), func(index int) bool {
+		return events[index].Sequence > after
+	})
+	cloned := make([]Event, len(events)-index)
+	for offset := range cloned {
+		cloned[offset] = cloneEvent(events[index+offset])
 	}
-	return w.journal.Acknowledge(last, channelAcks)
+	return cloned
+}
+
+func cloneEvent(event Event) Event {
+	event.Data = append(json.RawMessage(nil), event.Data...)
+	return event
+}
+
+func NewID(prefix string) (string, error) {
+	var value [8]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("create identity: %w", err)
+	}
+	return prefix + "-" + hex.EncodeToString(value[:]), nil
 }
