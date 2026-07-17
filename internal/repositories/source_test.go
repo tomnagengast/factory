@@ -54,14 +54,16 @@ func TestConvertSourcesPreservesCompiledAndAdmittedRepositoryIdentity(t *testing
 		network.ManagedPath != filepath.Join(root, "workspace", "network") || network.ManagedRoot != filepath.Join(root, "workspace") {
 		t.Fatalf("network paths and origin = %#v", network)
 	}
-	if network.CloudURL != "https://network.nags.cloud" || network.Project.ID != "project-network" || !network.Routable() {
+	if network.Provenance != ProvenanceCompiled || network.CloudURL != "https://network.nags.cloud" ||
+		network.Project.ID != "project-network" || !network.Routable() {
 		t.Fatalf("network admission = %#v", network)
 	}
 	if !network.Deployment.Required() || network.Deployment.SourcePath != "apps/network" {
 		t.Fatalf("network deployment = %#v", network.Deployment)
 	}
 	cellar := findRecord(t, state.Records, "tomnagengast/cellar")
-	if cellar.LocalPath != cellar.ManagedPath || !cellar.Bootstrap || cellar.Setup.State != SetupStatePending || cellar.Routable() {
+	if cellar.Provenance != ProvenanceProject || cellar.LocalPath != cellar.ManagedPath || !cellar.Bootstrap ||
+		cellar.Setup.State != SetupStatePending || cellar.Routable() {
 		t.Fatalf("cellar = %#v", cellar)
 	}
 	if state.Awaiting[0].Project.ID != "project-awaiting" || state.Awaiting[0].Setup.State != SetupStateAwaitingMetadata {

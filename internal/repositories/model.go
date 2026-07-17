@@ -30,6 +30,13 @@ const (
 	SetupStateFailed           SetupState = "failed"
 )
 
+type Provenance string
+
+const (
+	ProvenanceCompiled Provenance = "compiled"
+	ProvenanceProject  Provenance = "project"
+)
+
 type ProjectIdentity struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -156,6 +163,7 @@ func (d Deployment) validate() error {
 
 type Record struct {
 	App           string          `json:"app"`
+	Provenance    Provenance      `json:"provenance"`
 	Project       ProjectIdentity `json:"project,omitempty"`
 	Repository    string          `json:"repository"`
 	Origin        string          `json:"origin"`
@@ -172,6 +180,9 @@ type Record struct {
 func (r Record) validate() error {
 	if !appPattern.MatchString(r.App) {
 		return errors.New("repository record: canonical app identity is required")
+	}
+	if r.Provenance != ProvenanceCompiled && r.Provenance != ProvenanceProject {
+		return errors.New("repository record: source provenance is required")
 	}
 	repository, origin, err := normalizeOrigin(r.Origin)
 	if err != nil || repository != r.Repository || origin != r.Origin {
@@ -200,6 +211,9 @@ func (r Record) validate() error {
 		if err := r.Project.validate(); err != nil {
 			return err
 		}
+	}
+	if r.Provenance == ProvenanceProject && !hasProject {
+		return errors.New("repository record: project source provenance requires project identity")
 	}
 	return r.Setup.validate(hasProject)
 }

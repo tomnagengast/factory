@@ -285,6 +285,225 @@ func TestCatalogReplacePreservesAdmittedIdentity(t *testing.T) {
 	}
 }
 
+func TestCatalogReplacePreservesCompiledBaselineBeforeAndAfterProjectOverlay(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	now := time.Date(2026, time.July, 16, 18, 0, 0, 0, time.UTC)
+	compiled := []CompiledSource{compiledSource(root, "factory"), compiledSource(root, "network")}
+
+	stages := []struct {
+		name   string
+		setups []SetupSource
+	}{
+		{name: "before project overlay"},
+		{name: "after project overlay", setups: []SetupSource{succeededSetup(root, "network", now)}},
+	}
+	mutations := []struct {
+		name   string
+		mutate func(*SourceState)
+	}{
+		{name: "removal", mutate: func(state *SourceState) {
+			for index := range state.Records {
+				if state.Records[index].Repository == "tomnagengast/network" {
+					state.Records = append(state.Records[:index], state.Records[index+1:]...)
+					return
+				}
+			}
+		}},
+		{name: "compiled baseline addition", mutate: func(state *SourceState) {
+			record, err := convertCompiled(compiledSource(root, "cellar"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.Records = append(state.Records, record)
+		}},
+		{name: "provenance", mutate: func(state *SourceState) {
+			record := recordForMutation(t, state, "tomnagengast/network")
+			if record.Project.IsZero() {
+				record.Project = ProjectIdentity{ID: "project-network", Name: "Network"}
+				record.Setup = Setup{
+					State: SetupStateSucceeded, CreatedAt: now, UpdatedAt: now,
+					ProvisionedAt: timePointer(now), ProviderCoordinated: true,
+				}
+			}
+			record.Provenance = ProvenanceProject
+		}},
+		{name: "app", mutate: func(state *SourceState) {
+			recordForMutation(t, state, "tomnagengast/network").App = "network-next"
+		}},
+		{name: "repository and origin", mutate: func(state *SourceState) {
+			record := recordForMutation(t, state, "tomnagengast/network")
+			record.Repository = "tomnagengast/network-next"
+			record.Origin = "git@github.com:tomnagengast/network-next.git"
+		}},
+		{name: "local path", mutate: func(state *SourceState) {
+			recordForMutation(t, state, "tomnagengast/network").LocalPath = filepath.Join(root, "local-next", "network")
+		}},
+		{name: "managed path", mutate: func(state *SourceState) {
+			recordForMutation(t, state, "tomnagengast/network").ManagedPath = filepath.Join(root, "managed", "network-next")
+		}},
+		{name: "managed root", mutate: func(state *SourceState) {
+			recordForMutation(t, state, "tomnagengast/network").ManagedRoot = root
+		}},
+		{name: "branch", mutate: func(state *SourceState) {
+			recordForMutation(t, state, "tomnagengast/network").DefaultBranch = "release"
+		}},
+		{name: "bootstrap", mutate: func(state *SourceState) {
+			recordForMutation(t, state, "tomnagengast/network").Bootstrap = true
+		}},
+		{name: "deployment receipt", mutate: func(state *SourceState) {
+			recordForMutation(t, state, "tomnagengast/network").Deployment.ReceiptPath = filepath.Join(root, "network", "next-current.json")
+		}},
+		{name: "deployment pending receipt", mutate: func(state *SourceState) {
+			recordForMutation(t, state, "tomnagengast/network").Deployment.PendingReceiptPath = filepath.Join(root, "network", "next-pending.json")
+		}},
+		{name: "deployment health", mutate: func(state *SourceState) {
+			recordForMutation(t, state, "tomnagengast/network").Deployment.HealthURL = "http://127.0.0.1:8090/healthz"
+		}},
+		{name: "deployment source path", mutate: func(state *SourceState) {
+			recordForMutation(t, state, "tomnagengast/network").Deployment.SourcePath = "apps/network"
+		}},
+	}
+
+	for _, stage := range stages {
+		t.Run(stage.name, func(t *testing.T) {
+			initial, err := ConvertSources(compiled, stage.setups)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, mutation := range mutations {
+				t.Run(mutation.name, func(t *testing.T) {
+					catalog, err := NewCatalog(initial)
+					if err != nil {
+						t.Fatal(err)
+					}
+					candidate := initial.Clone()
+					mutation.mutate(&candidate)
+					if _, err := NewCatalog(candidate); err != nil {
+						t.Fatalf("candidate is independently invalid: %v", err)
+					}
+					if err := catalog.Replace(candidate); err == nil {
+						t.Fatal("Replace accepted a compiled baseline change")
+					} else {
+						assertPermanent(t, err)
+					}
+					if got := catalog.Snapshot(); !reflect.DeepEqual(got, initial) {
+						t.Fatalf("catalog changed after rejected replace: %#v", got)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestCatalogReplaceAllowsCompiledProjectSetupOverlay(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	now := time.Date(2026, time.July, 16, 18, 0, 0, 0, time.UTC)
+	compiled := []CompiledSource{compiledSource(root, "factory"), compiledSource(root, "network")}
+	initial, err := ConvertSources(compiled, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := NewCatalog(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	overlaid, err := ConvertSources(compiled, []SetupSource{succeededSetup(root, "network", now)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Replace(overlaid); err != nil {
+		t.Fatalf("initial project overlay: %v", err)
+	}
+
+	candidate := catalog.Snapshot()
+	record := recordForMutation(t, &candidate, "tomnagengast/network")
+	record.Project.Name = "Network Platform"
+	record.CloudURL = "https://network.nags.cloud"
+	record.Setup.State = SetupStatePending
+	record.Setup.ProviderCoordinated = false
+	record.Setup.UpdatedAt = now.Add(time.Minute)
+	if err := catalog.Replace(candidate); err != nil {
+		t.Fatalf("project name, setup, and Cloud overlay: %v", err)
+	}
+
+	invalid := catalog.Snapshot()
+	record = recordForMutation(t, &invalid, "tomnagengast/network")
+	record.CloudURL = "https://network-next.nags.cloud"
+	record.Setup.State = SetupStateSucceeded
+	record.Setup.ProviderCoordinated = true
+	if err := catalog.Replace(invalid); err == nil {
+		t.Fatal("Replace accepted a coordinated Cloud URL change")
+	} else {
+		assertPermanent(t, err)
+	}
+}
+
+func TestCatalogReplaceRejectsCompiledCloudChangeBeforeProjectOverlay(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	initial, err := ConvertSources(
+		[]CompiledSource{compiledSource(root, "factory"), compiledSource(root, "network")}, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := NewCatalog(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := initial.Clone()
+	recordForMutation(t, &candidate, "tomnagengast/network").CloudURL = "https://network.nags.cloud"
+	if _, err := NewCatalog(candidate); err != nil {
+		t.Fatalf("candidate is independently invalid: %v", err)
+	}
+	if err := catalog.Replace(candidate); err == nil {
+		t.Fatal("Replace accepted a Cloud URL change without a project overlay")
+	} else {
+		assertPermanent(t, err)
+	}
+}
+
+func TestCatalogReplaceCloudChangeClearsProjectCoordination(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	now := time.Date(2026, time.July, 16, 18, 0, 0, 0, time.UTC)
+	initial, err := ConvertSources(
+		[]CompiledSource{compiledSource(root, "factory")},
+		[]SetupSource{managedSetup(root, "cellar", now)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := NewCatalog(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	coordinated := initial.Clone()
+	recordForMutation(t, &coordinated, "tomnagengast/cellar").CloudURL = "https://cellar.nags.cloud"
+	if err := catalog.Replace(coordinated); err == nil {
+		t.Fatal("Replace accepted a coordinated project Cloud URL change")
+	} else {
+		assertPermanent(t, err)
+	}
+
+	pending := initial.Clone()
+	record := recordForMutation(t, &pending, "tomnagengast/cellar")
+	record.CloudURL = "https://cellar.nags.cloud"
+	record.Setup.State = SetupStatePending
+	record.Setup.ProviderCoordinated = false
+	record.Setup.UpdatedAt = now.Add(time.Minute)
+	if err := catalog.Replace(pending); err != nil {
+		t.Fatalf("Replace project Cloud URL recoordination: %v", err)
+	}
+	if got, found := catalog.Record("tomnagengast/cellar"); !found || got.Routable() || got.CloudURL != "https://cellar.nags.cloud" {
+		t.Fatalf("recoordination record = %#v, found=%t", got, found)
+	}
+}
+
 func TestCatalogReplaceAllowsLegacySetupLifecycleProgression(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -457,6 +676,17 @@ func assertPermanent(t *testing.T, err error) {
 	if !errors.As(err, &classified) || !classified.Permanent() {
 		t.Fatalf("error is not permanent: %v", err)
 	}
+}
+
+func recordForMutation(t *testing.T, state *SourceState, repository string) *Record {
+	t.Helper()
+	for index := range state.Records {
+		if state.Records[index].Repository == repository {
+			return &state.Records[index]
+		}
+	}
+	t.Fatalf("record %s not found in %#v", repository, state.Records)
+	return nil
 }
 
 func TestSourceStateSnapshotIsIndependent(t *testing.T) {

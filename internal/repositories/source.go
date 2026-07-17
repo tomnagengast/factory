@@ -165,7 +165,7 @@ func ConvertSources(compiled []CompiledSource, setups []SetupSource) (SourceStat
 		}
 		_, app, _ := strings.Cut(repository, "/")
 		record := Record{
-			App: strings.ToLower(app), Project: project, Repository: repository, Origin: origin,
+			App: strings.ToLower(app), Provenance: ProvenanceProject, Project: project, Repository: repository, Origin: origin,
 			LocalPath: localPath, ManagedPath: localPath, ManagedRoot: managedRoot,
 			DefaultBranch: source.BaseBranch, Bootstrap: source.Bootstrap, CloudURL: cloudURL,
 			Setup: setup,
@@ -206,7 +206,8 @@ func convertCompiled(source CompiledSource) (Record, error) {
 		return Record{}, errors.New("repository sources: compiled paths must be canonical")
 	}
 	record := Record{
-		App: strings.ToLower(strings.TrimSpace(source.App)), Repository: repository, Origin: origin,
+		App: strings.ToLower(strings.TrimSpace(source.App)), Provenance: ProvenanceCompiled,
+		Repository: repository, Origin: origin,
 		LocalPath: filepath.Clean(source.ProjectPath), ManagedPath: filepath.Clean(source.RepoPath),
 		ManagedRoot: filepath.Clean(source.ManagedRoot), DefaultBranch: source.BaseBranch,
 		Bootstrap: source.Bootstrap, CloudURL: cloudURL,

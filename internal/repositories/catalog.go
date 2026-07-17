@@ -41,9 +41,10 @@ type SetupSnapshot struct {
 }
 
 type catalogIndex struct {
-	state        SourceState
-	byRepository map[string]Record
-	byProject    map[string]Record
+	state            SourceState
+	byRepository     map[string]Record
+	byProject        map[string]Record
+	compiledBaseline map[string]Record
 }
 
 type Catalog struct {
@@ -74,6 +75,23 @@ func (c *Catalog) Replace(state SourceState) error {
 }
 
 func validateReplacement(current, candidate catalogIndex) error {
+	for repository, baseline := range current.compiledBaseline {
+		replacement, found := candidate.byRepository[repository]
+		if !found {
+			return permanent(fmt.Errorf("repository catalog: compiled repository %s cannot be removed", repository))
+		}
+		if !sameCompiledIdentity(baseline, replacement) {
+			return permanent(fmt.Errorf("repository catalog: compiled repository %s identity is immutable", repository))
+		}
+		if baseline.Project.IsZero() && replacement.Project.IsZero() && baseline.CloudURL != replacement.CloudURL {
+			return permanent(fmt.Errorf("repository catalog: compiled repository %s Cloud URL requires a project overlay", repository))
+		}
+	}
+	for repository := range candidate.compiledBaseline {
+		if _, found := current.compiledBaseline[repository]; !found {
+			return permanent(fmt.Errorf("repository catalog: compiled repository %s is not in the immutable baseline", repository))
+		}
+	}
 	for _, record := range current.state.Records {
 		if record.Project.IsZero() {
 			continue
@@ -84,6 +102,9 @@ func validateReplacement(current, candidate catalogIndex) error {
 		}
 		if !sameAdmittedIdentity(record, replacement) {
 			return permanent(fmt.Errorf("repository catalog: admitted project %s repository identity is immutable", record.Project.ID))
+		}
+		if record.CloudURL != replacement.CloudURL && replacement.Setup.ProviderCoordinated {
+			return permanent(fmt.Errorf("repository catalog: project %s Cloud URL change must clear provider coordination", record.Project.ID))
 		}
 	}
 	for _, awaiting := range current.state.Awaiting {
@@ -104,8 +125,22 @@ func validateReplacement(current, candidate catalogIndex) error {
 	return nil
 }
 
+func sameCompiledIdentity(current, candidate Record) bool {
+	return current.Provenance == ProvenanceCompiled && candidate.Provenance == ProvenanceCompiled &&
+		current.App == candidate.App &&
+		current.Repository == candidate.Repository &&
+		current.Origin == candidate.Origin &&
+		current.LocalPath == candidate.LocalPath &&
+		current.ManagedPath == candidate.ManagedPath &&
+		current.ManagedRoot == candidate.ManagedRoot &&
+		current.DefaultBranch == candidate.DefaultBranch &&
+		current.Bootstrap == candidate.Bootstrap &&
+		current.Deployment == candidate.Deployment
+}
+
 func sameAdmittedIdentity(current, candidate Record) bool {
 	return current.Project.ID == candidate.Project.ID &&
+		current.Provenance == candidate.Provenance &&
 		current.App == candidate.App &&
 		current.Repository == candidate.Repository &&
 		current.Origin == candidate.Origin &&
@@ -125,10 +160,14 @@ func buildIndex(state SourceState) (catalogIndex, error) {
 	state = canonicalSourceOrder(state)
 	index := catalogIndex{
 		state: state, byRepository: make(map[string]Record, len(state.Records)),
-		byProject: make(map[string]Record, len(state.Records)),
+		byProject:        make(map[string]Record, len(state.Records)),
+		compiledBaseline: make(map[string]Record, len(state.Records)),
 	}
 	for _, record := range state.Records {
 		index.byRepository[record.Repository] = record
+		if record.Provenance == ProvenanceCompiled {
+			index.compiledBaseline[record.Repository] = record
+		}
 		if !record.Project.IsZero() {
 			index.byProject[record.Project.ID] = record
 		}
