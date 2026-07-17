@@ -22,6 +22,7 @@ const (
 	operationCheckpoint     = "checkpoint"
 	operationAdmissionBatch = "admission-batch"
 	operationTransition     = "lifecycle-transition"
+	operationReconcile      = "reconcile-schedule"
 	operationPublish        = "delivery-publish"
 	operationAcknowledge    = "delivery-acknowledge"
 	maxJournalBytes         = 64 << 20
@@ -42,8 +43,34 @@ type diskOperation struct {
 	Runs             []Run                    `json:"runs,omitempty"`
 	RateIncrements   []RateBucket             `json:"rateIncrements,omitempty"`
 	Transition       *Run                     `json:"transition,omitempty"`
+	Reconcile        *ReconcileSchedule       `json:"reconcile,omitempty"`
 	Publication      *DeliveryPublication     `json:"publication,omitempty"`
 	Acknowledgement  *DeliveryAcknowledgement `json:"acknowledgement,omitempty"`
+}
+
+type ReconcileFailureMode string
+
+const (
+	ReconcileFailuresUnchanged ReconcileFailureMode = "unchanged"
+	ReconcileFailuresIncrement ReconcileFailureMode = "increment"
+	ReconcileFailuresReset     ReconcileFailureMode = "reset"
+)
+
+// ReconcileSchedule is a same-lifecycle-state durable wake or retry intent.
+// ExpectedUpdatedAt binds the operation to the snapshot that produced it, so a
+// stale poll cannot overwrite a newer timer, failure count, or webhook wake.
+// The Store derives every resulting counter and latch from the current Run.
+type ReconcileSchedule struct {
+	RunID                string               `json:"runId"`
+	ExpectedUpdatedAt    time.Time            `json:"expectedUpdatedAt"`
+	At                   time.Time            `json:"at"`
+	NextReconcileAt      time.Time            `json:"nextReconcileAt"`
+	FailureMode          ReconcileFailureMode `json:"failureMode"`
+	AuthoritativeRefresh bool                 `json:"authoritativeRefresh,omitempty"`
+	Cursor               uint64               `json:"cursor,omitempty"`
+	RemediationRequested bool                 `json:"remediationRequested,omitempty"`
+	DeliveryID           string               `json:"deliveryId,omitempty"`
+	Detail               *string              `json:"detail,omitempty"`
 }
 
 // DeliveryPublication records that one pending Run transition delivery was
@@ -302,6 +329,48 @@ func (s *Store) Transition(next Run) error {
 	return s.compactIfNeededLocked()
 }
 
+// ScheduleReconcile persists one same-state retry or wake without inventing a
+// lifecycle transition or transition delivery. The operation is store-derived:
+// callers select intent, while the Store owns counters, cursor monotonicity,
+// remediation latching, and delivery coalescing.
+func (s *Store) ScheduleReconcile(schedule ReconcileSchedule) error {
+	schedule.ExpectedUpdatedAt = schedule.ExpectedUpdatedAt.UTC()
+	schedule.At = schedule.At.UTC()
+	schedule.NextReconcileAt = schedule.NextReconcileAt.UTC()
+	if schedule.Detail != nil {
+		detail := *schedule.Detail
+		schedule.Detail = &detail
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.healthyLocked(); err != nil {
+		return err
+	}
+	sequence, err := nextSequence(s.state.model.JournalSequence)
+	if err != nil {
+		return err
+	}
+	operation := diskOperation{
+		Kind: operationReconcile, Version: JournalVersion, Sequence: sequence,
+		Reconcile: &schedule,
+	}
+	if _, err := applyOperation(s.state.model, operation); err != nil {
+		return err
+	}
+	if err := s.appendOperationLocked(operation); err != nil {
+		return err
+	}
+	state, err := s.apply(s.state.model, operation)
+	if err != nil {
+		s.poisoned = err
+		return fmt.Errorf("runs: apply persisted reconcile schedule: %w", err)
+	}
+	s.state = state
+	s.operationsSinceCheckpoint++
+	return s.compactIfNeededLocked()
+}
+
 // RecordPublication marks one pending Run transition delivery published with
 // the authoritative wire sequence returned by the event wire. It never
 // rewrites an already-published delivery; the store derives delivery state so
@@ -407,6 +476,8 @@ func applyOperation(current Model, operation diskOperation) (Snapshot, error) {
 		return applyAdmissionBatch(current, operation)
 	case operationTransition:
 		return applyTransition(current, operation)
+	case operationReconcile:
+		return applyReconcileSchedule(current, operation)
 	case operationPublish:
 		return applyPublish(current, operation)
 	case operationAcknowledge:
@@ -644,6 +715,77 @@ func applyTransition(current Model, operation diskOperation) (Snapshot, error) {
 	return NewSnapshot(next)
 }
 
+func applyReconcileSchedule(current Model, operation diskOperation) (Snapshot, error) {
+	schedule := *operation.Reconcile
+	index := -1
+	for candidate, run := range current.Runs {
+		if run.ID == schedule.RunID {
+			index = candidate
+			break
+		}
+	}
+	if index < 0 {
+		return Snapshot{}, fmt.Errorf("runs: Run %q not found", schedule.RunID)
+	}
+	run := cloneRun(current.Runs[index])
+	if run.UpdatedAt != schedule.ExpectedUpdatedAt {
+		return Snapshot{}, errors.New("runs: reconcile schedule is stale")
+	}
+	if run.State != StateStarting && run.State != StateRunning && run.State != StateAwaitingHumanMerge {
+		return Snapshot{}, fmt.Errorf("runs: cannot schedule reconciliation from state %q", run.State)
+	}
+	if run.State != StateAwaitingHumanMerge &&
+		(schedule.Cursor != 0 || schedule.RemediationRequested || schedule.DeliveryID != "") {
+		return Snapshot{}, errors.New("runs: worker reconciliation cannot carry a GitHub wake")
+	}
+	if schedule.DeliveryID != "" && schedule.Cursor == 0 {
+		return Snapshot{}, errors.New("runs: reconcile delivery wake requires a positive cursor")
+	}
+	if schedule.AuthoritativeRefresh && run.GitHub.LastAuthoritativeRefreshAt != nil &&
+		schedule.At.Before(*run.GitHub.LastAuthoritativeRefreshAt) {
+		return Snapshot{}, errors.New("runs: reconcile schedule regressed authoritative refresh time")
+	}
+
+	run.UpdatedAt = schedule.At
+	next := schedule.NextReconcileAt
+	run.GitHub.NextReconcileAt = &next
+	if schedule.AuthoritativeRefresh {
+		refreshed := schedule.At
+		run.GitHub.LastAuthoritativeRefreshAt = &refreshed
+	}
+	switch schedule.FailureMode {
+	case ReconcileFailuresUnchanged:
+	case ReconcileFailuresIncrement:
+		if run.GitHub.ReconcileFailures == math.MaxInt {
+			return Snapshot{}, errors.New("runs: reconcile failure count exhausted")
+		}
+		run.GitHub.ReconcileFailures++
+	case ReconcileFailuresReset:
+		run.GitHub.ReconcileFailures = 0
+	default:
+		return Snapshot{}, fmt.Errorf("runs: unsupported reconcile failure mode %q", schedule.FailureMode)
+	}
+	if schedule.Cursor > run.GitHub.LastCursor {
+		run.GitHub.LastCursor = schedule.Cursor
+	}
+	if schedule.RemediationRequested {
+		run.GitHub.RemediationRequested = true
+	}
+	if schedule.DeliveryID != "" && !slices.Contains(run.DeliveryIDs, schedule.DeliveryID) {
+		run.DeliveryIDs = append(run.DeliveryIDs, schedule.DeliveryID)
+		slices.Sort(run.DeliveryIDs)
+		run.DuplicateDeliveries = uint64(len(run.DeliveryIDs) - 1)
+	}
+	if schedule.Detail != nil {
+		run.Detail = *schedule.Detail
+	}
+
+	nextModel := cloneModel(current)
+	nextModel.JournalSequence = operation.Sequence
+	nextModel.Runs[index] = run
+	return NewSnapshot(nextModel)
+}
+
 func applyPublish(current Model, operation diskOperation) (Snapshot, error) {
 	publication := *operation.Publication
 	index := -1
@@ -804,29 +946,40 @@ func validateOperationShape(operation diskOperation) error {
 	switch operation.Kind {
 	case operationCheckpoint:
 		if operation.Schema != SchemaVersion || operation.Checkpoint == nil || len(operation.AdmissionBatches) != 0 || operation.Transition != nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
-			operation.Publication != nil || operation.Acknowledgement != nil ||
+			operation.Reconcile != nil || operation.Publication != nil || operation.Acknowledgement != nil ||
 			operation.Checkpoint.Schema != operation.Schema || operation.Checkpoint.JournalSequence != operation.Sequence {
 			return errors.New("runs: invalid checkpoint operation")
 		}
 	case operationAdmissionBatch:
 		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) == 0 || operation.Transition != nil ||
-			operation.Publication != nil || operation.Acknowledgement != nil {
+			operation.Reconcile != nil || operation.Publication != nil || operation.Acknowledgement != nil {
 			return errors.New("runs: invalid admission-batch operation")
 		}
 	case operationTransition:
 		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 0 || operation.Transition == nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
-			operation.Publication != nil || operation.Acknowledgement != nil {
+			operation.Reconcile != nil || operation.Publication != nil || operation.Acknowledgement != nil {
 			return errors.New("runs: invalid lifecycle-transition operation")
+		}
+	case operationReconcile:
+		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 0 || operation.Transition != nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
+			operation.Publication != nil || operation.Acknowledgement != nil || operation.Reconcile == nil ||
+			!validIdentity(operation.Reconcile.RunID) || operation.Reconcile.ExpectedUpdatedAt.IsZero() || operation.Reconcile.At.IsZero() || operation.Reconcile.NextReconcileAt.IsZero() ||
+			operation.Reconcile.ExpectedUpdatedAt.Location() != time.UTC || operation.Reconcile.At.Location() != time.UTC || operation.Reconcile.NextReconcileAt.Location() != time.UTC ||
+			!operation.Reconcile.At.After(operation.Reconcile.ExpectedUpdatedAt) || operation.Reconcile.NextReconcileAt.Before(operation.Reconcile.At) ||
+			operation.Reconcile.FailureMode != ReconcileFailuresUnchanged && operation.Reconcile.FailureMode != ReconcileFailuresIncrement && operation.Reconcile.FailureMode != ReconcileFailuresReset ||
+			operation.Reconcile.DeliveryID != "" && !validIdentity(operation.Reconcile.DeliveryID) ||
+			operation.Reconcile.Detail != nil && !validOptionalText(*operation.Reconcile.Detail, maximumTextBytes) {
+			return errors.New("runs: invalid reconcile-schedule operation")
 		}
 	case operationPublish:
 		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 0 || operation.Transition != nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
-			operation.Acknowledgement != nil || operation.Publication == nil ||
+			operation.Reconcile != nil || operation.Acknowledgement != nil || operation.Publication == nil ||
 			operation.Publication.RunID == "" || operation.Publication.TransitionID == "" || operation.Publication.Sequence == 0 {
 			return errors.New("runs: invalid delivery-publish operation")
 		}
 	case operationAcknowledge:
 		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 0 || operation.Transition != nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
-			operation.Publication != nil || operation.Acknowledgement == nil ||
+			operation.Reconcile != nil || operation.Publication != nil || operation.Acknowledgement == nil ||
 			operation.Acknowledgement.RunID == "" || operation.Acknowledgement.Count < 1 {
 			return errors.New("runs: invalid delivery-acknowledge operation")
 		}
@@ -934,6 +1087,17 @@ func canonicalOperation(operation diskOperation) diskOperation {
 		transition := cloneRun(*operation.Transition)
 		canonicalizeRun(&transition)
 		canonical.Transition = &transition
+	}
+	if operation.Reconcile != nil {
+		reconcile := *operation.Reconcile
+		reconcile.ExpectedUpdatedAt = reconcile.ExpectedUpdatedAt.UTC()
+		reconcile.At = reconcile.At.UTC()
+		reconcile.NextReconcileAt = reconcile.NextReconcileAt.UTC()
+		if reconcile.Detail != nil {
+			detail := *reconcile.Detail
+			reconcile.Detail = &detail
+		}
+		canonical.Reconcile = &reconcile
 	}
 	return canonical
 }
