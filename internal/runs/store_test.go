@@ -49,7 +49,7 @@ func TestStoreAppendReplayTransitionAndImmutableIdentity(t *testing.T) {
 		t.Fatalf("live projection = %#v", model)
 	}
 
-	reopened, err := Open(path, 10)
+	reopened, err := Open(filepath.Dir(path), path, 10)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestAdmissionBatchPersistsMultipleEventsAsOneOperation(t *testing.T) {
 	if err != nil || bytes.Count(data, []byte{'\n'}) != 2 {
 		t.Fatalf("multi-event operation count = %d, %v", bytes.Count(data, []byte{'\n'}), err)
 	}
-	reopened, err := Open(path, 10)
+	reopened, err := Open(filepath.Dir(path), path, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +183,225 @@ func TestAdmissionBatchPersistsMultipleEventsAsOneOperation(t *testing.T) {
 	if !reflect.DeepEqual(replayed.Model(), model) {
 		t.Fatalf("multi-event replay = %#v", replayed.Model())
 	}
+}
+
+func TestAdmissionBatchExactMultiEventRetryAfterReopen(t *testing.T) {
+	root := trustedTestRoot(t, t.TempDir())
+	path := filepath.Join(root, "runs.jsonl")
+	store := createEmptyStore(t, path, 10)
+	firstBatch, firstRun, firstRate := testAdmissionProjection(t, root, 1, StatePending)
+	secondBatch, secondRun, _ := testAdmissionProjection(t, root, 2, StatePending)
+	secondBatch.DecidedAt = firstBatch.DecidedAt
+	secondRun.Causation.AdmittedAt = firstRun.Causation.AdmittedAt
+	secondRun.CreatedAt = firstRun.CreatedAt
+	secondRun.UpdatedAt = firstRun.UpdatedAt
+	secondRun.Transitions[0].At = firstRun.Transitions[0].At
+	combinedRate := firstRate
+	combinedRate.Count = 2
+	batches := []AdmissionBatch{firstBatch, secondBatch}
+	runs := []Run{firstRun, secondRun}
+	if err := store.ApplyAdmissionBatch(batches, runs, []RateBucket{combinedRate}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(root, path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	beforeDisk, _ := os.ReadFile(path)
+	before, _ := reopened.Snapshot()
+	if err := reopened.ApplyAdmissionBatch(batches, runs, []RateBucket{combinedRate}); !errors.Is(err, ErrDuplicateAdmissionBatch) {
+		t.Fatalf("exact multi-event retry error = %v", err)
+	}
+	afterDisk, _ := os.ReadFile(path)
+	after, _ := reopened.Snapshot()
+	if !bytes.Equal(beforeDisk, afterDisk) || !reflect.DeepEqual(before.Model(), after.Model()) || after.Model().RateBuckets[0].Count != 2 {
+		t.Fatal("exact retry changed disk, memory, totals, or rates")
+	}
+
+	thirdBatch, thirdRun, _ := testAdmissionProjection(t, root, 3, StatePending)
+	thirdBatch.DecidedAt = firstBatch.DecidedAt
+	thirdRun.Causation.AdmittedAt = firstRun.Causation.AdmittedAt
+	thirdRun.CreatedAt = firstRun.CreatedAt
+	thirdRun.UpdatedAt = firstRun.UpdatedAt
+	thirdRun.Transitions[0].At = firstRun.Transitions[0].At
+	partialRate := firstRate
+	partialRate.Count = 2
+	if err := reopened.ApplyAdmissionBatch(
+		[]AdmissionBatch{firstBatch, thirdBatch}, []Run{firstRun, thirdRun}, []RateBucket{partialRate},
+	); !errors.Is(err, ErrIdentityCollision) {
+		t.Fatalf("partial overlap error = %v", err)
+	}
+	mismatchedRuns := []Run{firstRun, secondRun.Clone()}
+	mismatchedRuns[1].Detail = "rewritten"
+	if err := reopened.ApplyAdmissionBatch(batches, mismatchedRuns, []RateBucket{combinedRate}); !errors.Is(err, ErrIdentityCollision) {
+		t.Fatalf("associated Run mismatch error = %v", err)
+	}
+	if err := reopened.ApplyAdmissionBatch(batches, append(runs, thirdRun), []RateBucket{combinedRate}); !errors.Is(err, ErrIdentityCollision) {
+		t.Fatalf("mixed Run identity error = %v", err)
+	}
+	mismatchedRate := combinedRate
+	mismatchedRate.Count++
+	if err := reopened.ApplyAdmissionBatch(batches, runs, []RateBucket{mismatchedRate}); !errors.Is(err, ErrIdentityCollision) {
+		t.Fatalf("rate mismatch error = %v", err)
+	}
+	finalDisk, _ := os.ReadFile(path)
+	final, _ := reopened.Snapshot()
+	if !bytes.Equal(beforeDisk, finalDisk) || !reflect.DeepEqual(before.Model(), final.Model()) {
+		t.Fatal("collision changed durable admission projection")
+	}
+}
+
+func TestTransitionDeltaAndOldestTaskOwnership(t *testing.T) {
+	t.Run("durable evidence cannot be rewritten", func(t *testing.T) {
+		for _, test := range []struct {
+			name   string
+			mutate func(*Run)
+		}{
+			{name: "deliveries", mutate: func(run *Run) { run.DeliveryIDs = []string{"delivery-a"}; run.DuplicateDeliveries = 0 }},
+			{name: "attempts", mutate: func(run *Run) { run.Attempts = 0; run.Transitions[len(run.Transitions)-1].Attempts = 0 }},
+			{name: "started timestamp", mutate: func(run *Run) { run.StartedAt = pointerTime(run.StartedAt.Add(time.Second)) }},
+			{name: "GitHub cursor", mutate: func(run *Run) { run.GitHub.LastCursor-- }},
+			{name: "session", mutate: func(run *Run) { run.SessionName = "factory-rewritten" }},
+			{name: "Run directory", mutate: func(run *Run) { run.RunDirectory += "-rewritten" }},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				root := trustedTestRoot(t, t.TempDir())
+				path := filepath.Join(root, "runs.jsonl")
+				batch, current, rate := runningProjection(t, root)
+				initial, err := NewSnapshot(Model{Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{current}, RateBuckets: []RateBucket{rate}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				store, err := Create(root, path, initial, 10)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				next := awaitingProjection(current)
+				test.mutate(&next)
+				before, _ := os.ReadFile(path)
+				if err := store.Transition(next); err == nil {
+					t.Fatal("durable evidence rewrite was accepted")
+				}
+				after, _ := os.ReadFile(path)
+				if !bytes.Equal(before, after) {
+					t.Fatal("rejected transition changed disk")
+				}
+			})
+		}
+	})
+
+	t.Run("ready merge and migrated baseline are immutable", func(t *testing.T) {
+		root := trustedTestRoot(t, t.TempDir())
+		batch, running, rate := runningProjection(t, root)
+		awaiting := awaitingProjection(running)
+		awaiting.MergeCommitOID = strings.Repeat("b", 40)
+		initial, err := NewSnapshot(Model{Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{awaiting}, RateBuckets: []RateBucket{rate}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, "runs.jsonl")
+		store, err := Create(root, path, initial, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		for _, mutate := range []func(*Run){
+			func(run *Run) { run.Ready.VerifiedHeadOID = strings.Repeat("c", 40) },
+			func(run *Run) { run.MergeCommitOID = strings.Repeat("c", 40) },
+		} {
+			next := nextLifecycleRun(awaiting, StatePostMergePending, awaiting.UpdatedAt.Add(time.Second))
+			next.SessionName = ""
+			mutate(&next)
+			if err := store.Transition(next); err == nil {
+				t.Fatal("ready or merge identity rewrite was accepted")
+			}
+		}
+
+		migrated := running.Clone()
+		migrated.Transitions = nil
+		migrated.MigratedBaseline = &MigratedBaseline{State: StateRunning, ObservedAt: migrated.UpdatedAt, PriorTransitionsAcknowledged: true}
+		migratedSnapshot, err := NewSnapshot(Model{Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{migrated}, RateBuckets: []RateBucket{rate}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		migratedPath := filepath.Join(root, "migrated.jsonl")
+		migratedStore, err := Create(root, migratedPath, migratedSnapshot, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = migratedStore.Close() })
+		next := nextLifecycleRun(migrated, StateFailed, migrated.UpdatedAt.Add(time.Second))
+		next.MigratedBaseline.ObservedAt = next.MigratedBaseline.ObservedAt.Add(time.Nanosecond)
+		if err := migratedStore.Transition(next); err == nil || !strings.Contains(err.Error(), "immutable") {
+			t.Fatalf("migrated baseline rewrite error = %v", err)
+		}
+	})
+
+	t.Run("resettable reconciliation fields remain valid", func(t *testing.T) {
+		root := trustedTestRoot(t, t.TempDir())
+		batch, running, rate := runningProjection(t, root)
+		awaiting := awaitingProjection(running)
+		awaiting.GitHub.NextReconcileAt = pointerTime(awaiting.UpdatedAt.Add(time.Hour))
+		awaiting.GitHub.ReconcileFailures = 3
+		awaiting.GitHub.RemediationRequested = true
+		awaiting.TerminalIntent = string(StateSucceeded)
+		awaiting.TerminalRejection = "retry"
+		awaiting.Completion = &CompletionValidation{Accepted: false, Intent: string(StateSucceeded), State: StateFailed, Reason: "retry", ValidatedAt: awaiting.UpdatedAt}
+		initial, err := NewSnapshot(Model{Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{awaiting}, RateBuckets: []RateBucket{rate}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, "runs.jsonl")
+		store, err := Create(root, path, initial, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		next := nextLifecycleRun(awaiting, StatePostMergePending, awaiting.UpdatedAt.Add(time.Second))
+		next.SessionName = ""
+		next.MergeCommitOID = strings.Repeat("b", 40)
+		next.GitHub.NextReconcileAt = nil
+		next.GitHub.ReconcileFailures = 0
+		next.GitHub.RemediationRequested = false
+		next.TerminalIntent = ""
+		next.TerminalRejection = ""
+		if err := store.Transition(next); err != nil {
+			t.Fatalf("legitimate reconciliation reset: %v", err)
+		}
+	})
+
+	t.Run("younger same-task Run cannot enter ownership", func(t *testing.T) {
+		root := trustedTestRoot(t, t.TempDir())
+		firstBatch, firstRun, firstRate := testAdmissionProjection(t, root, 1, StatePending)
+		secondBatch, secondRun, secondRate := testAdmissionProjection(t, root, 2, StatePending)
+		secondRun.Causation.Task = firstRun.Causation.Task
+		for _, run := range []*Run{&firstRun, &secondRun} {
+			run.State = StateAdmitted
+			run.Transitions[0].State = StateAdmitted
+		}
+		initial, err := NewSnapshot(Model{
+			Schema: SchemaVersion, TotalBatches: 2, TotalRuns: 2,
+			AdmissionBatches: []AdmissionBatch{firstBatch, secondBatch}, Runs: []Run{firstRun, secondRun}, RateBuckets: []RateBucket{firstRate, secondRate},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, "runs.jsonl")
+		store, err := Create(root, path, initial, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		youngerRouting := nextLifecycleRun(secondRun, StateRouting, secondRun.UpdatedAt.Add(time.Second))
+		if err := store.Transition(youngerRouting); err == nil || !strings.Contains(err.Error(), "oldest") {
+			t.Fatalf("younger ownership error = %v", err)
+		}
+	})
 }
 
 func TestReplayRecoversTornTailButRejectsCompleteCorruption(t *testing.T) {
@@ -199,7 +418,7 @@ func TestReplayRecoversTornTailButRejectsCompleteCorruption(t *testing.T) {
 	if err := appendBytes(path, []byte(`{"kind":"lifecycle-transition"`)); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(path, 10)
+	reopened, err := Open(filepath.Dir(path), path, 10)
 	if err != nil {
 		t.Fatalf("recover torn tail: %v", err)
 	}
@@ -226,7 +445,7 @@ func TestReplayRecoversTornTailButRejectsCompleteCorruption(t *testing.T) {
 			if err := os.WriteFile(candidate, append(append([]byte(nil), valid...), append([]byte(test.line), '\n')...), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Open(candidate, 10); err == nil {
+			if _, err := Open(trustedTestRoot(t, filepath.Dir(candidate)), candidate, 10); err == nil {
 				t.Fatal("complete corrupt operation was accepted")
 			}
 		})
@@ -276,7 +495,7 @@ func TestReplayRejectsSchemaVersionSequenceAndNoncanonicalCheckpoint(t *testing.
 			if err := os.WriteFile(candidatePath, append(data, '\n'), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Open(candidatePath, 10); err == nil {
+			if _, err := Open(trustedTestRoot(t, filepath.Dir(candidatePath)), candidatePath, 10); err == nil {
 				t.Fatal("invalid checkpoint was accepted")
 			}
 		})
@@ -338,7 +557,7 @@ func TestAppendFailureRollbackPoisonAndApplyFailureBoundaries(t *testing.T) {
 		if _, err := store.Snapshot(); err == nil || !strings.Contains(err.Error(), "poisoned") {
 			t.Fatalf("poisoned snapshot error = %v", err)
 		}
-		reopened, err := Open(path, 10)
+		reopened, err := Open(filepath.Dir(path), path, 10)
 		if err != nil {
 			t.Fatalf("replay durable operation: %v", err)
 		}
@@ -375,7 +594,7 @@ func TestCheckpointCompactionRetentionAndFailureBoundaries(t *testing.T) {
 		if err != nil || bytes.Count(data, []byte{'\n'}) != 1 {
 			t.Fatalf("compacted journal lines = %d, %v", bytes.Count(data, []byte{'\n'}), err)
 		}
-		reopened, err := Open(path, 1)
+		reopened, err := Open(filepath.Dir(path), path, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -395,7 +614,7 @@ func TestCheckpointCompactionRetentionAndFailureBoundaries(t *testing.T) {
 		before, _ := os.ReadFile(path)
 		beforeSnapshot, _ := store.Snapshot()
 		injected := errors.New("injected checkpoint failure")
-		store.checkpoint = func(string, diskOperation, bool, func(*os.File) error) (bool, error) { return false, injected }
+		store.checkpoint = func(*storeLocation, diskOperation, bool, func(*os.File) error) (bool, error) { return false, injected }
 		if err := store.Compact(time.Time{}); !errors.Is(err, injected) {
 			t.Fatalf("checkpoint error = %v", err)
 		}
@@ -411,7 +630,7 @@ func TestCheckpointCompactionRetentionAndFailureBoundaries(t *testing.T) {
 		store := createEmptyStore(t, path, 10)
 		store.operationsSinceCheckpoint = 100
 		injected := errors.New("injected automatic checkpoint failure")
-		store.checkpoint = func(string, diskOperation, bool, func(*os.File) error) (bool, error) { return false, injected }
+		store.checkpoint = func(*storeLocation, diskOperation, bool, func(*os.File) error) (bool, error) { return false, injected }
 		batch, run, rate := testAdmissionProjection(t, filepath.Dir(path), 1, StatePending)
 		if err := store.ApplyAdmissionBatch([]AdmissionBatch{batch}, []Run{run}, []RateBucket{rate}); !errors.Is(err, injected) {
 			t.Fatalf("automatic checkpoint error = %v", err)
@@ -420,7 +639,7 @@ func TestCheckpointCompactionRetentionAndFailureBoundaries(t *testing.T) {
 		if err != nil || len(live.Model().Runs) != 1 {
 			t.Fatalf("durable apply missing after checkpoint failure: %#v, %v", live.Model(), err)
 		}
-		reopened, err := Open(path, 10)
+		reopened, err := Open(filepath.Dir(path), path, 10)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -440,23 +659,34 @@ func TestCheckpointCompactionRetentionAndFailureBoundaries(t *testing.T) {
 			}
 		}
 		injected := errors.New("injected directory sync failure")
-		store.checkpoint = func(path string, operation diskOperation, create bool, _ func(*os.File) error) (bool, error) {
-			return writeCheckpoint(path, operation, create, func(*os.File) error { return injected })
+		store.checkpoint = func(location *storeLocation, operation diskOperation, create bool, _ func(*os.File) error) (bool, error) {
+			return writeCheckpoint(location, operation, create, func(*os.File) error { return injected })
 		}
 		if err := store.Compact(time.Time{}); !errors.Is(err, injected) {
 			t.Fatalf("post-replace checkpoint error = %v", err)
 		}
-		live, err := store.Snapshot()
-		if err != nil || len(live.Model().Runs) != 1 || live.Model().Runs[0].ID != "run-2" {
-			t.Fatalf("post-replace memory = %#v, %v", live.Model(), err)
+		if len(store.state.Model().Runs) != 1 || store.state.Model().Runs[0].ID != "run-2" {
+			t.Fatalf("post-replace memory did not converge: %#v", store.state.Model())
 		}
-		reopened, err := Open(path, 1)
+		if _, err := store.Snapshot(); err == nil || !strings.Contains(err.Error(), "poisoned") {
+			t.Fatalf("post-replace store was not poisoned: %v", err)
+		}
+		poisonedDisk, _ := os.ReadFile(path)
+		thirdBatch, thirdRun, thirdRate := testAdmissionProjection(t, filepath.Dir(path), 3, StatePending)
+		if err := store.ApplyAdmissionBatch([]AdmissionBatch{thirdBatch}, []Run{thirdRun}, []RateBucket{thirdRate}); err == nil || !strings.Contains(err.Error(), "poisoned") {
+			t.Fatalf("post-replace mutation error = %v", err)
+		}
+		afterPoisonedMutation, _ := os.ReadFile(path)
+		if !bytes.Equal(poisonedDisk, afterPoisonedMutation) {
+			t.Fatal("poisoned store changed disk")
+		}
+		reopened, err := Open(filepath.Dir(path), path, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
 		replayed, _ := reopened.Snapshot()
-		if !reflect.DeepEqual(replayed.Model(), live.Model()) {
-			t.Fatalf("post-replace disk diverged: %#v", replayed.Model())
+		if len(replayed.Model().Runs) != 1 || replayed.Model().Runs[0].ID != "run-2" {
+			t.Fatalf("post-replace disk did not converge: %#v", replayed.Model())
 		}
 	})
 }
@@ -466,15 +696,16 @@ func TestStorePermissionSymlinkPathAndCreateSafety(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Create("relative/runs.jsonl", empty, 1); err == nil {
+	if _, err := Create(rootForInvalidTest(t), "relative/runs.jsonl", empty, 1); err == nil {
 		t.Fatal("relative path was accepted")
 	}
 	root := t.TempDir()
-	if _, err := Create(root+"/nested/../runs.jsonl", empty, 1); err == nil {
+	trustedTestRoot(t, root)
+	if _, err := Create(root, root+"/nested/../runs.jsonl", empty, 1); err == nil {
 		t.Fatal("noncanonical path was accepted")
 	}
 	path := filepath.Join(root, "runs.jsonl")
-	if _, err := Create(path, empty, 1); err != nil {
+	if _, err := Create(root, path, empty, 1); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Lstat(path)
@@ -482,7 +713,7 @@ func TestStorePermissionSymlinkPathAndCreateSafety(t *testing.T) {
 		t.Fatalf("journal mode = %v, %v", info, err)
 	}
 	before, _ := os.ReadFile(path)
-	if _, err := Create(path, empty, 1); err == nil {
+	if _, err := Create(root, path, empty, 1); err == nil {
 		t.Fatal("Create replaced an existing artifact")
 	}
 	after, _ := os.ReadFile(path)
@@ -493,7 +724,7 @@ func TestStorePermissionSymlinkPathAndCreateSafety(t *testing.T) {
 	if err := os.Chmod(path, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(path, 1); err == nil || !strings.Contains(err.Error(), "0600") {
+	if _, err := Open(root, path, 1); err == nil || !strings.Contains(err.Error(), "0600") {
 		t.Fatalf("unsafe mode error = %v", err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
@@ -503,7 +734,7 @@ func TestStorePermissionSymlinkPathAndCreateSafety(t *testing.T) {
 	if err := os.Symlink(path, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(link, 1); err == nil || !strings.Contains(err.Error(), "nonsymlink") {
+	if _, err := Open(root, link, 1); err == nil || !strings.Contains(err.Error(), "nonsymlink") {
 		t.Fatalf("symlink artifact error = %v", err)
 	}
 	oversized := filepath.Join(root, "oversized.jsonl")
@@ -518,7 +749,7 @@ func TestStorePermissionSymlinkPathAndCreateSafety(t *testing.T) {
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(oversized, 1); err == nil || !strings.Contains(err.Error(), "too large") {
+	if _, err := Open(root, oversized, 1); err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Fatalf("oversized journal error = %v", err)
 	}
 	targetDirectory := filepath.Join(root, "target")
@@ -530,28 +761,147 @@ func TestStorePermissionSymlinkPathAndCreateSafety(t *testing.T) {
 		t.Fatal(err)
 	}
 	realPath := filepath.Join(targetDirectory, "real-runs.jsonl")
-	if _, err := Create(realPath, empty, 1); err != nil {
+	if _, err := Create(root, realPath, empty, 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(filepath.Join(linkedDirectory, "real-runs.jsonl"), 1); err == nil || !strings.Contains(err.Error(), "nonsymlink directory") {
+	if _, err := Open(root, filepath.Join(linkedDirectory, "real-runs.jsonl"), 1); err == nil || !strings.Contains(err.Error(), "nonsymlink") {
 		t.Fatalf("symlink parent open error = %v", err)
 	}
-	if _, err := Create(filepath.Join(linkedDirectory, "new-runs.jsonl"), empty, 1); err == nil || !strings.Contains(err.Error(), "nonsymlink directory") {
+	if _, err := Create(root, filepath.Join(linkedDirectory, "new-runs.jsonl"), empty, 1); err == nil || !strings.Contains(err.Error(), "nonsymlink") {
 		t.Fatalf("symlink directory error = %v", err)
 	}
 }
 
-func createEmptyStore(t *testing.T, path string, retention int) *Store {
-	t.Helper()
+func TestStoreTrustedRootRejectsNestedSymlinksAndSurvivesParentReplacement(t *testing.T) {
 	empty, err := NewSnapshot(EmptyModel())
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := Create(path, empty, retention)
+
+	t.Run("root identity permits only ancestor symlinks", func(t *testing.T) {
+		outer := trustedTestRoot(t, t.TempDir())
+		realParent := filepath.Join(outer, "real")
+		realRoot := filepath.Join(realParent, "generation")
+		if err := os.MkdirAll(realRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ancestorLink := filepath.Join(outer, "ancestor-link")
+		if err := os.Symlink(realParent, ancestorLink); err != nil {
+			t.Fatal(err)
+		}
+		rootThroughAncestor := filepath.Join(ancestorLink, "generation")
+		path := filepath.Join(rootThroughAncestor, "runs.jsonl")
+		store, err := Create(rootThroughAncestor, path, empty, 1)
+		if err != nil {
+			t.Fatalf("symlink above trusted root: %v", err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+
+		rootLink := filepath.Join(outer, "root-link")
+		if err := os.Symlink(realRoot, rootLink); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Create(rootLink, filepath.Join(rootLink, "other.jsonl"), empty, 1); err == nil || !strings.Contains(err.Error(), "nonsymlink") {
+			t.Fatalf("symlink trusted root error = %v", err)
+		}
+	})
+
+	t.Run("nested intermediate symlink", func(t *testing.T) {
+		root := trustedTestRoot(t, t.TempDir())
+		target := filepath.Join(root, "target", "state")
+		if err := os.MkdirAll(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		nested := filepath.Join(root, "nested")
+		if err := os.Mkdir(nested, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(nested, "link")
+		if err := os.Symlink(filepath.Join(root, "target"), link); err != nil {
+			t.Fatal(err)
+		}
+		realPath := filepath.Join(target, "runs.jsonl")
+		realStore, err := Create(root, realPath, empty, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = realStore.Close() })
+		linkedPath := filepath.Join(link, "state", "runs.jsonl")
+		if _, err := Open(root, linkedPath, 1); err == nil || !strings.Contains(err.Error(), "nonsymlink") {
+			t.Fatalf("nested symlink open error = %v", err)
+		}
+		if _, err := Create(root, filepath.Join(link, "state", "new.jsonl"), empty, 1); err == nil || !strings.Contains(err.Error(), "nonsymlink") {
+			t.Fatalf("nested symlink create error = %v", err)
+		}
+	})
+
+	t.Run("captured parent cannot be redirected", func(t *testing.T) {
+		root := trustedTestRoot(t, t.TempDir())
+		path := filepath.Join(root, "generation", "state", "runs.jsonl")
+		store, err := Create(root, path, empty, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		original := filepath.Join(root, "original")
+		if err := os.Rename(filepath.Join(root, "generation"), original); err != nil {
+			t.Fatal(err)
+		}
+		attacker := filepath.Join(root, "attacker")
+		if err := os.MkdirAll(filepath.Join(attacker, "state"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(attacker, filepath.Join(root, "generation")); err != nil {
+			t.Fatal(err)
+		}
+		batch, run, rate := testAdmissionProjection(t, filepath.Join(original, "state"), 1, StateSucceeded)
+		if err := store.ApplyAdmissionBatch([]AdmissionBatch{batch}, []Run{run}, []RateBucket{rate}); err != nil {
+			t.Fatalf("append through captured parent: %v", err)
+		}
+		if err := store.Compact(time.Time{}); err != nil {
+			t.Fatalf("checkpoint through captured parent: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(attacker, "state", "runs.jsonl")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("replacement parent received artifact: %v", err)
+		}
+		movedPath := filepath.Join(original, "state", "runs.jsonl")
+		reopened, err := Open(root, movedPath, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = reopened.Close() })
+		snapshot, err := reopened.Snapshot()
+		if err != nil || len(snapshot.Model().Runs) != 1 {
+			t.Fatalf("captured parent projection = %#v, %v", snapshot.Model(), err)
+		}
+	})
+}
+
+func createEmptyStore(t *testing.T, path string, retention int) *Store {
+	t.Helper()
+	root := trustedTestRoot(t, filepath.Dir(path))
+	empty, err := NewSnapshot(EmptyModel())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Create(root, path, empty, retention)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return store
+}
+
+func rootForInvalidTest(t *testing.T) string {
+	t.Helper()
+	return trustedTestRoot(t, t.TempDir())
+}
+
+func trustedTestRoot(t *testing.T, root string) string {
+	t.Helper()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root
 }
 
 func nextLifecycleRun(current Run, state LifecycleState, at time.Time) Run {
@@ -564,6 +914,38 @@ func nextLifecycleRun(current Run, state LifecycleState, at time.Time) Run {
 	})
 	if state.Terminal() {
 		next.FinishedAt = pointerTime(at.UTC())
+	}
+	return next
+}
+
+func runningProjection(t *testing.T, root string) (AdmissionBatch, Run, RateBucket) {
+	t.Helper()
+	batch, run, rate := testAdmissionProjection(t, root, 1, StatePending)
+	startingAt := run.CreatedAt.Add(time.Second)
+	runningAt := run.CreatedAt.Add(2 * time.Second)
+	run.State = StateRunning
+	run.SessionName = "factory-sanitized"
+	run.RunDirectory = filepath.Join(root, "run-sanitized")
+	run.Attempts = 1
+	run.UpdatedAt = runningAt
+	run.StartedAt = pointerTime(runningAt)
+	run.SegmentStartedAt = pointerTime(startingAt)
+	run.Transitions = append(run.Transitions,
+		LifecycleTransition{ID: run.ID + ":starting", State: StateStarting, At: startingAt},
+		LifecycleTransition{ID: run.ID + ":running", State: StateRunning, Attempts: 1, At: runningAt},
+	)
+	run.GitHub.LastCursor = 10
+	run.GitHub.LastAuthoritativeRefreshAt = pointerTime(runningAt)
+	return batch, run, rate
+}
+
+func awaitingProjection(current Run) Run {
+	next := nextLifecycleRun(current, StateAwaitingHumanMerge, current.UpdatedAt.Add(time.Second))
+	next.Ready = &ReadyCheckpoint{
+		ContractVersion: readyContractVersion, RunID: next.ID, Task: next.Causation.Task,
+		Repository: next.Repository.Repository, PullRequest: 18, BaseBranch: next.Repository.DefaultBranch,
+		HeadBranch: "factory-task-1-sanitized", VerifiedHeadOID: strings.Repeat("a", 40),
+		CreatedAt: current.UpdatedAt.Add(500 * time.Millisecond), ValidatedAt: next.UpdatedAt,
 	}
 	return next
 }

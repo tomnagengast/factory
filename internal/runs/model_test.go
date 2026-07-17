@@ -1,6 +1,7 @@
 package runs
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -19,6 +20,9 @@ var modelTestNow = time.Date(2026, time.July, 16, 19, 0, 0, 0, time.UTC)
 func TestSnapshotCanonicalDigestAndNonAliasing(t *testing.T) {
 	model := EmptyModel()
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	firstBatch, firstRun, firstRate := testAdmissionProjection(t, root, 1, StatePending)
 	secondBatch, secondRun, secondRate := testAdmissionProjection(t, root, 2, StatePending)
 	model.JournalSequence = 7
@@ -127,6 +131,10 @@ func TestTerminalRunPreservesLegacyAndCompactedWorkflowPins(t *testing.T) {
 			run.Causation.Workflow = test.pin
 			if test.pin == nil {
 				run.Causation.WorkflowDigest = ""
+				run.MigratedBaseline = &MigratedBaseline{
+					State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true, WorkflowPinUnavailable: true,
+				}
+				run.Transitions = nil
 			} else if compactWorkflow(*test.pin) {
 				run.Causation.WorkflowDigest = strings.Repeat("a", 64)
 			} else {
@@ -146,6 +154,9 @@ func TestTerminalRunPreservesLegacyAndCompactedWorkflowPins(t *testing.T) {
 
 func TestSnapshotPreservesCompleteLifecycleCompatibilityPayload(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	batch, run, rate := testAdmissionProjection(t, root, 1, StateSucceeded)
 	created := run.CreatedAt
 	startingAt := created.Add(time.Second)
@@ -204,10 +215,10 @@ func TestSnapshotPreservesCompleteLifecycleCompatibilityPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "runs.jsonl")
-	if _, err := Create(path, snapshot, 10); err != nil {
+	if _, err := Create(root, path, snapshot, 10); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(path, 10)
+	reopened, err := Open(root, path, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,6 +240,239 @@ func TestSnapshotPreservesCompleteLifecycleCompatibilityPayload(t *testing.T) {
 	}
 }
 
+func TestMigratedBaselinePreservesAcknowledgedLegacyShapes(t *testing.T) {
+	t.Run("terminal current-shape fixture", func(t *testing.T) {
+		root := privateModelTestRoot(t)
+		batch, run, rate := testAdmissionProjection(t, root, 1, StateSucceeded)
+		historical := &HistoricalRepository{
+			Repository: run.Repository.Repository, Origin: run.Repository.Origin,
+			ManagedPath: run.Repository.ManagedPath, ManagedRoot: run.Repository.ManagedRoot,
+			DefaultBranch: run.Repository.DefaultBranch, CloudURL: run.Repository.CloudURL,
+		}
+		run.Repository = nil
+		run.Causation.Workflow = pointerPin(workflow.Pinned{ID: "full-sdlc", Revision: 3})
+		run.Causation.WorkflowDigest = ""
+		run.Transitions = nil
+		run.MigratedBaseline = &MigratedBaseline{
+			State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true,
+			WorkflowDigestUnavailable: true, HistoricalRepository: historical,
+		}
+		snapshot, err := NewSnapshot(Model{
+			Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1,
+			AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		absentRepository := snapshot.Model()
+		absentRepository.Runs[0].MigratedBaseline.HistoricalRepository = nil
+		if _, err := NewSnapshot(absentRepository); err != nil {
+			t.Fatalf("absent historical repository: %v", err)
+		}
+		path := filepath.Join(root, "generation", "runs.jsonl")
+		store, err := Create(root, path, snapshot, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := Open(root, path, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = reopened.Close() })
+		got, err := reopened.Snapshot()
+		if err != nil || !reflect.DeepEqual(got.Model(), snapshot.Model()) {
+			t.Fatalf("migrated fixture changed: %#v, %v", got.Model(), err)
+		}
+	})
+
+	t.Run("active baseline accepts first canonical transition", func(t *testing.T) {
+		root := privateModelTestRoot(t)
+		batch, run, rate := testAdmissionProjection(t, root, 1, StatePending)
+		run.State = StateRunning
+		run.Attempts = 1
+		run.SessionName = "factory-sanitized"
+		run.RunDirectory = filepath.Join(root, "run-sanitized")
+		run.StartedAt = pointerTime(run.UpdatedAt)
+		run.SegmentStartedAt = pointerTime(run.UpdatedAt)
+		run.Transitions = nil
+		run.MigratedBaseline = &MigratedBaseline{State: StateRunning, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true}
+		snapshot, err := NewSnapshot(Model{
+			Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1,
+			AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, "runs.jsonl")
+		store, err := Create(root, path, snapshot, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		failed := nextLifecycleRun(run, StateFailed, run.UpdatedAt.Add(time.Second))
+		if err := store.Transition(failed); err != nil {
+			t.Fatalf("first canonical transition: %v", err)
+		}
+		got, _ := store.Snapshot()
+		if len(got.Model().Runs[0].Transitions) != 1 || got.Model().Runs[0].State != StateFailed {
+			t.Fatalf("transitioned migrated Run = %#v", got.Model().Runs[0])
+		}
+	})
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*Run)
+	}{
+		{name: "acknowledged transition history", mutate: func(run *Run) { run.Transitions = nil }},
+		{name: "absent terminal route", mutate: func(run *Run) { run.Repository = nil }},
+		{name: "digestless compact pin", mutate: func(run *Run) {
+			run.Causation.Workflow = pointerPin(workflow.Pinned{ID: "full-sdlc", Revision: 3})
+			run.Causation.WorkflowDigest = ""
+		}},
+		{name: "unavailable workflow pin", mutate: func(run *Run) {
+			run.Causation.Workflow = nil
+			run.Causation.WorkflowDigest = ""
+		}},
+	} {
+		t.Run("ordinary Run rejects "+test.name, func(t *testing.T) {
+			batch, run, rate := testAdmissionProjection(t, privateModelTestRoot(t), 1, StateSucceeded)
+			test.mutate(&run)
+			_, err := NewSnapshot(Model{
+				Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1,
+				AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate},
+			})
+			if err == nil {
+				t.Fatal("ordinary canonical Run accepted migration-only evidence gap")
+			}
+		})
+	}
+}
+
+func TestModelLinksPolicyOwnershipAndCompletionEvidence(t *testing.T) {
+	t.Run("policy revision matches admission settings", func(t *testing.T) {
+		batch, run, rate := testAdmissionProjection(t, privateModelTestRoot(t), 1, StatePending)
+		run.Causation.PolicyRevision++
+		if _, err := NewSnapshot(Model{Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate}}); err == nil || !strings.Contains(err.Error(), "linkage") {
+			t.Fatalf("policy linkage error = %v", err)
+		}
+	})
+
+	t.Run("same-task ownership belongs to oldest nonterminal Run", func(t *testing.T) {
+		root := privateModelTestRoot(t)
+		firstBatch, firstRun, firstRate := testAdmissionProjection(t, root, 1, StatePending)
+		secondBatch, secondRun, secondRate := testAdmissionProjection(t, root, 2, StatePending)
+		secondRun.Causation.Task = firstRun.Causation.Task
+		admit := func(run *Run) {
+			run.State = StateAdmitted
+			run.Transitions[0].State = StateAdmitted
+		}
+		admit(&firstRun)
+		admit(&secondRun)
+		model := Model{
+			Schema: SchemaVersion, TotalBatches: 2, TotalRuns: 2,
+			AdmissionBatches: []AdmissionBatch{firstBatch, secondBatch}, Runs: []Run{firstRun, secondRun}, RateBuckets: []RateBucket{firstRate, secondRate},
+		}
+		if _, err := NewSnapshot(model); err != nil {
+			t.Fatalf("multiple admitted Runs: %v", err)
+		}
+		oldestOwns := cloneModel(model)
+		oldestOwns.Runs[0].State = StatePending
+		oldestOwns.Runs[0].Transitions[0].State = StatePending
+		if _, err := NewSnapshot(oldestOwns); err != nil {
+			t.Fatalf("oldest owner: %v", err)
+		}
+		youngerOwns := cloneModel(model)
+		youngerOwns.Runs[1].State = StatePending
+		youngerOwns.Runs[1].Transitions[0].State = StatePending
+		if _, err := NewSnapshot(youngerOwns); err == nil || !strings.Contains(err.Error(), "oldest") {
+			t.Fatalf("younger owner error = %v", err)
+		}
+	})
+
+	t.Run("completion is Run-aware", func(t *testing.T) {
+		root := privateModelTestRoot(t)
+		batch, run, rate := testAdmissionProjection(t, root, 1, StateSucceeded)
+		head := strings.Repeat("a", 40)
+		merge := strings.Repeat("b", 40)
+		run.Ready = &ReadyCheckpoint{
+			ContractVersion: readyContractVersion, RunID: run.ID, Task: run.Causation.Task,
+			Repository: run.Repository.Repository, PullRequest: 18, BaseBranch: run.Repository.DefaultBranch,
+			HeadBranch: "factory-task-1-sanitized", VerifiedHeadOID: head, CreatedAt: run.CreatedAt,
+		}
+		run.MergeCommitOID = merge
+		run.Completion = &CompletionValidation{
+			Accepted: true, Intent: string(StateSucceeded), State: StateSucceeded, Reason: "verified",
+			ValidatedAt: *run.FinishedAt, PullRequestState: "MERGED", PullRequestHead: head, MergeCommitOID: merge,
+		}
+		base := Model{Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate}}
+		if _, err := NewSnapshot(base); err != nil {
+			t.Fatalf("repository-only completion: %v", err)
+		}
+		for _, mutation := range []struct {
+			name string
+			edit func(*Run)
+		}{
+			{name: "running", edit: func(run *Run) {
+				run.State = StateRunning
+				run.FinishedAt = nil
+				run.Transitions[len(run.Transitions)-1].State = StateRunning
+			}},
+			{name: "terminal state", edit: func(run *Run) { run.Completion.State = StateBlocked; run.Completion.Intent = string(StateBlocked) }},
+			{name: "verified head", edit: func(run *Run) { run.Completion.PullRequestHead = strings.Repeat("c", 40) }},
+			{name: "merge", edit: func(run *Run) { run.Completion.MergeCommitOID = strings.Repeat("c", 40) }},
+		} {
+			t.Run(mutation.name, func(t *testing.T) {
+				candidate := cloneModel(base)
+				mutation.edit(&candidate.Runs[0])
+				if _, err := NewSnapshot(candidate); err == nil {
+					t.Fatal("conflicting accepted completion was accepted")
+				}
+			})
+		}
+
+		resumed := run.Clone()
+		resumed.State = StatePending
+		resumed.FinishedAt = nil
+		resumed.Ready = nil
+		resumed.MergeCommitOID = ""
+		resumed.Transitions = resumed.Transitions[:1]
+		resumed.Completion = &CompletionValidation{Accepted: false, Intent: string(StateSucceeded), State: StateFailed, Reason: "retry", ValidatedAt: resumed.UpdatedAt}
+		resumedModel := cloneModel(base)
+		resumedModel.Runs[0] = resumed
+		if _, err := NewSnapshot(resumedModel); err != nil {
+			t.Fatalf("rejected completion on resumed Run: %v", err)
+		}
+
+		blocked := run.Clone()
+		blocked.State = StateBlocked
+		blocked.Repository = nil
+		blocked.Ready = nil
+		blocked.MergeCommitOID = ""
+		blocked.Transitions[len(blocked.Transitions)-1].State = StateBlocked
+		blocked.Completion = &CompletionValidation{
+			Accepted: true, Intent: string(StateBlocked), Blocker: "missing_routing_metadata",
+			State: StateBlocked, Reason: "typed pre-checkpoint blocker accepted", ValidatedAt: blocked.UpdatedAt,
+		}
+		blockedModel := cloneModel(base)
+		blockedModel.Runs[0] = blocked
+		if _, err := NewSnapshot(blockedModel); err != nil {
+			t.Fatalf("typed pre-PR blocker: %v", err)
+		}
+	})
+}
+
+func privateModelTestRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 func testAdmissionProjection(t *testing.T, root string, number int, state LifecycleState) (AdmissionBatch, Run, RateBucket) {
 	t.Helper()
 	at := modelTestNow.Add(time.Duration(number-1) * time.Minute)
@@ -245,7 +489,7 @@ func testAdmissionProjection(t *testing.T, root string, number int, state Lifecy
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-1", Identifier: "FAC-1"}
+	task := taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-" + string(rune('0'+number)), Identifier: "FAC-" + string(rune('0'+number))}
 	batch := AdmissionBatch{
 		ID: batchID, Origin: AdmissionOriginEvent, EventID: eventID, EventSequence: uint64(number),
 		EventSource: eventwire.SourceFactory, RegistryRevision: 2, SettingsRevision: 3, PolicyGeneration: 4, DecidedAt: at,

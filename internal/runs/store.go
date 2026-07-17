@@ -2,6 +2,8 @@ package runs
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -39,8 +42,13 @@ type diskOperation struct {
 	Transition       *Run             `json:"transition,omitempty"`
 }
 
-type checkpointWriter func(string, diskOperation, bool, func(*os.File) error) (bool, error)
+type checkpointWriter func(*storeLocation, diskOperation, bool, func(*os.File) error) (bool, error)
 type operationApplier func(Model, diskOperation) (Snapshot, error)
+
+type storeLocation struct {
+	directory *os.Root
+	name      string
+}
 
 // Store is a dormant projection journal. Its exported mutations accept only
 // already-decided admission batches and already-constructed lifecycle
@@ -48,7 +56,7 @@ type operationApplier func(Model, diskOperation) (Snapshot, error)
 // arbitration.
 type Store struct {
 	mu                        sync.RWMutex
-	path                      string
+	location                  *storeLocation
 	retention                 int
 	state                     Snapshot
 	operationsSinceCheckpoint int
@@ -62,42 +70,57 @@ type Store struct {
 
 // Create installs one initial checkpoint without replacing an existing
 // artifact. Generation construction must supply a new disposable destination.
-func Create(path string, initial Snapshot, retention int) (*Store, error) {
-	if err := validateStoreArguments(path, retention); err != nil {
+func Create(trustedRoot, path string, initial Snapshot, retention int) (*Store, error) {
+	if err := validateStoreArguments(trustedRoot, path, retention); err != nil {
 		return nil, err
 	}
 	if err := initial.Validate(); err != nil {
 		return nil, fmt.Errorf("runs: invalid initial snapshot: %w", err)
 	}
-	if err := ensureStoreDirectory(filepath.Dir(path)); err != nil {
+	location, err := openStoreLocation(trustedRoot, path, true)
+	if err != nil {
 		return nil, err
 	}
+	installed := false
+	defer func() {
+		if !installed {
+			location.Close()
+		}
+	}()
 	model := initial.Model()
 	operation := diskOperation{
 		Kind: operationCheckpoint, Version: JournalVersion, Sequence: model.JournalSequence,
 		Schema: SchemaVersion, Checkpoint: &model,
 	}
-	replaced, err := writeCheckpoint(path, operation, true, func(directory *os.File) error { return directory.Sync() })
+	replaced, err := writeCheckpoint(location, operation, true, func(directory *os.File) error { return directory.Sync() })
 	if err != nil {
 		return nil, err
 	}
 	if !replaced {
 		return nil, errors.New("runs: create completed without installing artifact")
 	}
-	return newStore(path, retention, initial), nil
+	installed = true
+	return newStore(location, retention, initial), nil
 }
 
 // Open strictly replays an existing canonical journal. It recovers only an
 // incomplete final line; every complete malformed or semantically invalid
 // operation fails the open.
-func Open(path string, retention int) (*Store, error) {
-	if err := validateStoreArguments(path, retention); err != nil {
+func Open(trustedRoot, path string, retention int) (*Store, error) {
+	if err := validateStoreArguments(trustedRoot, path, retention); err != nil {
 		return nil, err
 	}
-	if err := inspectStoreDirectory(filepath.Dir(path)); err != nil {
+	location, err := openStoreLocation(trustedRoot, path, false)
+	if err != nil {
 		return nil, err
 	}
-	data, err := readJournal(path, true)
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			location.Close()
+		}
+	}()
+	data, err := readJournal(location, true)
 	if err != nil {
 		return nil, err
 	}
@@ -105,13 +128,14 @@ func Open(path string, retention int) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	store := newStore(path, retention, state)
+	store := newStore(location, retention, state)
 	store.operationsSinceCheckpoint = operations
+	succeeded = true
 	return store, nil
 }
 
-func newStore(path string, retention int, state Snapshot) *Store {
-	store := &Store{path: path, retention: retention, state: state}
+func newStore(location *storeLocation, retention int, state Snapshot) *Store {
+	store := &Store{location: location, retention: retention, state: state}
 	store.write = func(file *os.File, data []byte) (int, error) { return file.Write(data) }
 	store.syncFile = func(file *os.File) error { return file.Sync() }
 	store.rollback = rollbackAppend
@@ -120,11 +144,24 @@ func newStore(path string, retention int, state Snapshot) *Store {
 	return store
 }
 
+// Close releases the anchored directory handle. A closed Store refuses all
+// later reads and mutations.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.location == nil {
+		return nil
+	}
+	err := s.location.Close()
+	s.location = nil
+	return err
+}
+
 func (s *Store) Snapshot() (Snapshot, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.poisoned != nil {
-		return Snapshot{}, fmt.Errorf("runs: store is poisoned: %w", s.poisoned)
+	if err := s.healthyLocked(); err != nil {
+		return Snapshot{}, err
 	}
 	return Snapshot{model: cloneModel(s.state.model)}, nil
 }
@@ -235,6 +272,9 @@ func (s *Store) Compact(expireRatesBefore time.Time) error {
 }
 
 func (s *Store) healthyLocked() error {
+	if s.location == nil {
+		return errors.New("runs: store is closed")
+	}
 	if s.poisoned != nil {
 		return fmt.Errorf("runs: store is poisoned: %w", s.poisoned)
 	}
@@ -259,20 +299,34 @@ func applyOperation(current Model, operation diskOperation) (Snapshot, error) {
 }
 
 func applyAdmissionBatch(current Model, operation diskOperation) (Snapshot, error) {
+	matchedBatches := 0
 	for _, batch := range operation.AdmissionBatches {
 		for _, existing := range current.AdmissionBatches {
 			if existing.ID == batch.ID {
+				matchedBatches++
 				existingRuns := runsForBatch(current.Runs, existing.ID)
 				candidateRuns := runsForBatch(operation.Runs, batch.ID)
-				if len(operation.AdmissionBatches) == 1 && reflect.DeepEqual(existing, batch) && reflect.DeepEqual(existingRuns, candidateRuns) {
-					return Snapshot{}, ErrDuplicateAdmissionBatch
+				if !reflect.DeepEqual(existing, batch) || !reflect.DeepEqual(existingRuns, candidateRuns) {
+					return Snapshot{}, fmt.Errorf("%w: admission batch %q", ErrIdentityCollision, batch.ID)
 				}
-				return Snapshot{}, fmt.Errorf("%w: admission batch %q", ErrIdentityCollision, batch.ID)
+				continue
 			}
 			if existing.EventID == batch.EventID || batch.EventSequence != 0 && existing.EventSequence == batch.EventSequence {
 				return Snapshot{}, fmt.Errorf("%w: event %q", ErrIdentityCollision, batch.EventID)
 			}
 		}
+	}
+	if matchedBatches > 0 {
+		if matchedBatches != len(operation.AdmissionBatches) {
+			return Snapshot{}, fmt.Errorf("%w: admission operation partially overlaps durable batches", ErrIdentityCollision)
+		}
+		if err := validateRateIncrements(operation.AdmissionBatches, operation.RateIncrements); err != nil {
+			return Snapshot{}, fmt.Errorf("%w: persisted admission operation rates differ", ErrIdentityCollision)
+		}
+		if err := validateAdmissionOperationProjection(operation); err != nil {
+			return Snapshot{}, fmt.Errorf("%w: persisted admission operation projection differs", ErrIdentityCollision)
+		}
+		return Snapshot{}, ErrDuplicateAdmissionBatch
 	}
 	for _, candidate := range operation.Runs {
 		for _, existing := range current.Runs {
@@ -282,6 +336,9 @@ func applyAdmissionBatch(current Model, operation diskOperation) (Snapshot, erro
 		}
 	}
 	if err := validateRateIncrements(operation.AdmissionBatches, operation.RateIncrements); err != nil {
+		return Snapshot{}, err
+	}
+	if err := validateAdmissionOperationProjection(operation); err != nil {
 		return Snapshot{}, err
 	}
 	if uint64(len(operation.AdmissionBatches)) > math.MaxUint64-current.TotalBatches || uint64(len(operation.Runs)) > math.MaxUint64-current.TotalRuns {
@@ -313,6 +370,18 @@ func applyAdmissionBatch(current Model, operation diskOperation) (Snapshot, erro
 		next.RateBuckets = append(next.RateBuckets, bucket)
 	}
 	return NewSnapshot(next)
+}
+
+func validateAdmissionOperationProjection(operation diskOperation) error {
+	candidate := Model{
+		Schema: SchemaVersion, TotalBatches: uint64(len(operation.AdmissionBatches)), TotalRuns: uint64(len(operation.Runs)),
+		AdmissionBatches: cloneAdmissionBatches(operation.AdmissionBatches), Runs: cloneRuns(operation.Runs),
+		RateBuckets: slices.Clone(operation.RateIncrements),
+	}
+	if _, err := NewSnapshot(candidate); err != nil {
+		return fmt.Errorf("runs: invalid admission operation projection: %w", err)
+	}
+	return nil
 }
 
 func runsForBatch(runs []Run, batchID string) []Run {
@@ -369,10 +438,11 @@ func applyTransition(current Model, operation diskOperation) (Snapshot, error) {
 	if index < 0 {
 		return Snapshot{}, fmt.Errorf("runs: Run %q not found", nextRun.ID)
 	}
-	if currentRun.ID != nextRun.ID || !reflect.DeepEqual(currentRun.Causation, nextRun.Causation) || currentRun.CreatedAt != nextRun.CreatedAt {
+	if currentRun.ID != nextRun.ID || !reflect.DeepEqual(currentRun.Causation, nextRun.Causation) ||
+		!reflect.DeepEqual(currentRun.MigratedBaseline, nextRun.MigratedBaseline) || currentRun.CreatedAt != nextRun.CreatedAt {
 		return Snapshot{}, errors.New("runs: lifecycle transition changed immutable admission identity")
 	}
-	if len(nextRun.Transitions) != len(currentRun.Transitions)+1 || !reflect.DeepEqual(nextRun.Transitions[:len(currentRun.Transitions)], currentRun.Transitions) {
+	if len(nextRun.Transitions) != len(currentRun.Transitions)+1 || !slices.Equal(nextRun.Transitions[:len(currentRun.Transitions)], currentRun.Transitions) {
 		return Snapshot{}, errors.New("runs: lifecycle transition must append exactly one history record")
 	}
 	transition := nextRun.Transitions[len(nextRun.Transitions)-1]
@@ -381,6 +451,9 @@ func applyTransition(current Model, operation diskOperation) (Snapshot, error) {
 	}
 	if !nextRun.UpdatedAt.After(currentRun.UpdatedAt) || transition.At != nextRun.UpdatedAt {
 		return Snapshot{}, errors.New("runs: lifecycle transition time must advance UpdatedAt")
+	}
+	if err := validateTransitionDelta(currentRun, nextRun, transition); err != nil {
+		return Snapshot{}, err
 	}
 	if currentRun.Repository != nil && !reflect.DeepEqual(currentRun.Repository, nextRun.Repository) {
 		return Snapshot{}, errors.New("runs: lifecycle transition changed immutable repository route")
@@ -392,6 +465,92 @@ func applyTransition(current Model, operation diskOperation) (Snapshot, error) {
 	next.JournalSequence = operation.Sequence
 	next.Runs[index] = nextRun
 	return NewSnapshot(next)
+}
+
+func validateTransitionDelta(current, next Run, transition LifecycleTransition) error {
+	if !stringsSubset(current.DeliveryIDs, next.DeliveryIDs) || next.DuplicateDeliveries < current.DuplicateDeliveries {
+		return errors.New("runs: lifecycle transition rewrote delivery evidence")
+	}
+	if next.Attempts < current.Attempts || transition.Attempts != next.Attempts || next.ResumeCount < current.ResumeCount ||
+		next.GitHub.LastCursor < current.GitHub.LastCursor {
+		return errors.New("runs: lifecycle transition decreased durable counters")
+	}
+	if current.StartedAt != nil && !equalOptionalTime(current.StartedAt, next.StartedAt) ||
+		!monotonicOptionalTime(current.GitHub.LastAuthoritativeRefreshAt, next.GitHub.LastAuthoritativeRefreshAt) {
+		return errors.New("runs: lifecycle transition rewrote durable timestamps")
+	}
+	if current.StartedAt == nil && next.StartedAt != nil && (next.State != StateRunning || !next.StartedAt.Equal(next.UpdatedAt)) {
+		return errors.New("runs: lifecycle transition introduced an invalid start timestamp")
+	}
+	if current.RunDirectory != "" && next.RunDirectory != current.RunDirectory ||
+		current.RunDirectory == "" && next.RunDirectory != "" && next.State != StateStarting {
+		return errors.New("runs: lifecycle transition rewrote Run directory identity")
+	}
+	if current.SessionName != next.SessionName {
+		setting := current.SessionName == "" && next.SessionName != "" && next.State == StateStarting
+		clearing := current.SessionName != "" && next.SessionName == "" && (next.State == StatePending || next.State == StatePostMergePending)
+		if !setting && !clearing {
+			return errors.New("runs: lifecycle transition rewrote session identity")
+		}
+	}
+	if !equalOptionalTime(current.SegmentStartedAt, next.SegmentStartedAt) {
+		setting := next.SegmentStartedAt != nil && next.State == StateStarting
+		clearing := current.SegmentStartedAt != nil && next.SegmentStartedAt == nil && next.State == StatePostMergePending
+		if !setting && !clearing {
+			return errors.New("runs: lifecycle transition rewrote segment identity")
+		}
+	}
+	if current.SegmentAttempt != next.SegmentAttempt && (next.State != StateStarting || next.SegmentAttempt < current.SegmentAttempt) {
+		return errors.New("runs: lifecycle transition rewrote segment attempt identity")
+	}
+	if current.Ready != nil && !reflect.DeepEqual(current.Ready, next.Ready) ||
+		current.Ready == nil && next.Ready != nil && next.State != StateAwaitingHumanMerge {
+		return errors.New("runs: lifecycle transition rewrote ready checkpoint")
+	}
+	if current.MergeCommitOID != "" && next.MergeCommitOID != current.MergeCommitOID {
+		return errors.New("runs: lifecycle transition rewrote merge identity")
+	}
+	if current.MergeCommitOID == "" && next.MergeCommitOID != "" {
+		postMergeResume := current.State == StateAwaitingHumanMerge && next.State == StatePostMergePending
+		acceptedTerminal := next.State.Terminal() && next.Completion != nil && next.Completion.Accepted && next.Completion.MergeCommitOID == next.MergeCommitOID
+		if !postMergeResume && !acceptedTerminal {
+			return errors.New("runs: lifecycle transition introduced merge identity outside post-merge evidence")
+		}
+	}
+	if current.FinishedAt != nil && !equalOptionalTime(current.FinishedAt, next.FinishedAt) {
+		return errors.New("runs: lifecycle transition rewrote terminal timestamp")
+	}
+	if current.FinishedAt == nil && next.FinishedAt != nil && !next.FinishedAt.Equal(next.UpdatedAt) {
+		return errors.New("runs: lifecycle transition finish timestamp must match transition time")
+	}
+	if current.Completion != nil && current.Completion.Accepted && !reflect.DeepEqual(current.Completion, next.Completion) {
+		return errors.New("runs: lifecycle transition rewrote accepted completion")
+	}
+	return nil
+}
+
+func stringsSubset(current, next []string) bool {
+	index := 0
+	for _, value := range next {
+		if index < len(current) && current[index] == value {
+			index++
+		}
+	}
+	return index == len(current)
+}
+
+func monotonicOptionalTime(current, next *time.Time) bool {
+	if current == nil {
+		return true
+	}
+	return next != nil && !next.Before(*current)
+}
+
+func equalOptionalTime(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
 }
 
 func validateOperationShape(operation diskOperation) error {
@@ -557,7 +716,7 @@ func (s *Store) appendOperationLocked(operation diskOperation) error {
 	if len(data) > maxJournalBytes {
 		return errors.New("runs: journal operation is too large")
 	}
-	info, file, err := openArtifact(s.path, os.O_WRONLY|os.O_APPEND)
+	info, file, err := openArtifact(s.location, os.O_WRONLY|os.O_APPEND)
 	if err != nil {
 		return err
 	}
@@ -615,12 +774,15 @@ func (s *Store) writeCheckpointLocked(expireRatesBefore time.Time) error {
 		Kind: operationCheckpoint, Version: JournalVersion, Sequence: model.JournalSequence,
 		Schema: SchemaVersion, Checkpoint: &model,
 	}
-	replaced, writeErr := s.checkpoint(s.path, operation, false, func(directory *os.File) error { return directory.Sync() })
+	replaced, writeErr := s.checkpoint(s.location, operation, false, func(directory *os.File) error { return directory.Sync() })
 	if replaced {
 		s.state = next
 		s.operationsSinceCheckpoint = 0
 	}
 	if writeErr != nil {
+		if replaced {
+			s.poisoned = writeErr
+		}
 		return writeErr
 	}
 	if !replaced {
@@ -672,7 +834,7 @@ func retainedSnapshot(current Model, retention int, expireRatesBefore time.Time)
 	return NewSnapshot(next)
 }
 
-func writeCheckpoint(path string, operation diskOperation, createNoReplace bool, syncDirectory func(*os.File) error) (bool, error) {
+func writeCheckpoint(location *storeLocation, operation diskOperation, createNoReplace bool, syncDirectory func(*os.File) error) (bool, error) {
 	if err := validateOperationShape(operation); err != nil {
 		return false, err
 	}
@@ -685,16 +847,15 @@ func writeCheckpoint(path string, operation diskOperation, createNoReplace bool,
 		return false, errors.New("runs: checkpoint is too large")
 	}
 	if !createNoReplace {
-		if _, err := inspectArtifact(path); err != nil {
+		if _, err := inspectArtifact(location); err != nil {
 			return false, err
 		}
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".runs-*")
+	temporaryName, temporary, err := createTemporaryArtifact(location)
 	if err != nil {
 		return false, fmt.Errorf("runs: create checkpoint: %w", err)
 	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer location.directory.Remove(temporaryName)
 	if err := temporary.Chmod(0o600); err != nil {
 		temporary.Close()
 		return false, fmt.Errorf("runs: set checkpoint permissions: %w", err)
@@ -712,7 +873,7 @@ func writeCheckpoint(path string, operation diskOperation, createNoReplace bool,
 	}
 	reserved := false
 	if createNoReplace {
-		reservation, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		reservation, err := location.directory.OpenFile(location.name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
 			if errors.Is(err, os.ErrExist) {
 				return false, errors.New("runs: create: artifact already exists")
@@ -721,20 +882,20 @@ func writeCheckpoint(path string, operation diskOperation, createNoReplace bool,
 		}
 		reserved = true
 		if err := reservation.Close(); err != nil {
-			os.Remove(path)
+			location.directory.Remove(location.name)
 			return false, fmt.Errorf("runs: close artifact reservation: %w", err)
 		}
 	}
 	defer func() {
 		if reserved {
-			os.Remove(path)
+			location.directory.Remove(location.name)
 		}
 	}()
-	if err := os.Rename(temporaryPath, path); err != nil {
+	if err := location.directory.Rename(temporaryName, location.name); err != nil {
 		return false, fmt.Errorf("runs: replace checkpoint: %w", err)
 	}
 	reserved = false
-	directory, err := os.Open(filepath.Dir(path))
+	directory, err := location.directory.Open(".")
 	if err != nil {
 		return true, fmt.Errorf("runs: open checkpoint directory: %w", err)
 	}
@@ -745,8 +906,26 @@ func writeCheckpoint(path string, operation diskOperation, createNoReplace bool,
 	return true, nil
 }
 
-func readJournal(path string, recoverTail bool) ([]byte, error) {
-	info, file, err := openArtifact(path, os.O_RDWR)
+func createTemporaryArtifact(location *storeLocation) (string, *os.File, error) {
+	for attempt := 0; attempt < 100; attempt++ {
+		var entropy [12]byte
+		if _, err := rand.Read(entropy[:]); err != nil {
+			return "", nil, err
+		}
+		name := ".runs-" + hex.EncodeToString(entropy[:])
+		file, err := location.directory.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return name, file, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return "", nil, err
+		}
+	}
+	return "", nil, errors.New("temporary checkpoint name collision")
+}
+
+func readJournal(location *storeLocation, recoverTail bool) ([]byte, error) {
+	info, file, err := openArtifact(location, os.O_RDWR)
 	if err != nil {
 		return nil, err
 	}
@@ -784,20 +963,20 @@ func readJournal(path string, recoverTail bool) ([]byte, error) {
 	return data[:complete], nil
 }
 
-func openArtifact(path string, flags int) (os.FileInfo, *os.File, error) {
-	info, err := inspectArtifact(path)
+func openArtifact(location *storeLocation, flags int) (os.FileInfo, *os.File, error) {
+	info, err := inspectArtifact(location)
 	if err != nil {
 		return nil, nil, err
 	}
-	file, err := os.OpenFile(path, flags, 0)
+	file, err := location.directory.OpenFile(location.name, flags, 0)
 	if err != nil {
 		return nil, nil, fmt.Errorf("runs: open journal: %w", err)
 	}
 	return info, file, nil
 }
 
-func inspectArtifact(path string) (os.FileInfo, error) {
-	info, err := os.Lstat(path)
+func inspectArtifact(location *storeLocation) (os.FileInfo, error) {
+	info, err := location.directory.Lstat(location.name)
 	if err != nil {
 		return nil, fmt.Errorf("runs: inspect journal: %w", err)
 	}
@@ -810,9 +989,15 @@ func inspectArtifact(path string) (os.FileInfo, error) {
 	return info, nil
 }
 
-func validateStoreArguments(path string, retention int) error {
+func validateStoreArguments(trustedRoot, path string, retention int) error {
+	if trustedRoot == "" || !filepath.IsAbs(trustedRoot) || filepath.Clean(trustedRoot) != trustedRoot {
+		return errors.New("runs: trusted root must be canonical and absolute")
+	}
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || filepath.Base(path) == "." {
 		return errors.New("runs: journal path must be canonical and absolute")
+	}
+	if !pathWithin(trustedRoot, path) || trustedRoot == path {
+		return errors.New("runs: journal path must remain within the trusted root")
 	}
 	if retention < 1 {
 		return errors.New("runs: retention must be positive")
@@ -820,22 +1005,64 @@ func validateStoreArguments(path string, retention int) error {
 	return nil
 }
 
-func ensureStoreDirectory(directory string) error {
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return fmt.Errorf("runs: create journal directory: %w", err)
+func openStoreLocation(trustedRoot, path string, createDirectories bool) (*storeLocation, error) {
+	info, err := os.Lstat(trustedRoot)
+	if err != nil {
+		return nil, fmt.Errorf("runs: inspect trusted root: %w", err)
 	}
-	return inspectStoreDirectory(directory)
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		return nil, errors.New("runs: trusted root must be a private nonsymlink directory")
+	}
+	root, err := os.OpenRoot(trustedRoot)
+	if err != nil {
+		return nil, fmt.Errorf("runs: open trusted root: %w", err)
+	}
+	opened, err := root.Stat(".")
+	if err != nil || !os.SameFile(info, opened) {
+		root.Close()
+		return nil, errors.New("runs: trusted root changed while opening")
+	}
+	relative, err := filepath.Rel(trustedRoot, path)
+	if err != nil || relative == "." || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		root.Close()
+		return nil, errors.New("runs: journal path escaped trusted root")
+	}
+	directoryPath := filepath.Dir(relative)
+	current := root
+	if directoryPath != "." {
+		for _, component := range strings.Split(directoryPath, string(filepath.Separator)) {
+			next, openErr := current.OpenRoot(component)
+			if errors.Is(openErr, os.ErrNotExist) && createDirectories {
+				if err := current.Mkdir(component, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+					current.Close()
+					return nil, fmt.Errorf("runs: create journal directory: %w", err)
+				}
+				next, openErr = current.OpenRoot(component)
+			}
+			if openErr != nil {
+				current.Close()
+				return nil, fmt.Errorf("runs: open nonsymlink journal directory: %w", openErr)
+			}
+			directoryInfo, statErr := next.Stat(".")
+			if statErr != nil || !directoryInfo.IsDir() || directoryInfo.Mode().Perm() != 0o700 {
+				next.Close()
+				current.Close()
+				return nil, errors.New("runs: journal directory must be private and nonsymlinked")
+			}
+			current.Close()
+			current = next
+		}
+	}
+	return &storeLocation{directory: current, name: filepath.Base(path)}, nil
 }
 
-func inspectStoreDirectory(directory string) error {
-	info, err := os.Lstat(directory)
-	if err != nil {
-		return fmt.Errorf("runs: inspect journal directory: %w", err)
+func (l *storeLocation) Close() error {
+	if l == nil || l.directory == nil {
+		return nil
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("runs: journal directory must be a nonsymlink directory")
-	}
-	return nil
+	err := l.directory.Close()
+	l.directory = nil
+	return err
 }
 
 func nextSequence(current uint64) (uint64, error) {

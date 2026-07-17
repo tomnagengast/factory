@@ -127,6 +127,7 @@ type Causation struct {
 type Run struct {
 	ID                  string                `json:"id"`
 	Causation           Causation             `json:"causation"`
+	MigratedBaseline    *MigratedBaseline     `json:"migratedBaseline,omitempty"`
 	Repository          *repositories.Route   `json:"repository,omitempty"`
 	RepositoryRejection string                `json:"repositoryRejection,omitempty"`
 	TriggerKind         string                `json:"triggerKind"`
@@ -151,6 +152,32 @@ type Run struct {
 	TerminalIntent      string                `json:"terminalIntent,omitempty"`
 	TerminalRejection   string                `json:"terminalRejection,omitempty"`
 	Completion          *CompletionValidation `json:"completion,omitempty"`
+}
+
+// MigratedBaseline is immutable source evidence for a retained legacy Run.
+// Legacy Transitions was an acknowledged outbox, so State and ObservedAt are
+// the canonical journal's starting point rather than an invented lifecycle
+// history. The compatibility flags distinguish unavailable source evidence
+// from ordinary canonical Runs, which must retain complete initialization.
+type MigratedBaseline struct {
+	State                        LifecycleState        `json:"state"`
+	ObservedAt                   time.Time             `json:"observedAt"`
+	PriorTransitionsAcknowledged bool                  `json:"priorTransitionsAcknowledged"`
+	WorkflowPinUnavailable       bool                  `json:"workflowPinUnavailable,omitempty"`
+	WorkflowDigestUnavailable    bool                  `json:"workflowDigestUnavailable,omitempty"`
+	HistoricalRepository         *HistoricalRepository `json:"historicalRepository,omitempty"`
+}
+
+// HistoricalRepository preserves body-free legacy route evidence that may no
+// longer correspond to an admitted repository record.
+type HistoricalRepository struct {
+	Repository    string `json:"repository"`
+	Origin        string `json:"origin,omitempty"`
+	ManagedPath   string `json:"managedPath,omitempty"`
+	ManagedRoot   string `json:"managedRoot,omitempty"`
+	DefaultBranch string `json:"defaultBranch,omitempty"`
+	Bootstrap     bool   `json:"bootstrap,omitempty"`
+	CloudURL      string `json:"cloudUrl,omitempty"`
 }
 
 type LifecycleTransition struct {
@@ -306,6 +333,15 @@ func canonicalizeAdmissionBatch(batch *AdmissionBatch) {
 
 func canonicalizeRun(run *Run) {
 	run.Causation.AdmittedAt = run.Causation.AdmittedAt.UTC()
+	if run.MigratedBaseline != nil {
+		baseline := *run.MigratedBaseline
+		baseline.ObservedAt = baseline.ObservedAt.UTC()
+		if baseline.HistoricalRepository != nil {
+			repository := *baseline.HistoricalRepository
+			baseline.HistoricalRepository = &repository
+		}
+		run.MigratedBaseline = &baseline
+	}
 	if run.Causation.Workflow != nil {
 		pin := run.Causation.Workflow.Clone()
 		if pin.UpdatedAt != nil {
@@ -369,6 +405,14 @@ func cloneRun(run Run) Run {
 	if run.Causation.Workflow != nil {
 		pin := run.Causation.Workflow.Clone()
 		run.Causation.Workflow = &pin
+	}
+	if run.MigratedBaseline != nil {
+		baseline := *run.MigratedBaseline
+		if baseline.HistoricalRepository != nil {
+			repository := *baseline.HistoricalRepository
+			baseline.HistoricalRepository = &repository
+		}
+		run.MigratedBaseline = &baseline
 	}
 	if run.Repository != nil {
 		route := *run.Repository

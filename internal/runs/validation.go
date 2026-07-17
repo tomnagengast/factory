@@ -104,6 +104,7 @@ func validateModel(model Model) error {
 		if !found || !linked || outcome.RunID != run.ID || runOutcome[run.ID] != batch.ID ||
 			run.Causation.EventID != batch.EventID || run.Causation.EventSequence != batch.EventSequence ||
 			run.Causation.EventSource != batch.EventSource || run.Causation.PolicyGeneration != batch.PolicyGeneration ||
+			run.Causation.PolicyRevision != batch.SettingsRevision ||
 			outcome.RuleID != run.Causation.RuleID || outcome.RuleRevision != run.Causation.RuleRevision ||
 			run.Causation.AdmittedAt.Before(batch.DecidedAt) {
 			return fmt.Errorf("runs: Run %q admission linkage conflicts", run.ID)
@@ -111,6 +112,9 @@ func validateModel(model Model) error {
 	}
 	if len(seenRuns) != len(runnable) {
 		return errors.New("runs: runnable admission outcome is orphaned")
+	}
+	if err := validateTaskOwnership(model.Runs); err != nil {
+		return err
 	}
 
 	seenRates := make(map[string]bool, len(model.RateBuckets))
@@ -172,7 +176,10 @@ func validateRun(run Run) error {
 		!validOptionalText(run.TerminalRejection, maximumTextBytes) {
 		return errors.New("Run lifecycle metadata is invalid")
 	}
-	if err := validateCausation(run.Causation, run.State); err != nil {
+	if err := validateMigratedBaseline(run); err != nil {
+		return err
+	}
+	if err := validateCausation(run.Causation, run.State, run.MigratedBaseline); err != nil {
 		return err
 	}
 	if !validLifecycleState(run.State) {
@@ -212,7 +219,9 @@ func validateRun(run Run) error {
 	}
 	if run.Repository == nil {
 		if run.State != StateAdmitted && run.State != StateRouting && run.State != StateRejected {
-			return errors.New("runnable lifecycle is missing a repository route")
+			if (run.MigratedBaseline == nil || !run.State.Terminal()) && !acceptedPrePullRequestBlocker(run) {
+				return errors.New("runnable lifecycle is missing a repository route")
+			}
 		}
 	} else if err := validateRoute(*run.Repository); err != nil {
 		return err
@@ -235,17 +244,17 @@ func validateRun(run Run) error {
 		}
 	}
 	if run.Completion != nil {
-		if err := validateCompletion(*run.Completion); err != nil {
+		if err := validateCompletion(*run.Completion, run); err != nil {
 			return err
 		}
-		if run.Completion.ValidatedAt.Before(run.CreatedAt) {
-			return errors.New("Run completion predates the Run")
+		if run.Completion.ValidatedAt.Before(run.CreatedAt) || run.Completion.ValidatedAt.After(run.UpdatedAt) {
+			return errors.New("Run completion timestamp conflicts with the Run")
 		}
 	}
 	return nil
 }
 
-func validateCausation(c Causation, state LifecycleState) error {
+func validateCausation(c Causation, state LifecycleState, baseline *MigratedBaseline) error {
 	if !validIdentity(c.AdmissionID) || !validIdentity(c.BatchID) || !validIdentity(c.EventID) || !validSource(c.EventSource) ||
 		!ruleIDPattern.MatchString(c.RuleID) || c.RuleRevision == 0 || c.Task.Validate() != nil || !validIdentity(c.RootEventID) ||
 		c.Hop < 0 || c.Hop > maximumHop || len(c.AncestorRuleIDs) != c.Hop || c.AdmittedAt.IsZero() || c.AdmittedAt.Location() != time.UTC {
@@ -265,19 +274,28 @@ func validateCausation(c Causation, state LifecycleState) error {
 		return errors.New("Run ancestor path does not end at its admitting rule")
 	}
 	if c.Workflow == nil {
-		if c.WorkflowDigest != "" || state.Nonterminal() {
+		if c.WorkflowDigest != "" || state.Nonterminal() || baseline == nil || !baseline.WorkflowPinUnavailable {
 			return errors.New("nonterminal Run requires an immutable workflow pin")
 		}
 		return nil
-	}
-	if !digestPattern.MatchString(c.WorkflowDigest) {
-		return errors.New("Run workflow digest is invalid")
 	}
 	if compactWorkflow(*c.Workflow) {
 		if state.Nonterminal() {
 			return errors.New("nonterminal Run cannot use a compacted workflow pin")
 		}
+		if c.WorkflowDigest == "" {
+			if baseline == nil || !baseline.WorkflowDigestUnavailable {
+				return errors.New("Run compacted workflow digest is unavailable without migrated evidence")
+			}
+			return nil
+		}
+		if !digestPattern.MatchString(c.WorkflowDigest) {
+			return errors.New("Run workflow digest is invalid")
+		}
 		return nil
+	}
+	if !digestPattern.MatchString(c.WorkflowDigest) {
+		return errors.New("Run workflow digest is invalid")
 	}
 	if err := c.Workflow.Validate(); err != nil || !c.Workflow.Enabled || !c.Workflow.Complete() {
 		return errors.New("Run workflow pin is invalid")
@@ -294,7 +312,17 @@ func compactWorkflow(pin workflow.Pinned) bool {
 }
 
 func validateTransitions(run Run) error {
-	if len(run.Transitions) == 0 || run.Transitions[0].At != run.CreatedAt || run.Transitions[len(run.Transitions)-1].State != run.State {
+	baseline := run.MigratedBaseline
+	if len(run.Transitions) == 0 {
+		if baseline == nil || baseline.State != run.State || baseline.ObservedAt != run.UpdatedAt {
+			return errors.New("Run transition history is incomplete")
+		}
+		return nil
+	}
+	if run.Transitions[len(run.Transitions)-1].State != run.State {
+		return errors.New("Run transition history is incomplete")
+	}
+	if baseline == nil && run.Transitions[0].At != run.CreatedAt {
 		return errors.New("Run transition history is incomplete")
 	}
 	seen := make(map[string]bool, len(run.Transitions))
@@ -307,14 +335,23 @@ func validateTransitions(run Run) error {
 		}
 		seen[transition.ID] = true
 		previousAttempts = transition.Attempts
-		if index == 0 {
+		if index == 0 && baseline == nil {
 			if transition.State != StateAdmitted && transition.State != StatePending {
 				return errors.New("Run transition history has an invalid initial state")
 			}
 			continue
 		}
-		if !legalTransition(run.Transitions[index-1].State, transition.State) {
-			return fmt.Errorf("illegal lifecycle transition %s -> %s", run.Transitions[index-1].State, transition.State)
+		var previousState LifecycleState
+		var previousAt time.Time
+		if index > 0 {
+			previousState = run.Transitions[index-1].State
+			previousAt = run.Transitions[index-1].At
+		} else {
+			previousState = baseline.State
+			previousAt = baseline.ObservedAt
+		}
+		if !transition.At.After(previousAt) || !legalTransition(previousState, transition.State) {
+			return fmt.Errorf("illegal lifecycle transition %s -> %s", previousState, transition.State)
 		}
 	}
 	return nil
@@ -391,7 +428,7 @@ func validateReady(ready ReadyCheckpoint, run Run) error {
 	return nil
 }
 
-func validateCompletion(completion CompletionValidation) error {
+func validateCompletion(completion CompletionValidation, run Run) error {
 	if !validText(completion.Intent, 256) || !completion.State.Terminal() || !validText(completion.Reason, maximumTextBytes) ||
 		completion.ValidatedAt.IsZero() || completion.ValidatedAt.Location() != time.UTC || !validOptionalText(completion.Blocker, 256) ||
 		!validOptionalText(completion.PullRequestState, 64) || !validOptionalText(completion.DeploymentID, 256) {
@@ -402,7 +439,94 @@ func validateCompletion(completion CompletionValidation) error {
 			return errors.New("Run completion Git identity is invalid")
 		}
 	}
+	if completion.Accepted {
+		if !run.State.Terminal() || completion.State != run.State || completion.Intent != string(completion.State) {
+			return errors.New("accepted Run completion conflicts with terminal lifecycle")
+		}
+		if run.Ready != nil && completion.PullRequestHead != run.Ready.VerifiedHeadOID {
+			return errors.New("accepted Run completion conflicts with verified head")
+		}
+		if run.MergeCommitOID != "" && completion.MergeCommitOID != run.MergeCommitOID {
+			return errors.New("accepted Run completion conflicts with merge identity")
+		}
+	}
 	return nil
+}
+
+func validateMigratedBaseline(run Run) error {
+	baseline := run.MigratedBaseline
+	if baseline == nil {
+		return nil
+	}
+	if !baseline.PriorTransitionsAcknowledged || !validLifecycleState(baseline.State) || baseline.ObservedAt.IsZero() ||
+		baseline.ObservedAt.Location() != time.UTC || baseline.ObservedAt.Before(run.CreatedAt) || baseline.ObservedAt.After(run.UpdatedAt) ||
+		baseline.WorkflowPinUnavailable && baseline.WorkflowDigestUnavailable ||
+		baseline.WorkflowPinUnavailable != (run.Causation.Workflow == nil) ||
+		baseline.WorkflowDigestUnavailable != (run.Causation.Workflow != nil && compactWorkflow(*run.Causation.Workflow) && run.Causation.WorkflowDigest == "") ||
+		baseline.HistoricalRepository != nil && run.Repository != nil {
+		return errors.New("Run migrated baseline is invalid")
+	}
+	if baseline.HistoricalRepository != nil {
+		repository := baseline.HistoricalRepository
+		if !repositoryPattern.MatchString(repository.Repository) || !validOptionalText(repository.Origin, maximumTextBytes) ||
+			repository.ManagedPath != "" && !canonicalAbsolutePath(repository.ManagedPath) ||
+			repository.ManagedRoot != "" && !canonicalAbsolutePath(repository.ManagedRoot) ||
+			repository.DefaultBranch != "" && !validBranch(repository.DefaultBranch) ||
+			repository.CloudURL != "" && !validText(repository.CloudURL, maximumTextBytes) {
+			return errors.New("Run historical repository evidence is invalid")
+		}
+		if (repository.ManagedPath == "") != (repository.ManagedRoot == "") ||
+			repository.ManagedPath != "" && (repository.ManagedPath == repository.ManagedRoot || !pathWithin(repository.ManagedRoot, repository.ManagedPath)) {
+			return errors.New("Run historical repository evidence is invalid")
+		}
+	}
+	return nil
+}
+
+func acceptedPrePullRequestBlocker(run Run) bool {
+	if run.State != StateBlocked || run.Completion == nil || !run.Completion.Accepted || run.Ready != nil {
+		return false
+	}
+	switch run.Completion.Blocker {
+	case "missing_routing_metadata", "approval_denied", "authority_unavailable", "decision_required":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateTaskOwnership(runs []Run) error {
+	byTask := make(map[string][]Run)
+	for _, run := range runs {
+		if run.State.Nonterminal() {
+			key := run.Causation.Task.OwnershipKey()
+			byTask[key] = append(byTask[key], run)
+		}
+	}
+	for _, taskRuns := range byTask {
+		slices.SortFunc(taskRuns, compareOwnershipOrder)
+		owner := ""
+		for index, run := range taskRuns {
+			if run.State == StateAdmitted {
+				continue
+			}
+			if owner != "" || index != 0 {
+				return fmt.Errorf("runs: task ownership is not held by the oldest nonterminal Run")
+			}
+			owner = run.ID
+		}
+	}
+	return nil
+}
+
+func compareOwnershipOrder(left, right Run) int {
+	if comparison := left.Causation.AdmittedAt.Compare(right.Causation.AdmittedAt); comparison != 0 {
+		return comparison
+	}
+	if comparison := left.CreatedAt.Compare(right.CreatedAt); comparison != 0 {
+		return comparison
+	}
+	return strings.Compare(left.ID, right.ID)
 }
 
 func validLifecycleState(state LifecycleState) bool {
