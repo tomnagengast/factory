@@ -22,8 +22,8 @@ const (
 	readyContractVersion = 1
 	maximumHop           = 32
 	maximumTextBytes     = 4096
-	blockerVerifiedHead  = "verified_head_mismatch"
-	blockerExternalAuth  = "external_authentication"
+	blockerVerifiedHead  = BlockerVerifiedHeadMismatch
+	blockerExternalAuth  = BlockerExternalAuthentication
 )
 
 var (

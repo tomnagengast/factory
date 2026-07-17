@@ -839,7 +839,7 @@ func TestManagerEmitsBodyFreeTransitionDeliveries(t *testing.T) {
 
 // ---- constructor + dormancy --------------------------------------------
 
-func TestNewManagerRequiresCollaboratorsAndHasNoProductionCaller(t *testing.T) {
+func TestNewManagerRequiresCollaboratorsAndCanonicalLifecyclePortsRemainDormant(t *testing.T) {
 	store := createEmptyStore(t, filepath.Join(t.TempDir(), "runs.jsonl"), 8)
 	resolver := fakeResolver{fn: func(context.Context, Run) (repositories.Route, error) { return repositories.Route{}, nil }}
 	launcher := fakeLauncher{}
@@ -925,16 +925,21 @@ func TestNewManagerRequiresCollaboratorsAndHasNoProductionCaller(t *testing.T) {
 			if !ok {
 				return true
 			}
-			// Only a construction of THIS dormant manager counts: a qualified
-			// runs.NewManager selector, or a bare NewManager inside package runs.
-			// Unqualified NewManager elsewhere (agentrun, projectsetup) is unrelated.
+			// Only constructions of these canonical dormant lifecycle ports count:
+			// qualified runs selectors, or bare constructors inside package runs.
+			// Same-named constructors elsewhere (agentrun, projectsetup) are unrelated.
 			constructs := false
+			dormant := map[string]bool{
+				"NewManager":                       true,
+				"NewGitHubCLI":                     true,
+				"NewMechanicalCompletionValidator": true,
+			}
 			switch function := call.Fun.(type) {
 			case *ast.Ident:
-				constructs = inRunsPackage && function.Name == "NewManager"
+				constructs = inRunsPackage && dormant[function.Name]
 			case *ast.SelectorExpr:
 				pkg, ok := function.X.(*ast.Ident)
-				constructs = ok && pkg.Name == "runs" && function.Sel.Name == "NewManager"
+				constructs = ok && pkg.Name == "runs" && dormant[function.Sel.Name]
 			}
 			if constructs {
 				position := files.Position(call.Pos())
@@ -949,6 +954,6 @@ func TestNewManagerRequiresCollaboratorsAndHasNoProductionCaller(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(calls) != 0 {
-		t.Fatalf("production constructs dormant Manager: %v", calls)
+		t.Fatalf("production constructs dormant canonical lifecycle port: %v", calls)
 	}
 }
