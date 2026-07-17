@@ -281,6 +281,20 @@ func (i CompletionIdentity) Clone() CompletionIdentity {
 	return i
 }
 
+// Validate proves the identity has the exact normalized shape derived from an
+// allowlisted repository Record. Consumers can therefore reject reconstructed
+// or broadened remote authority before reading completion evidence.
+func (i CompletionIdentity) Validate() error {
+	if !appPattern.MatchString(i.App) || !repositoryPattern.MatchString(i.Repository) || i.Repository != strings.ToLower(i.Repository) ||
+		!canonicalAbsolutePath(i.Path) || !validBranch(i.DefaultBranch) || !slices.Equal(i.RemoteURLs, remoteURLs(i.Repository)) {
+		return errors.New("repository completion identity is not canonical")
+	}
+	if err := i.Deployment.validate(); err != nil {
+		return fmt.Errorf("repository completion identity: %w", err)
+	}
+	return nil
+}
+
 func normalizeOrigin(value string) (string, string, error) {
 	value = strings.TrimSpace(value)
 	repository := ""

@@ -19,11 +19,12 @@ import (
 )
 
 const (
-	readyContractVersion = 1
-	maximumHop           = 32
-	maximumTextBytes     = 4096
-	blockerVerifiedHead  = BlockerVerifiedHeadMismatch
-	blockerExternalAuth  = BlockerExternalAuthentication
+	LifecycleContractVersion = 1
+	readyContractVersion     = LifecycleContractVersion
+	maximumHop               = 32
+	maximumTextBytes         = 4096
+	blockerVerifiedHead      = BlockerVerifiedHeadMismatch
+	blockerExternalAuth      = BlockerExternalAuthentication
 )
 
 var (

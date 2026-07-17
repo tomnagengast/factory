@@ -901,6 +901,12 @@ func TestNewManagerRequiresCollaboratorsAndCanonicalLifecyclePortsRemainDormant(
 	}
 	files := token.NewFileSet()
 	var calls []string
+	dormant := map[string]bool{
+		"NewManager":                       true,
+		"NewGitHubCLI":                     true,
+		"NewMechanicalCompletionValidator": true,
+		"NewSystemCompletionEvidence":      true,
+	}
 	err = filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -929,11 +935,6 @@ func TestNewManagerRequiresCollaboratorsAndCanonicalLifecyclePortsRemainDormant(
 			// qualified runs selectors, or bare constructors inside package runs.
 			// Same-named constructors elsewhere (agentrun, projectsetup) are unrelated.
 			constructs := false
-			dormant := map[string]bool{
-				"NewManager":                       true,
-				"NewGitHubCLI":                     true,
-				"NewMechanicalCompletionValidator": true,
-			}
 			switch function := call.Fun.(type) {
 			case *ast.Ident:
 				constructs = inRunsPackage && dormant[function.Name]
