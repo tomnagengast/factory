@@ -11,7 +11,7 @@ import (
 func TestProjectEventsBuildsDomainState(t *testing.T) {
 	at := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	events := []eventwire.Event{
-		event(1, ProjectCreated, at, ProjectData{Name: "Factory"}),
+		event(1, ProjectCreated, at, ProjectData{Name: "Factory", Path: "/factory"}),
 		event(2, TaskCreated, at.Add(time.Minute), TaskData{
 			Title: "Build routes", Status: Todo, ProjectID: 1,
 		}),

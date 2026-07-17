@@ -27,13 +27,16 @@
 - Keep workflow source outside the repository under the configured workflow
   workspace. The wire stores workflow metadata and conversation history, while
   the workflow detail endpoint reads live source from disk.
+- Workflow-authoring Codex runs in that workspace and receives the current
+  server and resource CLI as `FACTORY_URL` and `FACTORY_CLI`.
 - Preserve one sequential worker and its priority: pending workflow
   conversations, matching event triggers, then due cron triggers. Do not add a
   queue or parallel worker pool unless the product direction changes.
 - Event triggers only see matching events received after the trigger's latest
   update. Cron appends a targeted `cron` event and then uses the same trigger
   path.
-- Every task requires a project. Workflows triggered by `task.created`,
+- Every project requires a local path, which the API creates on save. Every
+  task requires a project. Workflows triggered by `task.created`,
   `task.updated`, or `task.deleted` run from that project's configured local
   path; finer conditions such as status checks belong in workflow code.
 

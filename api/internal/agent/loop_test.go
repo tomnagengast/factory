@@ -62,7 +62,9 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !worked || len(runner.prompts) != 1 || !strings.Contains(runner.prompts[0], "Build a review panel") {
+	if !worked || len(runner.prompts) != 1 ||
+		!strings.Contains(runner.prompts[0], "Build a review panel") ||
+		!strings.Contains(runner.prompts[0], "$FACTORY_CLI") {
 		t.Fatalf("workflow was not authored: %#v", runner.prompts)
 	}
 	view, err := state.ProjectEvents(wire.Events(0))
@@ -109,7 +111,7 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 			wire := openWire(t)
 			defer wire.Close()
 			path := t.TempDir()
-			project, _ := wire.Publish(state.ProjectCreated, state.ProjectData{Name: "Factory", Path: &path})
+			project, _ := wire.Publish(state.ProjectCreated, state.ProjectData{Name: "Factory", Path: path})
 			workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
 			wire.Publish(state.TriggerCreated, state.TriggerData{EventType: eventType, WorkflowID: workflowEvent.ID})
 			task, _ := wire.Publish(state.TaskCreated, state.TaskData{

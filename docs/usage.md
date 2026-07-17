@@ -167,6 +167,10 @@ Factory appends the request to the wire, assigns an untracked workflow file,
 and gives the conversation to Codex. The workflow page shows the conversation
 and live file contents side by side while Codex writes it.
 
+That Codex process runs in the workflow workspace. It receives the current
+server as `$FACTORY_URL` and the CLI as `$FACTORY_CLI`, so you can ask it to
+create or update a trigger alongside the workflow.
+
 Generated files live under:
 
 ```text
@@ -234,6 +238,7 @@ The defaults are:
 | Event wire | `~/.local/share/factory/wire.jsonl` |
 | Workflow workspace | `~/.local/share/factory/workflow-workspace` |
 | Agent executable | `codex` |
+| Factory CLI exposed to Codex | `./factory` |
 | Workflow executable | `workflow` |
 
 Example with isolated state and a different port:
@@ -245,11 +250,12 @@ Example with isolated state and a different port:
   -workflow-workspace "$HOME/.local/share/factory-demo/workflows"
 ```
 
-Use `-agent` and `-workflow` when the executables are not on `PATH`:
+Use `-agent`, `-factory`, and `-workflow` to supply explicit executables:
 
 ```sh
 ./factory-api \
   -agent /path/to/codex \
+  -factory /path/to/factory \
   -workflow "$HOME/cmptr/bin/workflow"
 ```
 

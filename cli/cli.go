@@ -207,6 +207,7 @@ Resources:
   workflow  list, get, create, update, delete, comment
 
 Examples:
+  factory project create '{"name":"Factory","path":"/path/to/factory"}'
   factory task create '{"title":"Review the PR","status":"todo","projectId":1}'
   factory task comment 12 '{"content":"The build passed."}'
   factory artifact get 18

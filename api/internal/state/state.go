@@ -46,7 +46,7 @@ type Project struct {
 	Name        string  `json:"name"`
 	Description *string `json:"description,omitempty"`
 	Repo        *string `json:"repo,omitempty"`
-	Path        *string `json:"path,omitempty"`
+	Path        string  `json:"path"`
 	URL         *string `json:"url,omitempty"`
 }
 
@@ -111,7 +111,7 @@ type ProjectData struct {
 	Name        string  `json:"name"`
 	Description *string `json:"description,omitempty"`
 	Repo        *string `json:"repo,omitempty"`
-	Path        *string `json:"path,omitempty"`
+	Path        string  `json:"path"`
 	URL         *string `json:"url,omitempty"`
 }
 

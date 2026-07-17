@@ -323,7 +323,7 @@ function ProjectForm(props: {
         name: String(data.get("name") ?? "").trim(),
         description: optional(data.get("description")),
         repo: optional(data.get("repo")),
-        path: optional(data.get("path")),
+        path: String(data.get("path") ?? "").trim(),
         url: optional(data.get("url")),
       });
     }}>
@@ -331,7 +331,7 @@ function ProjectForm(props: {
       <label>Description<textarea name="description" rows="4">{props.project?.description ?? ""}</textarea></label>
       <div class="field-pair">
         <label>Repository<input name="repo" value={props.project?.repo ?? ""} /></label>
-        <label>Local path<input name="path" value={props.project?.path ?? ""} /></label>
+        <label>Local path<input name="path" required value={props.project?.path ?? ""} /></label>
       </div>
       <label>URL<input name="url" type="url" value={props.project?.url ?? ""} /></label>
       <FormFooter pending={props.pending} error={props.error} label={props.project ? "Save project" : "Create project"} />

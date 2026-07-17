@@ -30,7 +30,7 @@ Every projected resource includes:
 | `name` | string | yes |
 | `description` | string or null | no |
 | `repo` | string or null | no |
-| `path` | string or null | no |
+| `path` | string | yes |
 | `url` | string or null | no |
 
 ```sh
@@ -54,6 +54,7 @@ DELETE /api/projects/{id}
 ```
 
 Project detail includes the project's active tasks.
+Creating or updating a project creates its local `path` if needed.
 
 ## Tasks
 
@@ -263,8 +264,7 @@ trigger, then publish a second event to run it. Older events are not replayed
 into a newly created trigger.
 
 Triggers for `task.created`, `task.updated`, or `task.deleted` run from the
-task project's configured `path`. A missing project path produces a failed
-workflow run.
+task project's configured `path`.
 
 ## Workflows
 

@@ -56,6 +56,9 @@ Projects, tasks, comments, artifacts, triggers, and workflow metadata are
 rebuilt by replaying the wire. The wire is the durable source of truth; the
 resource view is derived state.
 
+Every project has a required local path. The API creates that directory when
+the project is created or updated.
+
 This gives Factory a deliberately simple write path:
 
 1. validate the request,
@@ -123,6 +126,9 @@ Factory-created files live in:
 When a user starts a workflow conversation, Factory assigns the local target
 before Codex begins. The workflow detail API reads the current file on every
 request, allowing the web application to show live source while Codex writes.
+Authoring Codex runs in the workflow workspace and receives `$FACTORY_CLI` and
+`$FACTORY_URL`, so the same conversation can inspect resources or configure a
+trigger when the user asks.
 
 After authoring, Factory asks the workflow CLI to rediscover definitions and
 projects the resolved name, description, phases, scope, path, and mutating

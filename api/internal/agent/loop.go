@@ -198,10 +198,10 @@ func taskDirectory(view state.Snapshot, event eventwire.Event) (string, error) {
 		return "", nil
 	}
 	project, found := view.Project(projectID)
-	if !found || project.Path == nil || strings.TrimSpace(*project.Path) == "" {
+	if !found || strings.TrimSpace(project.Path) == "" {
 		return "", errors.New("task project path is required")
 	}
-	return strings.TrimSpace(*project.Path), nil
+	return strings.TrimSpace(project.Path), nil
 }
 
 func (l *Loop) syncWorkflows(ctx context.Context) error {
@@ -316,6 +316,7 @@ func authorPrompt(selected state.Workflow, comments []state.Comment, target stri
 
 Read workflow CLI help and examples under ~/cmptr/config/ai/workflows when useful.
 Write the complete workflow to %s. This Factory-owned path is outside git.
+You may use $FACTORY_CLI to inspect Factory resources and create or update a trigger; $FACTORY_URL targets this server.
 The first statement must export const meta with name, description, and phases.
 Use the workflow runtime globals such as phase, agent, parallel, workflow, gate, and log.
 If an existing workflow is being edited, its resolved source is %s. Preserve its name unless the user asks to change it.

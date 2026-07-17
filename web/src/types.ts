@@ -9,7 +9,7 @@ export type Project = Record & {
   name: string;
   description?: string;
   repo?: string;
-  path?: string;
+  path: string;
   url?: string;
 };
 

@@ -54,9 +54,8 @@ func (s *Server) projectCreate(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	input.Name = strings.TrimSpace(input.Name)
-	if input.Name == "" {
-		writeError(writer, http.StatusBadRequest, errors.New("project name is required"))
+	if err := prepareProject(&input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
 	event, err := s.wire.Publish(state.ProjectCreated, input)
@@ -80,9 +79,9 @@ func (s *Server) projectUpdate(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	input.ID, input.Name = id, strings.TrimSpace(input.Name)
-	if input.Name == "" {
-		writeError(writer, http.StatusBadRequest, errors.New("project name is required"))
+	input.ID = id
+	if err := prepareProject(&input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
 	if _, err := s.wire.Publish(state.ProjectUpdated, input); err != nil {
@@ -100,6 +99,17 @@ func (s *Server) projectUpdate(writer http.ResponseWriter, request *http.Request
 
 func (s *Server) projectDelete(writer http.ResponseWriter, request *http.Request) {
 	s.delete(writer, request, "project", state.ProjectDeleted)
+}
+
+func prepareProject(input *state.ProjectData) error {
+	input.Name, input.Path = strings.TrimSpace(input.Name), strings.TrimSpace(input.Path)
+	if input.Name == "" || input.Path == "" {
+		return errors.New("project name and path are required")
+	}
+	if err := os.MkdirAll(input.Path, 0o777); err != nil {
+		return fmt.Errorf("create project path: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) tasks(writer http.ResponseWriter, _ *http.Request) {

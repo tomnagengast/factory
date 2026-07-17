@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -16,13 +18,19 @@ type Runner interface {
 // CommandRunner invokes one unrestricted, ephemeral Codex process and returns
 // its final plain-text response for the workflow conversation.
 type CommandRunner struct {
-	Command   string
-	Workspace string
+	Command        string
+	Workspace      string
+	FactoryCommand string
+	FactoryURL     string
 }
 
 func (r CommandRunner) Run(ctx context.Context, prompt string) (string, error) {
-	if r.Command == "" || r.Workspace == "" {
-		return "", errors.New("agent command and workspace are required")
+	if r.Command == "" || r.Workspace == "" || r.FactoryCommand == "" || r.FactoryURL == "" {
+		return "", errors.New("agent command, workspace, Factory CLI, and URL are required")
+	}
+	factory, err := filepath.Abs(r.FactoryCommand)
+	if err != nil {
+		return "", fmt.Errorf("resolve Factory CLI: %w", err)
 	}
 	command := exec.CommandContext(
 		ctx,
@@ -37,10 +45,11 @@ func (r CommandRunner) Run(ctx context.Context, prompt string) (string, error) {
 		"-",
 	)
 	command.Dir = r.Workspace
+	command.Env = append(os.Environ(), "FACTORY_CLI="+factory, "FACTORY_URL="+r.FactoryURL)
 	command.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
-	err := command.Run()
+	err = command.Run()
 	output := strings.TrimSpace(stdout.String())
 	if err != nil {
 		message := strings.TrimSpace(stderr.String())
