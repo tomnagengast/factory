@@ -20,6 +20,48 @@ var (
 	agentActor = Actor{ID: "run-0123456789abcdef", Kind: AuthorAgent}
 )
 
+func TestCreateRoundTripsConvertedSnapshot(t *testing.T) {
+	t.Parallel()
+	source := openTestStore(t)
+	task := createTestTask(t, source, ApprovalGated, "create-roundtrip")
+	if _, _, _, err := source.AddMessage(MessageCommand{
+		Actor: humanActor, TaskID: task.Ref.ProviderID, ExpectedRevision: task.Revision,
+		Body: "Preserve me", IdempotencyKey: "message-roundtrip",
+	}, testNow.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	initial := source.Snapshot()
+	path := filepath.Join(t.TempDir(), "tasks.jsonl")
+	created, err := Create(path, initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := created.Snapshot(); !reflect.DeepEqual(got, initial) {
+		t.Fatalf("created snapshot = %#v, want %#v", got, initial)
+	}
+	if _, err := Create(path, initial); err == nil {
+		t.Fatal("second create replaced task artifact")
+	}
+	reopened, err := OpenExisting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.Snapshot(); !reflect.DeepEqual(got, initial) {
+		t.Fatalf("reopened snapshot = %#v, want %#v", got, initial)
+	}
+}
+
+func TestOpenExistingRefusesMissingTaskArtifact(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "missing.jsonl")
+	if _, err := OpenExisting(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing open error = %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("strict open created artifact: %v", err)
+	}
+}
+
 func TestStoreNativeTaskLifecycleAndReplay(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tasks.jsonl")
 	store, err := Open(path)

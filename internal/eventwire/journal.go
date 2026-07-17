@@ -45,6 +45,19 @@ type Status struct {
 	LastRejection *Rejection `json:"lastRejection,omitempty"`
 }
 
+// State is the complete durable projection needed to construct a sibling
+// generation without replaying events through live handlers. Callers cannot
+// mutate a Journal through a State value because every boundary clones it.
+type State struct {
+	Total         uint64            `json:"total"`
+	ChannelTotals map[string]uint64 `json:"channelTotals"`
+	Dispatched    uint64            `json:"dispatched"`
+	ChannelAcks   map[string]uint64 `json:"channelAcks"`
+	Records       []Record          `json:"records"`
+	RejectedTotal uint64            `json:"rejectedTotal"`
+	Rejections    []Rejection       `json:"rejections"`
+}
+
 type diskLine struct {
 	Kind          string            `json:"kind"`
 	Version       int               `json:"version,omitempty"`
@@ -80,6 +93,17 @@ type Journal struct {
 }
 
 func Open(path string, limit int, channelSeeds map[string]uint64) (*Journal, error) {
+	return open(path, limit, channelSeeds, true)
+}
+
+// OpenExisting refuses to invent an empty journal when a selected generation
+// is incomplete. Bootstrap callers that intentionally create an empty legacy
+// journal continue to use Open.
+func OpenExisting(path string, limit int, channelSeeds map[string]uint64) (*Journal, error) {
+	return open(path, limit, channelSeeds, false)
+}
+
+func open(path string, limit int, channelSeeds map[string]uint64, create bool) (*Journal, error) {
 	if path == "" {
 		return nil, errors.New("event wire: journal path is required")
 	}
@@ -91,7 +115,7 @@ func Open(path string, limit int, channelSeeds map[string]uint64) (*Journal, err
 	}
 
 	state, err := readJournal(path, true)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) && create {
 		state = newJournalState(channelSeeds)
 		if err := writeJournal(path, state, nil); err != nil {
 			return nil, err
@@ -133,6 +157,33 @@ func Open(path string, limit int, channelSeeds map[string]uint64) (*Journal, err
 		}
 	}
 	return j, nil
+}
+
+// Create writes one complete journal checkpoint at a new destination. It
+// never replaces an existing artifact.
+func Create(path string, limit int, initial State) (*Journal, error) {
+	if path == "" {
+		return nil, errors.New("event wire: journal path is required")
+	}
+	if limit < 1 {
+		return nil, errors.New("event wire: journal limit must be positive")
+	}
+	state, err := stateFromProjection(initial)
+	if err != nil {
+		return nil, fmt.Errorf("event wire: invalid initial state: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("event wire: create journal directory: %w", err)
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return nil, errors.New("event wire: create: journal already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("event wire: inspect journal: %w", err)
+	}
+	if err := writeJournal(path, state, state.records); err != nil {
+		return nil, err
+	}
+	return OpenExisting(path, limit, nil)
 }
 
 func newJournalState(seeds map[string]uint64) journalState {
@@ -334,6 +385,13 @@ func (j *Journal) Snapshot() (uint64, uint64, map[string]uint64, []Record) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return j.state.total, j.state.dispatched, cloneMap(j.state.channelAcks), cloneRecords(j.state.records)
+}
+
+// State returns the complete durable journal projection.
+func (j *Journal) State() State {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return projectionFromState(j.state)
 }
 
 func (j *Journal) Status() Status {
@@ -545,6 +603,64 @@ func readJournal(path string, recoverTail bool) (journalState, error) {
 	}
 	if !foundCheckpoint {
 		return journalState{}, errors.New("event wire: journal checkpoint is missing")
+	}
+	if _, err := stateFromProjection(projectionFromState(state)); err != nil {
+		return journalState{}, fmt.Errorf("event wire: invalid journal state: %w", err)
+	}
+	return state, nil
+}
+
+func projectionFromState(state journalState) State {
+	return State{
+		Total: state.total, ChannelTotals: cloneMap(state.channelTotals),
+		Dispatched: state.dispatched, ChannelAcks: cloneMap(state.channelAcks),
+		Records: cloneRecords(state.records), RejectedTotal: state.rejectedTotal,
+		Rejections: slices.Clone(state.rejections),
+	}
+}
+
+func stateFromProjection(value State) (journalState, error) {
+	if value.Dispatched > value.Total || value.RejectedTotal < uint64(len(value.Rejections)) {
+		return journalState{}, errors.New("cursor totals are inconsistent")
+	}
+	state := journalState{
+		total: value.Total, channelTotals: cloneMap(value.ChannelTotals),
+		dispatched: value.Dispatched, channelAcks: cloneMap(value.ChannelAcks),
+		records: cloneRecords(value.Records), rejectedTotal: value.RejectedTotal,
+		rejections: slices.Clone(value.Rejections),
+	}
+	seenEvents := make(map[string]bool, len(state.records))
+	seenSequences := make(map[uint64]bool, len(state.records))
+	for index, record := range state.records {
+		record.Event = canonicalEvent(record.Event)
+		state.records[index] = record
+		if record.Sequence == 0 || record.Sequence > state.total || seenSequences[record.Sequence] || seenEvents[record.Event.ID] {
+			return journalState{}, errors.New("retained record identity is inconsistent")
+		}
+		if err := record.Event.Validate(); err != nil {
+			return journalState{}, err
+		}
+		seenSequences[record.Sequence], seenEvents[record.Event.ID] = true, true
+		for channel, sequence := range record.ChannelSequences {
+			if channel == "" || sequence == 0 || sequence > state.channelTotals[channel] {
+				return journalState{}, errors.New("retained channel sequence is inconsistent")
+			}
+		}
+	}
+	for channel, ack := range state.channelAcks {
+		if channel == "" || ack > state.channelTotals[channel] {
+			return journalState{}, errors.New("channel acknowledgment is inconsistent")
+		}
+	}
+	for channel := range state.channelTotals {
+		if channel == "" {
+			return journalState{}, errors.New("channel name is empty")
+		}
+	}
+	for _, rejection := range state.rejections {
+		if rejection.Sequence == 0 || rejection.Sequence > state.dispatched || rejection.EventID == "" || rejection.Reason == "" || rejection.RejectedAt.IsZero() {
+			return journalState{}, errors.New("rejection is inconsistent")
+		}
 	}
 	return state, nil
 }

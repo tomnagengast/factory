@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -56,6 +57,49 @@ func TestJournalPersistsGlobalAndChannelCursors(t *testing.T) {
 	record, _, err = reopened.Add(third)
 	if err != nil || record.ChannelSequences["github"] != 7 {
 		t.Fatalf("fast-forwarded record = %#v, %v", record, err)
+	}
+}
+
+func TestCreateRoundTripsCompleteJournalState(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	event := testEvent("linear:one", SourceLinear, "Issue")
+	event.Channels = []string{"linear"}
+	event = canonicalEvent(event)
+	rejection := Rejection{Sequence: 1, EventID: event.ID, Source: event.Source, Type: event.Type, Action: event.Action, Reason: "invalid routing", RejectedAt: eventTestNow}
+	initial := State{
+		Total: 1, ChannelTotals: map[string]uint64{"linear": 4}, Dispatched: 1,
+		ChannelAcks: map[string]uint64{"linear": 4}, Records: []Record{{Sequence: 1, ChannelSequences: map[string]uint64{"linear": 4}, Event: event}},
+		RejectedTotal: 1, Rejections: []Rejection{rejection},
+	}
+	journal, err := Create(path, 10, initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := journal.State(); !reflect.DeepEqual(got, initial) {
+		t.Fatalf("created state = %#v, want %#v", got, initial)
+	}
+	if _, err := Create(path, 10, initial); err == nil {
+		t.Fatal("second create replaced journal")
+	}
+	reopened, err := OpenExisting(path, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.State(); !reflect.DeepEqual(got, initial) {
+		t.Fatalf("reopened state = %#v, want %#v", got, initial)
+	}
+}
+
+func TestStrictJournalConstructionRejectsMissingAndInvalidState(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if _, err := OpenExisting(filepath.Join(root, "missing.jsonl"), 10, nil); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing open error = %v", err)
+	}
+	invalid := State{Total: 1, Dispatched: 2, ChannelTotals: map[string]uint64{}, ChannelAcks: map[string]uint64{}}
+	if _, err := Create(filepath.Join(root, "invalid.jsonl"), 10, invalid); err == nil {
+		t.Fatal("invalid state was created")
 	}
 }
 

@@ -180,19 +180,51 @@ type Store struct {
 	sync         func(*os.File) error
 }
 
-func Open(path string) (*Store, error) {
+// Create installs a converted canonical checkpoint at a new destination. It
+// never replaces an existing artifact.
+func Create(path string, initial Snapshot) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("task store: path is required")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("task store: create directory: %w", err)
 	}
-	s := &Store{path: path, random: rand.Reader}
-	s.write = func(file *os.File, data []byte) (int, error) { return file.Write(data) }
-	s.sync = func(file *os.File) error { return file.Sync() }
-	s.reset()
+	if _, err := os.Lstat(path); err == nil {
+		return nil, errors.New("task store: create: artifact already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("task store: inspect artifact: %w", err)
+	}
+	s := newStore(path)
+	checkpoint := initial.Clone()
+	if err := s.applyCheckpointLocked(diskOperation{Kind: operationCheckpoint, Schema: SchemaVersion, Checkpoint: &checkpoint}); err != nil {
+		return nil, fmt.Errorf("task store: invalid initial snapshot: %w", err)
+	}
+	if err := s.writeCheckpointLocked(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func Open(path string) (*Store, error) {
+	return open(path, true)
+}
+
+// OpenExisting refuses to create an empty task artifact when a selected
+// generation is incomplete. Legacy bootstrap callers continue to use Open.
+func OpenExisting(path string) (*Store, error) {
+	return open(path, false)
+}
+
+func open(path string, create bool) (*Store, error) {
+	if path == "" {
+		return nil, errors.New("task store: path is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("task store: create directory: %w", err)
+	}
+	s := newStore(path)
 	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) && create {
 		if err := s.writeCheckpointLocked(); err != nil {
 			return nil, err
 		}
@@ -227,6 +259,14 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+func newStore(path string) *Store {
+	s := &Store{path: path, random: rand.Reader}
+	s.write = func(file *os.File, data []byte) (int, error) { return file.Write(data) }
+	s.sync = func(file *os.File) error { return file.Sync() }
+	s.reset()
+	return s
 }
 
 func (s *Store) reset() {
