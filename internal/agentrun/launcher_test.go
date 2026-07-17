@@ -533,6 +533,9 @@ func newLauncherFixture(t *testing.T) launcherFixture {
 	if err := launcher.Prepare(context.Background()); err != nil {
 		t.Fatalf("clone workspace: %v", err)
 	}
+	// Keep workspace cleanliness tests independent of the developer's global
+	// ignore file, which may intentionally exclude nested .worktrees paths.
+	runGit(t, gitPath, workspacePath, "config", "core.excludesFile", os.DevNull)
 	return launcherFixture{
 		gitPath:       gitPath,
 		root:          root,
