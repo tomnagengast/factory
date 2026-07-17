@@ -3,80 +3,97 @@ package eventwire
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestWirePublishesWaitsAndReplays(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "events.jsonl")
+func TestWirePersistsOrderedIntegerEvents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wire.jsonl")
 	wire, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	first, err := wire.Publish(TaskSubmitted, "task-1", "", map[string]string{"prompt": "test"})
+	first, err := wire.Publish("task.created", map[string]string{"title": "First"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Sequence != 1 {
-		t.Fatalf("sequence = %d, want 1", first.Sequence)
-	}
-
-	result := make(chan []Event, 1)
-	go func() {
-		events, _ := wire.Wait(context.Background(), 1)
-		result <- events
-	}()
-	second, err := wire.Publish(RunStarted, "task-1", "run-1", struct{}{})
+	second, err := wire.Publish("task.updated", map[string]int64{"id": first.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case events := <-result:
-		if len(events) != 1 || events[0].ID != second.ID {
-			t.Fatalf("wait events = %#v", events)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("wait did not observe the published event")
+	if first.ID != 1 || second.ID != 2 {
+		t.Fatalf("unexpected IDs: %d, %d", first.ID, second.ID)
 	}
-
 	if err := wire.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	reopened, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
 	events := reopened.Events(0)
-	if len(events) != 2 || events[0].Type != TaskSubmitted || events[1].Type != RunStarted {
-		t.Fatalf("replayed events = %#v", events)
+	if len(events) != 2 || events[1].Type != "task.updated" {
+		t.Fatalf("unexpected events: %#v", events)
+	}
+	if event, found := reopened.Event(1); !found || event.Type != "task.created" {
+		t.Fatalf("event lookup failed: %#v, %v", event, found)
 	}
 }
 
-func TestWireWaitStopsWithContext(t *testing.T) {
-	wire, err := Open(filepath.Join(t.TempDir(), "events.jsonl"))
+func TestWaitWakesOnPublish(t *testing.T) {
+	wire, err := Open(filepath.Join(t.TempDir(), "wire.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer wire.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err = wire.Wait(ctx, 0)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("error = %v, want context cancellation", err)
+	result := make(chan []Event, 1)
+	go func() {
+		events, _ := wire.Wait(context.Background(), 0)
+		result <- events
+	}()
+	if _, err := wire.Publish("project.created", map[string]string{"name": "Factory"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case events := <-result:
+		if len(events) != 1 || events[0].ID != 1 {
+			t.Fatalf("unexpected wake: %#v", events)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("wait did not wake")
 	}
 }
 
-func TestWireRejectsMalformedHistory(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "events.jsonl")
-	if err := os.WriteFile(path, []byte(`{"sequence":2}`+"\n"), 0o666); err != nil {
+func TestWaitHonorsCancellation(t *testing.T) {
+	wire, err := Open(filepath.Join(t.TempDir(), "wire.jsonl"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(path); err == nil {
-		t.Fatal("expected malformed history to fail")
+	defer wire.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := wire.Wait(ctx, 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+}
+
+func TestTypesAreDistinctAndSorted(t *testing.T) {
+	wire, err := Open(filepath.Join(t.TempDir(), "wire.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wire.Close()
+	for _, eventType := range []string{"z", "a", "z"} {
+		if _, err := wire.Publish(eventType, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	types := wire.Types()
+	if len(types) != 2 || types[0] != "a" || types[1] != "z" {
+		t.Fatalf("unexpected types: %#v", types)
 	}
 }

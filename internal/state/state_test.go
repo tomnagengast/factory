@@ -8,47 +8,93 @@ import (
 	"github.com/tomnagengast/factory/internal/eventwire"
 )
 
-func TestProjectTaskLifecycle(t *testing.T) {
-	now := time.Date(2026, time.July, 17, 12, 0, 0, 0, time.UTC)
+func TestProjectEventsBuildsDomainState(t *testing.T) {
+	at := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	events := []eventwire.Event{
-		event(1, eventwire.TaskSubmitted, "task-1", "", now, map[string]string{"prompt": "Build it"}),
-		event(2, eventwire.RunStarted, "task-1", "run-1", now.Add(time.Second), struct{}{}),
-		event(3, eventwire.AgentOutput, "task-1", "run-1", now.Add(2*time.Second), map[string]string{"stream": "stdout", "text": "working"}),
-		event(4, eventwire.RunCompleted, "task-1", "run-1", now.Add(3*time.Second), struct{}{}),
+		event(1, ProjectCreated, at, ProjectData{Name: "Factory"}),
+		event(2, TaskCreated, at.Add(time.Minute), TaskData{
+			Title: "Build routes", Status: Todo, ProjectID: intPointer(1),
+		}),
+		event(3, TaskUpdated, at.Add(2*time.Minute), TaskData{
+			ID: 2, Title: "Build every route", Status: InProgress, ProjectID: intPointer(1),
+		}),
+		event(4, CommentCreated, at.Add(3*time.Minute), CommentData{
+			RelationType: "task", RelationID: 2, Author: "user", Content: "Keep it small.",
+		}),
+		event(5, ArtifactCreated, at.Add(4*time.Minute), ArtifactData{
+			Type: "link", Content: "https://example.com", RelationType: "task", RelationID: 2,
+		}),
 	}
-	tasks, err := Project(events)
+	view, err := ProjectEvents(events)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 1 {
-		t.Fatalf("tasks = %d, want 1", len(tasks))
+	if len(view.Projects) != 1 || view.Projects[0].ID != 1 {
+		t.Fatalf("unexpected projects: %#v", view.Projects)
 	}
-	task := tasks[0]
-	if task.Status != Completed || task.Prompt != "Build it" || task.RunID != "run-1" {
-		t.Fatalf("task = %#v", task)
+	if len(view.Tasks) != 1 || view.Tasks[0].Title != "Build every route" || view.Tasks[0].Status != InProgress {
+		t.Fatalf("unexpected tasks: %#v", view.Tasks)
 	}
-	if len(task.Output) != 1 || task.Output[0].Text != "working" {
-		t.Fatalf("output = %#v", task.Output)
+	if view.Tasks[0].UpdatedAt != events[2].At {
+		t.Fatalf("task was not touched: %#v", view.Tasks[0])
 	}
-}
-
-func TestProjectRejectsBrokenCausality(t *testing.T) {
-	now := time.Now().UTC()
-	_, err := Project([]eventwire.Event{
-		event(1, eventwire.RunStarted, "missing", "run-1", now, struct{}{}),
-	})
-	if err == nil {
-		t.Fatal("expected unknown task to fail")
+	if len(view.CommentsFor("task", 2)) != 1 || len(view.ArtifactsFor("task", 2)) != 1 {
+		t.Fatal("relations were not projected")
 	}
 }
 
-func event(sequence uint64, kind, taskID, runID string, at time.Time, value any) eventwire.Event {
-	data, err := json.Marshal(value)
+func TestPendingWorkflowCommentSkipsAnsweredMessages(t *testing.T) {
+	at := time.Now().UTC()
+	parent := int64(2)
+	events := []eventwire.Event{
+		event(1, WorkflowCreated, at, WorkflowData{Name: "Draft"}),
+		event(2, CommentCreated, at, CommentData{
+			RelationType: "workflow", RelationID: 1, Author: "user", Content: "Build it",
+		}),
+		event(3, CommentCreated, at, CommentData{
+			RelationType: "workflow", RelationID: 1, ParentCommentID: &parent,
+			Author: "agent", Content: "Done",
+		}),
+		event(4, CommentCreated, at, CommentData{
+			RelationType: "workflow", RelationID: 1, Author: "user", Content: "Revise it",
+		}),
+	}
+	view, err := ProjectEvents(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	comment, found := view.PendingWorkflowComment()
+	if !found || comment.ID != 4 {
+		t.Fatalf("unexpected pending comment: %#v, %v", comment, found)
+	}
+}
+
+func TestRunAndCronMarkersAreProjected(t *testing.T) {
+	at := time.Now().UTC()
+	events := []eventwire.Event{
+		event(1, CronFired, at, CronData{TriggerID: 8}),
+		event(2, WorkflowRunStarted, at, WorkflowRunData{TriggerID: 8, SourceEventID: 1}),
+	}
+	view, err := ProjectEvents(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.RunStarted(8, 1) {
+		t.Fatal("run marker missing")
+	}
+	if last, found := view.LastCron(8); !found || !last.Equal(at) {
+		t.Fatalf("cron marker missing: %v, %v", last, found)
+	}
+}
+
+func event(id int64, eventType string, at time.Time, data any) eventwire.Event {
+	encoded, err := json.Marshal(data)
 	if err != nil {
 		panic(err)
 	}
-	return eventwire.Event{
-		Sequence: sequence, ID: "event", Type: kind, At: at,
-		TaskID: taskID, RunID: runID, Data: data,
-	}
+	return eventwire.Event{ID: id, Type: eventType, At: at, Data: encoded}
+}
+
+func intPointer(value int64) *int64 {
+	return &value
 }

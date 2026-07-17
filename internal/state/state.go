@@ -2,190 +2,502 @@ package state
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/tomnagengast/factory/internal/eventwire"
 )
 
-type Status string
-
 const (
-	Queued    Status = "queued"
-	Running   Status = "running"
-	Completed Status = "completed"
-	Failed    Status = "failed"
+	ProjectCreated       = "project.created"
+	ProjectUpdated       = "project.updated"
+	ProjectDeleted       = "project.deleted"
+	TaskCreated          = "task.created"
+	TaskUpdated          = "task.updated"
+	TaskDeleted          = "task.deleted"
+	CommentCreated       = "comment.created"
+	CommentDeleted       = "comment.deleted"
+	ArtifactCreated      = "artifact.created"
+	ArtifactDeleted      = "artifact.deleted"
+	TriggerCreated       = "trigger.created"
+	TriggerUpdated       = "trigger.updated"
+	TriggerDeleted       = "trigger.deleted"
+	WorkflowCreated      = "workflow.created"
+	WorkflowDiscovered   = "workflow.discovered"
+	WorkflowUpdated      = "workflow.updated"
+	WorkflowDeleted      = "workflow.deleted"
+	CronFired            = "cron"
+	WorkflowRunStarted   = "workflow.run.started"
+	WorkflowRunCompleted = "workflow.run.completed"
+	WorkflowRunFailed    = "workflow.run.failed"
 )
 
-type Output struct {
-	Sequence uint64    `json:"sequence"`
-	Stream   string    `json:"stream"`
-	Text     string    `json:"text"`
-	At       time.Time `json:"at"`
+type Record struct {
+	ID        int64      `json:"id"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt time.Time  `json:"updatedAt"`
+	DeletedAt *time.Time `json:"deletedAt,omitempty"`
 }
+
+type Project struct {
+	Record
+	Name        string  `json:"name"`
+	Description *string `json:"description,omitempty"`
+	Repo        *string `json:"repo,omitempty"`
+	Path        *string `json:"path,omitempty"`
+	URL         *string `json:"url,omitempty"`
+}
+
+type TaskStatus string
+
+const (
+	Backlog    TaskStatus = "backlog"
+	Todo       TaskStatus = "todo"
+	InProgress TaskStatus = "in progress"
+	Done       TaskStatus = "done"
+	Canceled   TaskStatus = "canceled"
+)
+
+var TaskStatuses = []TaskStatus{Backlog, Todo, InProgress, Done, Canceled}
 
 type Task struct {
-	ID          string     `json:"id"`
-	Prompt      string     `json:"prompt"`
-	Status      Status     `json:"status"`
-	RunID       string     `json:"runId,omitempty"`
-	SubmittedAt time.Time  `json:"submittedAt"`
-	StartedAt   *time.Time `json:"startedAt,omitempty"`
-	FinishedAt  *time.Time `json:"finishedAt,omitempty"`
-	Error       string     `json:"error,omitempty"`
-	Output      []Output   `json:"output"`
+	Record
+	Title        string     `json:"title"`
+	Description  *string    `json:"description,omitempty"`
+	ParentTaskID *int64     `json:"parentTaskId,omitempty"`
+	Status       TaskStatus `json:"status"`
+	ProjectID    *int64     `json:"projectId,omitempty"`
 }
 
-type submittedData struct {
-	Prompt string `json:"prompt"`
+type Comment struct {
+	Record
+	RelationType    string `json:"relationType"`
+	RelationID      int64  `json:"relationId"`
+	ParentCommentID *int64 `json:"parentCommentId,omitempty"`
+	Author          string `json:"author"`
+	Content         string `json:"content"`
 }
 
-type outputData struct {
-	Stream string `json:"stream"`
-	Text   string `json:"text"`
+type Artifact struct {
+	Record
+	Name         *string `json:"name,omitempty"`
+	Type         string  `json:"type"`
+	Content      string  `json:"content"`
+	RelationType string  `json:"relationType"`
+	RelationID   int64   `json:"relationId"`
 }
 
-type failedData struct {
-	Error string `json:"error"`
+type Trigger struct {
+	Record
+	EventType  string  `json:"eventType"`
+	Schedule   *string `json:"schedule,omitempty"`
+	WorkflowID int64   `json:"workflowId"`
 }
 
-// Project rebuilds the complete task view from the wire. No mutable task or
-// Run state exists outside this projection.
-func Project(events []eventwire.Event) ([]Task, error) {
-	tasks := make([]Task, 0)
-	positions := make(map[string]int)
+type Workflow struct {
+	Record
+	Name        string   `json:"name"`
+	Description *string  `json:"description,omitempty"`
+	Path        *string  `json:"path,omitempty"`
+	Scope       *string  `json:"scope,omitempty"`
+	Phases      []string `json:"phases"`
+	Mutating    bool     `json:"mutating"`
+}
+
+type ProjectData struct {
+	ID          int64   `json:"id,omitempty"`
+	Name        string  `json:"name"`
+	Description *string `json:"description,omitempty"`
+	Repo        *string `json:"repo,omitempty"`
+	Path        *string `json:"path,omitempty"`
+	URL         *string `json:"url,omitempty"`
+}
+
+type TaskData struct {
+	ID           int64      `json:"id,omitempty"`
+	Title        string     `json:"title"`
+	Description  *string    `json:"description,omitempty"`
+	ParentTaskID *int64     `json:"parentTaskId,omitempty"`
+	Status       TaskStatus `json:"status"`
+	ProjectID    *int64     `json:"projectId,omitempty"`
+}
+
+type CommentData struct {
+	ID              int64  `json:"id,omitempty"`
+	RelationType    string `json:"relationType"`
+	RelationID      int64  `json:"relationId"`
+	ParentCommentID *int64 `json:"parentCommentId,omitempty"`
+	Author          string `json:"author"`
+	Content         string `json:"content"`
+}
+
+type ArtifactData struct {
+	ID           int64   `json:"id,omitempty"`
+	Name         *string `json:"name,omitempty"`
+	Type         string  `json:"type"`
+	Content      string  `json:"content"`
+	RelationType string  `json:"relationType"`
+	RelationID   int64   `json:"relationId"`
+}
+
+type TriggerData struct {
+	ID         int64   `json:"id,omitempty"`
+	EventType  string  `json:"eventType"`
+	Schedule   *string `json:"schedule,omitempty"`
+	WorkflowID int64   `json:"workflowId"`
+}
+
+type WorkflowData struct {
+	ID          int64    `json:"id,omitempty"`
+	Name        string   `json:"name"`
+	Description *string  `json:"description,omitempty"`
+	Path        *string  `json:"path,omitempty"`
+	Scope       *string  `json:"scope,omitempty"`
+	Phases      []string `json:"phases,omitempty"`
+	Mutating    bool     `json:"mutating"`
+}
+
+type IDData struct {
+	ID int64 `json:"id"`
+}
+
+type CronData struct {
+	TriggerID int64 `json:"triggerId"`
+}
+
+type WorkflowRunData struct {
+	TriggerID     int64  `json:"triggerId"`
+	WorkflowID    int64  `json:"workflowId"`
+	SourceEventID int64  `json:"sourceEventId"`
+	Output        string `json:"output,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
+type Snapshot struct {
+	Projects  []Project
+	Tasks     []Task
+	Comments  []Comment
+	Artifacts []Artifact
+	Triggers  []Trigger
+	Workflows []Workflow
+
+	startedRuns map[[2]int64]bool
+	lastCron    map[int64]time.Time
+}
+
+func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
+	view := Snapshot{
+		startedRuns: make(map[[2]int64]bool),
+		lastCron:    make(map[int64]time.Time),
+	}
+	projectIndex := make(map[int64]int)
+	taskIndex := make(map[int64]int)
+	commentIndex := make(map[int64]int)
+	artifactIndex := make(map[int64]int)
+	triggerIndex := make(map[int64]int)
+	workflowIndex := make(map[int64]int)
+
 	for _, event := range events {
 		switch event.Type {
-		case eventwire.TaskSubmitted:
-			if event.TaskID == "" || positions[event.TaskID] != 0 {
-				return nil, fmt.Errorf("task submission %q is invalid", event.TaskID)
+		case ProjectCreated:
+			var data ProjectData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
 			}
-			var data submittedData
-			if err := json.Unmarshal(event.Data, &data); err != nil {
-				return nil, fmt.Errorf("decode task %q: %w", event.TaskID, err)
-			}
-			if data.Prompt == "" {
-				return nil, fmt.Errorf("task %q has no prompt", event.TaskID)
-			}
-			positions[event.TaskID] = len(tasks) + 1
-			tasks = append(tasks, Task{
-				ID: event.TaskID, Prompt: data.Prompt, Status: Queued,
-				SubmittedAt: event.At, Output: []Output{},
+			projectIndex[event.ID] = len(view.Projects)
+			view.Projects = append(view.Projects, Project{
+				Record: newRecord(event), Name: data.Name, Description: data.Description,
+				Repo: data.Repo, Path: data.Path, URL: data.URL,
 			})
-		case eventwire.RunStarted:
-			task, err := referencedTask(tasks, positions, event)
-			if err != nil {
-				return nil, err
+		case ProjectUpdated:
+			var data ProjectData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
 			}
-			if task.Status != Queued || event.RunID == "" {
-				return nil, fmt.Errorf("run start for task %q is invalid", event.TaskID)
+			if index, found := projectIndex[data.ID]; found {
+				project := &view.Projects[index]
+				project.Name, project.Description, project.Repo = data.Name, data.Description, data.Repo
+				project.Path, project.URL, project.UpdatedAt = data.Path, data.URL, event.At
 			}
-			task.Status = Running
-			task.RunID = event.RunID
-			task.StartedAt = timePointer(event.At)
-		case eventwire.AgentOutput:
-			task, err := referencedRun(tasks, positions, event)
-			if err != nil {
-				return nil, err
+		case ProjectDeleted:
+			var data IDData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
 			}
-			if task.Status != Running {
-				return nil, fmt.Errorf("agent output for task %q is invalid", event.TaskID)
+			if index, found := projectIndex[data.ID]; found {
+				deleteRecord(&view.Projects[index].Record, event.At)
 			}
-			var data outputData
-			if err := json.Unmarshal(event.Data, &data); err != nil {
-				return nil, fmt.Errorf("decode output for task %q: %w", event.TaskID, err)
+
+		case TaskCreated:
+			var data TaskData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
 			}
-			if data.Stream == "" || data.Text == "" {
-				return nil, fmt.Errorf("output for task %q is incomplete", event.TaskID)
-			}
-			task.Output = append(task.Output, Output{
-				Sequence: event.Sequence, Stream: data.Stream, Text: data.Text, At: event.At,
+			taskIndex[event.ID] = len(view.Tasks)
+			view.Tasks = append(view.Tasks, Task{
+				Record: newRecord(event), Title: data.Title, Description: data.Description,
+				ParentTaskID: data.ParentTaskID, Status: data.Status, ProjectID: data.ProjectID,
 			})
-		case eventwire.RunCompleted:
-			task, err := referencedRun(tasks, positions, event)
-			if err != nil {
-				return nil, err
+		case TaskUpdated:
+			var data TaskData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
 			}
-			if task.Status != Running {
-				return nil, fmt.Errorf("run completion for task %q is invalid", event.TaskID)
+			if index, found := taskIndex[data.ID]; found {
+				task := &view.Tasks[index]
+				task.Title, task.Description, task.ParentTaskID = data.Title, data.Description, data.ParentTaskID
+				task.Status, task.ProjectID, task.UpdatedAt = data.Status, data.ProjectID, event.At
 			}
-			task.Status = Completed
-			task.FinishedAt = timePointer(event.At)
-		case eventwire.RunFailed:
-			task, err := referencedRun(tasks, positions, event)
-			if err != nil {
-				return nil, err
+		case TaskDeleted:
+			var data IDData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
 			}
-			if task.Status != Running {
-				return nil, fmt.Errorf("run failure for task %q is invalid", event.TaskID)
+			if index, found := taskIndex[data.ID]; found {
+				deleteRecord(&view.Tasks[index].Record, event.At)
 			}
-			var data failedData
-			if err := json.Unmarshal(event.Data, &data); err != nil {
-				return nil, fmt.Errorf("decode failure for task %q: %w", event.TaskID, err)
+
+		case CommentCreated:
+			var data CommentData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
 			}
-			if data.Error == "" {
-				return nil, fmt.Errorf("failure for task %q has no error", event.TaskID)
+			commentIndex[event.ID] = len(view.Comments)
+			view.Comments = append(view.Comments, Comment{
+				Record: newRecord(event), RelationType: data.RelationType, RelationID: data.RelationID,
+				ParentCommentID: data.ParentCommentID, Author: data.Author, Content: data.Content,
+			})
+		case CommentDeleted:
+			var data IDData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
 			}
-			task.Status = Failed
-			task.Error = data.Error
-			task.FinishedAt = timePointer(event.At)
-		default:
-			return nil, fmt.Errorf("unknown event type %q", event.Type)
+			if index, found := commentIndex[data.ID]; found {
+				deleteRecord(&view.Comments[index].Record, event.At)
+			}
+
+		case ArtifactCreated:
+			var data ArtifactData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			artifactIndex[event.ID] = len(view.Artifacts)
+			view.Artifacts = append(view.Artifacts, Artifact{
+				Record: newRecord(event), Name: data.Name, Type: data.Type, Content: data.Content,
+				RelationType: data.RelationType, RelationID: data.RelationID,
+			})
+		case ArtifactDeleted:
+			var data IDData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := artifactIndex[data.ID]; found {
+				deleteRecord(&view.Artifacts[index].Record, event.At)
+			}
+
+		case TriggerCreated:
+			var data TriggerData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			triggerIndex[event.ID] = len(view.Triggers)
+			view.Triggers = append(view.Triggers, Trigger{
+				Record: newRecord(event), EventType: data.EventType,
+				Schedule: data.Schedule, WorkflowID: data.WorkflowID,
+			})
+		case TriggerUpdated:
+			var data TriggerData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := triggerIndex[data.ID]; found {
+				trigger := &view.Triggers[index]
+				trigger.EventType, trigger.Schedule = data.EventType, data.Schedule
+				trigger.WorkflowID, trigger.UpdatedAt = data.WorkflowID, event.At
+			}
+		case TriggerDeleted:
+			var data IDData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := triggerIndex[data.ID]; found {
+				deleteRecord(&view.Triggers[index].Record, event.At)
+			}
+
+		case WorkflowCreated, WorkflowDiscovered:
+			var data WorkflowData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			name := data.Name
+			if name == "" {
+				name = fmt.Sprintf("Draft %d", event.ID)
+			}
+			workflowIndex[event.ID] = len(view.Workflows)
+			view.Workflows = append(view.Workflows, Workflow{
+				Record: newRecord(event), Name: name, Description: data.Description,
+				Path: data.Path, Scope: data.Scope, Phases: slices.Clone(data.Phases), Mutating: data.Mutating,
+			})
+		case WorkflowUpdated:
+			var data WorkflowData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := workflowIndex[data.ID]; found {
+				workflow := &view.Workflows[index]
+				workflow.Name, workflow.Description, workflow.Path = data.Name, data.Description, data.Path
+				workflow.Scope, workflow.Phases = data.Scope, slices.Clone(data.Phases)
+				workflow.Mutating, workflow.UpdatedAt = data.Mutating, event.At
+			}
+		case WorkflowDeleted:
+			var data IDData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := workflowIndex[data.ID]; found {
+				deleteRecord(&view.Workflows[index].Record, event.At)
+			}
+
+		case CronFired:
+			var data CronData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			view.lastCron[data.TriggerID] = event.At
+		case WorkflowRunStarted:
+			var data WorkflowRunData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			view.startedRuns[[2]int64{data.TriggerID, data.SourceEventID}] = true
 		}
 	}
-	return tasks, nil
+	return view, nil
 }
 
-func QueuedTask(tasks []Task) (Task, bool) {
-	for _, task := range tasks {
-		if task.Status == Queued {
-			return cloneTask(task), true
+func (s Snapshot) Project(id int64) (Project, bool) {
+	for _, project := range s.Projects {
+		if project.ID == id {
+			return project, true
+		}
+	}
+	return Project{}, false
+}
+
+func (s Snapshot) Task(id int64) (Task, bool) {
+	for _, task := range s.Tasks {
+		if task.ID == id {
+			return task, true
 		}
 	}
 	return Task{}, false
 }
 
-func RunningTasks(tasks []Task) []Task {
-	var running []Task
-	for _, task := range tasks {
-		if task.Status == Running {
-			running = append(running, cloneTask(task))
+func (s Snapshot) Comment(id int64) (Comment, bool) {
+	for _, comment := range s.Comments {
+		if comment.ID == id {
+			return comment, true
 		}
 	}
-	return running
+	return Comment{}, false
 }
 
-func referencedTask(tasks []Task, positions map[string]int, event eventwire.Event) (*Task, error) {
-	position := positions[event.TaskID]
-	if position == 0 {
-		return nil, fmt.Errorf("event %d references unknown task %q", event.Sequence, event.TaskID)
+func (s Snapshot) Trigger(id int64) (Trigger, bool) {
+	for _, trigger := range s.Triggers {
+		if trigger.ID == id {
+			return trigger, true
+		}
 	}
-	return &tasks[position-1], nil
+	return Trigger{}, false
 }
 
-func referencedRun(tasks []Task, positions map[string]int, event eventwire.Event) (*Task, error) {
-	task, err := referencedTask(tasks, positions, event)
-	if err != nil {
-		return nil, err
+func (s Snapshot) Workflow(id int64) (Workflow, bool) {
+	for _, workflow := range s.Workflows {
+		if workflow.ID == id {
+			return workflow, true
+		}
 	}
-	if event.RunID == "" || task.RunID != event.RunID {
-		return nil, errors.New("event references the wrong run")
-	}
-	return task, nil
+	return Workflow{}, false
 }
 
-func cloneTask(task Task) Task {
-	task.Output = append([]Output(nil), task.Output...)
-	if task.StartedAt != nil {
-		task.StartedAt = timePointer(*task.StartedAt)
+func (s Snapshot) WorkflowByPath(path string) (Workflow, bool) {
+	for _, workflow := range s.Workflows {
+		if workflow.Path != nil && *workflow.Path == path {
+			return workflow, true
+		}
 	}
-	if task.FinishedAt != nil {
-		task.FinishedAt = timePointer(*task.FinishedAt)
-	}
-	return task
+	return Workflow{}, false
 }
 
-func timePointer(value time.Time) *time.Time {
-	return &value
+func (s Snapshot) WorkflowByName(name string) (Workflow, bool) {
+	for _, workflow := range s.Workflows {
+		if workflow.Name == name && workflow.DeletedAt == nil {
+			return workflow, true
+		}
+	}
+	return Workflow{}, false
+}
+
+func (s Snapshot) CommentsFor(relationType string, relationID int64) []Comment {
+	comments := make([]Comment, 0)
+	for _, comment := range s.Comments {
+		if comment.RelationType == relationType && comment.RelationID == relationID && comment.DeletedAt == nil {
+			comments = append(comments, comment)
+		}
+	}
+	return comments
+}
+
+func (s Snapshot) ArtifactsFor(relationType string, relationID int64) []Artifact {
+	artifacts := make([]Artifact, 0)
+	for _, artifact := range s.Artifacts {
+		if artifact.RelationType == relationType && artifact.RelationID == relationID && artifact.DeletedAt == nil {
+			artifacts = append(artifacts, artifact)
+		}
+	}
+	return artifacts
+}
+
+func (s Snapshot) PendingWorkflowComment() (Comment, bool) {
+	answered := make(map[int64]bool)
+	for _, comment := range s.Comments {
+		if comment.Author == "agent" && comment.ParentCommentID != nil {
+			answered[*comment.ParentCommentID] = true
+		}
+	}
+	for _, comment := range s.Comments {
+		if comment.DeletedAt != nil || comment.Author != "user" || comment.RelationType != "workflow" || answered[comment.ID] {
+			continue
+		}
+		if workflow, found := s.Workflow(comment.RelationID); found && workflow.DeletedAt == nil {
+			return comment, true
+		}
+	}
+	return Comment{}, false
+}
+
+func (s Snapshot) RunStarted(triggerID, sourceEventID int64) bool {
+	return s.startedRuns[[2]int64{triggerID, sourceEventID}]
+}
+
+func (s Snapshot) LastCron(triggerID int64) (time.Time, bool) {
+	value, found := s.lastCron[triggerID]
+	return value, found
+}
+
+func newRecord(event eventwire.Event) Record {
+	return Record{ID: event.ID, CreatedAt: event.At, UpdatedAt: event.At}
+}
+
+func deleteRecord(record *Record, at time.Time) {
+	record.UpdatedAt = at
+	record.DeletedAt = &at
+}
+
+func decode(event eventwire.Event, target any) error {
+	if err := json.Unmarshal(event.Data, target); err != nil {
+		return fmt.Errorf("decode %s event %d: %w", event.Type, event.ID, err)
+	}
+	return nil
 }
