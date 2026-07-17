@@ -33,12 +33,17 @@ type collectorState struct {
 
 type Collector struct {
 	mu             sync.Mutex
-	store          *Store
+	store          TransitionAcknowledger
 	publisher      EventPublisher
 	runsRoot       string
 	checkpointPath string
 	state          collectorState
 	fresh          bool
+	transitions    bool
+}
+
+type TransitionAcknowledger interface {
+	AcknowledgeTransitions([]string) error
 }
 
 func NewCollector(store *Store, publisher EventPublisher, stateRoot, checkpointPath string) (*Collector, error) {
@@ -61,8 +66,30 @@ func NewCollector(store *Store, publisher EventPublisher, stateRoot, checkpointP
 			Offsets:  make(map[string]int64),
 			Prefixes: make(map[string]string),
 		},
+		transitions: true,
 	}
-	data, err := os.ReadFile(checkpointPath)
+	return openCollector(c)
+}
+
+// NewRecordCollector retains agent JSONL observation without owning lifecycle
+// transition publication or acknowledgement. Canonical Runs publish those
+// transitions through their journal outbox.
+func NewRecordCollector(publisher EventPublisher, stateRoot, checkpointPath string) (*Collector, error) {
+	if publisher == nil {
+		return nil, errors.New("agent event collector: publisher is required")
+	}
+	if stateRoot == "" || checkpointPath == "" {
+		return nil, errors.New("agent event collector: state root and checkpoint path are required")
+	}
+	c := &Collector{
+		publisher: publisher, runsRoot: filepath.Join(filepath.Clean(stateRoot), "runs"), checkpointPath: checkpointPath,
+		state: collectorState{Version: collectorStateVersion, Offsets: make(map[string]int64), Prefixes: make(map[string]string)},
+	}
+	return openCollector(c)
+}
+
+func openCollector(c *Collector) (*Collector, error) {
+	data, err := os.ReadFile(c.checkpointPath)
 	if errors.Is(err, os.ErrNotExist) {
 		c.fresh = true
 		return c, nil
@@ -106,8 +133,12 @@ func (c *Collector) Collect(ctx context.Context, runs []Run) error {
 		}
 	}
 
-	transitionEvents, transitionIDs := lifecycleEvents(runs)
-	events = append(events, transitionEvents...)
+	var transitionIDs []string
+	if c.transitions {
+		transitionEvents, ids := lifecycleEvents(runs)
+		events = append(events, transitionEvents...)
+		transitionIDs = ids
+	}
 	if len(events) > 0 {
 		if _, err := c.publisher.PublishBatch(ctx, events); err != nil {
 			return fmt.Errorf("agent event collector: publish: %w", err)
@@ -118,8 +149,10 @@ func (c *Collector) Collect(ctx context.Context, runs []Run) error {
 	}
 	c.state = next
 	c.fresh = false
-	if err := c.store.AcknowledgeTransitions(transitionIDs); err != nil {
-		return fmt.Errorf("agent event collector: acknowledge transitions: %w", err)
+	if c.transitions {
+		if err := c.store.AcknowledgeTransitions(transitionIDs); err != nil {
+			return fmt.Errorf("agent event collector: acknowledge transitions: %w", err)
+		}
 	}
 	return nil
 }

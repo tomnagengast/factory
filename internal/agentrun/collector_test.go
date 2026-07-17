@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/internal/taskmodel"
 )
 
 func TestCollectorPublishesCompleteAgentRecordsAndLifecycle(t *testing.T) {
@@ -146,6 +147,38 @@ func TestCollectorRetainsOutboxWhenPublicationFails(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "data", "offsets.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("checkpoint exists after failed publication: %v", err)
+	}
+}
+
+func TestRecordCollectorPublishesAgentRecordsWithoutLifecycleOwnership(t *testing.T) {
+	root := t.TempDir()
+	runDirectory := filepath.Join(root, "runs", "run-record-only")
+	if err := os.MkdirAll(runDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDirectory, "attempt-1-events.jsonl"), []byte("{\"type\":\"assistant\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := eventwire.Open(filepath.Join(root, "events.jsonl"), 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, _ := eventwire.New(journal)
+	collector, err := NewRecordCollector(wire, root, filepath.Join(root, "offsets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := Run{
+		ID: "run-record-only", Task: taskmodel.TaskRef{Source: taskmodel.SourceLinear, ProviderID: "ENG-47", Identifier: "ENG-47"},
+		IssueIdentifier: "ENG-47", RunDirectory: runDirectory, State: StateRunning,
+		Transitions: []Transition{{ID: "run-record-only:running", State: StateRunning, At: time.Now().UTC()}},
+	}
+	if err := collector.Collect(context.Background(), []Run{run}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, records := journal.Snapshot()
+	if len(records) != 1 || records[0].Event.Type != "agent-record" || records[0].Event.Action != "assistant" {
+		t.Fatalf("record-only events = %#v", records)
 	}
 }
 

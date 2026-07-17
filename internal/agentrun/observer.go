@@ -72,7 +72,7 @@ type StepView struct {
 }
 
 type Observer struct {
-	store      *Store
+	store      ObserverStore
 	tmuxPath   string
 	tmuxSocket string
 	redactions []string
@@ -80,7 +80,11 @@ type Observer struct {
 	run        func(context.Context, ...string) ([]byte, error)
 }
 
-func NewObserver(store *Store, tmuxPath, tmuxSocket string, redactions []string, now func() time.Time) (*Observer, error) {
+type ObserverStore interface {
+	Find(string) (Run, bool)
+}
+
+func NewObserver(store ObserverStore, tmuxPath, tmuxSocket string, redactions []string, now func() time.Time) (*Observer, error) {
 	if store == nil {
 		return nil, errors.New("agent observer: run store is required")
 	}
