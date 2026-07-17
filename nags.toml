@@ -20,3 +20,8 @@ command = "./factory serve"
 [health]
 path = "/api/healthz"
 identity = true
+
+[compatibility.factory]
+state_generations = [1]
+deployment_contracts = [1]
+rollback_lease_contract = 1
