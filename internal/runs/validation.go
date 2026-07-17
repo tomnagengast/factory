@@ -315,7 +315,7 @@ func validateRetainedProjection(model Model, migration migrationIdentityEvidence
 	seenRuns := make(map[string]bool, len(model.Runs))
 	seenAdmissions := make(map[string]bool, len(model.Runs))
 	for index, run := range model.Runs {
-		if err := validateRun(run); err != nil {
+		if err := validateRun(run, migration.backsRun(run)); err != nil {
 			return fmt.Errorf("runs: Run %d: %w", index+1, err)
 		}
 		if seenRuns[run.ID] {
@@ -410,7 +410,7 @@ func validateAdmissionBatch(batch AdmissionBatch) error {
 	return nil
 }
 
-func validateRun(run Run) error {
+func validateRun(run Run, migrationBacked bool) error {
 	if !validIdentity(run.ID) || !validText(run.TriggerKind, 128) || run.Attempts < 0 || run.SegmentAttempt < 0 || run.SegmentAttempt > run.Attempts ||
 		run.ResumeCount < 0 || run.GitHub.ReconcileFailures < 0 || !validOptionalText(run.Detail, maximumTextBytes) ||
 		!validOptionalText(run.RepositoryRejection, maximumTextBytes) || !validOptionalText(run.TerminalIntent, 256) ||
@@ -482,7 +482,7 @@ func validateRun(run Run) error {
 		return err
 	}
 	if run.Ready != nil {
-		if err := validateReady(*run.Ready, run); err != nil {
+		if err := validateReady(*run.Ready, run, migrationBacked); err != nil {
 			return err
 		}
 	}
@@ -643,7 +643,7 @@ func validateRoute(route repositories.Route) error {
 	return nil
 }
 
-func validateReady(ready ReadyCheckpoint, run Run) error {
+func validateReady(ready ReadyCheckpoint, run Run, migrationBacked bool) error {
 	if ready.ContractVersion != readyContractVersion || ready.RunID != run.ID || !repositoryPattern.MatchString(ready.Repository) ||
 		ready.PullRequest < 1 || !validBranch(ready.BaseBranch) || !validBranch(ready.HeadBranch) || !gitOIDPattern.MatchString(ready.VerifiedHeadOID) ||
 		ready.CreatedAt.IsZero() || ready.CreatedAt.Location() != time.UTC || !ready.PullRequestUpdatedAt.IsZero() && ready.PullRequestUpdatedAt.Location() != time.UTC ||
@@ -659,7 +659,13 @@ func validateReady(ready ReadyCheckpoint, run Run) error {
 			return errors.New("Run ready checkpoint branch conflicts with its task")
 		}
 	}
-	if run.Repository == nil || ready.Repository != run.Repository.Repository || ready.BaseBranch != run.Repository.DefaultBranch {
+	repositoryMatches := run.Repository != nil && ready.Repository == run.Repository.Repository && ready.BaseBranch == run.Repository.DefaultBranch
+	if !repositoryMatches && run.Repository == nil && migrationBacked && run.State.Terminal() && run.MigratedBaseline != nil &&
+		run.MigratedBaseline.HistoricalRepository != nil {
+		historical := run.MigratedBaseline.HistoricalRepository
+		repositoryMatches = ready.Repository == historical.Repository && ready.BaseBranch == historical.DefaultBranch
+	}
+	if !repositoryMatches {
 		return errors.New("Run ready checkpoint conflicts with its repository route")
 	}
 	if run.State == StateAwaitingHumanMerge && run.SegmentStartedAt != nil && ready.CreatedAt.Before(*run.SegmentStartedAt) {

@@ -217,15 +217,88 @@ func TestConvertSynthesizesReflectedTerminalInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, run := range snapshot.Model().Runs {
+	model := snapshot.Model()
+	if model.TotalRuns != 13 {
+		t.Fatalf("canonical lifetime total = %d, want 13", model.TotalRuns)
+	}
+	for _, run := range model.Runs {
 		if run.Causation.AdmissionID == invocation.ID {
-			if run.State != runs.StateFailed || run.Detail != invocation.Reason || !run.MigratedBaseline.RepositoryRouteUnavailable {
+			if run.ID != invocation.RunID || run.State != runs.StateFailed || run.Detail != invocation.Reason || !run.MigratedBaseline.RepositoryRouteUnavailable {
 				t.Fatalf("terminal synthesized Run = %#v", run)
 			}
 			return
 		}
 	}
 	t.Fatal("terminal synthesized Run was not retained")
+}
+
+func TestConvertDirectTransitionUsesExactLegacyWireCausation(t *testing.T) {
+	state, canonical := syntheticRunSources(t)
+	direct := &state.runs.Runs[2]
+	transition := agentrun.Transition{
+		ID: direct.ID + ":succeeded:1784110920000000000", State: agentrun.StateSucceeded,
+		Attempts: direct.Attempts, At: direct.UpdatedAt,
+	}
+	direct.Transitions = []agentrun.Transition{transition}
+	state.wireRecords = append(state.wireRecords, transitionWireRecord(9, *direct, transition))
+	state.wireTotal, state.wireDispatched = 9, 9
+	slices.SortFunc(state.wireRecords, func(left, right eventwire.Record) int {
+		if left.Sequence < right.Sequence {
+			return -1
+		}
+		if left.Sequence > right.Sequence {
+			return 1
+		}
+		return 0
+	})
+
+	_, metrics, err := convertRunSources(state, canonical, preAuditMigrationID(strings.Repeat("5", 64)), strings.Repeat("5", 64))
+	if err != nil {
+		t.Fatalf("exact direct transition: %v", err)
+	}
+	if metrics.audit.TransitionReceipts != 2 {
+		t.Fatalf("transition receipts = %d, want 2", metrics.audit.TransitionReceipts)
+	}
+
+	mismatched := state
+	mismatched.wireRecords = slices.Clone(state.wireRecords)
+	for index := range mismatched.wireRecords {
+		if mismatched.wireRecords[index].Event.ID == "factory:run-transition:"+transition.ID {
+			mismatched.wireRecords[index].Event.RootEventID = mismatched.wireRecords[index].Event.ID
+		}
+	}
+	if _, _, err := convertRunSources(mismatched, canonical, preAuditMigrationID(strings.Repeat("5", 64)), strings.Repeat("5", 64)); err == nil || !strings.Contains(err.Error(), "not exactly globally dispatched") {
+		t.Fatalf("mismatched direct transition error = %v", err)
+	}
+}
+
+func TestConvertTerminalHistoricalRoutePreservesReadyCheckpoint(t *testing.T) {
+	state, canonical := syntheticRunSources(t)
+	legacy := &state.runs.Runs[2]
+	legacy.Repository = "example/retired-ready"
+	legacy.RepositoryURL = "git@github.com:example/retired-ready.git"
+	legacy.RepositoryPath = "/srv/sandbox/retired-ready"
+	legacy.ManagedRoot = "/srv/sandbox"
+	legacy.BaseBranch = "trunk"
+	legacy.Ready.Repository = legacy.Repository
+	legacy.Ready.BaseBranch = legacy.BaseBranch
+
+	snapshot, _, err := convertRunSources(state, canonical, preAuditMigrationID(strings.Repeat("6", 64)), strings.Repeat("6", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range snapshot.Model().Runs {
+		if run.ID != legacy.ID {
+			continue
+		}
+		if run.Repository != nil || run.Ready == nil || run.Ready.Repository != legacy.Repository || run.Ready.BaseBranch != legacy.BaseBranch ||
+			run.MigratedBaseline == nil || run.MigratedBaseline.HistoricalRepository == nil ||
+			run.MigratedBaseline.HistoricalRepository.Repository != legacy.Repository {
+			t.Fatalf("historical ready Run = %#v", run)
+		}
+		return
+	}
+	t.Fatal("historical ready Run was not retained")
 }
 
 func TestConvertRunSourcesFailsClosed(t *testing.T) {
@@ -266,9 +339,39 @@ func TestConvertRunSourcesFailsClosed(t *testing.T) {
 			state.routing.Invocations[2].Reason = "historical terminal"
 			state.routing.Invocations[2].RunID = ""
 		}, want: "invalid reflection evidence"},
+		{name: "terminal missing deterministic Run ID", mutate: func(state *sourceState) {
+			invocation := &state.routing.Invocations[2]
+			invocation.State = triggerrouter.StateFailed
+			invocation.Reason = "historical terminal"
+			invocation.RunID = ""
+			invocation.ReflectedAt = ptrTime(invocation.UpdatedAt)
+		}, want: "invalid reflection evidence"},
+		{name: "terminal mismatched deterministic Run ID", mutate: func(state *sourceState) {
+			invocation := &state.routing.Invocations[2]
+			invocation.State = triggerrouter.StateFailed
+			invocation.Reason = "historical terminal"
+			invocation.RunID = "run-fedcba9876543210"
+			invocation.ReflectedAt = ptrTime(invocation.UpdatedAt)
+		}, want: "invalid reflection evidence"},
+		{name: "terminal reflection timestamp mismatch", mutate: func(state *sourceState) {
+			invocation := &state.routing.Invocations[2]
+			invocation.State = triggerrouter.StateFailed
+			invocation.Reason = "historical terminal"
+			invocation.ReflectedAt = ptrTime(invocation.UpdatedAt.Add(-time.Nanosecond))
+		}, want: "invalid reflection evidence"},
+		{name: "terminal lifetime coverage gap", mutate: func(state *sourceState) {
+			invocation := &state.routing.Invocations[2]
+			invocation.State = triggerrouter.StateFailed
+			invocation.Reason = "historical terminal"
+			invocation.ReflectedAt = ptrTime(invocation.UpdatedAt)
+			state.runs.Total = uint64(len(state.runs.Runs))
+		}, want: "does not cover synthesized terminal Runs"},
 		{name: "unacknowledged transition", mutate: func(state *sourceState) {
 			state.wireDispatched = 6
 		}, want: "not exactly globally dispatched"},
+		{name: "duplicate wire sequence", mutate: func(state *sourceState) {
+			state.wireRecords[1].Sequence = state.wireRecords[0].Sequence
+		}, want: "duplicate wire identity or sequence"},
 		{name: "deterministic identity", mutate: func(state *sourceState) {
 			wrong := strings.Repeat("a", 64)
 			state.routing.Decisions[1].Outcomes[0].InvocationID = wrong
@@ -357,6 +460,7 @@ func syntheticRunSources(t *testing.T) (sourceState, canonicalEvidence) {
 	invocations[2].RunID = syntheticRunID("event:claiming", rule.ID, rule.Revision)
 	invocations[2].UpdatedAt = converterNow.Add(4*time.Minute + time.Second)
 	invocations[3].State = triggerrouter.StateRejected
+	invocations[3].RunID = syntheticRunID("event:rejected", rule.ID, rule.Revision)
 	invocations[3].Reason = "repository-routing-rejected"
 	invocations[3].UpdatedAt = converterNow.Add(5 * time.Minute)
 
@@ -645,17 +749,24 @@ func directWireRecord(sequence uint64, id string, source eventwire.Source, at ti
 }
 
 func transitionWireRecord(sequence uint64, run agentrun.Run, transition agentrun.Transition) eventwire.Record {
-	return eventwire.Record{Sequence: sequence, Event: eventwire.Event{
+	record := eventwire.Record{Sequence: sequence, Event: eventwire.Event{
 		ID: "factory:run-transition:" + transition.ID, Source: eventwire.SourceFactory,
 		Type: "agent-run", Action: string(transition.State), Subject: run.IssueIdentifier,
 		Attributes: map[string][]string{
-			"runId": {run.ID}, "attempts": {"0"}, "taskSource": {string(run.Task.Source)},
+			"runId": {run.ID}, "attempts": {strconv.Itoa(transition.Attempts)}, "taskSource": {string(run.Task.Source)},
 			"taskProviderId": {run.Task.ProviderID}, "taskIdentifier": {run.Task.Identifier},
 			eventwire.AttributeProducer: {"agent-collector"}, eventwire.AttributeProvenance: {"factory"},
 		},
-		RootEventID: run.InvocationRootEventID, ParentInvocationID: run.InvocationID, ParentRunID: run.ID,
-		Hop: run.InvocationHop, AncestorRuleIDs: slices.Clone(run.InvocationAncestorRuleIDs), ReceivedAt: transition.At,
+		ReceivedAt: transition.At,
 	}}
+	if run.InvocationID != "" {
+		record.Event.RootEventID = run.InvocationRootEventID
+		record.Event.ParentInvocationID = run.InvocationID
+		record.Event.ParentRunID = run.ID
+		record.Event.Hop = run.InvocationHop
+		record.Event.AncestorRuleIDs = slices.Clone(run.InvocationAncestorRuleIDs)
+	}
+	return record
 }
 
 func linearTask(identifier string) taskmodel.TaskRef {

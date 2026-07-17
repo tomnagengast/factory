@@ -380,6 +380,68 @@ func TestMigrationSnapshotBacksLinkedTerminalRepositoryEscapeEvidence(t *testing
 	}
 }
 
+func TestMigrationSnapshotBacksTerminalHistoricalReadyCheckpoint(t *testing.T) {
+	model := testLinkedMigrationRouteModel(t, AdmissionOriginEvent, StateSucceeded, true)
+	setHistoricalReadyCheckpoint(&model.Runs[0])
+	model.Migration = testMigrationReceipt(t, model)
+	if _, err := NewSnapshot(model); err != nil {
+		t.Fatalf("migration-backed historical ready checkpoint: %v", err)
+	}
+
+	unbacked := cloneModel(model)
+	unbacked.Migration = nil
+	if _, err := NewSnapshot(unbacked); err == nil || !strings.Contains(err.Error(), "ready checkpoint conflicts with its repository route") {
+		t.Fatalf("unbacked historical ready error = %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		model  func() Model
+		mutate func(*Run)
+	}{
+		{
+			name: "nonterminal",
+			model: func() Model {
+				return testLinkedMigrationRouteModel(t, AdmissionOriginEvent, StatePending, true)
+			},
+		},
+		{
+			name: "route unavailable",
+			model: func() Model {
+				return testLinkedMigrationRouteModel(t, AdmissionOriginEvent, StateSucceeded, false)
+			},
+		},
+		{
+			name:  "repository mismatch",
+			model: func() Model { return testLinkedMigrationRouteModel(t, AdmissionOriginEvent, StateSucceeded, true) },
+			mutate: func(run *Run) {
+				run.Ready.Repository = "tomnagengast/other"
+			},
+		},
+		{
+			name:  "default branch mismatch",
+			model: func() Model { return testLinkedMigrationRouteModel(t, AdmissionOriginEvent, StateSucceeded, true) },
+			mutate: func(run *Run) {
+				run.Ready.BaseBranch = "trunk"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := test.model()
+			setHistoricalReadyCheckpoint(&candidate.Runs[0])
+			if test.mutate != nil {
+				test.mutate(&candidate.Runs[0])
+			}
+			if _, err := NewMigrationSnapshotReceipt(
+				"migration-historical-ready", strings.Repeat("c", 64), candidate.TotalRuns,
+				candidate.AdmissionBatches, candidate.Runs, candidate.RateBuckets,
+			); err == nil || !strings.Contains(err.Error(), "ready checkpoint conflicts with its repository route") {
+				t.Fatalf("historical ready rejection error = %v", err)
+			}
+		})
+	}
+}
+
 func TestLinkedRepositoryEscapeRequiresValidatedMigrationTerminalEvidence(t *testing.T) {
 	t.Run("missing migration receipt", func(t *testing.T) {
 		model := testLinkedMigrationRouteModel(t, AdmissionOriginEvent, StateSucceeded, false)
@@ -1098,6 +1160,19 @@ func testMigrationReceipt(t *testing.T, model Model) *MigrationSnapshotReceipt {
 		t.Fatal(err)
 	}
 	return receipt
+}
+
+func setHistoricalReadyCheckpoint(run *Run) {
+	historical := run.MigratedBaseline.HistoricalRepository
+	repository, baseBranch := "tomnagengast/factory", "main"
+	if historical != nil {
+		repository, baseBranch = historical.Repository, historical.DefaultBranch
+	}
+	run.Ready = &ReadyCheckpoint{
+		ContractVersion: readyContractVersion, RunID: run.ID, Task: run.Causation.Task,
+		Repository: repository, PullRequest: 18, BaseBranch: baseBranch,
+		HeadBranch: "factory-task-1-historical", VerifiedHeadOID: strings.Repeat("a", 40), CreatedAt: run.CreatedAt,
+	}
 }
 
 func resignMigrationReceipt(model *Model) {

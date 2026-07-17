@@ -321,7 +321,7 @@ func (r Run) Clone() Run { return cloneRun(r) }
 func (r Run) Validate() error {
 	r = cloneRun(r)
 	canonicalizeRun(&r)
-	return validateRun(r)
+	return validateRun(r, false)
 }
 
 func canonicalizeModel(model *Model) {

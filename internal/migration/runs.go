@@ -71,6 +71,8 @@ func convertRunSources(
 	synthesizedEvidence := make([]string, 0, len(state.routing.Invocations))
 	directEvidence := make([]string, 0, len(state.runs.Runs))
 	reflectionEvidence := make([]string, 0)
+	var synthesizedLifetimeRuns uint64
+	var synthesizedTerminalRuns uint64
 
 	for _, invocation := range state.routing.Invocations {
 		decision, found := index.decisionByInvoke[invocation.ID]
@@ -87,6 +89,12 @@ func convertRunSources(
 		model.Runs = append(model.Runs, converted)
 		if synthesized {
 			synthesizedEvidence = append(synthesizedEvidence, fmt.Sprintf("%s|%s|%s", invocation.ID, converted.ID, converted.State))
+			switch invocation.State {
+			case triggerrouter.StateSucceeded, triggerrouter.StateBlocked, triggerrouter.StateFailed:
+				synthesizedTerminalRuns++
+			default:
+				synthesizedLifetimeRuns++
+			}
 		} else {
 			linkedEvidence = append(linkedEvidence, invocation.ID+"|"+converted.ID)
 		}
@@ -139,11 +147,15 @@ func convertRunSources(
 		model.RateBuckets[position] = runs.RateBucket{RuleID: bucket.RuleID, Minute: bucket.Minute, Count: bucket.Count}
 	}
 
-	synthesized := uint64(len(synthesizedEvidence))
-	if synthesized > ^uint64(0)-state.runs.Total {
+	retainedLegacyRuns := uint64(len(state.runs.Runs))
+	if synthesizedTerminalRuns > ^uint64(0)-retainedLegacyRuns ||
+		state.runs.Total < retainedLegacyRuns+synthesizedTerminalRuns {
+		return runs.Snapshot{}, runConversionMetrics{}, errors.New("migration: legacy Run lifetime total does not cover synthesized terminal Runs")
+	}
+	if synthesizedLifetimeRuns > ^uint64(0)-state.runs.Total {
 		return runs.Snapshot{}, runConversionMetrics{}, errors.New("migration: canonical Run lifetime total is exhausted")
 	}
-	model.TotalRuns = state.runs.Total + synthesized
+	model.TotalRuns = state.runs.Total + synthesizedLifetimeRuns
 	receipt, err := runs.NewMigrationSnapshotReceipt(
 		migrationID, sourceRootDigest, model.TotalRuns,
 		model.AdmissionBatches, model.Runs, model.RateBuckets,
@@ -182,11 +194,13 @@ func indexRunSources(
 		legacyRuns:       make(map[string]agentrun.Run, len(state.runs.Runs)),
 		runByInvocation:  make(map[string]agentrun.Run, len(state.runs.Runs)),
 	}
+	wireBySequence := make(map[uint64]string, len(state.wireRecords))
 	for _, record := range state.wireRecords {
-		if record.Sequence == 0 || index.wireByID[record.Event.ID].Sequence != 0 {
-			return runSourceIndex{}, errors.New("migration: duplicate wire identity")
+		if record.Sequence == 0 || index.wireByID[record.Event.ID].Sequence != 0 || wireBySequence[record.Sequence] != "" {
+			return runSourceIndex{}, errors.New("migration: duplicate wire identity or sequence")
 		}
 		index.wireByID[record.Event.ID] = record
+		wireBySequence[record.Sequence] = record.Event.ID
 	}
 	for _, invocation := range state.routing.Invocations {
 		if invocation.ID == "" || index.invocations[invocation.ID].ID != "" {
@@ -444,11 +458,12 @@ func convertInvocationRun(
 		}
 	case triggerrouter.StateSucceeded, triggerrouter.StateBlocked, triggerrouter.StateFailed:
 		if !linked {
-			if invocation.ReflectedAt == nil || invocation.ReflectedAt.After(invocation.UpdatedAt) {
+			if invocation.RunID == "" || invocation.RunID != deterministicRunID || invocation.ReflectedAt == nil ||
+				!invocation.ReflectedAt.Equal(invocation.UpdatedAt) {
 				return runs.Run{}, false, fmt.Errorf("migration: terminal invocation %s has invalid reflection evidence", invocation.ID)
 			}
 			state, _ := invocationLifecycleState(invocation.State)
-			converted, err := synthesizeInvocationRun(invocation, decision, batch, deterministicRunID, state)
+			converted, err := synthesizeInvocationRun(invocation, decision, batch, invocation.RunID, state)
 			if err == nil {
 				converted.Detail = invocation.Reason
 				converted.MigratedBaseline.RepositoryRouteUnavailable = true
@@ -931,7 +946,7 @@ func exactTransitionEvent(event eventwire.Event, legacy agentrun.Run, transition
 		return false
 	}
 	if legacy.InvocationID == "" {
-		return event.RootEventID == event.ID && event.ParentInvocationID == "" && event.ParentRunID == "" && event.Hop == 0 && len(event.AncestorRuleIDs) == 0
+		return event.RootEventID == "" && event.ParentInvocationID == "" && event.ParentRunID == "" && event.Hop == 0 && len(event.AncestorRuleIDs) == 0
 	}
 	return event.RootEventID == legacy.InvocationRootEventID && event.ParentInvocationID == legacy.InvocationID &&
 		event.ParentRunID == legacy.ID && event.Hop == legacy.InvocationHop &&

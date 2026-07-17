@@ -33,7 +33,7 @@ func NewMigrationSnapshotReceipt(
 	runs = cloneRuns(runs)
 	for index := range runs {
 		canonicalizeRun(&runs[index])
-		if err := validateRun(runs[index]); err != nil {
+		if err := validateRun(runs[index], true); err != nil {
 			return nil, fmt.Errorf("runs: migration Run %d: %w", index+1, err)
 		}
 	}

@@ -220,6 +220,24 @@ func TestLiveAdmissionOperationRejectsLinkedTerminalRepositoryEscapeEvidence(t *
 	}
 }
 
+func TestLiveAdmissionOperationRejectsHistoricalReadyMigrationException(t *testing.T) {
+	model := testLinkedMigrationRouteModel(t, AdmissionOriginMigratedDirect, StateSucceeded, true)
+	setHistoricalReadyCheckpoint(&model.Runs[0])
+	model.Migration = testMigrationReceipt(t, model)
+	snapshot, err := NewSnapshot(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model = snapshot.Model()
+	operation := diskOperation{
+		Kind: operationAdmissionBatch, Version: JournalVersion, Sequence: 1,
+		AdmissionBatches: model.AdmissionBatches, Runs: model.Runs, RateIncrements: model.RateBuckets,
+	}
+	if err := validateAdmissionOperationProjection(operation); err == nil || !strings.Contains(err.Error(), "ready checkpoint conflicts with its repository route") {
+		t.Fatalf("live historical ready error = %v", err)
+	}
+}
+
 func TestSuppressedAdmissionOperationExactRetryAfterReopen(t *testing.T) {
 	root := trustedTestRoot(t, t.TempDir())
 	path := filepath.Join(root, "runs.jsonl")
