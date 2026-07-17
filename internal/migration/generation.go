@@ -19,6 +19,8 @@ import (
 	"github.com/tomnagengast/factory/internal/repositories"
 	"github.com/tomnagengast/factory/internal/runs"
 	"github.com/tomnagengast/factory/internal/taskstore"
+	"github.com/tomnagengast/factory/internal/triggerscheduler"
+	"github.com/tomnagengast/factory/internal/workflow"
 )
 
 const (
@@ -29,7 +31,14 @@ const (
 	generationMigrationFile  = "migration.json"
 	generationBackupFile     = "backup-receipt.json"
 	generationBackupDir      = "backup"
+	generationRuntimeDir     = "runtime"
 )
+
+type RuntimeArtifacts struct {
+	WorkflowDrafts string
+	TriggerCursors string
+	AgentOffsets   string
+}
 
 // GenerationManifest binds one complete, still-unselected canonical
 // generation to its immutable migration evidence and initial artifact bytes.
@@ -59,6 +68,7 @@ type SelectedGeneration struct {
 	Tasks        *taskstore.Store
 	Wire         *eventwire.Journal
 	Activity     *eventwire.ActivityStore
+	Runtime      RuntimeArtifacts
 }
 
 func (s *SelectedGeneration) Close() error {
@@ -171,7 +181,7 @@ func OpenSelectedGeneration(path string) (*SelectedGeneration, error) {
 	return &SelectedGeneration{
 		Generation: Generation{Path: path, Manifest: manifest, Report: report},
 		Policy:     policyStore, Repositories: repositoryStore, Runs: runStore,
-		Tasks: taskStore, Wire: wire, Activity: activity,
+		Tasks: taskStore, Wire: wire, Activity: activity, Runtime: runtimeArtifacts(path),
 	}, nil
 }
 
@@ -335,6 +345,9 @@ func materializeGeneration(sourceRoot, destination string, report DryRunReport, 
 	if err := eventwire.MaterializeActivity(filepath.Join(destination, "activity"), canonical.activityProjection, canonical.activityCorpus); err != nil {
 		return err
 	}
+	if err := materializeRuntimeArtifacts(destination, state); err != nil {
+		return err
+	}
 	if err := copyBackup(sourceRoot, filepath.Join(destination, generationBackupDir), report.Backup); err != nil {
 		return err
 	}
@@ -357,6 +370,64 @@ func materializeGeneration(sourceRoot, destination string, report DryRunReport, 
 		}
 	}
 	return inject(options, "after-generation-materialize")
+}
+
+func runtimeArtifacts(root string) RuntimeArtifacts {
+	directory := filepath.Join(root, generationRuntimeDir)
+	return RuntimeArtifacts{
+		WorkflowDrafts: filepath.Join(directory, "workflow-drafts.json"),
+		TriggerCursors: filepath.Join(directory, "trigger-cursors.json"),
+		AgentOffsets:   filepath.Join(directory, "agent-event-offsets.json"),
+	}
+}
+
+func materializeRuntimeArtifacts(destination string, state sourceState) error {
+	paths := runtimeArtifacts(destination)
+	if err := os.Mkdir(filepath.Dir(paths.WorkflowDrafts), 0o700); err != nil {
+		return fmt.Errorf("migration: create runtime artifact directory: %w", err)
+	}
+	for path, value := range map[string]any{
+		paths.WorkflowDrafts: state.drafts,
+		paths.TriggerCursors: state.cursors,
+		paths.AgentOffsets:   state.agentCursors,
+	} {
+		if err := writeExclusiveJSON(path, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRuntimeArtifacts(root string) error {
+	paths := runtimeArtifacts(root)
+	entries, err := os.ReadDir(filepath.Dir(paths.WorkflowDrafts))
+	if err != nil || len(entries) != 3 {
+		return errors.New("migration: runtime artifact inventory is incomplete")
+	}
+	expected := map[string]bool{
+		filepath.Base(paths.WorkflowDrafts): true,
+		filepath.Base(paths.TriggerCursors): true,
+		filepath.Base(paths.AgentOffsets):   true,
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !expected[entry.Name()] {
+			return errors.New("migration: runtime artifact inventory is invalid")
+		}
+	}
+	if _, err := workflow.OpenDraftStore(paths.WorkflowDrafts); err != nil {
+		return err
+	}
+	if _, err := triggerscheduler.Open(paths.TriggerCursors); err != nil {
+		return err
+	}
+	var offsets agentCursorState
+	if err := readStrictJSON(paths.AgentOffsets, &offsets); err != nil {
+		return err
+	}
+	if offsets.Version != 1 || offsets.Offsets == nil {
+		return errors.New("migration: runtime agent offsets are invalid")
+	}
+	return nil
 }
 
 // ValidateStagedGeneration verifies immutable bytes, backup evidence, strict
@@ -451,6 +522,9 @@ func ValidateStagedGeneration(path string, expected DryRunReport) (Generation, e
 	if err != nil || activityDigest != audit.CanonicalEvents.Digest || uint64(len(corpus)) != audit.PrivatePayloads {
 		return Generation{}, errors.New("migration: staged activity audit changed")
 	}
+	if err := validateRuntimeArtifacts(path); err != nil {
+		return Generation{}, err
+	}
 	return Generation{Path: path, Manifest: manifest, Report: expected}, nil
 }
 
@@ -458,7 +532,7 @@ func validateGenerationInventory(path string) error {
 	expected := map[string]bool{
 		"policy.json": true, "repositories.json": true, "runs.jsonl": true,
 		"tasks.jsonl": true, "system-events.jsonl": true, "task-source-neutral.json": true,
-		"activity": true, generationBackupDir: true, generationManifestFile: true,
+		"activity": true, generationRuntimeDir: true, generationBackupDir: true, generationManifestFile: true,
 		generationAuditFile: true, generationMigrationFile: true, generationBackupFile: true,
 	}
 	entries, err := os.ReadDir(path)
@@ -477,7 +551,7 @@ func validateGenerationInventory(path string) error {
 			return errors.New("migration: staged generation inventory is incomplete or contains unknown artifacts")
 		}
 		seen[entry.Name()] = true
-		shouldDirectory := entry.Name() == "activity" || entry.Name() == generationBackupDir
+		shouldDirectory := entry.Name() == "activity" || entry.Name() == generationRuntimeDir || entry.Name() == generationBackupDir
 		if entry.IsDir() != shouldDirectory {
 			return errors.New("migration: staged generation artifact has the wrong type")
 		}
@@ -517,7 +591,7 @@ func canonicalArtifactHashes(root string) ([]SourceHash, error) {
 		}
 		top := strings.Split(filepath.ToSlash(relative), "/")[0]
 		canonical := top == "policy.json" || top == "repositories.json" || top == "runs.jsonl" || top == "tasks.jsonl" ||
-			top == "system-events.jsonl" || top == "task-source-neutral.json" || top == "activity"
+			top == "system-events.jsonl" || top == "task-source-neutral.json" || top == "activity" || top == generationRuntimeDir
 		if !canonical {
 			if entry.IsDir() {
 				return filepath.SkipDir

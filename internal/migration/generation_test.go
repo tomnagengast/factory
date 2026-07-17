@@ -30,7 +30,7 @@ func TestBuildGenerationMaterializesAndIdempotentlyReopensCompleteState(t *testi
 	}
 	for _, name := range []string{
 		"policy.json", "repositories.json", "runs.jsonl", "tasks.jsonl", "system-events.jsonl",
-		"task-source-neutral.json", "activity", "backup", "generation.json", "audit.json", "migration.json", "backup-receipt.json",
+		"task-source-neutral.json", "activity", "runtime", "backup", "generation.json", "audit.json", "migration.json", "backup-receipt.json",
 	} {
 		if _, err := os.Lstat(filepath.Join(created.Path, name)); err != nil {
 			t.Fatalf("missing generation artifact %s: %v", name, err)
@@ -49,6 +49,12 @@ func TestBuildGenerationMaterializesAndIdempotentlyReopensCompleteState(t *testi
 	}
 	if !reflect.DeepEqual(restarted.Manifest, created.Manifest) || !reflect.DeepEqual(restarted.Report, created.Report) {
 		t.Fatalf("restart reopen = %#v, want %#v", restarted, created)
+	}
+	artifacts := runtimeArtifacts(created.Path)
+	for _, path := range []string{artifacts.WorkflowDrafts, artifacts.TriggerCursors, artifacts.AgentOffsets} {
+		if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			t.Fatalf("runtime artifact %s is unsafe: %v", path, err)
+		}
 	}
 	afterFiles, err := hashTree(source)
 	if err != nil {
