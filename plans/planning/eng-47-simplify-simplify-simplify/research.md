@@ -56,6 +56,7 @@
 - Those provider writes do not fsync the release, selection, runtime artifacts, receipts, or parent directories. Direct `nags deploy` and `nags rollback` also have no Factory generation compatibility or state-transition-lease guard before activation.
 - The durability defect does not itself require a Network write. After `nags deploy` returns, Factory can acquire its state-transition lease and the provider's existing deployment lock in that order, revalidate the exact selected release, wrapper/plist set, successful receipt, and deployment identity, recursively fsync the release/runtime/receipt graph and parent directories, then write and fsync a Factory-owned finalization acknowledgement before publishing the canonical manifest. A competing direct provider action either owns the deployment lock first and is detected by revalidation, or fails while Factory owns it.
 - That Factory-local finalization cannot close the activation-bypass defect after the lock is released. Direct provider deploy or rollback could still select and start an incompatible release against canonical state. This run must add a provider-enforced pre-activation contract for both entry points: deploy proves target-generation compatibility, and rollback additionally proves the process- and token-bound Factory state-transition lease before `activate_release`.
+- A point-in-time lease check is insufficient: if the wrapper dies, the provider child can otherwise continue after the application lock disappears. The safe boundary passes the exact locked descriptor into `nags`, retains it through receipt completion, keeps the wrapper as live parent, and repeats inode/owner/token/generation/manifest/receipt validation immediately before activation using already-open verified descriptors.
 - Network manifests are validated centrally by `platform/nags_config.py`; release selection, deployment locking, activation, health, receipt finalization, and rollback are owned by `bin/nags`. Provider tests currently cover manifest parsing, runtime artifact identity, state presentation, reconciliation, and console actions, but no shell-level deployment/rollback contract harness exists. The change therefore needs a disposable-runtime harness around `bin/nags` plus schema and console regression coverage.
 - Network's own post-merge contract starts from its updated clean admitted checkout but installs and executes through the internal clean provider clone: run `bin/nags refresh-env` and `bin/nags reconcile`, require `~/.local/share/nags/provider/main == origin/main`, then from that internal checkout run `~/.local/bin/nags deploy network --expected-commit "$(git rev-parse HEAD)"`, followed by `http://127.0.0.1:8090/healthz`, `https://network.nags.cloud/healthz`, and Network receipt identity checks. Nothing runs from the T9 checkout.
 - PR 18 remains the draft Factory pull request. Its remote head still records the prior planning boundary until the reviewed cross-repository plan is committed and the rebased branch is force-pushed with lease. No Network branch or pull request existed at intake, so this run will create exactly one after plan approval.
@@ -103,6 +104,7 @@ The root cause is not lack of generic abstraction. It is multiple owners for the
 - Keep `system-events.jsonl` and the event-wire ordering, acknowledgement, rejection, payload-privacy, channel-cursor, and crash-recovery contract.
 - Delete the two provider-specific JSON journal implementations, startup seeds, server interfaces/configuration, and post-wire mirror writes.
 - Keep provider normalization and wire adapters. `agent github-events`, `agent linear-comments`, and the generic event/task activity helpers continue reading the unified wire while an existing pin can still require them.
+- Migrate the Home activity lifetime/retained projection and its private Linear payload corpus into this owner. Those totals and bodies are not derivable from the body-free retained wire; preserve delivery mappings, payload hashes/modes, authenticated historical detail, pruning, and project-setup replay.
 - Existing provider journal files remain untouched on disk as archival evidence but are no longer opened or updated.
 - This intentionally retires rollback to a binary that requires gap-free projection journals after the cutover. Recovery after the cut must use a compatible retained release and the authoritative wire or a forward corrective commit.
 
@@ -120,6 +122,7 @@ The root cause is not lack of generic abstraction. It is multiple owners for the
 - Move pending private task commands into the native task journal as an outbox record.
 - Append the private pending operation durably, publish only its opaque body-free reference to the wire, apply it idempotently during dispatch, append the result, and mark the operation applied.
 - Preserve API idempotency, exact revision conflict semantics, private bodies, crash replay, and result recovery.
+- Fold the complete Linear display-identifier/provider-UUID bijection into the same task owner. Preserve its one-to-one conflict rejection at webhook and provider lookup boundaries; do not reconstruct it only from retained tasks.
 - Delete the separate `task-operations/` filesystem protocol and the current double execution call.
 
 ### 4. One authoritative policy
@@ -182,7 +185,7 @@ Budgets are guardrails. A smaller reduction is acceptable only when evidence sho
 No production data wipe is inferred from the greenfield comment. The cut uses a fail-closed one-shot migration and preserves current state.
 
 1. Before deployment, require a quiescent service boundary and capture a permission-preserving backup of the complete Factory data root.
-2. Validate the current settings, routing journal, task journal, repository/setup state, Run ledger, workflow pins, drafts, event wire, and cursor files before mutation.
+2. Validate the current settings, routing journal, task journal, Linear identity bijection, activity history and private payload corpus, repository/setup state, Run ledger, workflow pins, drafts, event wire, and cursor files before mutation.
 3. Migrate into sibling temporary artifacts, validate them completely, fsync them, and atomically replace only after the full converted set is consistent. Mixed old/new authorities must be rejected.
 4. Preserve the active ENG-47 Run's immutable old workflow pin, repository identity, checkpoint state, attempts, children, and session. The new executor must still understand that pin if the service restarts before this Run reaches terminal.
 5. Preserve historical terminal Runs for UI/history. Compatibility readers may normalize their old identity and pin shapes in memory, but new writes use only canonical shapes.
@@ -214,13 +217,13 @@ Source rollback alone is insufficient after the one-way state cut. Recovery requ
 
 | Concern | Required evidence |
 | --- | --- |
-| Canonical state migration | Fresh-state and current-state fixtures; unknown customization rejection; complete backup/restore rehearsal; no mixed artifacts after injected failure |
+| Canonical state migration | Fresh-state and current-state fixtures; unknown customization rejection; Linear identity bijection and activity/payload parity; complete backup/restore rehearsal; no mixed artifacts after injected failure |
 | Event durability | Duplicate publication, torn tail, append/sync/ack failure, permanent rejection, restart catch-up, retention, monotonic channel cursors |
 | Unified admission and Run | Rule match/suppress, multi-match, hop/cycle/rate limits, same-task serialization, repository resolution failure, crash at each transition, retry, feedback coalescing, native start, GitHub remediation |
 | Task outbox | Duplicate idempotency key, stale revision, private-body audit, crash before/after pending append, event publish, apply, result, acknowledgement |
 | Policy | Publish/delete/binding/rule/schedule/project changes; optimistic conflicts; mutation blocked while admission pending; draft-store failure does not block execution |
 | Repository catalog | Origin/path/managed-root/default-branch validation, compiled/admitted projects, bootstrap, provider coordination, completion reader identity |
-| Network provider guard | Manifest contract validation; guarded and unguarded target releases; direct deploy before/after canonical activation; rollback with missing/stale/foreign/valid lease token; preflight failure before selection; automatic restore compatibility; shell-level disposable runtime; complete provider and console regressions |
+| Network provider guard | Manifest contract validation; guarded and unguarded target releases; direct deploy before/after canonical activation; rollback with missing/stale/foreign/valid inherited lease descriptor; wrapper-death and retained-manifest-replacement pauses; repeated last-point validation; preflight failure before selection; automatic restore compatibility; shell-level disposable runtime; complete provider and console regressions |
 | Mechanical lifecycle | Tampered checkpoint, changed head, unmerged close, squash/rebase ancestry failure, review/check regression, dirty/divergent main, receipt/health mismatch, incomplete task/children, branch/worktree residue |
 | Security | Webhook HMAC and replay window, OAuth/local viewer auth, same-origin, strict bounded JSON, file modes, symlink/path traversal, environment allowlist and redaction |
 | Runtime supervision | Recovery before readiness, component error propagation, cancellation, bounded join, no leaked temporary processes |
