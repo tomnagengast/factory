@@ -67,12 +67,18 @@ func TestCanonicalQuiescenceKeepsBootstrapHealthUntilProcessShutdown(t *testing.
 	quiesce := make(chan os.Signal, 1)
 	runtimeStopped := make(chan struct{})
 	withdrawn := make(chan struct{})
+	withdrawalStarted := make(chan struct{})
 	result := make(chan error, 1)
+	requestEntered := make(chan struct{})
+	requestRelease := make(chan struct{})
+	requestDone := make(chan struct{})
 	build := server.BuildIdentity{
 		Commit: "commit", Tree: "tree", BuildID: "build", DeploymentID: "deployment",
 		ContractVersion: "1", StartedAt: time.Date(2026, time.July, 17, 17, 0, 0, 0, time.UTC),
 	}
 	switcher, err := app.NewHandlerSwitch(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		close(requestEntered)
+		<-requestRelease
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	if err != nil {
@@ -81,6 +87,7 @@ func TestCanonicalQuiescenceKeepsBootstrapHealthUntilProcessShutdown(t *testing.
 
 	go func() {
 		result <- runQuiesceableRuntime(ctx, quiesce, func() {
+			close(withdrawalStarted)
 			switcher.Install(canonicalBootstrapHandler(build))
 			close(withdrawn)
 		}, func(runtimeContext context.Context) error {
@@ -89,13 +96,30 @@ func TestCanonicalQuiescenceKeepsBootstrapHealthUntilProcessShutdown(t *testing.
 			return runtimeContext.Err()
 		})
 	}()
+	go func() {
+		switcher.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/settings", nil))
+		close(requestDone)
+	}()
+	<-requestEntered
 
 	quiesce <- syscall.SIGUSR1
+	select {
+	case <-withdrawalStarted:
+	case <-time.After(time.Second):
+		t.Fatal("mutable handler withdrawal did not start")
+	}
+	select {
+	case <-runtimeStopped:
+		t.Fatal("advancing runtime stopped before entered request drained")
+	default:
+	}
+	close(requestRelease)
 	select {
 	case <-withdrawn:
 	case <-time.After(time.Second):
 		t.Fatal("mutable handler was not withdrawn")
 	}
+	<-requestDone
 	select {
 	case <-runtimeStopped:
 	case <-time.After(time.Second):
