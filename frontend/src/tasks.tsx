@@ -17,7 +17,7 @@ import {
   runStateLabel,
 } from "./activity";
 import { agentRunHref, type AgentActivityRun } from "./agent";
-import { getJSON } from "./http";
+import { getJSON, HTTPError, sendJSON } from "./http";
 
 type TaskRef = {
   source: "factory" | "linear";
@@ -167,32 +167,18 @@ class TaskConflict extends Error {
 }
 
 async function taskRequest<T>(url: string, method: string, body: unknown): Promise<T> {
-  const response = await fetch(url, {
-    method,
-    cache: "no-store",
-    credentials: "same-origin",
-    headers: {
-      "Content-Type": "application/json",
-      "Idempotency-Key": crypto.randomUUID(),
-    },
-    body: JSON.stringify(body),
-  });
-  if (response.status === 409) {
-    const text = await response.text();
-    let current: unknown = text;
-    try {
-      current = text ? JSON.parse(text) : undefined;
-    } catch {
-      // Preserve a plain-text conflict reason.
+  try {
+    return await sendJSON<T>(url, "Task request", {
+      method,
+      body,
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  } catch (error) {
+    if (error instanceof HTTPError && error.status === 409) {
+      throw new TaskConflict(error.body);
     }
-    throw new TaskConflict(current);
+    throw error;
   }
-  if (!response.ok) {
-    const detail = (await response.text()).trim();
-    throw new Error(detail || `Task request failed with ${response.status}`);
-  }
-  const text = await response.text();
-  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 export function TasksPage(): JSX.Element {

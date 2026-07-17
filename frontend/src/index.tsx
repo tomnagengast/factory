@@ -19,7 +19,7 @@ import {
   runStateLabel,
 } from "./activity";
 import { agentRunHref, type AgentActivityRun, type AgentRun } from "./agent";
-import { getJSON } from "./http";
+import { getJSON, HTTPError, sendJSON } from "./http";
 import { LinearTaskDetailPage, NativeTaskDetailPage, TasksPage } from "./tasks";
 import "./styles.css";
 
@@ -412,67 +412,50 @@ class WorkflowConflict extends Error {
 }
 
 async function workflowRequest<T>(url: string, method: string, body?: unknown): Promise<T> {
-  const response = await fetch(url, {
-    method,
-    cache: "no-store",
-    credentials: "same-origin",
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (response.status === 409) {
-    throw new WorkflowConflict((await response.json()) as WorkflowsResponse);
+  try {
+    return await sendJSON<T>(url, "Workflow request", { method, body });
+  } catch (error) {
+    if (error instanceof HTTPError && error.status === 409) {
+      throw new WorkflowConflict(error.body as WorkflowsResponse);
+    }
+    throw error;
   }
-  if (!response.ok) {
-    const detail = (await response.text()).trim();
-    throw new Error(detail || `Workflow request failed with ${response.status}`);
-  }
-  if (response.status === 204) return undefined as T;
-  const text = await response.text();
-  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 async function saveTriggers(candidate: TriggerRegistry): Promise<TriggerSaveResult> {
-  const response = await fetch("/api/triggers", {
-    method: "PUT",
-    cache: "no-store",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(candidate),
-  });
-  if (response.status === 409) {
-    return { snapshot: (await response.json()) as TriggerResponse, conflict: true };
+  try {
+    return {
+      snapshot: await sendJSON<TriggerResponse>("/api/triggers", "Trigger update", {
+        method: "PUT",
+        body: candidate,
+      }),
+      conflict: false,
+    };
+  } catch (error) {
+    if (error instanceof HTTPError && error.status === 409) {
+      return { snapshot: error.body as TriggerResponse, conflict: true };
+    }
+    throw error;
   }
-  if (!response.ok) {
-    const detail = (await response.text()).trim();
-    throw new Error(detail || `Trigger update failed with ${response.status}`);
-  }
-  return { snapshot: (await response.json()) as TriggerResponse, conflict: false };
 }
 
 async function saveSettings(
   candidate: FactorySettings,
 ): Promise<SettingsSaveResult> {
-  const response = await fetch("/api/settings", {
-    method: "PUT",
-    cache: "no-store",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(candidate),
-  });
-  if (response.status === 409) {
+  try {
     return {
-      snapshot: (await response.json()) as FactorySettings,
-      conflict: true,
+      snapshot: await sendJSON<FactorySettings>("/api/settings", "Settings update", {
+        method: "PUT",
+        body: candidate,
+      }),
+      conflict: false,
     };
+  } catch (error) {
+    if (error instanceof HTTPError && error.status === 409) {
+      return { snapshot: error.body as FactorySettings, conflict: true };
+    }
+    throw error;
   }
-  if (!response.ok) {
-    const detail = (await response.text()).trim();
-    throw new Error(detail || `Settings update failed with ${response.status}`);
-  }
-  return {
-    snapshot: (await response.json()) as FactorySettings,
-    conflict: false,
-  };
 }
 
 function resourceSnapshot<T>(resource: Resource<T>): T | undefined {
