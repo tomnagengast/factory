@@ -154,19 +154,9 @@ func (a *RunAdapter) RoutingSnapshot() triggerrouter.Snapshot {
 	for index, run := range model.Runs {
 		rule := rules[run.Causation.RuleID]
 		if rule.ID == "" {
-			rule = triggerregistry.Rule{ID: run.Causation.RuleID, Revision: run.Causation.RuleRevision, Name: run.Causation.RuleID, Enabled: true}
+			rule = legacyRule(run)
 		}
-		pin := workflowPin(run)
-		invocations[index] = triggerrouter.Invocation{
-			ID: run.Causation.AdmissionID, EventID: run.Causation.EventID, EventSequence: run.Causation.EventSequence,
-			Rule: rule, Workflow: pin, WorkflowDigest: run.Causation.WorkflowDigest,
-			PolicyRevision: run.Causation.PolicyRevision, Task: run.Causation.Task,
-			IssueIdentifier: run.Causation.Task.Identifier, RootEventID: run.Causation.RootEventID,
-			ParentInvocationID: run.Causation.ParentAdmissionID, ParentRunID: run.Causation.ParentRunID,
-			Hop: run.Causation.Hop, AncestorRuleIDs: slices.Clone(run.Causation.AncestorRuleIDs),
-			State: legacyInvocationState(run.State), RunID: run.ID, Reason: run.Detail,
-			AdmittedAt: run.Causation.AdmittedAt, UpdatedAt: run.UpdatedAt, ReflectedAt: cloneTime(run.FinishedAt),
-		}
+		invocations[index] = legacyInvocation(run, rule)
 	}
 	rates := make([]triggerrouter.RateBucket, len(model.RateBuckets))
 	for index, rate := range model.RateBuckets {
@@ -305,4 +295,27 @@ func workflowPin(run runs.Run) workflow.Pinned {
 		return workflow.Pinned{}
 	}
 	return run.Causation.Workflow.Clone()
+}
+
+func legacyRule(run runs.Run) triggerregistry.Rule {
+	return triggerregistry.Rule{
+		ID: run.Causation.RuleID, Revision: run.Causation.RuleRevision, Name: run.Causation.RuleID, Enabled: true,
+		WorkflowID: workflowPin(run).ID,
+		Target:     triggerregistry.TargetPolicy{Provider: run.Causation.Task.Source, Kind: triggerregistry.TargetEventSubject},
+		MaxHop:     triggerregistry.DefaultMaxHop, MaxOutstanding: triggerregistry.DefaultMaxOutstanding,
+		AdmissionsHour: triggerregistry.DefaultAdmissionsHour,
+	}
+}
+
+func legacyInvocation(run runs.Run, rule triggerregistry.Rule) triggerrouter.Invocation {
+	return triggerrouter.Invocation{
+		ID: run.Causation.AdmissionID, EventID: run.Causation.EventID, EventSequence: run.Causation.EventSequence,
+		Rule: rule, Workflow: workflowPin(run), WorkflowDigest: run.Causation.WorkflowDigest,
+		PolicyRevision: run.Causation.PolicyRevision, Task: run.Causation.Task,
+		IssueIdentifier: run.Causation.Task.Identifier, RootEventID: run.Causation.RootEventID,
+		ParentInvocationID: run.Causation.ParentAdmissionID, ParentRunID: run.Causation.ParentRunID,
+		Hop: run.Causation.Hop, AncestorRuleIDs: slices.Clone(run.Causation.AncestorRuleIDs),
+		State: legacyInvocationState(run.State), RunID: run.ID, Reason: run.Detail,
+		AdmittedAt: run.Causation.AdmittedAt, UpdatedAt: run.UpdatedAt, ReflectedAt: cloneTime(run.FinishedAt),
+	}
 }

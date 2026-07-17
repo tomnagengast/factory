@@ -394,8 +394,6 @@ func TestNativeAdmissionRejectsInvalidAuthority(t *testing.T) {
 		{name: "task", mutate: func(value *NativeAdmission) { value.Task.Source = taskmodel.SourceLinear }},
 		{name: "workflow disabled", mutate: func(value *NativeAdmission) { value.Workflow.Enabled = false }},
 		{name: "workflow digest", mutate: func(value *NativeAdmission) { value.WorkflowDigest = strings.Repeat("f", 64) }},
-		{name: "policy revision", mutate: func(value *NativeAdmission) { value.PolicyRevision = 0 }},
-		{name: "registry revision", mutate: func(value *NativeAdmission) { value.RegistryRevision = 0 }},
 		{name: "policy generation", mutate: func(value *NativeAdmission) { value.PolicyGeneration = 0 }},
 		{name: "decision time", mutate: func(value *NativeAdmission) { value.AdmittedAt = value.AdmittedAt.In(time.FixedZone("test", 3600)) }},
 	}
@@ -411,6 +409,17 @@ func TestNativeAdmissionRejectsInvalidAuthority(t *testing.T) {
 	}
 	if len(snapshotModel(t, store).Runs) != 0 {
 		t.Fatal("invalid native admission changed the store")
+	}
+}
+
+func TestNativeAdmissionAcceptsInitialPublicPolicyRevisions(t *testing.T) {
+	store := createEmptyStore(t, filepath.Join(t.TempDir(), "runs.jsonl"), 10)
+	t.Cleanup(func() { _ = store.Close() })
+	admission := nativeAdmissionFixture(t, modelTestNow)
+	admission.PolicyRevision = 0
+	admission.RegistryRevision = 0
+	if _, created, err := mustAdmitter(t, store).AdmitNative(admission); err != nil || !created {
+		t.Fatalf("revision-zero native admission: created=%t err=%v", created, err)
 	}
 }
 

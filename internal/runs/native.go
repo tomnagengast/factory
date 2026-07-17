@@ -51,8 +51,8 @@ func (a *Admitter) admitNative(admission NativeAdmission, origin AdmissionOrigin
 		return Run{}, false, errors.New("runs: native admission task is invalid")
 	}
 	if err := admission.Workflow.Validate(); err != nil || !admission.Workflow.Enabled || !admission.Workflow.Complete() ||
-		admission.WorkflowDigest == "" || admission.PolicyRevision == 0 || admission.RegistryRevision == 0 ||
-		admission.PolicyGeneration == 0 || admission.AdmittedAt.IsZero() || admission.AdmittedAt.Location() != time.UTC {
+		admission.WorkflowDigest == "" || admission.PolicyGeneration == 0 || admission.AdmittedAt.IsZero() ||
+		admission.AdmittedAt.Location() != time.UTC {
 		return Run{}, false, errors.New("runs: native admission workflow and policy evidence are invalid")
 	}
 	digest, err := admission.Workflow.Digest()
