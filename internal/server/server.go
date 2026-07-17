@@ -100,6 +100,7 @@ type AgentObserver interface {
 type SettingsStore interface {
 	Snapshot() settings.Snapshot
 	Update(uint64, settings.Snapshot, time.Time) (settings.Snapshot, error)
+	MarkWorkflowRollbackIncompatible(time.Time) (settings.Snapshot, error)
 }
 
 type WorkflowDraftStore interface {
@@ -984,13 +985,9 @@ func (s *appServer) dispatchLinear(ctx context.Context, record eventwire.Record)
 			if err != nil {
 				return fmt.Errorf("server: digest Linear continuation workflow: %w", err)
 			}
-			if marker, ok := s.settings.(interface {
-				MarkWorkflowRollbackIncompatible(time.Time) (settings.Snapshot, error)
-			}); ok {
-				configuration, err = marker.MarkWorkflowRollbackIncompatible(record.Event.ReceivedAt)
-				if err != nil {
-					return fmt.Errorf("server: mark workflow rollback boundary: %w", err)
-				}
+			configuration, err = s.settings.MarkWorkflowRollbackIncompatible(record.Event.ReceivedAt)
+			if err != nil {
+				return fmt.Errorf("server: mark workflow rollback boundary: %w", err)
 			}
 			trigger, err := s.repositoryTrigger(ctx, deliveryID, event.IssueIdentifier, agentrun.TriggerKindComment)
 			if err != nil {
@@ -1036,13 +1033,9 @@ func resolveInitialWorkflowCandidate(store SettingsStore, triggerKind string, no
 	if err != nil {
 		return agentrun.FailedWorkflowCandidate(fmt.Errorf("digest %s workflow: %w", triggerKind, err))
 	}
-	if marker, ok := store.(interface {
-		MarkWorkflowRollbackIncompatible(time.Time) (settings.Snapshot, error)
-	}); ok {
-		configuration, err = marker.MarkWorkflowRollbackIncompatible(now)
-		if err != nil {
-			return agentrun.FailedWorkflowCandidate(fmt.Errorf("mark workflow rollback boundary: %w", err))
-		}
+	configuration, err = store.MarkWorkflowRollbackIncompatible(now)
+	if err != nil {
+		return agentrun.FailedWorkflowCandidate(fmt.Errorf("mark workflow rollback boundary: %w", err))
 	}
 	return agentrun.ResolvedWorkflowCandidate(pinned, digest, configuration.Revision)
 }

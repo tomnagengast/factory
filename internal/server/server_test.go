@@ -803,6 +803,9 @@ func TestLinearFactoryLabelStartsOneRunPerActiveIssue(t *testing.T) {
 	if got := notifier.count.Load(); got != 1 {
 		t.Fatalf("notifications = %d, want 1", got)
 	}
+	if !configuration.Snapshot().WorkflowRollbackIncompatible {
+		t.Fatal("initial pinned admission did not mark the workflow rollback boundary")
+	}
 	activityRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(activityRecorder, httptest.NewRequest(http.MethodGet, "/api/home", nil))
 	if body := activityRecorder.Body.String(); strings.Contains(body, "ENG-123") || strings.Contains(body, testActorID) {
