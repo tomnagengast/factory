@@ -14,8 +14,8 @@ import (
 const maxSourceStateBytes = 2 << 20
 
 // Store owns the canonical repository artifact and its validated catalog
-// projection. Mutations remain package-private until they can be expressed as
-// typed onboarding operations.
+// projection. Raw persistence remains package-private; exported mutations are
+// expressed as typed onboarding operations.
 type Store struct {
 	mu      sync.Mutex
 	path    string
@@ -109,7 +109,10 @@ func (s *Store) Snapshot() SourceState {
 func (s *Store) persist(next SourceState) (SourceState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.persistLocked(next)
+}
 
+func (s *Store) persistLocked(next SourceState) (SourceState, error) {
 	s.catalog.mu.RLock()
 	current := s.catalog.index
 	s.catalog.mu.RUnlock()

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var (
@@ -154,7 +155,7 @@ func (d Deployment) validate() error {
 	}
 	if d.SourcePath != "" {
 		clean := filepath.Clean(d.SourcePath)
-		if filepath.IsAbs(d.SourcePath) || clean == "." || clean != d.SourcePath || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		if !utf8.ValidString(d.SourcePath) || filepath.IsAbs(d.SourcePath) || clean == "." || clean != d.SourcePath || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 			return errors.New("repository record: source path must be canonical and stay within the repository")
 		}
 	}
@@ -344,7 +345,7 @@ func validBranch(value string) bool {
 }
 
 func canonicalAbsolutePath(value string) bool {
-	return filepath.IsAbs(value) && filepath.Clean(value) == value
+	return utf8.ValidString(value) && filepath.IsAbs(value) && filepath.Clean(value) == value
 }
 
 func pathWithin(root, target string) bool {
@@ -357,7 +358,7 @@ func pathsOverlap(left, right string) bool {
 }
 
 func validText(value string, maximum int) bool {
-	return value != "" && value == strings.TrimSpace(value) && len(value) <= maximum
+	return value != "" && utf8.ValidString(value) && value == strings.TrimSpace(value) && len(value) <= maximum
 }
 
 func validOptionalText(value string, maximum int) bool {
