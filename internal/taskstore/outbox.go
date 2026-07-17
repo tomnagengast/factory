@@ -610,12 +610,12 @@ func (o *TaskOutbox) Execute(ctx context.Context, command CommandEnvelope, now t
 	if o == nil || o.store == nil || o.wire == nil {
 		return Result{}, errors.New("task outbox: unavailable")
 	}
-	operation, replayed, err := o.store.SubmitTaskOperation(command, now)
+	operation, _, err := o.store.SubmitTaskOperation(command, now)
 	if err != nil {
 		return Result{}, err
 	}
 	if operation.State == TaskOperationAcknowledged {
-		return operation.response(replayed)
+		return operation.response(true)
 	}
 	if operation.State == TaskOperationPendingUnpublished {
 		if _, _, err := o.wire.Publish(ctx, operation.Event()); err != nil {
@@ -629,7 +629,11 @@ func (o *TaskOutbox) Execute(ctx context.Context, command CommandEnvelope, now t
 	if !found || operation.State != TaskOperationAcknowledged {
 		return Result{}, errors.New("task outbox: operation did not reach global acknowledgement")
 	}
-	return operation.response(replayed)
+	// The legacy coordinator synchronously dispatches and then rereads the
+	// durable idempotent outcome, so its successful API response reports a
+	// replay even on the first call. Preserve that public behavior while the
+	// task operation keeps its original non-replayed result as journal evidence.
+	return operation.response(true)
 }
 
 func (o *TaskOutbox) Reconcile(ctx context.Context) error {

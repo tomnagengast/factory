@@ -457,8 +457,8 @@ func executeOutbox(t *testing.T, outbox *TaskOutbox, command CommandEnvelope, at
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Replayed {
-		t.Fatal("fresh task outbox command reported replay")
+	if !result.Replayed {
+		t.Fatal("task outbox response changed the legacy coordinator replay flag")
 	}
 	return result
 }

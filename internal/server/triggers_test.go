@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +24,34 @@ import (
 	"github.com/tomnagengast/factory/internal/triggerscheduler"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
+
+func TestGenericLinearLabelUsesOneNormalizedMetadataBuild(t *testing.T) {
+	t.Parallel()
+	handler, policy, _ := testTriggerHandler(t)
+	body := fmt.Sprintf(
+		`{"type":"Issue","action":"update","webhookTimestamp":%d,"actor":{"id":"%s"},"data":{"id":"11111111-1111-4111-8111-111111111111","identifier":"ENG-40","labelIds":["label-other","label-factory"],"labels":[{"id":"label-other","name":"Other"},{"id":"label-factory","name":" Factory "}]},"updatedFrom":{"labelIds":["label-other"]}}`,
+		testNow.UnixMilli(), testActorID,
+	)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, signedWebhookRequest(body, "generic-label-metadata", testSecret))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("webhook status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	routing := policy.RoutingSnapshot()
+	if len(routing.Decisions) != 1 || len(routing.Invocations) != 1 || routing.Invocations[0].Rule.ID != "linear-label" || routing.Invocations[0].Task.Identifier != "ENG-40" {
+		t.Fatalf("generic label admission = %#v", routing)
+	}
+	record, found := policy.Record(1)
+	if !found {
+		t.Fatal("normalized Linear record is missing")
+	}
+	if got := record.Event.Values(triggerregistry.AttributeAddedLabel); !reflect.DeepEqual(got, []string{"FACTORY"}) {
+		t.Fatalf("normalized added label metadata = %#v", got)
+	}
+	if got := record.Event.Values("addedLabelId"); !reflect.DeepEqual(got, []string{"label-factory"}) {
+		t.Fatalf("normalized added label IDs = %#v", got)
+	}
+}
 
 type scheduleStatusStub struct{ values []triggerscheduler.Status }
 
