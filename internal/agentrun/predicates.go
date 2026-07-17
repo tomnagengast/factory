@@ -9,37 +9,9 @@ import (
 )
 
 var (
-	deployCompletionProfile = predicate.Profile{
-		Name: predicate.ProfileSDLCDeploy,
-		Mode: predicate.All,
-		Requirements: []predicate.Requirement{
-			{Atom: predicate.DeploymentSuccessful, Failure: "deployment receipt is not successful"},
-			{Atom: predicate.HealthMatches, Failure: "running health identity does not match the deployment"},
-			{Atom: predicate.SourceValid, Failure: "completion source is not clean updated main"},
-			{Atom: predicate.MergeContained, Failure: "updated main does not contain the merge"},
-			{Atom: predicate.VerifiedHeadContained, Failure: "merged result does not contain the verified head"},
-			{Atom: predicate.SafeguardsClear, Failure: "pull request checks or reviews regressed"},
-			{Atom: predicate.RemoteBranchAbsent, Failure: "remote issue branch still exists"},
-			{Atom: predicate.WorktreeAbsent, Failure: "issue worktree still exists"},
-			{Atom: predicate.TaskComplete, Failure: "task is not complete"},
-			{Atom: predicate.ChildrenComplete, Failure: "child work remains incomplete"},
-		},
-	}
-	repositoryCompletionProfile = predicate.Profile{
-		Name: predicate.ProfileSDLCRepoOnly,
-		Mode: predicate.All,
-		Requirements: []predicate.Requirement{
-			{Atom: predicate.SourceValid, Failure: "completion source is not clean updated main"},
-			{Atom: predicate.MergeContained, Failure: "updated main does not contain the merge"},
-			{Atom: predicate.VerifiedHeadContained, Failure: "merged result does not contain the verified head"},
-			{Atom: predicate.SafeguardsClear, Failure: "pull request checks or reviews regressed"},
-			{Atom: predicate.RemoteBranchAbsent, Failure: "remote issue branch still exists"},
-			{Atom: predicate.WorktreeAbsent, Failure: "issue worktree still exists"},
-			{Atom: predicate.TaskComplete, Failure: "task is not complete"},
-			{Atom: predicate.ChildrenComplete, Failure: "child work remains incomplete"},
-		},
-	}
-	healthIdentityProfile = predicate.Profile{
+	deployCompletionProfile     = predicate.SDLCDeployProfile()
+	repositoryCompletionProfile = predicate.SDLCRepoOnlyProfile()
+	healthIdentityProfile       = predicate.Profile{
 		Name: "health-identity",
 		Mode: predicate.All,
 		Requirements: []predicate.Requirement{

@@ -152,3 +152,22 @@ func TestAtomVocabularyIsValidAndUnique(t *testing.T) {
 		seen[atom] = struct{}{}
 	}
 }
+
+func TestPublicSDLCProfilesAreValidAndIsolated(t *testing.T) {
+	t.Parallel()
+	deploy := SDLCDeployProfile()
+	repository := SDLCRepoOnlyProfile()
+	if err := deploy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if deploy.Name != ProfileSDLCDeploy || repository.Name != ProfileSDLCRepoOnly || len(deploy.Requirements) != len(repository.Requirements)+2 {
+		t.Fatalf("profiles = %#v, %#v", deploy, repository)
+	}
+	deploy.Requirements[0].Failure = "mutated"
+	if got := SDLCDeployProfile().Requirements[0].Failure; got == "mutated" {
+		t.Fatal("public profile shared mutable requirements")
+	}
+}
