@@ -1,0 +1,409 @@
+package runs
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"slices"
+	"sort"
+	"time"
+
+	"github.com/tomnagengast/factory/internal/eventwire"
+	"github.com/tomnagengast/factory/internal/repositories"
+	"github.com/tomnagengast/factory/internal/taskmodel"
+	"github.com/tomnagengast/factory/internal/workflow"
+)
+
+const (
+	SchemaVersion  = 1
+	JournalVersion = 1
+)
+
+type AdmissionOrigin string
+
+const (
+	AdmissionOriginEvent          AdmissionOrigin = "event"
+	AdmissionOriginNative         AdmissionOrigin = "native"
+	AdmissionOriginContinuation   AdmissionOrigin = "continuation"
+	AdmissionOriginMigratedDirect AdmissionOrigin = "migrated_direct"
+)
+
+type AdmissionOutcomeKind string
+
+const (
+	AdmissionOutcomeRun        AdmissionOutcomeKind = "run"
+	AdmissionOutcomeRejected   AdmissionOutcomeKind = "rejected"
+	AdmissionOutcomeSuppressed AdmissionOutcomeKind = "suppressed"
+)
+
+type LifecycleState string
+
+const (
+	StateAdmitted           LifecycleState = "admitted"
+	StateRouting            LifecycleState = "routing"
+	StatePending            LifecycleState = "pending"
+	StatePostMergePending   LifecycleState = "post_merge_pending"
+	StateStarting           LifecycleState = "starting"
+	StateRunning            LifecycleState = "running"
+	StateAwaitingHumanMerge LifecycleState = "awaiting_human_merge"
+	StateSucceeded          LifecycleState = "succeeded"
+	StateBlocked            LifecycleState = "blocked"
+	StateFailed             LifecycleState = "failed"
+	StateRejected           LifecycleState = "rejected"
+)
+
+func (s LifecycleState) Nonterminal() bool {
+	switch s {
+	case StateAdmitted, StateRouting, StatePending, StatePostMergePending, StateStarting, StateRunning, StateAwaitingHumanMerge:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s LifecycleState) Terminal() bool {
+	return s == StateSucceeded || s == StateBlocked || s == StateFailed || s == StateRejected
+}
+
+// Model is the canonical journal projection. JournalSequence is durability
+// metadata and is intentionally excluded from the semantic digest.
+type Model struct {
+	Schema           int              `json:"schema"`
+	JournalSequence  uint64           `json:"journalSequence"`
+	TotalBatches     uint64           `json:"totalBatches"`
+	TotalRuns        uint64           `json:"totalRuns"`
+	AdmissionBatches []AdmissionBatch `json:"admissionBatches"`
+	Runs             []Run            `json:"runs"`
+	RateBuckets      []RateBucket     `json:"rateBuckets"`
+}
+
+type AdmissionBatch struct {
+	ID               string             `json:"id"`
+	Origin           AdmissionOrigin    `json:"origin"`
+	EventID          string             `json:"eventId"`
+	EventSequence    uint64             `json:"eventSequence,omitempty"`
+	EventSource      eventwire.Source   `json:"eventSource"`
+	RegistryRevision uint64             `json:"registryRevision,omitempty"`
+	SettingsRevision uint64             `json:"settingsRevision,omitempty"`
+	PolicyGeneration uint64             `json:"policyGeneration,omitempty"`
+	DecidedAt        time.Time          `json:"decidedAt"`
+	Outcomes         []AdmissionOutcome `json:"outcomes"`
+}
+
+type AdmissionOutcome struct {
+	Kind         AdmissionOutcomeKind `json:"kind"`
+	RuleID       string               `json:"ruleId"`
+	RuleRevision uint64               `json:"ruleRevision"`
+	AdmissionID  string               `json:"admissionId,omitempty"`
+	RunID        string               `json:"runId,omitempty"`
+	Reason       string               `json:"reason,omitempty"`
+}
+
+// Causation is immutable after a Run is created. AdmissionID preserves the
+// migrated Invocation identity; Run.ID separately preserves the legacy Run
+// identity needed by parentRunId compatibility.
+type Causation struct {
+	AdmissionID       string            `json:"admissionId"`
+	BatchID           string            `json:"batchId"`
+	EventID           string            `json:"eventId"`
+	EventSequence     uint64            `json:"eventSequence,omitempty"`
+	EventSource       eventwire.Source  `json:"eventSource"`
+	RuleID            string            `json:"ruleId"`
+	RuleRevision      uint64            `json:"ruleRevision"`
+	Workflow          *workflow.Pinned  `json:"workflow,omitempty"`
+	WorkflowDigest    string            `json:"workflowDigest,omitempty"`
+	PolicyRevision    uint64            `json:"policyRevision,omitempty"`
+	PolicyGeneration  uint64            `json:"policyGeneration,omitempty"`
+	Task              taskmodel.TaskRef `json:"task"`
+	RootEventID       string            `json:"rootEventId"`
+	ParentAdmissionID string            `json:"parentAdmissionId,omitempty"`
+	ParentRunID       string            `json:"parentRunId,omitempty"`
+	Hop               int               `json:"hop"`
+	AncestorRuleIDs   []string          `json:"ancestorRuleIds"`
+	AdmittedAt        time.Time         `json:"admittedAt"`
+}
+
+type Run struct {
+	ID                  string                `json:"id"`
+	Causation           Causation             `json:"causation"`
+	Repository          *repositories.Route   `json:"repository,omitempty"`
+	RepositoryRejection string                `json:"repositoryRejection,omitempty"`
+	TriggerKind         string                `json:"triggerKind"`
+	DeliveryIDs         []string              `json:"deliveryIds"`
+	DuplicateDeliveries uint64                `json:"duplicateDeliveries"`
+	State               LifecycleState        `json:"state"`
+	SessionName         string                `json:"sessionName,omitempty"`
+	RunDirectory        string                `json:"runDirectory,omitempty"`
+	Attempts            int                   `json:"attempts"`
+	Detail              string                `json:"detail,omitempty"`
+	CreatedAt           time.Time             `json:"createdAt"`
+	UpdatedAt           time.Time             `json:"updatedAt"`
+	StartedAt           *time.Time            `json:"startedAt,omitempty"`
+	SegmentStartedAt    *time.Time            `json:"segmentStartedAt,omitempty"`
+	SegmentAttempt      int                   `json:"segmentAttemptOffset,omitempty"`
+	FinishedAt          *time.Time            `json:"finishedAt,omitempty"`
+	Transitions         []LifecycleTransition `json:"transitions"`
+	Ready               *ReadyCheckpoint      `json:"ready,omitempty"`
+	MergeCommitOID      string                `json:"mergeCommitOid,omitempty"`
+	GitHub              GitHubState           `json:"github"`
+	ResumeCount         int                   `json:"resumeCount,omitempty"`
+	TerminalIntent      string                `json:"terminalIntent,omitempty"`
+	TerminalRejection   string                `json:"terminalRejection,omitempty"`
+	Completion          *CompletionValidation `json:"completion,omitempty"`
+}
+
+type LifecycleTransition struct {
+	ID       string         `json:"id"`
+	State    LifecycleState `json:"state"`
+	Attempts int            `json:"attempts"`
+	At       time.Time      `json:"at"`
+}
+
+type GitHubState struct {
+	LastCursor                 uint64     `json:"lastCursor,omitempty"`
+	LastAuthoritativeRefreshAt *time.Time `json:"lastAuthoritativeRefreshAt,omitempty"`
+	NextReconcileAt            *time.Time `json:"nextReconcileAt,omitempty"`
+	ReconcileFailures          int        `json:"reconcileFailures,omitempty"`
+	RemediationRequested       bool       `json:"remediationRequested,omitempty"`
+}
+
+type ReadyCheckpoint struct {
+	ContractVersion      int               `json:"contractVersion"`
+	RunID                string            `json:"runId"`
+	Task                 taskmodel.TaskRef `json:"task,omitzero"`
+	Repository           string            `json:"repository"`
+	PullRequest          int               `json:"pullRequest"`
+	BaseBranch           string            `json:"baseBranch"`
+	HeadBranch           string            `json:"headBranch"`
+	VerifiedHeadOID      string            `json:"verifiedHeadOid"`
+	PullRequestUpdatedAt time.Time         `json:"pullRequestUpdatedAt,omitempty"`
+	CreatedAt            time.Time         `json:"createdAt"`
+	ValidatedAt          time.Time         `json:"validatedAt,omitempty"`
+}
+
+type CompletionValidation struct {
+	Accepted         bool           `json:"accepted"`
+	Intent           string         `json:"intent"`
+	Blocker          string         `json:"blocker,omitempty"`
+	State            LifecycleState `json:"state"`
+	Reason           string         `json:"reason"`
+	ValidatedAt      time.Time      `json:"validatedAt"`
+	PullRequestState string         `json:"pullRequestState,omitempty"`
+	PullRequestHead  string         `json:"pullRequestHead,omitempty"`
+	MergeCommitOID   string         `json:"mergeCommitOid,omitempty"`
+	DeploymentID     string         `json:"deploymentId,omitempty"`
+	DeploymentCommit string         `json:"deploymentCommit,omitempty"`
+}
+
+type RateBucket struct {
+	RuleID string    `json:"ruleId"`
+	Minute time.Time `json:"minute"`
+	Count  int       `json:"count"`
+}
+
+// Snapshot is immutable. Model returns a complete deep clone.
+type Snapshot struct {
+	model Model
+}
+
+func NewSnapshot(model Model) (Snapshot, error) {
+	canonicalizeModel(&model)
+	if err := validateModel(model); err != nil {
+		return Snapshot{}, err
+	}
+	return Snapshot{model: cloneModel(model)}, nil
+}
+
+func EmptyModel() Model {
+	return Model{
+		Schema: SchemaVersion, AdmissionBatches: []AdmissionBatch{},
+		Runs: []Run{}, RateBuckets: []RateBucket{},
+	}
+}
+
+func (s Snapshot) Model() Model { return cloneModel(s.model) }
+
+func (s Snapshot) Validate() error { return validateModel(s.model) }
+
+func (s Snapshot) Digest() (string, error) {
+	semantic := struct {
+		Schema           int              `json:"schema"`
+		TotalBatches     uint64           `json:"totalBatches"`
+		TotalRuns        uint64           `json:"totalRuns"`
+		AdmissionBatches []AdmissionBatch `json:"admissionBatches"`
+		Runs             []Run            `json:"runs"`
+		RateBuckets      []RateBucket     `json:"rateBuckets"`
+	}{
+		Schema: s.model.Schema, TotalBatches: s.model.TotalBatches, TotalRuns: s.model.TotalRuns,
+		AdmissionBatches: cloneAdmissionBatches(s.model.AdmissionBatches),
+		Runs:             cloneRuns(s.model.Runs), RateBuckets: slices.Clone(s.model.RateBuckets),
+	}
+	data, err := json.Marshal(semantic)
+	if err != nil {
+		return "", fmt.Errorf("runs: encode digest: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func (r Run) Clone() Run { return cloneRun(r) }
+
+func (r Run) Validate() error {
+	r = cloneRun(r)
+	canonicalizeRun(&r)
+	return validateRun(r)
+}
+
+func canonicalizeModel(model *Model) {
+	for index := range model.AdmissionBatches {
+		canonicalizeAdmissionBatch(&model.AdmissionBatches[index])
+	}
+	for index := range model.Runs {
+		canonicalizeRun(&model.Runs[index])
+	}
+	for index := range model.RateBuckets {
+		model.RateBuckets[index].Minute = model.RateBuckets[index].Minute.UTC().Truncate(time.Minute)
+	}
+	sort.Slice(model.AdmissionBatches, func(i, j int) bool {
+		left, right := model.AdmissionBatches[i], model.AdmissionBatches[j]
+		if !left.DecidedAt.Equal(right.DecidedAt) {
+			return left.DecidedAt.Before(right.DecidedAt)
+		}
+		return left.ID < right.ID
+	})
+	sort.Slice(model.Runs, func(i, j int) bool {
+		left, right := model.Runs[i], model.Runs[j]
+		if !left.CreatedAt.Equal(right.CreatedAt) {
+			return left.CreatedAt.Before(right.CreatedAt)
+		}
+		return left.ID < right.ID
+	})
+	sort.Slice(model.RateBuckets, func(i, j int) bool {
+		if model.RateBuckets[i].RuleID != model.RateBuckets[j].RuleID {
+			return model.RateBuckets[i].RuleID < model.RateBuckets[j].RuleID
+		}
+		return model.RateBuckets[i].Minute.Before(model.RateBuckets[j].Minute)
+	})
+}
+
+func canonicalizeAdmissionBatch(batch *AdmissionBatch) {
+	batch.DecidedAt = batch.DecidedAt.UTC()
+	sort.Slice(batch.Outcomes, func(i, j int) bool {
+		left, right := batch.Outcomes[i], batch.Outcomes[j]
+		if left.RuleID != right.RuleID {
+			return left.RuleID < right.RuleID
+		}
+		if left.RuleRevision != right.RuleRevision {
+			return left.RuleRevision < right.RuleRevision
+		}
+		if left.Kind != right.Kind {
+			return left.Kind < right.Kind
+		}
+		return left.AdmissionID < right.AdmissionID
+	})
+}
+
+func canonicalizeRun(run *Run) {
+	run.Causation.AdmittedAt = run.Causation.AdmittedAt.UTC()
+	if run.Causation.Workflow != nil {
+		pin := run.Causation.Workflow.Clone()
+		if pin.UpdatedAt != nil {
+			updated := pin.UpdatedAt.UTC()
+			pin.UpdatedAt = &updated
+		}
+		run.Causation.Workflow = &pin
+	}
+	sort.Strings(run.DeliveryIDs)
+	run.CreatedAt = run.CreatedAt.UTC()
+	run.UpdatedAt = run.UpdatedAt.UTC()
+	run.StartedAt = canonicalTime(run.StartedAt)
+	run.SegmentStartedAt = canonicalTime(run.SegmentStartedAt)
+	run.FinishedAt = canonicalTime(run.FinishedAt)
+	for index := range run.Transitions {
+		run.Transitions[index].At = run.Transitions[index].At.UTC()
+	}
+	if run.Ready != nil {
+		ready := *run.Ready
+		ready.PullRequestUpdatedAt = ready.PullRequestUpdatedAt.UTC()
+		ready.CreatedAt = ready.CreatedAt.UTC()
+		ready.ValidatedAt = ready.ValidatedAt.UTC()
+		run.Ready = &ready
+	}
+	run.GitHub.LastAuthoritativeRefreshAt = canonicalTime(run.GitHub.LastAuthoritativeRefreshAt)
+	run.GitHub.NextReconcileAt = canonicalTime(run.GitHub.NextReconcileAt)
+	if run.Completion != nil {
+		completion := *run.Completion
+		completion.ValidatedAt = completion.ValidatedAt.UTC()
+		run.Completion = &completion
+	}
+}
+
+func cloneModel(model Model) Model {
+	clone := model
+	clone.AdmissionBatches = cloneAdmissionBatches(model.AdmissionBatches)
+	clone.Runs = cloneRuns(model.Runs)
+	clone.RateBuckets = slices.Clone(model.RateBuckets)
+	return clone
+}
+
+func cloneAdmissionBatches(values []AdmissionBatch) []AdmissionBatch {
+	cloned := make([]AdmissionBatch, len(values))
+	for index, value := range values {
+		cloned[index] = value
+		cloned[index].Outcomes = slices.Clone(value.Outcomes)
+	}
+	return cloned
+}
+
+func cloneRuns(values []Run) []Run {
+	cloned := make([]Run, len(values))
+	for index, value := range values {
+		cloned[index] = cloneRun(value)
+	}
+	return cloned
+}
+
+func cloneRun(run Run) Run {
+	run.Causation.AncestorRuleIDs = slices.Clone(run.Causation.AncestorRuleIDs)
+	if run.Causation.Workflow != nil {
+		pin := run.Causation.Workflow.Clone()
+		run.Causation.Workflow = &pin
+	}
+	if run.Repository != nil {
+		route := *run.Repository
+		run.Repository = &route
+	}
+	run.DeliveryIDs = slices.Clone(run.DeliveryIDs)
+	run.StartedAt = cloneTime(run.StartedAt)
+	run.SegmentStartedAt = cloneTime(run.SegmentStartedAt)
+	run.FinishedAt = cloneTime(run.FinishedAt)
+	run.Transitions = slices.Clone(run.Transitions)
+	if run.Ready != nil {
+		ready := *run.Ready
+		run.Ready = &ready
+	}
+	run.GitHub.LastAuthoritativeRefreshAt = cloneTime(run.GitHub.LastAuthoritativeRefreshAt)
+	run.GitHub.NextReconcileAt = cloneTime(run.GitHub.NextReconcileAt)
+	if run.Completion != nil {
+		completion := *run.Completion
+		run.Completion = &completion
+	}
+	return run
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func canonicalTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	canonical := value.UTC()
+	return &canonical
+}
