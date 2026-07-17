@@ -979,7 +979,7 @@ func (s *appServer) dispatchLinear(ctx context.Context, record eventwire.Record)
 				return fmt.Errorf("server: project Linear comment: %w", err)
 			}
 		}
-		if firstAttribute(record.Event, attributeTriggerKind) == agentrun.TriggerKindComment {
+		if !s.genericTriggers && firstAttribute(record.Event, attributeTriggerKind) == agentrun.TriggerKindComment {
 			configuration := s.settings.Snapshot()
 			definition, err := configuration.WorkflowForTrigger(agentrun.TriggerKindComment)
 			if err != nil {

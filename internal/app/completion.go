@@ -23,16 +23,21 @@ type CompletionOptions struct {
 	Now            func() time.Time
 }
 
+type CompletionAuthorities struct {
+	PullRequests *runs.GitHubCLI
+	Validator    *runs.MechanicalCompletionValidator
+}
+
 // NewCompletionValidator builds one read-only GitHub authority and one
 // completion evidence reader for every immutable repository in the selected
 // catalog. There is no default repository or runtime registration fallback.
-func NewCompletionValidator(store *repositories.Store, options CompletionOptions) (*runs.MechanicalCompletionValidator, error) {
+func NewCompletionAuthorities(store *repositories.Store, options CompletionOptions) (CompletionAuthorities, error) {
 	if store == nil || options.HTTPClient == nil || options.Now == nil {
-		return nil, errors.New("app completion: catalog, HTTP client, and clock are required")
+		return CompletionAuthorities{}, errors.New("app completion: catalog, HTTP client, and clock are required")
 	}
 	catalog, err := repositories.NewCatalog(store.Snapshot())
 	if err != nil {
-		return nil, err
+		return CompletionAuthorities{}, err
 	}
 	identities := catalog.CompletionIdentities()
 	readers := make(map[string]runs.CompletionEvidenceReader, len(identities))
@@ -42,17 +47,23 @@ func NewCompletionValidator(store *repositories.Store, options CompletionOptions
 			LinearAPIKey: options.LinearAPIKey, HTTPClient: options.HTTPClient, TaskCompletion: options.TaskCompletion,
 		})
 		if err != nil {
-			return nil, err
+			return CompletionAuthorities{}, err
 		}
 		readers[identity.Repository] = reader
 	}
 	evidence, err := runs.NewRepositoryCompletionEvidence(readers)
 	if err != nil {
-		return nil, err
+		return CompletionAuthorities{}, err
 	}
 	pullRequests, err := runs.NewGitHubCLI(options.GitHubPath, options.GitDirectory)
 	if err != nil {
-		return nil, err
+		return CompletionAuthorities{}, err
 	}
-	return runs.NewMechanicalCompletionValidator(pullRequests, evidence, options.Now)
+	validator, err := runs.NewMechanicalCompletionValidator(pullRequests, evidence, options.Now)
+	return CompletionAuthorities{PullRequests: pullRequests, Validator: validator}, err
+}
+
+func NewCompletionValidator(store *repositories.Store, options CompletionOptions) (*runs.MechanicalCompletionValidator, error) {
+	authorities, err := NewCompletionAuthorities(store, options)
+	return authorities.Validator, err
 }
