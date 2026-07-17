@@ -209,7 +209,7 @@ func validateMigrationSnapshotReceipt(model Model) (migrationIdentityEvidence, e
 		}
 	}
 	fullMigrationProjection := migratedBatches == len(receipt.BatchIDs) && len(migratedRuns) == len(receipt.RunIDs)
-	if fullMigrationProjection {
+	if fullMigrationProjection && model.JournalSequence == 0 {
 		digest, err := canonicalRunsDigest(migratedRuns)
 		if err != nil || digest != receipt.CanonicalRunsDigest {
 			return evidence, errors.New("runs: migration snapshot canonical Runs digest conflicts")

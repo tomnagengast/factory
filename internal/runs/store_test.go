@@ -405,6 +405,65 @@ func TestAdmissionOperationExactRetrySurvivesTransitionsAndCompaction(t *testing
 	}
 }
 
+func TestMigrationSnapshotReceiptAcceptsFirstTransitionOfMigratedRun(t *testing.T) {
+	root := trustedTestRoot(t, t.TempDir())
+	path := filepath.Join(root, "runs.jsonl")
+	batch, run, rate := runningProjection(t, root)
+	run.Transitions = nil
+	run.MigratedBaseline = &MigratedBaseline{
+		State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true,
+	}
+	receipt, err := NewMigrationSnapshotReceipt(
+		"migration-running-1", strings.Repeat("a", 64), 1,
+		[]AdmissionBatch{batch}, []Run{run}, []RateBucket{rate},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := NewSnapshot(Model{
+		Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, Migration: receipt,
+		AdmissionOperations: []AdmissionOperationReceipt{}, AdmissionBatches: []AdmissionBatch{batch},
+		Runs: []Run{run}, RateBuckets: []RateBucket{rate},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReceipt := cloneMigrationSnapshotReceipt(initial.Model().Migration)
+	store, err := Create(root, path, initial, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failed := nextLifecycleRun(run, StateFailed, run.UpdatedAt.Add(time.Second))
+	if err := store.Transition(failed); err != nil {
+		t.Fatalf("first migrated Run transition: %v", err)
+	}
+	transitioned, err := store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := transitioned.Model()
+	if model.JournalSequence != 1 || model.Runs[0].State != StateFailed || len(model.Runs[0].Transitions) != 1 ||
+		model.Runs[0].Transitions[0].State != StateFailed || !reflect.DeepEqual(model.Migration, wantReceipt) {
+		t.Fatalf("transitioned migration projection = %#v", model)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(root, path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	replayed, err := reopened.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(replayed.Model(), model) || !reflect.DeepEqual(replayed.Model().Migration, wantReceipt) {
+		t.Fatalf("replayed migrated transition = %#v, want %#v", replayed.Model(), model)
+	}
+}
+
 func TestMigrationSnapshotReceiptSurvivesReplayCompactionAndRejectsLiveIdentityReuse(t *testing.T) {
 	root := trustedTestRoot(t, t.TempDir())
 	path := filepath.Join(root, "runs.jsonl")
