@@ -250,7 +250,7 @@ func TestMigrationSnapshotReceiptRejectsMalformedAmbiguousAndIncompleteEvidence(
 			value.Migration.EventSequences = value.Migration.EventSequences[1:]
 			value.Migration.RetainedBatches--
 			resignMigrationReceipt(value)
-		}, want: "lifetime totals"},
+		}, want: "admission batch"},
 		{name: "event coverage gap", mutate: func(value *Model) {
 			value.Migration.EventIDs[0] = "factory:event-other"
 			slices.Sort(value.Migration.EventIDs)
@@ -1045,7 +1045,8 @@ func testAdmissionProjection(t *testing.T, root string, number int, state Lifecy
 	task := taskmodel.TaskRef{Source: taskmodel.SourceFactory, ProviderID: "task-" + string(rune('0'+number)), Identifier: "FAC-" + string(rune('0'+number))}
 	batch := AdmissionBatch{
 		ID: batchID, Origin: AdmissionOriginEvent, EventID: eventID, EventSequence: uint64(number),
-		EventSource: eventwire.SourceFactory, RegistryRevision: 2, SettingsRevision: 3, PolicyGeneration: 4, DecidedAt: at,
+		EventSource: eventwire.SourceFactory, EventRecordDigest: strings.Repeat(string(rune('a'+number-1)), 64),
+		RegistryRevision: 2, SettingsRevision: 3, PolicyGeneration: 4, DecidedAt: at,
 		Outcomes: []AdmissionOutcome{
 			{Kind: AdmissionOutcomeSuppressed, RuleID: "rule-two", RuleRevision: 1, Reason: "hop-limit"},
 			{Kind: AdmissionOutcomeRun, RuleID: ruleID, RuleRevision: 2, AdmissionID: admissionID, RunID: runID},
@@ -1121,6 +1122,7 @@ func testLinkedMigrationRouteModel(t *testing.T, origin AdmissionOrigin, state L
 	batch.Origin = origin
 	if origin != AdmissionOriginEvent {
 		batch.EventSequence = 0
+		batch.EventRecordDigest = ""
 		run.Causation.EventSequence = 0
 	}
 	route := *run.Repository
@@ -1182,5 +1184,6 @@ func resignMigrationReceipt(model *Model) {
 func makeMigratedDirect(batch *AdmissionBatch, run *Run) {
 	batch.Origin = AdmissionOriginMigratedDirect
 	batch.EventSequence = 0
+	batch.EventRecordDigest = ""
 	run.Causation.EventSequence = 0
 }

@@ -1,6 +1,9 @@
 package eventwire
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -47,6 +50,40 @@ type Event struct {
 	Hop                int                 `json:"hop,omitempty"`
 	AncestorRuleIDs    []string            `json:"ancestorRuleIds,omitempty"`
 	ReceivedAt         time.Time           `json:"receivedAt"`
+}
+
+// CanonicalRecordDigest returns a body-free digest of the complete durable
+// wire record. Map keys are ordered by encoding/json, while slice ordering is
+// retained because it is part of the authoritative record. Equivalent time
+// instants and direct-event root defaults canonicalize to one identity.
+func CanonicalRecordDigest(record Record) (string, error) {
+	if record.Sequence == 0 {
+		return "", errors.New("event wire: record sequence is required")
+	}
+	event := canonicalEvent(record.Event)
+	event.ReceivedAt = event.ReceivedAt.UTC()
+	if err := event.Validate(); err != nil {
+		return "", err
+	}
+	if len(record.ChannelSequences) != len(event.Channels) {
+		return "", errors.New("event wire: record channel sequences conflict with channels")
+	}
+	for _, channel := range event.Channels {
+		if record.ChannelSequences[channel] == 0 {
+			return "", errors.New("event wire: record channel sequence is required")
+		}
+	}
+	canonical := Record{
+		Sequence:         record.Sequence,
+		ChannelSequences: record.ChannelSequences,
+		Event:            event,
+	}
+	data, err := json.Marshal(canonical)
+	if err != nil {
+		return "", fmt.Errorf("event wire: encode canonical record: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (e Event) Validate() error {

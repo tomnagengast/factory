@@ -49,6 +49,7 @@ func NewMigrationSnapshotReceipt(
 		Origin:           MigrationSnapshotOrigin,
 		MigrationID:      migrationID,
 		SourceRootDigest: sourceRootDigest,
+		AdmissionBatches: cloneAdmissionBatches(batches),
 		LifetimeRuns:     lifetimeRuns,
 		RetainedBatches:  uint64(len(batches)),
 		RateBucketCount:  uint64(len(rateBuckets)),
@@ -87,11 +88,14 @@ func NewMigrationSnapshotReceipt(
 }
 
 func migrationSnapshotOperationID(receipt MigrationSnapshotReceipt) string {
+	admissionBatches, _ := json.Marshal(receipt.AdmissionBatches)
 	parts := []string{
 		"factory-runs-migration-snapshot-v1",
 		receipt.Origin,
 		receipt.MigrationID,
 		receipt.SourceRootDigest,
+		"admission_batches",
+		string(admissionBatches),
 		"batch_ids",
 	}
 	parts = append(parts, receipt.BatchIDs...)

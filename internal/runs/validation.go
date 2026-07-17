@@ -129,7 +129,7 @@ func validateAdmissionOperations(model Model, migration migrationIdentityEvidenc
 		if found && !reflect.DeepEqual(original, batch) {
 			return fmt.Errorf("runs: retained admission batch %q conflicts with its durable operation receipt", batch.ID)
 		}
-		if migrated && (!migration.eventIDs[batch.EventID] || batch.EventSequence != 0 && !migration.eventSequences[batch.EventSequence]) {
+		if migrated && !reflect.DeepEqual(migration.batches[batch.ID], batch) {
 			return fmt.Errorf("runs: retained admission batch %q conflicts with its migration snapshot receipt", batch.ID)
 		}
 		if !migrated && (migration.eventIDs[batch.EventID] || batch.EventSequence != 0 && migration.eventSequences[batch.EventSequence]) {
@@ -159,6 +159,7 @@ func validateAdmissionOperations(model Model, migration migrationIdentityEvidenc
 type migrationIdentityEvidence struct {
 	retainedBatches uint64
 	lifetimeRuns    uint64
+	batches         map[string]AdmissionBatch
 	batchIDs        map[string]bool
 	eventIDs        map[string]bool
 	eventSequences  map[uint64]bool
@@ -168,6 +169,7 @@ type migrationIdentityEvidence struct {
 
 func validateMigrationSnapshotReceipt(model Model) (migrationIdentityEvidence, error) {
 	evidence := migrationIdentityEvidence{
+		batches:  make(map[string]AdmissionBatch),
 		batchIDs: make(map[string]bool), eventIDs: make(map[string]bool), eventSequences: make(map[uint64]bool),
 		runIDs: make(map[string]bool), admissionIDs: make(map[string]bool),
 	}
@@ -180,6 +182,9 @@ func validateMigrationSnapshotReceipt(model Model) (migrationIdentityEvidence, e
 	}
 	evidence.retainedBatches = receipt.RetainedBatches
 	evidence.lifetimeRuns = receipt.LifetimeRuns
+	for _, batch := range receipt.AdmissionBatches {
+		evidence.batches[batch.ID] = batch
+	}
 	for _, value := range receipt.BatchIDs {
 		evidence.batchIDs[value] = true
 	}
@@ -250,8 +255,35 @@ func validateMigrationSnapshotReceiptShape(receipt MigrationSnapshotReceipt) err
 			return errors.New("runs: migration snapshot event sequences are not positive, sorted, and unique")
 		}
 	}
+	if !canonicalBatchOrder(receipt.AdmissionBatches) {
+		return errors.New("runs: migration snapshot admission batches are not canonical")
+	}
+	seenBatches := make(map[string]bool, len(receipt.AdmissionBatches))
+	eventIDs := make([]string, 0, len(receipt.AdmissionBatches))
+	eventSequences := make([]uint64, 0, len(receipt.AdmissionBatches))
+	for index, batch := range receipt.AdmissionBatches {
+		if err := validateAdmissionBatch(batch); err != nil {
+			return fmt.Errorf("runs: migration snapshot admission batch %d: %w", index+1, err)
+		}
+		if seenBatches[batch.ID] {
+			return errors.New("runs: migration snapshot admission batch IDs are duplicated")
+		}
+		seenBatches[batch.ID] = true
+		eventIDs = append(eventIDs, batch.EventID)
+		if batch.EventSequence != 0 {
+			eventSequences = append(eventSequences, batch.EventSequence)
+		}
+		if _, found := slices.BinarySearch(receipt.BatchIDs, batch.ID); !found {
+			return errors.New("runs: migration snapshot admission batch conflicts with tombstones")
+		}
+	}
+	slices.Sort(eventIDs)
+	slices.Sort(eventSequences)
+	if !slices.Equal(eventIDs, receipt.EventIDs) || !slices.Equal(eventSequences, receipt.EventSequences) {
+		return errors.New("runs: migration snapshot receipt event evidence conflicts with admission batches")
+	}
 	if receipt.RetainedBatches != uint64(len(receipt.BatchIDs)) || len(receipt.EventIDs) != len(receipt.BatchIDs) ||
-		receipt.LifetimeRuns < uint64(len(receipt.RunIDs)) || len(receipt.AdmissionIDs) != len(receipt.RunIDs) {
+		len(receipt.AdmissionBatches) != len(receipt.BatchIDs) || receipt.LifetimeRuns < uint64(len(receipt.RunIDs)) || len(receipt.AdmissionIDs) != len(receipt.RunIDs) {
 		return errors.New("runs: migration snapshot baselines conflict with tombstones")
 	}
 	if receipt.OperationID != migrationSnapshotOperationID(receipt) {
@@ -378,12 +410,12 @@ func validateAdmissionBatch(batch AdmissionBatch) error {
 	}
 	switch batch.Origin {
 	case AdmissionOriginEvent:
-		if batch.EventSequence == 0 {
-			return errors.New("event admission requires a source sequence")
+		if batch.EventSequence == 0 || !digestPattern.MatchString(batch.EventRecordDigest) {
+			return errors.New("event admission requires a source sequence and record digest")
 		}
 	case AdmissionOriginNative, AdmissionOriginContinuation, AdmissionOriginMigratedDirect:
-		if batch.EventSequence != 0 {
-			return errors.New("non-event admission cannot invent a source sequence")
+		if batch.EventSequence != 0 || batch.EventRecordDigest != "" {
+			return errors.New("non-event admission cannot invent source record evidence")
 		}
 	default:
 		return fmt.Errorf("unsupported admission origin %q", batch.Origin)

@@ -54,8 +54,11 @@ func TestConvertRunSourcesCoversLegacyOriginsAndEvidence(t *testing.T) {
 				nonRunnable[outcome.Kind]++
 			}
 		}
-		if batch.Origin != runs.AdmissionOriginEvent && batch.EventSequence != 0 {
-			t.Fatalf("synthetic batch %s retained sequence %d", batch.ID, batch.EventSequence)
+		if batch.Origin == runs.AdmissionOriginEvent && batch.EventRecordDigest == "" {
+			t.Fatalf("event batch %s lacks exact wire record evidence", batch.ID)
+		}
+		if batch.Origin != runs.AdmissionOriginEvent && (batch.EventSequence != 0 || batch.EventRecordDigest != "") {
+			t.Fatalf("synthetic batch %s invented source record evidence", batch.ID)
 		}
 	}
 	if origins[runs.AdmissionOriginEvent] != 7 || origins[runs.AdmissionOriginNative] != 1 ||

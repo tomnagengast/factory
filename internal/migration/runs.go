@@ -28,6 +28,7 @@ type runConversionMetrics struct {
 
 type runSourceIndex struct {
 	wireByID           map[string]eventwire.Record
+	wireDigestByID     map[string]string
 	decisions          map[string]triggerrouter.Decision
 	invocations        map[string]triggerrouter.Invocation
 	decisionByInvoke   map[string]triggerrouter.Decision
@@ -187,6 +188,7 @@ func indexRunSources(
 ) (runSourceIndex, error) {
 	index := runSourceIndex{
 		wireByID:         make(map[string]eventwire.Record, len(state.wireRecords)),
+		wireDigestByID:   make(map[string]string, len(state.wireRecords)),
 		decisions:        make(map[string]triggerrouter.Decision, len(state.routing.Decisions)),
 		invocations:      make(map[string]triggerrouter.Invocation, len(state.routing.Invocations)),
 		decisionByInvoke: make(map[string]triggerrouter.Decision, len(state.routing.Invocations)),
@@ -199,7 +201,12 @@ func indexRunSources(
 		if record.Sequence == 0 || index.wireByID[record.Event.ID].Sequence != 0 || wireBySequence[record.Sequence] != "" {
 			return runSourceIndex{}, errors.New("migration: duplicate wire identity or sequence")
 		}
+		digest, err := eventwire.CanonicalRecordDigest(record)
+		if err != nil {
+			return runSourceIndex{}, fmt.Errorf("migration: wire record %d: %w", record.Sequence, err)
+		}
 		index.wireByID[record.Event.ID] = record
+		index.wireDigestByID[record.Event.ID] = digest
 		wireBySequence[record.Sequence] = record.Event.ID
 	}
 	for _, invocation := range state.routing.Invocations {
@@ -242,6 +249,7 @@ func indexRunSources(
 		}
 		if origin == runs.AdmissionOriginEvent {
 			batch.EventSequence = decision.EventSequence
+			batch.EventRecordDigest = index.wireDigestByID[decision.EventID]
 		}
 		owned := make(map[string]bool)
 		for _, outcome := range decision.Outcomes {
@@ -377,6 +385,7 @@ func convertDecision(
 	}
 	if origin == runs.AdmissionOriginEvent {
 		batch.EventSequence = decision.EventSequence
+		batch.EventRecordDigest = index.wireDigestByID[decision.EventID]
 	}
 	for _, legacy := range decision.Outcomes {
 		outcome := runs.AdmissionOutcome{RuleID: legacy.RuleID, RuleRevision: legacy.RuleRevision, Reason: legacy.Reason}

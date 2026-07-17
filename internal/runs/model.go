@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	SchemaVersion  = 3
-	JournalVersion = 2
+	SchemaVersion  = 4
+	JournalVersion = 3
 )
 
 type AdmissionOrigin string
@@ -88,20 +88,21 @@ const MigrationSnapshotOrigin = "migration_snapshot"
 // in canonical order. This binds the migration and source-root identities to
 // the complete receipt without inventing historical admission operations.
 type MigrationSnapshotReceipt struct {
-	Origin              string   `json:"origin"`
-	OperationID         string   `json:"operationId"`
-	MigrationID         string   `json:"migrationId"`
-	SourceRootDigest    string   `json:"sourceRootDigest"`
-	BatchIDs            []string `json:"batchIds"`
-	EventIDs            []string `json:"eventIds"`
-	EventSequences      []uint64 `json:"eventSequences"`
-	RunIDs              []string `json:"runIds"`
-	AdmissionIDs        []string `json:"admissionIds"`
-	LifetimeRuns        uint64   `json:"lifetimeRuns"`
-	RetainedBatches     uint64   `json:"retainedBatches"`
-	RateBucketDigest    string   `json:"rateBucketDigest"`
-	RateBucketCount     uint64   `json:"rateBucketCount"`
-	CanonicalRunsDigest string   `json:"canonicalRunsDigest"`
+	Origin              string           `json:"origin"`
+	OperationID         string           `json:"operationId"`
+	MigrationID         string           `json:"migrationId"`
+	SourceRootDigest    string           `json:"sourceRootDigest"`
+	AdmissionBatches    []AdmissionBatch `json:"admissionBatches"`
+	BatchIDs            []string         `json:"batchIds"`
+	EventIDs            []string         `json:"eventIds"`
+	EventSequences      []uint64         `json:"eventSequences"`
+	RunIDs              []string         `json:"runIds"`
+	AdmissionIDs        []string         `json:"admissionIds"`
+	LifetimeRuns        uint64           `json:"lifetimeRuns"`
+	RetainedBatches     uint64           `json:"retainedBatches"`
+	RateBucketDigest    string           `json:"rateBucketDigest"`
+	RateBucketCount     uint64           `json:"rateBucketCount"`
+	CanonicalRunsDigest string           `json:"canonicalRunsDigest"`
 }
 
 // AdmissionOperationReceipt retains the complete canonical input of one
@@ -116,16 +117,17 @@ type AdmissionOperationReceipt struct {
 }
 
 type AdmissionBatch struct {
-	ID               string             `json:"id"`
-	Origin           AdmissionOrigin    `json:"origin"`
-	EventID          string             `json:"eventId"`
-	EventSequence    uint64             `json:"eventSequence,omitempty"`
-	EventSource      eventwire.Source   `json:"eventSource"`
-	RegistryRevision uint64             `json:"registryRevision,omitempty"`
-	SettingsRevision uint64             `json:"settingsRevision,omitempty"`
-	PolicyGeneration uint64             `json:"policyGeneration,omitempty"`
-	DecidedAt        time.Time          `json:"decidedAt"`
-	Outcomes         []AdmissionOutcome `json:"outcomes"`
+	ID                string             `json:"id"`
+	Origin            AdmissionOrigin    `json:"origin"`
+	EventID           string             `json:"eventId"`
+	EventSequence     uint64             `json:"eventSequence,omitempty"`
+	EventSource       eventwire.Source   `json:"eventSource"`
+	EventRecordDigest string             `json:"eventRecordDigest,omitempty"`
+	RegistryRevision  uint64             `json:"registryRevision,omitempty"`
+	SettingsRevision  uint64             `json:"settingsRevision,omitempty"`
+	PolicyGeneration  uint64             `json:"policyGeneration,omitempty"`
+	DecidedAt         time.Time          `json:"decidedAt"`
+	Outcomes          []AdmissionOutcome `json:"outcomes"`
 }
 
 type AdmissionOutcome struct {
@@ -325,6 +327,7 @@ func (r Run) Validate() error {
 }
 
 func canonicalizeModel(model *Model) {
+	canonicalizeMigrationSnapshotReceipt(model.Migration)
 	for index := range model.AdmissionOperations {
 		canonicalizeAdmissionOperation(&model.AdmissionOperations[index])
 	}
@@ -358,6 +361,16 @@ func canonicalizeModel(model *Model) {
 		}
 		return model.RateBuckets[i].Minute.Before(model.RateBuckets[j].Minute)
 	})
+}
+
+func canonicalizeMigrationSnapshotReceipt(receipt *MigrationSnapshotReceipt) {
+	if receipt == nil {
+		return
+	}
+	for index := range receipt.AdmissionBatches {
+		canonicalizeAdmissionBatch(&receipt.AdmissionBatches[index])
+	}
+	slices.SortFunc(receipt.AdmissionBatches, compareAdmissionBatches)
 }
 
 func canonicalizeAdmissionOperation(operation *AdmissionOperationReceipt) {
@@ -477,6 +490,7 @@ func cloneMigrationSnapshotReceipt(receipt *MigrationSnapshotReceipt) *Migration
 		return nil
 	}
 	clone := *receipt
+	clone.AdmissionBatches = cloneAdmissionBatches(receipt.AdmissionBatches)
 	clone.BatchIDs = slices.Clone(receipt.BatchIDs)
 	clone.EventIDs = slices.Clone(receipt.EventIDs)
 	clone.EventSequences = slices.Clone(receipt.EventSequences)

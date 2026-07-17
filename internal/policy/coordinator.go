@@ -27,12 +27,13 @@ type AdmissionCallback func(Snapshot) error
 // deliberately non-reentrant.
 //
 // Lock order is: a caller-owned keyed workflow lock, when present, then the
-// Coordinator mutex, then the Store mutex, then downstream domain locks. Store
-// methods release their mutex before returning. The pending predicate and the
-// admission callback run with the Coordinator mutex held but no Store mutex
-// held, so they may briefly acquire downstream read or journal locks without
-// inverting the Store order. Neither may call Admit or a mutation method: doing
-// so would attempt to reacquire the non-reentrant Coordinator mutex.
+// Coordinator mutex, then the canonical admission-owner mutex, then either the
+// Runs Store Snapshot RLock or one ApplyAdmissionBatch Lock. Store locks are
+// released before matching continues or a downstream domain lock is acquired.
+// The pending predicate and the admission callback run with the Coordinator
+// mutex held but no Store mutex held. Neither may call Admit or a mutation
+// method: doing so would attempt to reacquire the non-reentrant Coordinator
+// mutex.
 //
 // Snapshot is the only exception to the Coordinator lock. It returns the
 // Store's immutable snapshot directly and is suitable for independent reads.
