@@ -35,8 +35,6 @@ func ProviderNeutralDefault(now time.Time) Definition {
 	}
 }
 
-func ProviderNeutralMarkdown() string { return CanonicalizeMarkdown(providerNeutralMarkdown) }
-
 func ProviderNeutralDigest() string {
 	digest, err := Digest(ProviderNeutralDefault(time.Time{}))
 	if err != nil {

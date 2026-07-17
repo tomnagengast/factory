@@ -23,7 +23,7 @@ import (
 // concurrent writer that already advanced a Run fails this manager's transition
 // closed rather than clobbering durable state.
 //
-// This slice owns the admission→execution→direct-terminal spine plus the merge
+// The manager owns the admission→execution→direct-terminal spine plus the merge
 // lifecycle: ready-checkpoint parking, awaiting-merge/GitHub reconciliation,
 // merged/closed resume, post-merge start-retry backoff, and rejected-terminal
 // re-park. Admission entrypoints and feedback coalescing are owned by Admitter
@@ -63,9 +63,9 @@ type RepositoryResolver interface {
 }
 
 // Launcher owns the worker session lifecycle. The manager depends only
-// on this narrow interface; the production tmux launcher (environment
-// allowlist, task-capability token, LINEAR_API_KEY withholding, lifecycle
-// artifact cleanup) is wired in Phase 4. ReadReadyCheckpoint reads the
+// on this narrow interface. The production tmux launcher enforces the
+// environment allowlist, task capability, LINEAR_API_KEY withholding, and
+// lifecycle artifact cleanup. ReadReadyCheckpoint reads the
 // body-free ready-for-merge checkpoint a worker leaves in its run directory.
 type Launcher interface {
 	Prepare(ctx context.Context) error
@@ -77,10 +77,8 @@ type Launcher interface {
 }
 
 // PullRequestReader is the read-only authority over a parked pull request's live
-// state. The manager depends only on this narrow interface; the concrete
-// GitHub CLI port is wired in a later slice. It mirrors the legacy
-// agentrun.PullRequestReader contract so a faithful port classifies snapshots
-// identically.
+// state. The manager depends only on this narrow interface. The production
+// GitHub CLI adapter preserves the established snapshot classification.
 type PullRequestReader interface {
 	Snapshot(ctx context.Context, checkpoint ReadyCheckpoint) (PullRequestSnapshot, error)
 }

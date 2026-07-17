@@ -1527,12 +1527,6 @@ func testHandlerWithRunsAndSettingsAndWire(t *testing.T) (http.Handler, *agentru
 	return handler, runStore, notifier, configuration, wire
 }
 
-func testHandlerWithObserver(t *testing.T, observer AgentObserver) http.Handler {
-	t.Helper()
-	handler, _ := testHandlerWithObserverAndStore(t, observer)
-	return handler
-}
-
 func testHandlerWithObserverAndStore(t *testing.T, observer AgentObserver) (http.Handler, *agentrun.Store) {
 	t.Helper()
 	store, err := activity.Open(filepath.Join(t.TempDir(), "activity.json"), 10)

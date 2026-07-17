@@ -755,10 +755,6 @@ func (l *TmuxLauncher) ReadReadyCheckpoint(runDirectory string) (ReadyCheckpoint
 	return ReadReadyCheckpoint(runDirectory)
 }
 
-func sessionName(issueIdentifier string) string {
-	return "factory-" + strings.ToLower(issueIdentifier)
-}
-
 func taskSessionName(run Run) string {
 	source := string(run.Task.Source)
 	if source == "" {

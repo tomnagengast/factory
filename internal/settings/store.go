@@ -206,24 +206,6 @@ func (s *Store) MarkWorkflowRollbackIncompatible(now time.Time) (Snapshot, error
 	return s.state.Clone(), nil
 }
 
-func ReadSchema1Backup(path string) (Snapshot, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("settings: read schema 1 backup: %w", err)
-	}
-	if len(data) > maxSettingsBytes {
-		return Snapshot{}, errors.New("settings: schema 1 backup is too large")
-	}
-	legacy, err := decodeLegacy(data)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	if err := validateLegacy(legacy); err != nil {
-		return Snapshot{}, err
-	}
-	return migrateLegacy(legacy), nil
-}
-
 func decodeSchema(data []byte) (int, error) {
 	var envelope struct {
 		Schema int `json:"schema"`
