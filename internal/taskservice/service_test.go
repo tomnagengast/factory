@@ -2,8 +2,10 @@ package taskservice
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,6 +140,33 @@ func TestStartScopesRoutingIdempotencyToEachTask(t *testing.T) {
 	}
 	if invocations[tasks[0].Ref.ProviderID] == invocations[tasks[1].Ref.ProviderID] {
 		t.Fatal("different tasks shared a native admission invocation")
+	}
+}
+
+func TestDetailSerializesEmptyCollectionsAsArrays(t *testing.T) {
+	service, _, _ := newService(t, true)
+	created, err := service.Create(context.Background(), CreateRequest{
+		Actor: taskstore.Actor{ID: "human", Kind: taskstore.AuthorHuman}, Title: "Native task",
+		ProjectID: "project-factory", ApprovalMode: taskstore.ApprovalGated, IdempotencyKey: "create-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := service.Detail(created.Task.Ref.ProviderID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Messages.Messages == nil || detail.Links == nil || detail.Gates == nil {
+		t.Fatalf("detail collections must not be nil: %#v", detail)
+	}
+	encoded, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{`"messages":[]`, `"links":[]`, `"gates":[]`} {
+		if !strings.Contains(string(encoded), fragment) {
+			t.Fatalf("detail JSON is missing %s: %s", fragment, encoded)
+		}
 	}
 }
 
