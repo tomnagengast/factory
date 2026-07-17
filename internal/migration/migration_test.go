@@ -375,13 +375,11 @@ func alteredPayload(t *testing.T, root string) {
 }
 
 func pendingWire(t *testing.T, root string) {
-	path := filepath.Join(root, "system-events.jsonl")
-	journal, err := eventwire.Open(path, 100, nil)
+	data, err := os.ReadFile(filepath.Join("testdata", "cases", "pending-system-events.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = journal.Add(eventwire.Event{ID: "factory:pending", Source: eventwire.SourceFactory, Type: "task-mutation", Action: "create", ReceivedAt: fixtureNow.Add(time.Hour)})
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(root, "system-events.jsonl"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -516,7 +514,17 @@ func generateGolden(root string) error {
 		return err
 	}
 	taskJournal = []byte(strings.ReplaceAll(string(taskJournal), task.Ref.ProviderID, "task-0123456789abcdef"))
-	if err := os.WriteFile(taskJournalPath, taskJournal, 0o600); err != nil {
+	var taskCheckpoint map[string]any
+	if err := json.Unmarshal(taskJournal, &taskCheckpoint); err != nil {
+		return err
+	}
+	outcomes := taskCheckpoint["checkpoint"].(map[string]any)["outcomes"].([]any)
+	outcomes[1].(map[string]any)["commandHash"] = strings.Repeat("c", 64)
+	taskJournal, err = json.Marshal(taskCheckpoint)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(taskJournalPath, append(taskJournal, '\n'), 0o600); err != nil {
 		return err
 	}
 	control, err := taskcontrol.Open(filepath.Join(root, "native-task-control.json"))
@@ -572,7 +580,18 @@ func generateGolden(root string) error {
 	if err := os.MkdirAll(filepath.Join("testdata", "cases"), 0o700); err != nil {
 		return err
 	}
-	return writeGoldenJSON(filepath.Join("testdata", "cases", "pending-stage.json"), map[string]any{"operationId": "op-0123456789abcdef", "kind": "create", "sanitized": true})
+	if err := writeGoldenJSON(filepath.Join("testdata", "cases", "pending-stage.json"), map[string]any{"operationId": "op-0123456789abcdef", "kind": "create", "sanitized": true}); err != nil {
+		return err
+	}
+	wireData, err := os.ReadFile(filepath.Join(root, "system-events.jsonl"))
+	if err != nil {
+		return err
+	}
+	wireLines := strings.Split(string(wireData), "\n")
+	if len(wireLines) < 4 {
+		return errors.New("generated wire fixture is incomplete")
+	}
+	return os.WriteFile(filepath.Join("testdata", "cases", "pending-system-events.jsonl"), []byte(strings.Join(wireLines[:2], "\n")+"\n"), 0o600)
 }
 
 func writeGoldenJSON(path string, value any) error {

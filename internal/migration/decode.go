@@ -128,23 +128,6 @@ type sourceState struct {
 	directories    []SourceDirectory
 }
 
-var requiredFiles = []string{
-	"agent-event-offsets.json",
-	"agent-runs.json",
-	"github-events.json",
-	"linear-activity.json",
-	"linear-task-identities.json",
-	"linear-comments.json",
-	"native-task-control.json",
-	"native-tasks.jsonl",
-	"project-setups.json",
-	"settings.json",
-	"system-events.jsonl",
-	"trigger-cursors.json",
-	"trigger-routing.jsonl",
-	"workflow-drafts.json",
-}
-
 func readSources(root string, options Options) (sourceState, error) {
 	if options.Now.IsZero() {
 		return sourceState{}, errors.New("migration: observation time is required")
