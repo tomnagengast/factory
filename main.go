@@ -87,6 +87,13 @@ type serveOptions struct {
 }
 
 func serveConfigured(ctx context.Context, options serveOptions) error {
+	if !options.localStart {
+		return serveCanonicalConfigured(ctx, options)
+	}
+	return serveLegacyConfigured(ctx, options)
+}
+
+func serveLegacyConfigured(ctx context.Context, options serveOptions) error {
 	serviceStartedAt := time.Now().UTC()
 	if buildContractVersion != strconv.Itoa(agentrun.LifecycleContractVersion) {
 		return fmt.Errorf("build contract version %q does not match lifecycle contract %d", buildContractVersion, agentrun.LifecycleContractVersion)
