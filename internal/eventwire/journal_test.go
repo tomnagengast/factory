@@ -103,6 +103,39 @@ func TestStrictJournalConstructionRejectsMissingAndInvalidState(t *testing.T) {
 	}
 }
 
+func TestOpenExistingRejectsUnsafeJournalIdentity(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		setup func(string) error
+	}{
+		{name: "symlink", setup: func(path string) error {
+			target := path + ".target"
+			if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+				return err
+			}
+			return os.Symlink(target, path)
+		}},
+		{name: "mode", setup: func(path string) error { return os.WriteFile(path, []byte("{}\n"), 0o644) }},
+		{name: "hard link", setup: func(path string) error {
+			if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+				return err
+			}
+			return os.Link(path, path+".second")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "events.jsonl")
+			if err := test.setup(path); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := OpenExisting(path, 10, nil); err == nil {
+				t.Fatal("unsafe journal was opened")
+			}
+		})
+	}
+}
+
 func TestJournalRecoversIncompleteTailAndSameProcessShortWrite(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "events.jsonl")

@@ -43,6 +43,13 @@ func TestBuildGenerationMaterializesAndIdempotentlyReopensCompleteState(t *testi
 	if reopened.Path != created.Path || !reflect.DeepEqual(reopened.Manifest, created.Manifest) {
 		t.Fatalf("idempotent reopen = %#v, want %#v", reopened, created)
 	}
+	restarted, err := OpenStagedGeneration(created.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(restarted.Manifest, created.Manifest) || !reflect.DeepEqual(restarted.Report, created.Report) {
+		t.Fatalf("restart reopen = %#v, want %#v", restarted, created)
+	}
 	afterFiles, err := hashTree(source)
 	if err != nil {
 		t.Fatal(err)

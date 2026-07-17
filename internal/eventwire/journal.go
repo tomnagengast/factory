@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -112,6 +113,14 @@ func open(path string, limit int, channelSeeds map[string]uint64, create bool) (
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("event wire: create journal directory: %w", err)
+	}
+	if info, err := os.Lstat(path); err == nil {
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 || stat.Nlink != 1 {
+			return nil, errors.New("event wire: journal must be a private, singly linked regular file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("event wire: inspect journal: %w", err)
 	}
 
 	state, err := readJournal(path, true)
@@ -525,6 +534,14 @@ func writeJournal(path string, state journalState, records []Record) error {
 	}
 	if err := os.Rename(tempPath, path); err != nil {
 		return fmt.Errorf("event wire: replace journal: %w", err)
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("event wire: open journal directory: %w", err)
+	}
+	defer directory.Close()
+	if err := directory.Sync(); err != nil {
+		return fmt.Errorf("event wire: sync journal directory: %w", err)
 	}
 	return nil
 }

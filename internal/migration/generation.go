@@ -51,6 +51,174 @@ type Generation struct {
 	Report   DryRunReport
 }
 
+type SelectedGeneration struct {
+	Generation   Generation
+	Policy       *policy.Store
+	Repositories *repositories.Store
+	Runs         *runs.Store
+	Tasks        *taskstore.Store
+	Wire         *eventwire.Journal
+	Activity     eventwire.ActivityProjection
+	Payloads     map[string][]byte
+}
+
+func (s *SelectedGeneration) Close() error {
+	if s == nil || s.Runs == nil {
+		return nil
+	}
+	return s.Runs.Close()
+}
+
+// OpenStagedGeneration reconstructs the immutable report from a generation's
+// own evidence, then performs the same strict validation as initial staging.
+// It is the restart path before any selector or write boundary exists.
+func OpenStagedGeneration(path string) (Generation, error) {
+	path = filepath.Clean(path)
+	report, err := readGenerationReport(path)
+	if err != nil {
+		return Generation{}, err
+	}
+	return ValidateStagedGeneration(path, report)
+}
+
+func readGenerationReport(path string) (DryRunReport, error) {
+	var audit Audit
+	var manifest MigrationManifest
+	var backup BackupReceipt
+	if err := readStrictJSON(filepath.Join(path, generationAuditFile), &audit); err != nil {
+		return DryRunReport{}, err
+	}
+	if err := readStrictJSON(filepath.Join(path, generationMigrationFile), &manifest); err != nil {
+		return DryRunReport{}, err
+	}
+	if err := readStrictJSON(filepath.Join(path, generationBackupFile), &backup); err != nil {
+		return DryRunReport{}, err
+	}
+	auditDigest, err := digestJSON(audit)
+	if err != nil {
+		return DryRunReport{}, err
+	}
+	report := DryRunReport{
+		Schema: dryRunReportSchema, Manifest: manifest, Backup: backup,
+		Audit: audit, AuditDigest: auditDigest,
+	}
+	if err := report.validate(); err != nil {
+		return DryRunReport{}, err
+	}
+	return report, nil
+}
+
+// OpenSelectedGeneration strictly replays mutable canonical stores without
+// comparing them to their initial staging hashes. Immutable migration evidence
+// and the whole-source backup remain exact, and the monotonic write boundary
+// must exist as a private regular file.
+func OpenSelectedGeneration(path string) (*SelectedGeneration, error) {
+	path = filepath.Clean(path)
+	if err := requirePrivateDirectory(path); err != nil {
+		return nil, err
+	}
+	if err := validateGenerationInventory(path); err != nil {
+		return nil, err
+	}
+	boundaryInfo, err := os.Lstat(filepath.Join(path, writeBoundaryArtifactName))
+	if err != nil || !boundaryInfo.Mode().IsRegular() || boundaryInfo.Mode()&os.ModeSymlink != 0 || boundaryInfo.Mode().Perm() != 0o600 {
+		return nil, errors.New("migration: selected generation write boundary is missing or unsafe")
+	}
+	report, err := readGenerationReport(path)
+	if err != nil {
+		return nil, err
+	}
+	var manifest GenerationManifest
+	if err := readStrictJSON(filepath.Join(path, generationManifestFile), &manifest); err != nil {
+		return nil, err
+	}
+	if err := validateGenerationManifest(manifest, report); err != nil {
+		return nil, err
+	}
+	if err := verifyBackup(filepath.Join(path, generationBackupDir), report.Backup); err != nil {
+		return nil, err
+	}
+	policyStore, err := policy.Open(filepath.Join(path, "policy.json"))
+	if err != nil {
+		return nil, err
+	}
+	repositoryStore, err := repositories.Open(filepath.Join(path, "repositories.json"))
+	if err != nil {
+		return nil, err
+	}
+	runStore, err := runs.Open(path, filepath.Join(path, "runs.jsonl"), validationLimit)
+	if err != nil {
+		return nil, err
+	}
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = runStore.Close()
+		}
+	}()
+	taskStore, err := taskstore.OpenExisting(filepath.Join(path, "tasks.jsonl"))
+	if err != nil {
+		return nil, err
+	}
+	wire, err := eventwire.OpenExisting(filepath.Join(path, "system-events.jsonl"), validationLimit, nil)
+	if err != nil {
+		return nil, err
+	}
+	activity, payloads, err := eventwire.ReadActivity(filepath.Join(path, "activity"))
+	if err != nil {
+		return nil, err
+	}
+	succeeded = true
+	return &SelectedGeneration{
+		Generation: Generation{Path: path, Manifest: manifest, Report: report},
+		Policy:     policyStore, Repositories: repositoryStore, Runs: runStore,
+		Tasks: taskStore, Wire: wire, Activity: activity, Payloads: payloads,
+	}, nil
+}
+
+// VerifySourceSnapshot rechecks every source file and directory captured by a
+// generation while allowing known operational files such as the lease and
+// selector to appear beside that immutable legacy set.
+func VerifySourceSnapshot(root string, report DryRunReport) error {
+	if err := report.validate(); err != nil {
+		return err
+	}
+	root = filepath.Clean(root)
+	for _, expected := range report.Manifest.Sources {
+		path, err := safeRelativePath(root, expected.Path)
+		if err != nil {
+			return err
+		}
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != os.FileMode(expected.Mode) || info.Size() != expected.Size {
+			return fmt.Errorf("migration: source artifact changed: %s", expected.Path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(data)
+		if hex.EncodeToString(digest[:]) != expected.SHA256 {
+			return fmt.Errorf("migration: source artifact changed: %s", expected.Path)
+		}
+	}
+	for _, expected := range report.Manifest.Directories {
+		path := root
+		if expected.Path != "." {
+			var err error
+			path, err = safeRelativePath(root, expected.Path)
+			if err != nil {
+				return err
+			}
+		}
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != os.FileMode(expected.Mode) {
+			return fmt.Errorf("migration: source directory changed: %s", expected.Path)
+		}
+	}
+	return nil
+}
+
 // BuildGeneration creates and reopens a complete sibling generation without
 // selecting it or enabling canonical writes. Repeating the same build reuses
 // only an exact, unchanged staged generation.
@@ -298,20 +466,30 @@ func validateGenerationInventory(path string) error {
 	if err != nil {
 		return err
 	}
-	if len(entries) != len(expected) {
+	if len(entries) != len(expected) && len(entries) != len(expected)+1 {
 		return errors.New("migration: staged generation inventory is incomplete or contains unknown artifacts")
 	}
+	seen := make(map[string]bool, len(expected))
 	for _, entry := range entries {
+		if entry.Name() == writeBoundaryArtifactName && !entry.IsDir() && entry.Type()&os.ModeSymlink == 0 {
+			continue
+		}
 		if !expected[entry.Name()] || entry.Type()&os.ModeSymlink != 0 {
 			return errors.New("migration: staged generation inventory is incomplete or contains unknown artifacts")
 		}
+		seen[entry.Name()] = true
 		shouldDirectory := entry.Name() == "activity" || entry.Name() == generationBackupDir
 		if entry.IsDir() != shouldDirectory {
 			return errors.New("migration: staged generation artifact has the wrong type")
 		}
 	}
+	if len(seen) != len(expected) {
+		return errors.New("migration: staged generation inventory is incomplete or contains unknown artifacts")
+	}
 	return nil
 }
+
+const writeBoundaryArtifactName = "canonicalWritesStarted"
 
 func validateGenerationManifest(value GenerationManifest, expected DryRunReport) error {
 	if value.Schema != generationManifestSchema || value.StateGeneration != stateGeneration ||

@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/tomnagengast/factory/internal/taskcompat"
@@ -221,6 +222,14 @@ func open(path string, create bool) (*Store, error) {
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("task store: create directory: %w", err)
+	}
+	if info, err := os.Lstat(path); err == nil {
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 || stat.Nlink != 1 {
+			return nil, errors.New("task store: artifact must be a private, singly linked regular file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("task store: inspect artifact: %w", err)
 	}
 	s := newStore(path)
 	data, err := os.ReadFile(path)
