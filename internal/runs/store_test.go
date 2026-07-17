@@ -199,6 +199,27 @@ func TestLiveAdmissionOperationRejectsMultipleRateMinutes(t *testing.T) {
 	}
 }
 
+func TestLiveAdmissionOperationRejectsLinkedTerminalRepositoryEscapeEvidence(t *testing.T) {
+	for _, origin := range []AdmissionOrigin{AdmissionOriginEvent, AdmissionOriginNative, AdmissionOriginContinuation} {
+		for _, historical := range []bool{false, true} {
+			name := "route unavailable"
+			if historical {
+				name = "historical route"
+			}
+			t.Run(string(origin)+"/"+name, func(t *testing.T) {
+				model := testLinkedMigrationRouteModel(t, origin, StateSucceeded, historical)
+				operation := diskOperation{
+					Kind: operationAdmissionBatch, Version: JournalVersion, Sequence: 1,
+					AdmissionBatches: model.AdmissionBatches, Runs: model.Runs, RateIncrements: model.RateBuckets,
+				}
+				if err := validateAdmissionOperationProjection(operation); err == nil {
+					t.Fatal("live admission operation accepted migration-only repository escape evidence")
+				}
+			})
+		}
+	}
+}
+
 func TestSuppressedAdmissionOperationExactRetryAfterReopen(t *testing.T) {
 	root := trustedTestRoot(t, t.TempDir())
 	path := filepath.Join(root, "runs.jsonl")

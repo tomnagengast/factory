@@ -352,6 +352,107 @@ func TestMigrationSnapshotDigestCanonicalizationAndNonAliasing(t *testing.T) {
 	}
 }
 
+func TestMigrationSnapshotBacksLinkedTerminalRepositoryEscapeEvidence(t *testing.T) {
+	origins := []AdmissionOrigin{AdmissionOriginEvent, AdmissionOriginNative, AdmissionOriginContinuation}
+	states := []LifecycleState{StateSucceeded, StateBlocked, StateFailed, StateRejected}
+	repositories := []struct {
+		name       string
+		historical bool
+	}{
+		{name: "route unavailable"},
+		{name: "historical route", historical: true},
+	}
+	for _, origin := range origins {
+		for _, state := range states {
+			for _, repository := range repositories {
+				t.Run(string(origin)+"/"+string(state)+"/"+repository.name, func(t *testing.T) {
+					model := testLinkedMigrationRouteModel(t, origin, state, repository.historical)
+					snapshot, err := NewSnapshot(model)
+					if err != nil {
+						t.Fatalf("migration-backed linked terminal Run: %v", err)
+					}
+					if got := snapshot.Model().AdmissionBatches[0].Origin; got != origin {
+						t.Fatalf("admission origin = %q, want %q", got, origin)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestLinkedRepositoryEscapeRequiresValidatedMigrationTerminalEvidence(t *testing.T) {
+	t.Run("missing migration receipt", func(t *testing.T) {
+		model := testLinkedMigrationRouteModel(t, AdmissionOriginEvent, StateSucceeded, false)
+		model.Migration = nil
+		if _, err := NewSnapshot(model); err == nil {
+			t.Fatal("linked repository escape accepted without a migration receipt")
+		}
+	})
+
+	t.Run("missing Run tombstones", func(t *testing.T) {
+		model := testLinkedMigrationRouteModel(t, AdmissionOriginEvent, StateSucceeded, false)
+		receipt, err := NewMigrationSnapshotReceipt(
+			model.Migration.MigrationID, model.Migration.SourceRootDigest, model.TotalRuns,
+			model.AdmissionBatches, nil, model.RateBuckets,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		model.Migration = receipt
+		if _, err := NewSnapshot(model); err == nil {
+			t.Fatal("linked repository escape accepted without Run tombstones")
+		}
+	})
+
+	t.Run("invalid migration operation identity", func(t *testing.T) {
+		model := testLinkedMigrationRouteModel(t, AdmissionOriginEvent, StateSucceeded, false)
+		model.Migration.OperationID = strings.Repeat("0", 64)
+		if _, err := NewSnapshot(model); err == nil || !strings.Contains(err.Error(), "operation identity") {
+			t.Fatalf("invalid migration operation identity error = %v", err)
+		}
+	})
+
+	for _, origin := range []AdmissionOrigin{AdmissionOriginEvent, AdmissionOriginNative, AdmissionOriginContinuation} {
+		for _, historical := range []bool{false, true} {
+			name := "route unavailable"
+			if historical {
+				name = "historical route"
+			}
+			t.Run("nonterminal/"+string(origin)+"/"+name, func(t *testing.T) {
+				model := testLinkedMigrationRouteModel(t, origin, StatePending, historical)
+				if _, err := NewSnapshot(model); err == nil {
+					t.Fatal("migration-backed linked nonterminal Run accepted repository escape evidence")
+				}
+			})
+		}
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*Run)
+	}{
+		{name: "workflow pin unavailable", mutate: func(run *Run) {
+			run.Causation.Workflow = nil
+			run.Causation.WorkflowDigest = ""
+			run.MigratedBaseline.WorkflowPinUnavailable = true
+		}},
+		{name: "workflow digest unavailable", mutate: func(run *Run) {
+			run.Causation.Workflow = pointerPin(workflow.Pinned{ID: "full-sdlc", Revision: 3})
+			run.Causation.WorkflowDigest = ""
+			run.MigratedBaseline.WorkflowDigestUnavailable = true
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := testLinkedMigrationRouteModel(t, AdmissionOriginEvent, StateSucceeded, false)
+			test.mutate(&model.Runs[0])
+			model.Migration = testMigrationReceipt(t, model)
+			if _, err := NewSnapshot(model); err == nil || !strings.Contains(err.Error(), "migrated direct admission") {
+				t.Fatalf("linked workflow escape error = %v", err)
+			}
+		})
+	}
+}
+
 func TestTerminalRunPreservesLegacyAndCompactedWorkflowPins(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -950,6 +1051,53 @@ func testMigrationSnapshotModel(t *testing.T, root string) Model {
 		AdmissionOperations: []AdmissionOperationReceipt{}, AdmissionBatches: batches,
 		Runs: runs, RateBuckets: rates,
 	}
+}
+
+func testLinkedMigrationRouteModel(t *testing.T, origin AdmissionOrigin, state LifecycleState, historical bool) Model {
+	t.Helper()
+	batch, run, rate := testAdmissionProjection(t, privateModelTestRoot(t), 1, state)
+	batch.Origin = origin
+	if origin != AdmissionOriginEvent {
+		batch.EventSequence = 0
+		run.Causation.EventSequence = 0
+	}
+	route := *run.Repository
+	run.Repository = nil
+	run.Transitions = nil
+	run.MigratedBaseline = &MigratedBaseline{
+		State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true,
+	}
+	if historical {
+		run.MigratedBaseline.HistoricalRepository = &HistoricalRepository{
+			Repository: route.Repository, Origin: route.Origin, ManagedPath: route.ManagedPath,
+			ManagedRoot: route.ManagedRoot, DefaultBranch: route.DefaultBranch, Bootstrap: route.Bootstrap,
+			CloudURL: route.CloudURL,
+		}
+	} else {
+		run.MigratedBaseline.RepositoryRouteUnavailable = true
+	}
+	if state == StateRejected {
+		run.Detail = "synthetic migrated rejection"
+	}
+	model := Model{
+		Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1,
+		AdmissionOperations: []AdmissionOperationReceipt{}, AdmissionBatches: []AdmissionBatch{batch},
+		Runs: []Run{run}, RateBuckets: []RateBucket{rate},
+	}
+	model.Migration = testMigrationReceipt(t, model)
+	return model
+}
+
+func testMigrationReceipt(t *testing.T, model Model) *MigrationSnapshotReceipt {
+	t.Helper()
+	receipt, err := NewMigrationSnapshotReceipt(
+		"migration-linked-routes-1", strings.Repeat("b", 64), model.TotalRuns,
+		model.AdmissionBatches, model.Runs, model.RateBuckets,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return receipt
 }
 
 func resignMigrationReceipt(model *Model) {

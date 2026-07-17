@@ -436,7 +436,7 @@ func validateAdmissionOperationProjection(operation diskOperation) error {
 	if !canonicalBatchOrder(candidate.AdmissionBatches) || !canonicalRunOrder(candidate.Runs) || !canonicalRateOrder(candidate.RateBuckets) {
 		return errors.New("runs: invalid admission operation projection: ordering is not canonical")
 	}
-	if err := validateRetainedProjection(candidate); err != nil {
+	if err := validateRetainedProjection(candidate, migrationIdentityEvidence{}); err != nil {
 		return fmt.Errorf("runs: invalid admission operation projection: %w", err)
 	}
 	return nil

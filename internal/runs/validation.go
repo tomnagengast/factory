@@ -50,17 +50,17 @@ func validateModel(model Model) error {
 		!canonicalBatchOrder(model.AdmissionBatches) || !canonicalRunOrder(model.Runs) || !canonicalRateOrder(model.RateBuckets) {
 		return errors.New("runs: projection ordering is not canonical")
 	}
-	if err := validateRetainedProjection(model); err != nil {
-		return err
-	}
-	return validateAdmissionOperations(model)
-}
-
-func validateAdmissionOperations(model Model) error {
 	migration, err := validateMigrationSnapshotReceipt(model)
 	if err != nil {
 		return err
 	}
+	if err := validateRetainedProjection(model, migration); err != nil {
+		return err
+	}
+	return validateAdmissionOperations(model, migration)
+}
+
+func validateAdmissionOperations(model Model, migration migrationIdentityEvidence) error {
 	totalBatches := migration.retainedBatches
 	totalRuns := migration.lifetimeRuns
 	batches := make(map[string]AdmissionBatch)
@@ -268,7 +268,11 @@ func (e migrationIdentityEvidence) overlapsRun(run Run) bool {
 	return e.runIDs[run.ID] || e.admissionIDs[run.Causation.AdmissionID]
 }
 
-func validateRetainedProjection(model Model) error {
+func (e migrationIdentityEvidence) backsRun(run Run) bool {
+	return e.runIDs[run.ID] && e.admissionIDs[run.Causation.AdmissionID]
+}
+
+func validateRetainedProjection(model Model, migration migrationIdentityEvidence) error {
 
 	batches := make(map[string]AdmissionBatch, len(model.AdmissionBatches))
 	events := make(map[string]string, len(model.AdmissionBatches))
@@ -333,10 +337,18 @@ func validateRetainedProjection(model Model) error {
 			return fmt.Errorf("runs: Run %q admission linkage conflicts", run.ID)
 		}
 		baseline := run.MigratedBaseline
-		if baseline != nil && batch.Origin != AdmissionOriginMigratedDirect &&
-			(baseline.WorkflowPinUnavailable || baseline.WorkflowDigestUnavailable ||
-				baseline.RepositoryRouteUnavailable || baseline.HistoricalRepository != nil) {
-			return fmt.Errorf("runs: Run %q migrated baseline escape evidence is not linked to a migrated direct admission", run.ID)
+		if baseline != nil && batch.Origin != AdmissionOriginMigratedDirect {
+			if baseline.WorkflowPinUnavailable || baseline.WorkflowDigestUnavailable {
+				return fmt.Errorf("runs: Run %q migrated baseline escape evidence is not linked to a migrated direct admission", run.ID)
+			}
+			if baseline.RepositoryRouteUnavailable || baseline.HistoricalRepository != nil {
+				if !run.State.Terminal() {
+					return fmt.Errorf("runs: Run %q migrated baseline escape evidence is not linked to a migrated direct admission", run.ID)
+				}
+				if !migration.backsRun(run) {
+					return fmt.Errorf("runs: Run %q linked repository escape evidence lacks migration snapshot backing", run.ID)
+				}
+			}
 		}
 	}
 	if len(seenRuns) != len(runnable) {
