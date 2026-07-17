@@ -76,4 +76,9 @@ export type Health = {
 export type ProjectDetail = { project: Project; tasks: Task[] };
 export type TaskDetail = { task: Task; comments: Comment[]; artifacts: Artifact[] };
 export type CommentDetail = { comment: Comment; replies: Comment[]; artifacts: Artifact[] };
-export type WorkflowDetail = { workflow: Workflow; comments: Comment[]; artifacts: Artifact[] };
+export type WorkflowDetail = {
+  workflow: Workflow;
+  comments: Comment[];
+  artifacts: Artifact[];
+  source: string;
+};

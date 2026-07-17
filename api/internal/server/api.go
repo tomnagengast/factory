@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -514,9 +515,15 @@ func (s *Server) workflow(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusNotFound, errors.New("workflow not found"))
 		return
 	}
+	source := ""
+	if workflow.Path != nil {
+		if data, err := os.ReadFile(*workflow.Path); err == nil {
+			source = string(data)
+		}
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"workflow": workflow, "comments": view.CommentsFor("workflow", id),
-		"artifacts": view.ArtifactsFor("workflow", id),
+		"artifacts": view.ArtifactsFor("workflow", id), "source": source,
 	})
 }
 

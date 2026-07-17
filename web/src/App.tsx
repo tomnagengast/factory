@@ -899,11 +899,19 @@ function WorkflowView() {
   const [data, { refetch }] = createResource(() => get<WorkflowDetail>(`/api/workflows/${params.workflow}`));
   const action = mutation();
   liveRefetch(["comment.created", "workflow.updated", "workflow.authoring.completed", "workflow.authoring.failed"], refetch);
+  let sourcePolling: number | undefined;
+  onMount(() => {
+    sourcePolling = window.setInterval(() => {
+      if (data()?.comments.at(-1)?.author === "user") void refetch();
+    }, 1000);
+  });
+  onCleanup(() => window.clearInterval(sourcePolling));
   return (
     <div class="page chat-page">
       <Load data={data} error={() => data.error}>
         {(value) => {
-          const working = () => value.comments.at(-1)?.author === "user";
+          const current = () => data() ?? value;
+          const working = () => current().comments.at(-1)?.author === "user";
           return <>
             <PageHeader eyebrow={`Workflow ${value.workflow.id}`} title={value.workflow.name}
               description={value.workflow.description}
@@ -916,29 +924,40 @@ function WorkflowView() {
               <Show when={value.workflow.path}><code>{value.workflow.path}</code></Show>
               <Show when={value.workflow.mutating}><span class="event-chip">mutating</span></Show>
             </div>
-            <div class="conversation">
-              <For each={value.comments}>{(comment) => <article classList={{ message: true, agent: comment.author === "agent" }}>
-                <header><strong>{comment.author === "agent" ? "Codex" : "You"}</strong><time>{date(comment.createdAt)}</time></header>
-                <p>{comment.content}</p>
-              </article>}</For>
-              <Show when={working()}><article class="message agent working"><header><strong>Codex</strong></header><p>Working on the workflow…</p></article></Show>
+            <div class="workflow-studio">
+              <section class="workflow-chat" aria-label="Workflow conversation">
+                <div class="conversation" role="log" aria-live="polite">
+                  <For each={current().comments}>{(comment) => <article classList={{ message: true, agent: comment.author === "agent" }}>
+                    <header><strong>{comment.author === "agent" ? "Codex" : "You"}</strong><time>{date(comment.createdAt)}</time></header>
+                    <p>{comment.content}</p>
+                  </article>}</For>
+                  <Show when={working()}><article class="message agent working"><header><strong>Codex</strong></header><p>Working on the workflow…</p></article></Show>
+                </div>
+                <form class="composer" onSubmit={(event) => {
+                  event.preventDefault();
+                  const form = event.currentTarget;
+                  const body = new FormData(form);
+                  action.run(async () => {
+                    await post<Comment>(`/api/workflows/${value.workflow.id}/comments`, {
+                      message: String(body.get("message") ?? "").trim(),
+                    });
+                    form.reset();
+                    await refetch();
+                  });
+                }}>
+                  <textarea name="message" required rows="4" placeholder="Ask Codex to revise, explain, or extend the workflow…" />
+                  <button class="button primary" disabled={action.pending()}>Send to Codex</button>
+                  <Show when={action.error()}><span class="form-error">{action.error()}</span></Show>
+                </form>
+              </section>
+              <section class="source-panel" aria-label="Live workflow source">
+                <header>
+                  <div><span>Live source</span><strong>{fileName(current().workflow.path)}</strong></div>
+                  <span classList={{ "source-status": true, working: working() }}>{working() ? "Updating" : "Current"}</span>
+                </header>
+                <pre tabIndex={0}><code>{current().source || "// Waiting for Codex to write the workflow file."}</code></pre>
+              </section>
             </div>
-            <form class="composer" onSubmit={(event) => {
-              event.preventDefault();
-              const form = event.currentTarget;
-              const body = new FormData(form);
-              action.run(async () => {
-                await post<Comment>(`/api/workflows/${value.workflow.id}/comments`, {
-                  message: String(body.get("message") ?? "").trim(),
-                });
-                form.reset();
-                await refetch();
-              });
-            }}>
-              <textarea name="message" required rows="4" placeholder="Ask Codex to revise, explain, or extend the workflow…" />
-              <button class="button primary" disabled={action.pending()}>Send to Codex</button>
-              <Show when={action.error()}><span class="form-error">{action.error()}</span></Show>
-            </form>
           </>;
         }}
       </Load>
@@ -1020,6 +1039,10 @@ function workflowName(id: number, workflows: Workflow[]) {
 function compactJSON(value: unknown) {
   const text = JSON.stringify(value);
   return text.length > 100 ? `${text.slice(0, 97)}…` : text;
+}
+
+function fileName(path: string | undefined) {
+  return path?.split("/").at(-1) ?? "workflow.js";
 }
 
 function date(value: string) {

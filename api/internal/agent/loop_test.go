@@ -73,6 +73,10 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	if len(comments) != 2 || comments[1].Author != "agent" {
 		t.Fatalf("agent reply missing: %#v", comments)
 	}
+	authored, _ := view.Workflow(created.ID)
+	if authored.Path == nil || *authored.Path != workflows.LocalPath(created.ID) {
+		t.Fatalf("workflow path = %v, want live authoring target", authored.Path)
+	}
 }
 
 func TestLoopRunsMatchingEventTrigger(t *testing.T) {

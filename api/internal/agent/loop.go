@@ -92,12 +92,22 @@ func (l *Loop) authorWorkflow(ctx context.Context, view state.Snapshot, comment 
 	if !found {
 		return nil
 	}
+	target := l.workflows.LocalPath(selected.ID)
+	if filepath.Clean(stringValue(selected.Path)) != filepath.Clean(target) {
+		if _, err := l.wire.Publish(state.WorkflowUpdated, state.WorkflowData{
+			ID: selected.ID, Name: selected.Name, Description: selected.Description,
+			Path: &target, Scope: selected.Scope, Phases: slices.Clone(selected.Phases),
+			Mutating: selected.Mutating,
+		}); err != nil {
+			return err
+		}
+	}
 	if _, err := l.wire.Publish(authoringStarted, map[string]int64{
 		"workflowId": selected.ID, "commentId": comment.ID,
 	}); err != nil {
 		return err
 	}
-	output, runErr := l.agent.Run(ctx, authorPrompt(selected, view.CommentsFor("workflow", selected.ID), l.workflows.LocalPath(selected.ID)))
+	output, runErr := l.agent.Run(ctx, authorPrompt(selected, view.CommentsFor("workflow", selected.ID), target))
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

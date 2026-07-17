@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -87,6 +88,44 @@ func TestWorkflowCreationIsAConversation(t *testing.T) {
 	}
 	if len(view.Workflows) != 1 || len(view.CommentsFor("workflow", view.Workflows[0].ID)) != 1 {
 		t.Fatalf("workflow conversation missing: %#v", view)
+	}
+}
+
+func TestWorkflowDetailIncludesLiveSource(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	path := filepath.Join(t.TempDir(), "review.js")
+	source := "export const meta = { name: \"review\" };"
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{
+		Name: "review", Path: &path,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	response := requestJSON(t, testServer(t, wire).Handler(), http.MethodGet, "/api/workflows/1", "")
+	var detail struct {
+		Source string `json:"source"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Source != source {
+		t.Fatalf("source = %q, want %q", detail.Source, source)
+	}
+
+	source = "export const meta = { name: \"review-v2\" };"
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	response = requestJSON(t, testServer(t, wire).Handler(), http.MethodGet, "/api/workflows/1", "")
+	if err := json.Unmarshal(response.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Source != source {
+		t.Fatalf("refreshed source = %q, want %q", detail.Source, source)
 	}
 }
 
