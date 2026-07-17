@@ -28,6 +28,10 @@ func TestSnapshotCanonicalDigestAndNonAliasing(t *testing.T) {
 	model.JournalSequence = 7
 	model.TotalBatches = 2
 	model.TotalRuns = 2
+	model.AdmissionOperations = []AdmissionOperationReceipt{
+		testAdmissionReceipt([]AdmissionBatch{secondBatch}, []Run{secondRun}, []RateBucket{secondRate}),
+		testAdmissionReceipt([]AdmissionBatch{firstBatch}, []Run{firstRun}, []RateBucket{firstRate}),
+	}
 	model.AdmissionBatches = []AdmissionBatch{secondBatch, firstBatch}
 	model.Runs = []Run{secondRun, firstRun}
 	model.RateBuckets = []RateBucket{secondRate, firstRate}
@@ -62,18 +66,22 @@ func TestSnapshotCanonicalDigestAndNonAliasing(t *testing.T) {
 	}
 
 	model.AdmissionBatches[0].Outcomes[0].Reason = "mutated input"
+	model.AdmissionOperations[0].Runs[0].DeliveryIDs[0] = "mutated-operation-input"
 	model.Runs[0].DeliveryIDs[0] = "mutated-input"
 	model.Runs[0].Causation.AncestorRuleIDs[0] = "mutated-input"
 	model.Runs[0].Causation.Workflow.Steps = append(model.Runs[0].Causation.Workflow.Steps, "mutated")
 	model.Runs[0].Repository.Repository = "mutated/repository"
 	model.Runs[0].StartedAt = pointerTime(modelTestNow.Add(24 * time.Hour))
 	read := snapshot.Model()
-	if read.AdmissionBatches[1].Outcomes[0].Reason == "mutated input" || strings.Contains(strings.Join(read.Runs[1].DeliveryIDs, ","), "mutated") ||
+	if read.AdmissionBatches[1].Outcomes[0].Reason == "mutated input" ||
+		strings.Contains(strings.Join(read.AdmissionOperations[0].Runs[0].DeliveryIDs, ","), "mutated-operation") ||
+		strings.Contains(strings.Join(read.Runs[1].DeliveryIDs, ","), "mutated") ||
 		read.Runs[1].Repository.Repository == "mutated/repository" || read.Runs[1].StartedAt != nil {
 		t.Fatalf("snapshot aliases caller input: %#v", read)
 	}
 
 	read.AdmissionBatches[0].Outcomes[0].AdmissionID = "mutated-output"
+	read.AdmissionOperations[0].AdmissionBatches[0].EventID = "mutated-operation-output"
 	read.Runs[0].Causation.Workflow.Markdown = "mutated-output"
 	read.Runs[0].Repository.ProjectID = "mutated-output"
 	read.Runs[0].DeliveryIDs[0] = "mutated-output"
@@ -85,16 +93,15 @@ func TestSnapshotCanonicalDigestAndNonAliasing(t *testing.T) {
 
 func TestSnapshotRejectsBrokenIdentityAndLifecycleInvariants(t *testing.T) {
 	batch, run, rate := testAdmissionProjection(t, t.TempDir(), 1, StatePending)
-	base := Model{
-		Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1,
-		AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate},
-	}
+	base := testSingleAdmissionModel(batch, run, rate)
 	tests := []struct {
 		name   string
 		mutate func(*Model)
 		want   string
 	}{
 		{name: "missing schema", mutate: func(value *Model) { value.Schema = 0 }, want: "schema"},
+		{name: "missing operation receipts", mutate: func(value *Model) { value.AdmissionOperations = nil }, want: "receipts"},
+		{name: "invalid operation receipt", mutate: func(value *Model) { value.AdmissionOperations[0].RateIncrements[0].Count++ }, want: "operation receipt"},
 		{name: "total below retained", mutate: func(value *Model) { value.TotalRuns = 0 }, want: "retained"},
 		{name: "outcome link", mutate: func(value *Model) { value.AdmissionBatches[0].Outcomes[1].RunID = "run-other" }, want: "linkage"},
 		{name: "admission identity", mutate: func(value *Model) { value.Runs[0].Causation.AdmissionID = "admission-other" }, want: "linkage"},
@@ -117,6 +124,47 @@ func TestSnapshotRejectsBrokenIdentityAndLifecycleInvariants(t *testing.T) {
 	}
 }
 
+func TestSnapshotDigestIncludesEvictedAdmissionOperationReceipt(t *testing.T) {
+	root := privateModelTestRoot(t)
+	firstBatch, firstRun, firstRate := testAdmissionProjection(t, root, 1, StateSucceeded)
+	secondBatch, secondRun, secondRate := testAdmissionProjection(t, root, 2, StateSucceeded)
+	model := Model{
+		Schema: SchemaVersion, TotalBatches: 2, TotalRuns: 2,
+		AdmissionOperations: []AdmissionOperationReceipt{
+			testAdmissionReceipt([]AdmissionBatch{firstBatch}, []Run{firstRun}, []RateBucket{firstRate}),
+			testAdmissionReceipt([]AdmissionBatch{secondBatch}, []Run{secondRun}, []RateBucket{secondRate}),
+		},
+		AdmissionBatches: []AdmissionBatch{secondBatch}, Runs: []Run{secondRun},
+		RateBuckets: []RateBucket{firstRate, secondRate},
+	}
+	before, err := NewSnapshot(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeDigest, err := before.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := before.Model()
+	for index := range changed.AdmissionOperations[0].AdmissionBatches[0].Outcomes {
+		outcome := &changed.AdmissionOperations[0].AdmissionBatches[0].Outcomes[index]
+		if outcome.Kind == AdmissionOutcomeSuppressed {
+			outcome.Reason = "different durable suppression"
+		}
+	}
+	after, err := NewSnapshot(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterDigest, err := after.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeDigest == afterDigest {
+		t.Fatal("semantic digest omitted an evicted durable admission operation receipt")
+	}
+}
+
 func TestTerminalRunPreservesLegacyAndCompactedWorkflowPins(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -135,6 +183,7 @@ func TestTerminalRunPreservesLegacyAndCompactedWorkflowPins(t *testing.T) {
 					State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true, WorkflowPinUnavailable: true,
 				}
 				run.Transitions = nil
+				makeMigratedDirect(&batch, &run)
 			} else if compactWorkflow(*test.pin) {
 				run.Causation.WorkflowDigest = strings.Repeat("a", 64)
 			} else {
@@ -144,7 +193,7 @@ func TestTerminalRunPreservesLegacyAndCompactedWorkflowPins(t *testing.T) {
 				}
 				run.Causation.WorkflowDigest = digest
 			}
-			model := Model{Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate}}
+			model := testSingleAdmissionModel(batch, run, rate)
 			if _, err := NewSnapshot(model); err != nil {
 				t.Fatalf("legacy-compatible terminal Run: %v", err)
 			}
@@ -206,10 +255,8 @@ func TestSnapshotPreservesCompleteLifecycleCompatibilityPayload(t *testing.T) {
 		PullRequestState: "MERGED", PullRequestHead: verifiedHead, MergeCommitOID: mergeCommit,
 		DeploymentID: "deployment-1", DeploymentCommit: deploymentCommit,
 	}
-	model := Model{
-		Schema: SchemaVersion, JournalSequence: 42, TotalBatches: 1, TotalRuns: 1,
-		AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate},
-	}
+	model := testSingleAdmissionModel(batch, run, rate)
+	model.JournalSequence = 42
 	snapshot, err := NewSnapshot(model)
 	if err != nil {
 		t.Fatal(err)
@@ -257,15 +304,16 @@ func TestMigratedBaselinePreservesAcknowledgedLegacyShapes(t *testing.T) {
 			State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true,
 			WorkflowDigestUnavailable: true, HistoricalRepository: historical,
 		}
-		snapshot, err := NewSnapshot(Model{
-			Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1,
-			AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate},
-		})
+		makeMigratedDirect(&batch, &run)
+		snapshot, err := NewSnapshot(testSingleAdmissionModel(batch, run, rate))
 		if err != nil {
 			t.Fatal(err)
 		}
 		absentRepository := snapshot.Model()
 		absentRepository.Runs[0].MigratedBaseline.HistoricalRepository = nil
+		absentRepository.Runs[0].MigratedBaseline.RepositoryRouteUnavailable = true
+		absentRepository.AdmissionOperations[0].Runs[0].MigratedBaseline.HistoricalRepository = nil
+		absentRepository.AdmissionOperations[0].Runs[0].MigratedBaseline.RepositoryRouteUnavailable = true
 		if _, err := NewSnapshot(absentRepository); err != nil {
 			t.Fatalf("absent historical repository: %v", err)
 		}
@@ -299,10 +347,8 @@ func TestMigratedBaselinePreservesAcknowledgedLegacyShapes(t *testing.T) {
 		run.SegmentStartedAt = pointerTime(run.UpdatedAt)
 		run.Transitions = nil
 		run.MigratedBaseline = &MigratedBaseline{State: StateRunning, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true}
-		snapshot, err := NewSnapshot(Model{
-			Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1,
-			AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate},
-		})
+		makeMigratedDirect(&batch, &run)
+		snapshot, err := NewSnapshot(testSingleAdmissionModel(batch, run, rate))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -322,6 +368,55 @@ func TestMigratedBaselinePreservesAcknowledgedLegacyShapes(t *testing.T) {
 		}
 	})
 
+	for _, state := range []LifecycleState{StatePending, StateRunning} {
+		t.Run("active direct source without pin or route "+string(state), func(t *testing.T) {
+			root := privateModelTestRoot(t)
+			batch, run, rate := testAdmissionProjection(t, root, 1, StatePending)
+			if state == StateRunning {
+				batch, run, rate = runningProjection(t, root)
+			}
+			run.Causation.Workflow = nil
+			run.Causation.WorkflowDigest = ""
+			run.Repository = nil
+			run.Transitions = nil
+			run.MigratedBaseline = &MigratedBaseline{
+				State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true,
+				WorkflowPinUnavailable: true, RepositoryRouteUnavailable: true,
+			}
+			makeMigratedDirect(&batch, &run)
+			snapshot, err := NewSnapshot(testSingleAdmissionModel(batch, run, rate))
+			if err != nil {
+				t.Fatalf("sanitized legacy %s source shape: %v", state, err)
+			}
+			path := filepath.Join(root, "legacy-"+string(state), "runs.jsonl")
+			store, err := Create(root, path, snapshot, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			failed := nextLifecycleRun(run, StateFailed, run.UpdatedAt.Add(time.Second))
+			if err := store.Transition(failed); err != nil {
+				t.Fatalf("first canonical transition from %s migrated baseline: %v", state, err)
+			}
+		})
+	}
+
+	for _, state := range []LifecycleState{StatePending, StateRunning} {
+		t.Run("ordinary active Run rejects absent pin and route "+string(state), func(t *testing.T) {
+			root := privateModelTestRoot(t)
+			batch, run, rate := testAdmissionProjection(t, root, 1, StatePending)
+			if state == StateRunning {
+				batch, run, rate = runningProjection(t, root)
+			}
+			run.Causation.Workflow = nil
+			run.Causation.WorkflowDigest = ""
+			run.Repository = nil
+			if _, err := NewSnapshot(testSingleAdmissionModel(batch, run, rate)); err == nil {
+				t.Fatal("ordinary canonical active Run accepted absent pin and route")
+			}
+		})
+	}
+
 	for _, test := range []struct {
 		name   string
 		mutate func(*Run)
@@ -340,10 +435,7 @@ func TestMigratedBaselinePreservesAcknowledgedLegacyShapes(t *testing.T) {
 		t.Run("ordinary Run rejects "+test.name, func(t *testing.T) {
 			batch, run, rate := testAdmissionProjection(t, privateModelTestRoot(t), 1, StateSucceeded)
 			test.mutate(&run)
-			_, err := NewSnapshot(Model{
-				Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1,
-				AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate},
-			})
+			_, err := NewSnapshot(testSingleAdmissionModel(batch, run, rate))
 			if err == nil {
 				t.Fatal("ordinary canonical Run accepted migration-only evidence gap")
 			}
@@ -355,7 +447,7 @@ func TestModelLinksPolicyOwnershipAndCompletionEvidence(t *testing.T) {
 	t.Run("policy revision matches admission settings", func(t *testing.T) {
 		batch, run, rate := testAdmissionProjection(t, privateModelTestRoot(t), 1, StatePending)
 		run.Causation.PolicyRevision++
-		if _, err := NewSnapshot(Model{Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate}}); err == nil || !strings.Contains(err.Error(), "linkage") {
+		if _, err := NewSnapshot(testSingleAdmissionModel(batch, run, rate)); err == nil || !strings.Contains(err.Error(), "linkage") {
 			t.Fatalf("policy linkage error = %v", err)
 		}
 	})
@@ -373,6 +465,10 @@ func TestModelLinksPolicyOwnershipAndCompletionEvidence(t *testing.T) {
 		admit(&secondRun)
 		model := Model{
 			Schema: SchemaVersion, TotalBatches: 2, TotalRuns: 2,
+			AdmissionOperations: []AdmissionOperationReceipt{
+				testAdmissionReceipt([]AdmissionBatch{firstBatch}, []Run{firstRun}, []RateBucket{firstRate}),
+				testAdmissionReceipt([]AdmissionBatch{secondBatch}, []Run{secondRun}, []RateBucket{secondRate}),
+			},
 			AdmissionBatches: []AdmissionBatch{firstBatch, secondBatch}, Runs: []Run{firstRun, secondRun}, RateBuckets: []RateBucket{firstRate, secondRate},
 		}
 		if _, err := NewSnapshot(model); err != nil {
@@ -407,7 +503,7 @@ func TestModelLinksPolicyOwnershipAndCompletionEvidence(t *testing.T) {
 			Accepted: true, Intent: string(StateSucceeded), State: StateSucceeded, Reason: "verified",
 			ValidatedAt: *run.FinishedAt, PullRequestState: "MERGED", PullRequestHead: head, MergeCommitOID: merge,
 		}
-		base := Model{Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate}}
+		base := testSingleAdmissionModel(batch, run, rate)
 		if _, err := NewSnapshot(base); err != nil {
 			t.Fatalf("repository-only completion: %v", err)
 		}
@@ -423,6 +519,20 @@ func TestModelLinksPolicyOwnershipAndCompletionEvidence(t *testing.T) {
 			{name: "terminal state", edit: func(run *Run) { run.Completion.State = StateBlocked; run.Completion.Intent = string(StateBlocked) }},
 			{name: "verified head", edit: func(run *Run) { run.Completion.PullRequestHead = strings.Repeat("c", 40) }},
 			{name: "merge", edit: func(run *Run) { run.Completion.MergeCommitOID = strings.Repeat("c", 40) }},
+			{name: "head without ready", edit: func(run *Run) {
+				run.Ready = nil
+				run.MergeCommitOID = ""
+				run.Completion.PullRequestState = ""
+				run.Completion.MergeCommitOID = ""
+			}},
+			{name: "merge without Run merge", edit: func(run *Run) { run.MergeCommitOID = "" }},
+			{name: "success without ready", edit: func(run *Run) {
+				run.Ready = nil
+				run.MergeCommitOID = ""
+				run.Completion.PullRequestState = ""
+				run.Completion.PullRequestHead = ""
+				run.Completion.MergeCommitOID = ""
+			}},
 		} {
 			t.Run(mutation.name, func(t *testing.T) {
 				candidate := cloneModel(base)
@@ -460,6 +570,54 @@ func TestModelLinksPolicyOwnershipAndCompletionEvidence(t *testing.T) {
 		blockedModel.Runs[0] = blocked
 		if _, err := NewSnapshot(blockedModel); err != nil {
 			t.Fatalf("typed pre-PR blocker: %v", err)
+		}
+
+		failed := run.Clone()
+		failed.State = StateFailed
+		failed.Ready = nil
+		failed.MergeCommitOID = ""
+		failed.Transitions[len(failed.Transitions)-1].State = StateFailed
+		failed.Completion = &CompletionValidation{
+			Accepted: true, Intent: string(StateFailed), State: StateFailed,
+			Reason: "process failure preserved", ValidatedAt: failed.UpdatedAt,
+		}
+		failedModel := cloneModel(base)
+		failedModel.Runs[0] = failed
+		if _, err := NewSnapshot(failedModel); err != nil {
+			t.Fatalf("accepted pre-checkpoint process failure: %v", err)
+		}
+
+		for _, blocker := range []string{
+			"closed_unmerged", "verified_head_mismatch", "safeguard_regression",
+			"deployment_source_invalid", "deployment_failed", "cleanup_failed", "external_authentication",
+		} {
+			t.Run("accepted post-ready blocker "+blocker, func(t *testing.T) {
+				candidate := run.Clone()
+				candidate.State = StateBlocked
+				candidate.Transitions[len(candidate.Transitions)-1].State = StateBlocked
+				candidate.Completion = &CompletionValidation{
+					Accepted: true, Intent: string(StateBlocked), Blocker: blocker, State: StateBlocked,
+					Reason: "typed post-ready blocker verified", ValidatedAt: candidate.UpdatedAt,
+					PullRequestState: "MERGED", PullRequestHead: head, MergeCommitOID: merge,
+				}
+				switch blocker {
+				case "closed_unmerged":
+					candidate.MergeCommitOID = ""
+					candidate.Completion.PullRequestState = "CLOSED"
+					candidate.Completion.MergeCommitOID = ""
+				case "verified_head_mismatch":
+					candidate.Completion.PullRequestHead = strings.Repeat("c", 40)
+				case "external_authentication":
+					candidate.Completion.PullRequestState = ""
+					candidate.Completion.PullRequestHead = ""
+					candidate.Completion.MergeCommitOID = ""
+				}
+				candidateModel := cloneModel(base)
+				candidateModel.Runs[0] = candidate
+				if _, err := NewSnapshot(candidateModel); err != nil {
+					t.Fatalf("accepted blocker shape: %v", err)
+				}
+			})
 		}
 	})
 }
@@ -526,3 +684,23 @@ func testAdmissionProjection(t *testing.T, root string, number int, state Lifecy
 func pointerTime(value time.Time) *time.Time { return &value }
 
 func pointerPin(value workflow.Pinned) *workflow.Pinned { return &value }
+
+func testSingleAdmissionModel(batch AdmissionBatch, run Run, rate RateBucket) Model {
+	return Model{
+		Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1,
+		AdmissionOperations: []AdmissionOperationReceipt{
+			testAdmissionReceipt([]AdmissionBatch{batch}, []Run{run}, []RateBucket{rate}),
+		},
+		AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateBuckets: []RateBucket{rate},
+	}
+}
+
+func testAdmissionReceipt(batches []AdmissionBatch, runs []Run, rates []RateBucket) AdmissionOperationReceipt {
+	return AdmissionOperationReceipt{AdmissionBatches: batches, Runs: runs, RateIncrements: rates}
+}
+
+func makeMigratedDirect(batch *AdmissionBatch, run *Run) {
+	batch.Origin = AdmissionOriginMigratedDirect
+	batch.EventSequence = 0
+	run.Causation.EventSequence = 0
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -21,6 +22,8 @@ const (
 	readyContractVersion = 1
 	maximumHop           = 32
 	maximumTextBytes     = 4096
+	blockerVerifiedHead  = "verified_head_mismatch"
+	blockerExternalAuth  = "external_authentication"
 )
 
 var (
@@ -43,9 +46,87 @@ func validateModel(model Model) error {
 	if model.TotalRuns < uint64(len(model.Runs)) {
 		return errors.New("runs: total Runs is below the retained count")
 	}
-	if !canonicalBatchOrder(model.AdmissionBatches) || !canonicalRunOrder(model.Runs) || !canonicalRateOrder(model.RateBuckets) {
+	if !slices.IsSortedFunc(model.AdmissionOperations, compareAdmissionOperationReceipts) ||
+		!canonicalBatchOrder(model.AdmissionBatches) || !canonicalRunOrder(model.Runs) || !canonicalRateOrder(model.RateBuckets) {
 		return errors.New("runs: projection ordering is not canonical")
 	}
+	if err := validateRetainedProjection(model); err != nil {
+		return err
+	}
+	return validateAdmissionOperations(model)
+}
+
+func validateAdmissionOperations(model Model) error {
+	var totalBatches uint64
+	var totalRuns uint64
+	batches := make(map[string]AdmissionBatch)
+	events := make(map[string]string)
+	sequences := make(map[uint64]string)
+	runs := make(map[string]Run)
+	admissions := make(map[string]string)
+	for index, receipt := range model.AdmissionOperations {
+		if len(receipt.AdmissionBatches) == 0 {
+			return fmt.Errorf("runs: admission operation receipt %d has no batches", index+1)
+		}
+		operation := diskOperation{
+			Kind: operationAdmissionBatch, Version: JournalVersion, Sequence: 1,
+			AdmissionBatches: receipt.AdmissionBatches, Runs: receipt.Runs, RateIncrements: receipt.RateIncrements,
+		}
+		if err := validateAdmissionOperationProjection(operation); err != nil {
+			return fmt.Errorf("runs: admission operation receipt %d: %w", index+1, err)
+		}
+		if uint64(len(receipt.AdmissionBatches)) > ^uint64(0)-totalBatches || uint64(len(receipt.Runs)) > ^uint64(0)-totalRuns {
+			return errors.New("runs: admission operation receipt totals are exhausted")
+		}
+		totalBatches += uint64(len(receipt.AdmissionBatches))
+		totalRuns += uint64(len(receipt.Runs))
+		for _, batch := range receipt.AdmissionBatches {
+			if _, duplicate := batches[batch.ID]; duplicate {
+				return fmt.Errorf("runs: admission operation batch ID %q is duplicated", batch.ID)
+			}
+			if previous := events[batch.EventID]; previous != "" {
+				return fmt.Errorf("runs: admission operation event ID %q belongs to batches %q and %q", batch.EventID, previous, batch.ID)
+			}
+			if batch.EventSequence != 0 {
+				if previous := sequences[batch.EventSequence]; previous != "" {
+					return fmt.Errorf("runs: admission operation event sequence %d belongs to batches %q and %q", batch.EventSequence, previous, batch.ID)
+				}
+				sequences[batch.EventSequence] = batch.ID
+			}
+			batches[batch.ID] = batch
+			events[batch.EventID] = batch.ID
+		}
+		for _, run := range receipt.Runs {
+			if _, duplicate := runs[run.ID]; duplicate {
+				return fmt.Errorf("runs: admission operation Run ID %q is duplicated", run.ID)
+			}
+			if previous := admissions[run.Causation.AdmissionID]; previous != "" {
+				return fmt.Errorf("runs: admission operation admission ID %q belongs to Runs %q and %q", run.Causation.AdmissionID, previous, run.ID)
+			}
+			runs[run.ID] = run
+			admissions[run.Causation.AdmissionID] = run.ID
+		}
+	}
+	if model.TotalBatches != totalBatches || model.TotalRuns != totalRuns {
+		return errors.New("runs: lifetime totals conflict with durable admission operation receipts")
+	}
+	for _, batch := range model.AdmissionBatches {
+		original, found := batches[batch.ID]
+		if !found || !reflect.DeepEqual(original, batch) {
+			return fmt.Errorf("runs: retained admission batch %q conflicts with its durable operation receipt", batch.ID)
+		}
+	}
+	for _, run := range model.Runs {
+		original, found := runs[run.ID]
+		if !found || !reflect.DeepEqual(original.Causation, run.Causation) ||
+			!reflect.DeepEqual(original.MigratedBaseline, run.MigratedBaseline) || original.CreatedAt != run.CreatedAt {
+			return fmt.Errorf("runs: retained Run %q conflicts with its durable operation receipt", run.ID)
+		}
+	}
+	return nil
+}
+
+func validateRetainedProjection(model Model) error {
 
 	batches := make(map[string]AdmissionBatch, len(model.AdmissionBatches))
 	events := make(map[string]string, len(model.AdmissionBatches))
@@ -108,6 +189,9 @@ func validateModel(model Model) error {
 			outcome.RuleID != run.Causation.RuleID || outcome.RuleRevision != run.Causation.RuleRevision ||
 			run.Causation.AdmittedAt.Before(batch.DecidedAt) {
 			return fmt.Errorf("runs: Run %q admission linkage conflicts", run.ID)
+		}
+		if run.MigratedBaseline != nil && batch.Origin != AdmissionOriginMigratedDirect {
+			return fmt.Errorf("runs: Run %q migrated baseline is not linked to a migrated direct admission", run.ID)
 		}
 	}
 	if len(seenRuns) != len(runnable) {
@@ -219,7 +303,9 @@ func validateRun(run Run) error {
 	}
 	if run.Repository == nil {
 		if run.State != StateAdmitted && run.State != StateRouting && run.State != StateRejected {
-			if (run.MigratedBaseline == nil || !run.State.Terminal()) && !acceptedPrePullRequestBlocker(run) {
+			migratedRouteEvidence := run.MigratedBaseline != nil &&
+				(run.MigratedBaseline.RepositoryRouteUnavailable || run.MigratedBaseline.HistoricalRepository != nil)
+			if !migratedRouteEvidence && !acceptedPrePullRequestBlocker(run) {
 				return errors.New("runnable lifecycle is missing a repository route")
 			}
 		}
@@ -274,8 +360,8 @@ func validateCausation(c Causation, state LifecycleState, baseline *MigratedBase
 		return errors.New("Run ancestor path does not end at its admitting rule")
 	}
 	if c.Workflow == nil {
-		if c.WorkflowDigest != "" || state.Nonterminal() || baseline == nil || !baseline.WorkflowPinUnavailable {
-			return errors.New("nonterminal Run requires an immutable workflow pin")
+		if c.WorkflowDigest != "" || baseline == nil || !baseline.WorkflowPinUnavailable {
+			return errors.New("Run requires an immutable workflow pin or explicit migrated evidence")
 		}
 		return nil
 	}
@@ -439,15 +525,45 @@ func validateCompletion(completion CompletionValidation, run Run) error {
 			return errors.New("Run completion Git identity is invalid")
 		}
 	}
+	if run.Ready == nil {
+		if completion.PullRequestState != "" || completion.PullRequestHead != "" || completion.MergeCommitOID != "" {
+			return errors.New("Run completion has pull request evidence without a ready checkpoint")
+		}
+	} else if completion.PullRequestHead != "" && completion.PullRequestHead != run.Ready.VerifiedHeadOID {
+		verifiedHeadBlocker := completion.Accepted && completion.State == StateBlocked && completion.Blocker == blockerVerifiedHead
+		if !verifiedHeadBlocker {
+			return errors.New("Run completion conflicts with verified head")
+		}
+	}
+	if completion.MergeCommitOID != "" && (run.MergeCommitOID == "" || completion.MergeCommitOID != run.MergeCommitOID) {
+		return errors.New("Run completion conflicts with merge identity")
+	}
 	if completion.Accepted {
 		if !run.State.Terminal() || completion.State != run.State || completion.Intent != string(completion.State) {
 			return errors.New("accepted Run completion conflicts with terminal lifecycle")
 		}
-		if run.Ready != nil && completion.PullRequestHead != run.Ready.VerifiedHeadOID {
-			return errors.New("accepted Run completion conflicts with verified head")
-		}
-		if run.MergeCommitOID != "" && completion.MergeCommitOID != run.MergeCommitOID {
-			return errors.New("accepted Run completion conflicts with merge identity")
+		if run.Ready == nil {
+			switch completion.State {
+			case StateFailed:
+				if completion.Blocker != "" {
+					return errors.New("accepted pre-checkpoint process failure cannot carry a blocker")
+				}
+			case StateBlocked:
+				if !acceptedPrePullRequestBlocker(run) {
+					return errors.New("accepted blocked completion lacks an allowed pre-PR blocker")
+				}
+			default:
+				return errors.New("accepted Run completion requires a ready checkpoint")
+			}
+		} else {
+			missingHeadAllowed := completion.State == StateBlocked && completion.Blocker == blockerExternalAuth
+			if completion.PullRequestHead == "" && !missingHeadAllowed {
+				return errors.New("accepted post-ready completion is missing the pull request head")
+			}
+			if completion.State == StateSucceeded &&
+				(completion.PullRequestHead != run.Ready.VerifiedHeadOID || run.MergeCommitOID == "" || completion.MergeCommitOID == "") {
+				return errors.New("accepted successful completion lacks exact ready and merge identity")
+			}
 		}
 	}
 	return nil
@@ -463,7 +579,8 @@ func validateMigratedBaseline(run Run) error {
 		baseline.WorkflowPinUnavailable && baseline.WorkflowDigestUnavailable ||
 		baseline.WorkflowPinUnavailable != (run.Causation.Workflow == nil) ||
 		baseline.WorkflowDigestUnavailable != (run.Causation.Workflow != nil && compactWorkflow(*run.Causation.Workflow) && run.Causation.WorkflowDigest == "") ||
-		baseline.HistoricalRepository != nil && run.Repository != nil {
+		baseline.HistoricalRepository != nil && run.Repository != nil ||
+		baseline.RepositoryRouteUnavailable && (run.Repository != nil || baseline.HistoricalRepository != nil) {
 		return errors.New("Run migrated baseline is invalid")
 	}
 	if baseline.HistoricalRepository != nil {

@@ -185,6 +185,38 @@ func TestAdmissionBatchPersistsMultipleEventsAsOneOperation(t *testing.T) {
 	}
 }
 
+func TestSuppressedAdmissionOperationExactRetryAfterReopen(t *testing.T) {
+	root := trustedTestRoot(t, t.TempDir())
+	path := filepath.Join(root, "runs.jsonl")
+	store := createEmptyStore(t, path, 10)
+	batch, _, _ := testAdmissionProjection(t, root, 1, StatePending)
+	batch.Outcomes = []AdmissionOutcome{{
+		Kind: AdmissionOutcomeSuppressed, RuleID: "rule-one", RuleRevision: 2, Reason: "policy suppressed",
+	}}
+	if err := store.ApplyAdmissionBatch([]AdmissionBatch{batch}, []Run{}, []RateBucket{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(root, path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	beforeDisk, _ := os.ReadFile(path)
+	before, _ := reopened.Snapshot()
+	if err := reopened.ApplyAdmissionBatch([]AdmissionBatch{batch}, []Run{}, []RateBucket{}); !errors.Is(err, ErrDuplicateAdmissionBatch) {
+		t.Fatalf("exact suppressed-only retry = %v", err)
+	}
+	afterDisk, _ := os.ReadFile(path)
+	after, _ := reopened.Snapshot()
+	if !bytes.Equal(beforeDisk, afterDisk) || !reflect.DeepEqual(before.Model(), after.Model()) ||
+		after.Model().TotalBatches != 1 || after.Model().TotalRuns != 0 || len(after.Model().RateBuckets) != 0 {
+		t.Fatal("suppressed-only retry changed disk, memory, totals, or rates")
+	}
+}
+
 func TestAdmissionBatchExactMultiEventRetryAfterReopen(t *testing.T) {
 	root := trustedTestRoot(t, t.TempDir())
 	path := filepath.Join(root, "runs.jsonl")
@@ -221,6 +253,9 @@ func TestAdmissionBatchExactMultiEventRetryAfterReopen(t *testing.T) {
 	if !bytes.Equal(beforeDisk, afterDisk) || !reflect.DeepEqual(before.Model(), after.Model()) || after.Model().RateBuckets[0].Count != 2 {
 		t.Fatal("exact retry changed disk, memory, totals, or rates")
 	}
+	if err := reopened.ApplyAdmissionBatch([]AdmissionBatch{firstBatch}, []Run{firstRun}, []RateBucket{firstRate}); !errors.Is(err, ErrIdentityCollision) {
+		t.Fatalf("subset retry error = %v", err)
+	}
 
 	thirdBatch, thirdRun, _ := testAdmissionProjection(t, root, 3, StatePending)
 	thirdBatch.DecidedAt = firstBatch.DecidedAt
@@ -255,6 +290,107 @@ func TestAdmissionBatchExactMultiEventRetryAfterReopen(t *testing.T) {
 	}
 }
 
+func TestAdmissionOperationCannotCombineSeparatelyPersistedInputs(t *testing.T) {
+	root := trustedTestRoot(t, t.TempDir())
+	path := filepath.Join(root, "runs.jsonl")
+	store := createEmptyStore(t, path, 10)
+	firstBatch, firstRun, firstRate := testAdmissionProjection(t, root, 1, StatePending)
+	secondBatch, secondRun, secondRate := testAdmissionProjection(t, root, 2, StatePending)
+	secondBatch.DecidedAt = firstBatch.DecidedAt
+	secondRun.Causation.AdmittedAt = firstRun.Causation.AdmittedAt
+	secondRun.CreatedAt = firstRun.CreatedAt
+	secondRun.UpdatedAt = firstRun.UpdatedAt
+	secondRun.Transitions[0].At = firstRun.Transitions[0].At
+	secondRate.Minute = firstRate.Minute
+	if err := store.ApplyAdmissionBatch([]AdmissionBatch{firstBatch}, []Run{firstRun}, []RateBucket{firstRate}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ApplyAdmissionBatch([]AdmissionBatch{secondBatch}, []Run{secondRun}, []RateBucket{secondRate}); err != nil {
+		t.Fatal(err)
+	}
+	combinedRate := firstRate
+	combinedRate.Count = 2
+	beforeDisk, _ := os.ReadFile(path)
+	before, _ := store.Snapshot()
+	if err := store.ApplyAdmissionBatch(
+		[]AdmissionBatch{firstBatch, secondBatch}, []Run{firstRun, secondRun}, []RateBucket{combinedRate},
+	); !errors.Is(err, ErrIdentityCollision) {
+		t.Fatalf("combined separate operations error = %v", err)
+	}
+	afterDisk, _ := os.ReadFile(path)
+	after, _ := store.Snapshot()
+	if !bytes.Equal(beforeDisk, afterDisk) || !reflect.DeepEqual(before.Model(), after.Model()) {
+		t.Fatal("combined operation collision changed disk or memory")
+	}
+}
+
+func TestAdmissionOperationExactRetrySurvivesTransitionsAndCompaction(t *testing.T) {
+	root := trustedTestRoot(t, t.TempDir())
+	path := filepath.Join(root, "runs.jsonl")
+	store := createEmptyStore(t, path, 1)
+	firstBatch, firstRun, firstRate := testAdmissionProjection(t, root, 1, StatePending)
+	secondBatch, secondRun, _ := testAdmissionProjection(t, root, 2, StatePending)
+	secondBatch.DecidedAt = firstBatch.DecidedAt
+	secondRun.Causation.AdmittedAt = firstRun.Causation.AdmittedAt
+	secondRun.CreatedAt = firstRun.CreatedAt
+	secondRun.UpdatedAt = firstRun.UpdatedAt
+	secondRun.Transitions[0].At = firstRun.Transitions[0].At
+	combinedRate := firstRate
+	combinedRate.Count = 2
+	batches := []AdmissionBatch{firstBatch, secondBatch}
+	runs := []Run{firstRun, secondRun}
+	rates := []RateBucket{combinedRate}
+	if err := store.ApplyAdmissionBatch(batches, runs, rates); err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range runs {
+		failed := nextLifecycleRun(run, StateFailed, run.UpdatedAt.Add(time.Second))
+		if err := store.Transition(failed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	beforeTransitionRetry, _ := store.Snapshot()
+	if err := store.ApplyAdmissionBatch(batches, runs, rates); !errors.Is(err, ErrDuplicateAdmissionBatch) {
+		t.Fatalf("retry after associated Run transitions = %v", err)
+	}
+	afterTransitionRetry, _ := store.Snapshot()
+	if !reflect.DeepEqual(beforeTransitionRetry.Model(), afterTransitionRetry.Model()) {
+		t.Fatal("retry after transitions changed memory")
+	}
+
+	thirdBatch, thirdRun, thirdRate := testAdmissionProjection(t, root, 3, StateSucceeded)
+	if err := store.ApplyAdmissionBatch([]AdmissionBatch{thirdBatch}, []Run{thirdRun}, []RateBucket{thirdRate}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Compact(modelTestNow.Add(4 * time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	compacted, _ := store.Snapshot()
+	if len(compacted.Model().AdmissionBatches) != 1 || len(compacted.Model().Runs) != 1 ||
+		len(compacted.Model().AdmissionOperations) != 2 || compacted.Model().TotalBatches != 3 || compacted.Model().TotalRuns != 3 {
+		t.Fatalf("compacted durable operation evidence = %#v", compacted.Model())
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(root, path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	beforeDisk, _ := os.ReadFile(path)
+	before, _ := reopened.Snapshot()
+	if err := reopened.ApplyAdmissionBatch(batches, runs, rates); !errors.Is(err, ErrDuplicateAdmissionBatch) {
+		t.Fatalf("retry after compaction and reopen = %v", err)
+	}
+	afterDisk, _ := os.ReadFile(path)
+	after, _ := reopened.Snapshot()
+	if !bytes.Equal(beforeDisk, afterDisk) || !reflect.DeepEqual(before.Model(), after.Model()) ||
+		after.Model().TotalBatches != 3 || after.Model().TotalRuns != 3 || len(after.Model().RateBuckets) != 0 {
+		t.Fatal("post-compaction exact retry changed disk, memory, lifetime totals, or rates")
+	}
+}
+
 func TestTransitionDeltaAndOldestTaskOwnership(t *testing.T) {
 	t.Run("durable evidence cannot be rewritten", func(t *testing.T) {
 		for _, test := range []struct {
@@ -272,7 +408,7 @@ func TestTransitionDeltaAndOldestTaskOwnership(t *testing.T) {
 				root := trustedTestRoot(t, t.TempDir())
 				path := filepath.Join(root, "runs.jsonl")
 				batch, current, rate := runningProjection(t, root)
-				initial, err := NewSnapshot(Model{Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{current}, RateBuckets: []RateBucket{rate}})
+				initial, err := NewSnapshot(testSingleAdmissionModel(batch, current, rate))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -300,7 +436,7 @@ func TestTransitionDeltaAndOldestTaskOwnership(t *testing.T) {
 		batch, running, rate := runningProjection(t, root)
 		awaiting := awaitingProjection(running)
 		awaiting.MergeCommitOID = strings.Repeat("b", 40)
-		initial, err := NewSnapshot(Model{Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{awaiting}, RateBuckets: []RateBucket{rate}})
+		initial, err := NewSnapshot(testSingleAdmissionModel(batch, awaiting, rate))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -315,7 +451,6 @@ func TestTransitionDeltaAndOldestTaskOwnership(t *testing.T) {
 			func(run *Run) { run.MergeCommitOID = strings.Repeat("c", 40) },
 		} {
 			next := nextLifecycleRun(awaiting, StatePostMergePending, awaiting.UpdatedAt.Add(time.Second))
-			next.SessionName = ""
 			mutate(&next)
 			if err := store.Transition(next); err == nil {
 				t.Fatal("ready or merge identity rewrite was accepted")
@@ -325,7 +460,8 @@ func TestTransitionDeltaAndOldestTaskOwnership(t *testing.T) {
 		migrated := running.Clone()
 		migrated.Transitions = nil
 		migrated.MigratedBaseline = &MigratedBaseline{State: StateRunning, ObservedAt: migrated.UpdatedAt, PriorTransitionsAcknowledged: true}
-		migratedSnapshot, err := NewSnapshot(Model{Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{migrated}, RateBuckets: []RateBucket{rate}})
+		makeMigratedDirect(&batch, &migrated)
+		migratedSnapshot, err := NewSnapshot(testSingleAdmissionModel(batch, migrated, rate))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -352,7 +488,7 @@ func TestTransitionDeltaAndOldestTaskOwnership(t *testing.T) {
 		awaiting.TerminalIntent = string(StateSucceeded)
 		awaiting.TerminalRejection = "retry"
 		awaiting.Completion = &CompletionValidation{Accepted: false, Intent: string(StateSucceeded), State: StateFailed, Reason: "retry", ValidatedAt: awaiting.UpdatedAt}
-		initial, err := NewSnapshot(Model{Schema: SchemaVersion, TotalBatches: 1, TotalRuns: 1, AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{awaiting}, RateBuckets: []RateBucket{rate}})
+		initial, err := NewSnapshot(testSingleAdmissionModel(batch, awaiting, rate))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -363,7 +499,6 @@ func TestTransitionDeltaAndOldestTaskOwnership(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = store.Close() })
 		next := nextLifecycleRun(awaiting, StatePostMergePending, awaiting.UpdatedAt.Add(time.Second))
-		next.SessionName = ""
 		next.MergeCommitOID = strings.Repeat("b", 40)
 		next.GitHub.NextReconcileAt = nil
 		next.GitHub.ReconcileFailures = 0
@@ -386,6 +521,10 @@ func TestTransitionDeltaAndOldestTaskOwnership(t *testing.T) {
 		}
 		initial, err := NewSnapshot(Model{
 			Schema: SchemaVersion, TotalBatches: 2, TotalRuns: 2,
+			AdmissionOperations: []AdmissionOperationReceipt{
+				testAdmissionReceipt([]AdmissionBatch{firstBatch}, []Run{firstRun}, []RateBucket{firstRate}),
+				testAdmissionReceipt([]AdmissionBatch{secondBatch}, []Run{secondRun}, []RateBucket{secondRate}),
+			},
 			AdmissionBatches: []AdmissionBatch{firstBatch, secondBatch}, Runs: []Run{firstRun, secondRun}, RateBuckets: []RateBucket{firstRate, secondRate},
 		})
 		if err != nil {
@@ -400,6 +539,87 @@ func TestTransitionDeltaAndOldestTaskOwnership(t *testing.T) {
 		youngerRouting := nextLifecycleRun(secondRun, StateRouting, secondRun.UpdatedAt.Add(time.Second))
 		if err := store.Transition(youngerRouting); err == nil || !strings.Contains(err.Error(), "oldest") {
 			t.Fatalf("younger ownership error = %v", err)
+		}
+	})
+}
+
+func TestSessionIdentityIsStableAcrossLifecycleReuseAndReplay(t *testing.T) {
+	t.Run("clear and replacement are refused", func(t *testing.T) {
+		for _, session := range []string{"", "factory-replacement"} {
+			root := trustedTestRoot(t, t.TempDir())
+			path := filepath.Join(root, "runs.jsonl")
+			batch, running, rate := runningProjection(t, root)
+			initial, err := NewSnapshot(testSingleAdmissionModel(batch, running, rate))
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := Create(root, path, initial, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			next := awaitingProjection(running)
+			next.SessionName = session
+			before, _ := os.ReadFile(path)
+			if err := store.Transition(next); err == nil || !strings.Contains(err.Error(), "session identity") {
+				t.Fatalf("session %q rewrite error = %v", session, err)
+			}
+			after, _ := os.ReadFile(path)
+			if !bytes.Equal(before, after) {
+				t.Fatal("rejected session rewrite changed disk")
+			}
+		}
+	})
+
+	t.Run("post-merge retry reuses name and directory", func(t *testing.T) {
+		root := trustedTestRoot(t, t.TempDir())
+		path := filepath.Join(root, "runs.jsonl")
+		batch, running, rate := runningProjection(t, root)
+		initial, err := NewSnapshot(testSingleAdmissionModel(batch, running, rate))
+		if err != nil {
+			t.Fatal(err)
+		}
+		store, err := Create(root, path, initial, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		awaiting := awaitingProjection(running)
+		if err := store.Transition(awaiting); err != nil {
+			t.Fatal(err)
+		}
+		postMerge := nextLifecycleRun(awaiting, StatePostMergePending, awaiting.UpdatedAt.Add(time.Second))
+		postMerge.MergeCommitOID = strings.Repeat("b", 40)
+		postMerge.SegmentStartedAt = nil
+		if err := store.Transition(postMerge); err != nil {
+			t.Fatal(err)
+		}
+		starting := nextLifecycleRun(postMerge, StateStarting, postMerge.UpdatedAt.Add(time.Second))
+		starting.SegmentStartedAt = pointerTime(starting.UpdatedAt)
+		starting.SegmentAttempt = starting.Attempts
+		if err := store.Transition(starting); err != nil {
+			t.Fatalf("restart with stable session identity: %v", err)
+		}
+		runningAgain := nextLifecycleRun(starting, StateRunning, starting.UpdatedAt.Add(time.Second))
+		runningAgain.Attempts++
+		runningAgain.Transitions[len(runningAgain.Transitions)-1].Attempts = runningAgain.Attempts
+		if err := store.Transition(runningAgain); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := Open(root, path, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = reopened.Close() })
+		replayed, err := reopened.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := replayed.Model().Runs[0]
+		if got.SessionName != running.SessionName || got.RunDirectory != running.RunDirectory || got.State != StateRunning || got.Attempts != 2 {
+			t.Fatalf("replayed stable lifecycle identity = %#v", got)
 		}
 	})
 }
@@ -770,6 +990,26 @@ func TestStorePermissionSymlinkPathAndCreateSafety(t *testing.T) {
 	if _, err := Create(root, filepath.Join(linkedDirectory, "new-runs.jsonl"), empty, 1); err == nil || !strings.Contains(err.Error(), "nonsymlink") {
 		t.Fatalf("symlink directory error = %v", err)
 	}
+	relativeTarget := filepath.Join(root, "relative-target")
+	if err := os.Mkdir(relativeTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	relativeRealPath := filepath.Join(relativeTarget, "runs.jsonl")
+	relativeStore, err := Create(root, relativeRealPath, empty, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = relativeStore.Close() })
+	relativeLink := filepath.Join(root, "relative-linked")
+	if err := os.Symlink("relative-target", relativeLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(root, filepath.Join(relativeLink, "runs.jsonl"), 1); err == nil || !strings.Contains(err.Error(), "nonsymlink") {
+		t.Fatalf("relative in-root symlink open error = %v", err)
+	}
+	if _, err := Create(root, filepath.Join(relativeLink, "new.jsonl"), empty, 1); err == nil || !strings.Contains(err.Error(), "nonsymlink") {
+		t.Fatalf("relative in-root symlink create error = %v", err)
+	}
 }
 
 func TestStoreTrustedRootRejectsNestedSymlinksAndSurvivesParentReplacement(t *testing.T) {
@@ -832,6 +1072,35 @@ func TestStoreTrustedRootRejectsNestedSymlinksAndSurvivesParentReplacement(t *te
 		}
 		if _, err := Create(root, filepath.Join(link, "state", "new.jsonl"), empty, 1); err == nil || !strings.Contains(err.Error(), "nonsymlink") {
 			t.Fatalf("nested symlink create error = %v", err)
+		}
+	})
+
+	t.Run("nested relative in-root symlink", func(t *testing.T) {
+		root := trustedTestRoot(t, t.TempDir())
+		target := filepath.Join(root, "target", "state")
+		if err := os.MkdirAll(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		nested := filepath.Join(root, "nested")
+		if err := os.Mkdir(nested, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(nested, "link")
+		if err := os.Symlink("../target", link); err != nil {
+			t.Fatal(err)
+		}
+		realPath := filepath.Join(target, "runs.jsonl")
+		realStore, err := Create(root, realPath, empty, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = realStore.Close() })
+		linkedPath := filepath.Join(link, "state", "runs.jsonl")
+		if _, err := Open(root, linkedPath, 1); err == nil || !strings.Contains(err.Error(), "nonsymlink") {
+			t.Fatalf("nested relative symlink open error = %v", err)
+		}
+		if _, err := Create(root, filepath.Join(link, "state", "new.jsonl"), empty, 1); err == nil || !strings.Contains(err.Error(), "nonsymlink") {
+			t.Fatalf("nested relative symlink create error = %v", err)
 		}
 	})
 

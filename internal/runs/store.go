@@ -180,19 +180,17 @@ func (s *Store) ApplyAdmissionBatch(batches []AdmissionBatch, runs []Run, increm
 		canonicalizeRun(&runs[index])
 	}
 	slices.SortFunc(runs, compareRuns)
+	if len(runs) == 0 {
+		runs = nil
+	}
 	increments = slices.Clone(increments)
 	for index := range increments {
 		increments[index].Minute = increments[index].Minute.UTC().Truncate(time.Minute)
 	}
-	slices.SortFunc(increments, func(left, right RateBucket) int {
-		if left.RuleID != right.RuleID {
-			if left.RuleID < right.RuleID {
-				return -1
-			}
-			return 1
-		}
-		return left.Minute.Compare(right.Minute)
-	})
+	slices.SortFunc(increments, compareRateBuckets)
+	if len(increments) == 0 {
+		increments = nil
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -299,41 +297,9 @@ func applyOperation(current Model, operation diskOperation) (Snapshot, error) {
 }
 
 func applyAdmissionBatch(current Model, operation diskOperation) (Snapshot, error) {
-	matchedBatches := 0
-	for _, batch := range operation.AdmissionBatches {
-		for _, existing := range current.AdmissionBatches {
-			if existing.ID == batch.ID {
-				matchedBatches++
-				existingRuns := runsForBatch(current.Runs, existing.ID)
-				candidateRuns := runsForBatch(operation.Runs, batch.ID)
-				if !reflect.DeepEqual(existing, batch) || !reflect.DeepEqual(existingRuns, candidateRuns) {
-					return Snapshot{}, fmt.Errorf("%w: admission batch %q", ErrIdentityCollision, batch.ID)
-				}
-				continue
-			}
-			if existing.EventID == batch.EventID || batch.EventSequence != 0 && existing.EventSequence == batch.EventSequence {
-				return Snapshot{}, fmt.Errorf("%w: event %q", ErrIdentityCollision, batch.EventID)
-			}
-		}
-	}
-	if matchedBatches > 0 {
-		if matchedBatches != len(operation.AdmissionBatches) {
-			return Snapshot{}, fmt.Errorf("%w: admission operation partially overlaps durable batches", ErrIdentityCollision)
-		}
-		if err := validateRateIncrements(operation.AdmissionBatches, operation.RateIncrements); err != nil {
-			return Snapshot{}, fmt.Errorf("%w: persisted admission operation rates differ", ErrIdentityCollision)
-		}
-		if err := validateAdmissionOperationProjection(operation); err != nil {
-			return Snapshot{}, fmt.Errorf("%w: persisted admission operation projection differs", ErrIdentityCollision)
-		}
-		return Snapshot{}, ErrDuplicateAdmissionBatch
-	}
-	for _, candidate := range operation.Runs {
-		for _, existing := range current.Runs {
-			if existing.ID == candidate.ID || existing.Causation.AdmissionID == candidate.Causation.AdmissionID {
-				return Snapshot{}, fmt.Errorf("%w: Run %q", ErrIdentityCollision, candidate.ID)
-			}
-		}
+	receipt := receiptForAdmissionOperation(operation)
+	if err := classifyAdmissionOperation(current.AdmissionOperations, receipt); err != nil {
+		return Snapshot{}, err
 	}
 	if err := validateRateIncrements(operation.AdmissionBatches, operation.RateIncrements); err != nil {
 		return Snapshot{}, err
@@ -348,6 +314,7 @@ func applyAdmissionBatch(current Model, operation diskOperation) (Snapshot, erro
 	next.JournalSequence = operation.Sequence
 	next.TotalBatches += uint64(len(operation.AdmissionBatches))
 	next.TotalRuns += uint64(len(operation.Runs))
+	next.AdmissionOperations = append(next.AdmissionOperations, receipt)
 	next.AdmissionBatches = append(next.AdmissionBatches, cloneAdmissionBatches(operation.AdmissionBatches)...)
 	next.Runs = append(next.Runs, cloneRuns(operation.Runs)...)
 	rates := make(map[string]RateBucket, len(next.RateBuckets)+len(operation.RateIncrements))
@@ -372,26 +339,82 @@ func applyAdmissionBatch(current Model, operation diskOperation) (Snapshot, erro
 	return NewSnapshot(next)
 }
 
+func receiptForAdmissionOperation(operation diskOperation) AdmissionOperationReceipt {
+	return AdmissionOperationReceipt{
+		AdmissionBatches: cloneAdmissionBatches(operation.AdmissionBatches),
+		Runs:             cloneRuns(operation.Runs),
+		RateIncrements:   slices.Clone(operation.RateIncrements),
+	}
+}
+
+func classifyAdmissionOperation(existing []AdmissionOperationReceipt, candidate AdmissionOperationReceipt) error {
+	overlaps := false
+	for _, receipt := range existing {
+		if !admissionOperationsOverlap(receipt, candidate) {
+			continue
+		}
+		overlaps = true
+		if reflect.DeepEqual(receipt, candidate) {
+			return ErrDuplicateAdmissionBatch
+		}
+	}
+	if overlaps {
+		return fmt.Errorf("%w: admission operation overlaps a durable receipt", ErrIdentityCollision)
+	}
+	return nil
+}
+
+func admissionOperationsOverlap(left, right AdmissionOperationReceipt) bool {
+	batchIDs := make(map[string]struct{}, len(left.AdmissionBatches))
+	eventIDs := make(map[string]struct{}, len(left.AdmissionBatches))
+	eventSequences := make(map[uint64]struct{}, len(left.AdmissionBatches))
+	for _, batch := range left.AdmissionBatches {
+		batchIDs[batch.ID] = struct{}{}
+		eventIDs[batch.EventID] = struct{}{}
+		if batch.EventSequence != 0 {
+			eventSequences[batch.EventSequence] = struct{}{}
+		}
+	}
+	for _, batch := range right.AdmissionBatches {
+		_, sameBatch := batchIDs[batch.ID]
+		_, sameEvent := eventIDs[batch.EventID]
+		_, sameSequence := eventSequences[batch.EventSequence]
+		if sameBatch || sameEvent || batch.EventSequence != 0 && sameSequence {
+			return true
+		}
+	}
+	runIDs := make(map[string]struct{}, len(left.Runs))
+	admissionIDs := make(map[string]struct{}, len(left.Runs))
+	for _, run := range left.Runs {
+		runIDs[run.ID] = struct{}{}
+		admissionIDs[run.Causation.AdmissionID] = struct{}{}
+	}
+	for _, run := range right.Runs {
+		_, sameRun := runIDs[run.ID]
+		_, sameAdmission := admissionIDs[run.Causation.AdmissionID]
+		if sameRun || sameAdmission {
+			return true
+		}
+	}
+	return false
+}
+
 func validateAdmissionOperationProjection(operation diskOperation) error {
+	if err := validateRateIncrements(operation.AdmissionBatches, operation.RateIncrements); err != nil {
+		return fmt.Errorf("runs: invalid admission operation projection: %w", err)
+	}
 	candidate := Model{
 		Schema: SchemaVersion, TotalBatches: uint64(len(operation.AdmissionBatches)), TotalRuns: uint64(len(operation.Runs)),
 		AdmissionBatches: cloneAdmissionBatches(operation.AdmissionBatches), Runs: cloneRuns(operation.Runs),
 		RateBuckets: slices.Clone(operation.RateIncrements),
 	}
-	if _, err := NewSnapshot(candidate); err != nil {
+	if !canonicalBatchOrder(candidate.AdmissionBatches) || !canonicalRunOrder(candidate.Runs) || !canonicalRateOrder(candidate.RateBuckets) {
+		return errors.New("runs: invalid admission operation projection: ordering is not canonical")
+	}
+	if err := validateRetainedProjection(candidate); err != nil {
 		return fmt.Errorf("runs: invalid admission operation projection: %w", err)
 	}
 	return nil
-}
-
-func runsForBatch(runs []Run, batchID string) []Run {
-	result := make([]Run, 0)
-	for _, run := range runs {
-		if run.Causation.BatchID == batchID {
-			result = append(result, run)
-		}
-	}
-	return result
 }
 
 func validateRateIncrements(batches []AdmissionBatch, increments []RateBucket) error {
@@ -488,8 +511,7 @@ func validateTransitionDelta(current, next Run, transition LifecycleTransition) 
 	}
 	if current.SessionName != next.SessionName {
 		setting := current.SessionName == "" && next.SessionName != "" && next.State == StateStarting
-		clearing := current.SessionName != "" && next.SessionName == "" && (next.State == StatePending || next.State == StatePostMergePending)
-		if !setting && !clearing {
+		if !setting {
 			return errors.New("runs: lifecycle transition rewrote session identity")
 		}
 	}
@@ -657,21 +679,19 @@ func canonicalOperation(operation diskOperation) diskOperation {
 			canonicalizeRun(&canonical.Runs[index])
 		}
 		slices.SortFunc(canonical.Runs, compareRuns)
+		if len(canonical.Runs) == 0 {
+			canonical.Runs = nil
+		}
 	}
 	if operation.RateIncrements != nil {
 		canonical.RateIncrements = slices.Clone(operation.RateIncrements)
 		for index := range canonical.RateIncrements {
 			canonical.RateIncrements[index].Minute = canonical.RateIncrements[index].Minute.UTC().Truncate(time.Minute)
 		}
-		slices.SortFunc(canonical.RateIncrements, func(left, right RateBucket) int {
-			if left.RuleID != right.RuleID {
-				if left.RuleID < right.RuleID {
-					return -1
-				}
-				return 1
-			}
-			return left.Minute.Compare(right.Minute)
-		})
+		slices.SortFunc(canonical.RateIncrements, compareRateBuckets)
+		if len(canonical.RateIncrements) == 0 {
+			canonical.RateIncrements = nil
+		}
 	}
 	if operation.Transition != nil {
 		transition := cloneRun(*operation.Transition)
@@ -757,7 +777,7 @@ func rollbackAppend(file *os.File, offset int64) error {
 }
 
 func (s *Store) compactIfNeededLocked() error {
-	live := len(s.state.model.AdmissionBatches) + len(s.state.model.Runs) + len(s.state.model.RateBuckets)
+	live := len(s.state.model.AdmissionOperations) + len(s.state.model.AdmissionBatches) + len(s.state.model.Runs) + len(s.state.model.RateBuckets)
 	if s.operationsSinceCheckpoint <= max(1, live) {
 		return nil
 	}
@@ -1031,29 +1051,48 @@ func openStoreLocation(trustedRoot, path string, createDirectories bool) (*store
 	current := root
 	if directoryPath != "." {
 		for _, component := range strings.Split(directoryPath, string(filepath.Separator)) {
-			next, openErr := current.OpenRoot(component)
-			if errors.Is(openErr, os.ErrNotExist) && createDirectories {
-				if err := current.Mkdir(component, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-					current.Close()
-					return nil, fmt.Errorf("runs: create journal directory: %w", err)
-				}
-				next, openErr = current.OpenRoot(component)
-			}
+			next, openErr := openPrivateDirectory(current, component, createDirectories)
 			if openErr != nil {
 				current.Close()
 				return nil, fmt.Errorf("runs: open nonsymlink journal directory: %w", openErr)
-			}
-			directoryInfo, statErr := next.Stat(".")
-			if statErr != nil || !directoryInfo.IsDir() || directoryInfo.Mode().Perm() != 0o700 {
-				next.Close()
-				current.Close()
-				return nil, errors.New("runs: journal directory must be private and nonsymlinked")
 			}
 			current.Close()
 			current = next
 		}
 	}
 	return &storeLocation{directory: current, name: filepath.Base(path)}, nil
+}
+
+func openPrivateDirectory(parent *os.Root, component string, create bool) (*os.Root, error) {
+	for {
+		observed, err := parent.Lstat(component)
+		if errors.Is(err, os.ErrNotExist) && create {
+			if mkdirErr := parent.Mkdir(component, 0o700); mkdirErr != nil && !errors.Is(mkdirErr, os.ErrExist) {
+				return nil, fmt.Errorf("create journal directory: %w", mkdirErr)
+			}
+			// Whether this call created the name or raced with another creator,
+			// prove the resulting component from a fresh no-follow observation.
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if observed.Mode()&os.ModeSymlink != 0 || !observed.IsDir() || observed.Mode().Perm() != 0o700 {
+			return nil, errors.New("journal directory must be a private nonsymlink directory")
+		}
+		next, err := parent.OpenRoot(component)
+		if err != nil {
+			return nil, err
+		}
+		opened, openStatErr := next.Stat(".")
+		confirmed, confirmErr := parent.Lstat(component)
+		if openStatErr != nil || confirmErr != nil || confirmed.Mode()&os.ModeSymlink != 0 || !confirmed.IsDir() ||
+			confirmed.Mode().Perm() != 0o700 || !os.SameFile(observed, opened) || !os.SameFile(confirmed, opened) {
+			next.Close()
+			return nil, errors.New("journal directory changed while opening without symlinks")
+		}
+		return next, nil
+	}
 }
 
 func (l *storeLocation) Close() error {

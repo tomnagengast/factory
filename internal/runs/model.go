@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	SchemaVersion  = 1
-	JournalVersion = 1
+	SchemaVersion  = 2
+	JournalVersion = 2
 )
 
 type AdmissionOrigin string
@@ -69,13 +69,25 @@ func (s LifecycleState) Terminal() bool {
 // Model is the canonical journal projection. JournalSequence is durability
 // metadata and is intentionally excluded from the semantic digest.
 type Model struct {
-	Schema           int              `json:"schema"`
-	JournalSequence  uint64           `json:"journalSequence"`
-	TotalBatches     uint64           `json:"totalBatches"`
-	TotalRuns        uint64           `json:"totalRuns"`
+	Schema              int                         `json:"schema"`
+	JournalSequence     uint64                      `json:"journalSequence"`
+	TotalBatches        uint64                      `json:"totalBatches"`
+	TotalRuns           uint64                      `json:"totalRuns"`
+	AdmissionOperations []AdmissionOperationReceipt `json:"admissionOperations"`
+	AdmissionBatches    []AdmissionBatch            `json:"admissionBatches"`
+	Runs                []Run                       `json:"runs"`
+	RateBuckets         []RateBucket                `json:"rateBuckets"`
+}
+
+// AdmissionOperationReceipt retains the complete canonical input of one
+// atomic admission operation. Receipts are never retention-evicted: they are
+// the durable identity tombstones used to distinguish an exact retry from a
+// subset, combination, or rewritten operation after its live projections are
+// gone.
+type AdmissionOperationReceipt struct {
 	AdmissionBatches []AdmissionBatch `json:"admissionBatches"`
 	Runs             []Run            `json:"runs"`
-	RateBuckets      []RateBucket     `json:"rateBuckets"`
+	RateIncrements   []RateBucket     `json:"rateIncrements"`
 }
 
 type AdmissionBatch struct {
@@ -165,6 +177,7 @@ type MigratedBaseline struct {
 	PriorTransitionsAcknowledged bool                  `json:"priorTransitionsAcknowledged"`
 	WorkflowPinUnavailable       bool                  `json:"workflowPinUnavailable,omitempty"`
 	WorkflowDigestUnavailable    bool                  `json:"workflowDigestUnavailable,omitempty"`
+	RepositoryRouteUnavailable   bool                  `json:"repositoryRouteUnavailable,omitempty"`
 	HistoricalRepository         *HistoricalRepository `json:"historicalRepository,omitempty"`
 }
 
@@ -244,7 +257,7 @@ func NewSnapshot(model Model) (Snapshot, error) {
 
 func EmptyModel() Model {
 	return Model{
-		Schema: SchemaVersion, AdmissionBatches: []AdmissionBatch{},
+		Schema: SchemaVersion, AdmissionOperations: []AdmissionOperationReceipt{}, AdmissionBatches: []AdmissionBatch{},
 		Runs: []Run{}, RateBuckets: []RateBucket{},
 	}
 }
@@ -255,16 +268,18 @@ func (s Snapshot) Validate() error { return validateModel(s.model) }
 
 func (s Snapshot) Digest() (string, error) {
 	semantic := struct {
-		Schema           int              `json:"schema"`
-		TotalBatches     uint64           `json:"totalBatches"`
-		TotalRuns        uint64           `json:"totalRuns"`
-		AdmissionBatches []AdmissionBatch `json:"admissionBatches"`
-		Runs             []Run            `json:"runs"`
-		RateBuckets      []RateBucket     `json:"rateBuckets"`
+		Schema              int                         `json:"schema"`
+		TotalBatches        uint64                      `json:"totalBatches"`
+		TotalRuns           uint64                      `json:"totalRuns"`
+		AdmissionOperations []AdmissionOperationReceipt `json:"admissionOperations"`
+		AdmissionBatches    []AdmissionBatch            `json:"admissionBatches"`
+		Runs                []Run                       `json:"runs"`
+		RateBuckets         []RateBucket                `json:"rateBuckets"`
 	}{
 		Schema: s.model.Schema, TotalBatches: s.model.TotalBatches, TotalRuns: s.model.TotalRuns,
-		AdmissionBatches: cloneAdmissionBatches(s.model.AdmissionBatches),
-		Runs:             cloneRuns(s.model.Runs), RateBuckets: slices.Clone(s.model.RateBuckets),
+		AdmissionOperations: cloneAdmissionOperations(s.model.AdmissionOperations),
+		AdmissionBatches:    cloneAdmissionBatches(s.model.AdmissionBatches),
+		Runs:                cloneRuns(s.model.Runs), RateBuckets: slices.Clone(s.model.RateBuckets),
 	}
 	data, err := json.Marshal(semantic)
 	if err != nil {
@@ -283,6 +298,9 @@ func (r Run) Validate() error {
 }
 
 func canonicalizeModel(model *Model) {
+	for index := range model.AdmissionOperations {
+		canonicalizeAdmissionOperation(&model.AdmissionOperations[index])
+	}
 	for index := range model.AdmissionBatches {
 		canonicalizeAdmissionBatch(&model.AdmissionBatches[index])
 	}
@@ -299,6 +317,7 @@ func canonicalizeModel(model *Model) {
 		}
 		return left.ID < right.ID
 	})
+	slices.SortFunc(model.AdmissionOperations, compareAdmissionOperationReceipts)
 	sort.Slice(model.Runs, func(i, j int) bool {
 		left, right := model.Runs[i], model.Runs[j]
 		if !left.CreatedAt.Equal(right.CreatedAt) {
@@ -312,6 +331,47 @@ func canonicalizeModel(model *Model) {
 		}
 		return model.RateBuckets[i].Minute.Before(model.RateBuckets[j].Minute)
 	})
+}
+
+func canonicalizeAdmissionOperation(operation *AdmissionOperationReceipt) {
+	for index := range operation.AdmissionBatches {
+		canonicalizeAdmissionBatch(&operation.AdmissionBatches[index])
+	}
+	slices.SortFunc(operation.AdmissionBatches, compareAdmissionBatches)
+	for index := range operation.Runs {
+		canonicalizeRun(&operation.Runs[index])
+	}
+	slices.SortFunc(operation.Runs, compareRuns)
+	if len(operation.Runs) == 0 {
+		operation.Runs = nil
+	}
+	for index := range operation.RateIncrements {
+		operation.RateIncrements[index].Minute = operation.RateIncrements[index].Minute.UTC().Truncate(time.Minute)
+	}
+	slices.SortFunc(operation.RateIncrements, compareRateBuckets)
+	if len(operation.RateIncrements) == 0 {
+		operation.RateIncrements = nil
+	}
+}
+
+func compareAdmissionOperationReceipts(left, right AdmissionOperationReceipt) int {
+	if len(left.AdmissionBatches) == 0 || len(right.AdmissionBatches) == 0 {
+		return len(left.AdmissionBatches) - len(right.AdmissionBatches)
+	}
+	if comparison := compareAdmissionBatches(left.AdmissionBatches[0], right.AdmissionBatches[0]); comparison != 0 {
+		return comparison
+	}
+	return len(left.AdmissionBatches) - len(right.AdmissionBatches)
+}
+
+func compareRateBuckets(left, right RateBucket) int {
+	if left.RuleID < right.RuleID {
+		return -1
+	}
+	if left.RuleID > right.RuleID {
+		return 1
+	}
+	return left.Minute.Compare(right.Minute)
 }
 
 func canonicalizeAdmissionBatch(batch *AdmissionBatch) {
@@ -377,10 +437,23 @@ func canonicalizeRun(run *Run) {
 
 func cloneModel(model Model) Model {
 	clone := model
+	clone.AdmissionOperations = cloneAdmissionOperations(model.AdmissionOperations)
 	clone.AdmissionBatches = cloneAdmissionBatches(model.AdmissionBatches)
 	clone.Runs = cloneRuns(model.Runs)
 	clone.RateBuckets = slices.Clone(model.RateBuckets)
 	return clone
+}
+
+func cloneAdmissionOperations(values []AdmissionOperationReceipt) []AdmissionOperationReceipt {
+	cloned := make([]AdmissionOperationReceipt, len(values))
+	for index, value := range values {
+		cloned[index] = AdmissionOperationReceipt{
+			AdmissionBatches: cloneAdmissionBatches(value.AdmissionBatches),
+			Runs:             cloneRuns(value.Runs),
+			RateIncrements:   slices.Clone(value.RateIncrements),
+		}
+	}
+	return cloned
 }
 
 func cloneAdmissionBatches(values []AdmissionBatch) []AdmissionBatch {
