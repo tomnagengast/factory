@@ -20,6 +20,7 @@ import (
 
 	"github.com/tomnagengast/factory/internal/activity"
 	"github.com/tomnagengast/factory/internal/agentrun"
+	"github.com/tomnagengast/factory/internal/app"
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
@@ -580,47 +581,80 @@ func serveConfigured(ctx context.Context, options serveOptions) error {
 		}
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		slog.Info("factory listening", "address", httpServer.Addr)
-		errCh <- httpServer.Serve(listener)
-	}()
-	go recoverEventWire(ctx, events, 5*time.Second, func(ctx context.Context) error {
-		return triggerManager.ReconcileExisting(ctx)
-	}, func() error {
-		if _, err := events.ReconcileCompiledDefaults(settingsStore.Snapshot().Revision, time.Now()); err != nil {
-			return fmt.Errorf("reconcile compiled default workflows: %w", err)
-		}
-		projectManager.Reconcile(ctx)
-		if err := triggerManager.Reconcile(ctx); err != nil {
-			return err
-		}
-		if err := publishServiceEvent(ctx, events, "started", serviceStartedAt, serviceStartedAt); err != nil {
-			return err
-		}
-		go projectManager.Run(ctx)
-		go manager.Run(ctx)
-		go triggerManager.Run(ctx, 2*time.Second)
-		go scheduler.Run(ctx, 30*time.Second)
-		go publishServiceHeartbeats(ctx, events, serviceStartedAt, serviceHeartbeatInterval, time.Now)
-		ready.Store(true)
-		return nil
-	}, slog.Default())
-
-	select {
-	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
+	advancing := make(chan struct{})
+	recovery := app.Component{Name: "event-recovery", Run: func(componentContext context.Context) error {
+		return superviseEventWireRecovery(componentContext, events, 5*time.Second, func(ctx context.Context) error {
+			return triggerManager.ReconcileExisting(ctx)
+		}, func() error {
+			if _, err := events.ReconcileCompiledDefaults(settingsStore.Snapshot().Revision, time.Now()); err != nil {
+				return fmt.Errorf("reconcile compiled default workflows: %w", err)
+			}
+			projectManager.Reconcile(componentContext)
+			if err := triggerManager.Reconcile(componentContext); err != nil {
+				return err
+			}
+			if err := publishServiceEvent(componentContext, events, "started", serviceStartedAt, serviceStartedAt); err != nil {
+				return err
+			}
+			ready.Store(true)
+			close(advancing)
 			return nil
+		}, slog.Default())
+	}}
+	waitAndRun := func(run func(context.Context)) func(context.Context) error {
+		return func(componentContext context.Context) error {
+			if err := app.WaitForReady(componentContext, advancing); err != nil {
+				return err
+			}
+			run(componentContext)
+			return componentContext.Err()
 		}
-		return err
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := publishServiceEvent(shutdownCtx, events, "stopping", serviceStartedAt, time.Now().UTC()); err != nil {
-			slog.Error("publish Factory stopping event", "error", err)
-		}
-		return httpServer.Shutdown(shutdownCtx)
 	}
+	supervisor, err := app.NewSupervisor(
+		app.Component{Name: "http", Run: func(componentContext context.Context) error {
+			serveResult := make(chan error, 1)
+			go func() {
+				slog.Info("factory listening", "address", httpServer.Addr)
+				serveResult <- httpServer.Serve(listener)
+			}()
+			select {
+			case serveErr := <-serveResult:
+				if errors.Is(serveErr, http.ErrServerClosed) {
+					return componentContext.Err()
+				}
+				return serveErr
+			case <-componentContext.Done():
+				shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := httpServer.Shutdown(shutdownContext); err != nil {
+					return err
+				}
+				serveErr := <-serveResult
+				if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+					return serveErr
+				}
+				return componentContext.Err()
+			}
+		}},
+		recovery,
+		app.Component{Name: "repository-onboarding", Run: waitAndRun(projectManager.Run)},
+		app.Component{Name: "run-manager", Run: waitAndRun(manager.Run)},
+		app.Component{Name: "trigger-manager", Run: waitAndRun(func(componentContext context.Context) { triggerManager.Run(componentContext, 2*time.Second) })},
+		app.Component{Name: "scheduler", Run: waitAndRun(func(componentContext context.Context) { scheduler.Run(componentContext, 30*time.Second) })},
+		app.Component{Name: "heartbeat", Run: waitAndRun(func(componentContext context.Context) {
+			publishServiceHeartbeats(componentContext, events, serviceStartedAt, serviceHeartbeatInterval, time.Now)
+		})},
+	)
+	if err != nil {
+		return err
+	}
+	err = supervisor.Run(ctx)
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if publishErr := publishServiceEvent(shutdownContext, events, "stopping", serviceStartedAt, time.Now().UTC()); publishErr != nil {
+		slog.Error("publish Factory stopping event", "error", publishErr)
+	}
+	return err
 }
 
 type recoverableEventWire interface {
@@ -655,6 +689,40 @@ func recoverEventWire(
 		case <-ctx.Done():
 			timer.Stop()
 			return
+		case <-timer.C:
+		}
+	}
+}
+
+func superviseEventWireRecovery(
+	ctx context.Context,
+	events recoverableEventWire,
+	retryInterval time.Duration,
+	beforeCatchUp func(context.Context) error,
+	onReady func() error,
+	logger *slog.Logger,
+) error {
+	for {
+		err := beforeCatchUp(ctx)
+		if err == nil {
+			err = events.CatchUp(ctx)
+		}
+		if err == nil {
+			err = onReady()
+		}
+		if err == nil {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		logger.Warn("Factory event wire recovery pending", "error", err, "retry_in", retryInterval)
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
 		case <-timer.C:
 		}
 	}
