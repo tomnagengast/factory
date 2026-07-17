@@ -58,8 +58,7 @@ type SelectedGeneration struct {
 	Runs         *runs.Store
 	Tasks        *taskstore.Store
 	Wire         *eventwire.Journal
-	Activity     eventwire.ActivityProjection
-	Payloads     map[string][]byte
+	Activity     *eventwire.ActivityStore
 }
 
 func (s *SelectedGeneration) Close() error {
@@ -164,7 +163,7 @@ func OpenSelectedGeneration(path string) (*SelectedGeneration, error) {
 	if err != nil {
 		return nil, err
 	}
-	activity, payloads, err := eventwire.ReadActivity(filepath.Join(path, "activity"))
+	activity, err := eventwire.OpenActivityStore(filepath.Join(path, "activity"), validationLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +171,7 @@ func OpenSelectedGeneration(path string) (*SelectedGeneration, error) {
 	return &SelectedGeneration{
 		Generation: Generation{Path: path, Manifest: manifest, Report: report},
 		Policy:     policyStore, Repositories: repositoryStore, Runs: runStore,
-		Tasks: taskStore, Wire: wire, Activity: activity, Payloads: payloads,
+		Tasks: taskStore, Wire: wire, Activity: activity,
 	}, nil
 }
 
