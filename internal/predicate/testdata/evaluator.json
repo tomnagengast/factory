@@ -1,0 +1,66 @@
+[
+  {
+    "name": "all requirements pass",
+    "mode": "all",
+    "requirements": [
+      {"atom": "checkout.clean", "failure": "checkout is dirty"},
+      {"atom": "checkout.head_on_main", "failure": "head is not on main"}
+    ],
+    "facts": [
+      {"atom": "checkout.clean", "passed": true},
+      {"atom": "checkout.head_on_main", "passed": true}
+    ],
+    "passed": true,
+    "failures": null,
+    "evaluatedAtoms": ["checkout.clean", "checkout.head_on_main"]
+  },
+  {
+    "name": "all requirements retain failure order",
+    "mode": "all",
+    "requirements": [
+      {"atom": "checkout.clean", "failure": "checkout is dirty"},
+      {"atom": "checkout.head_on_main", "failure": "head is not on main"},
+      {"atom": "checkout.origin", "failure": "origin is not allowed"}
+    ],
+    "facts": [
+      {"atom": "checkout.clean", "passed": false},
+      {"atom": "checkout.head_on_main", "passed": true},
+      {"atom": "checkout.origin", "passed": false}
+    ],
+    "passed": false,
+    "failures": ["checkout is dirty", "origin is not allowed"],
+    "evaluatedAtoms": ["checkout.clean", "checkout.head_on_main", "checkout.origin"]
+  },
+  {
+    "name": "any requirement stops at first support",
+    "mode": "any",
+    "requirements": [
+      {"atom": "blocker.remote_branch_present", "failure": "remote branch is absent"},
+      {"atom": "blocker.worktree_present", "failure": "worktree is absent"},
+      {"atom": "blocker.task_incomplete", "failure": "task is complete"}
+    ],
+    "facts": [
+      {"atom": "blocker.remote_branch_present", "passed": false},
+      {"atom": "blocker.worktree_present", "passed": true},
+      {"atom": "blocker.task_incomplete", "passed": true}
+    ],
+    "passed": true,
+    "failures": null,
+    "evaluatedAtoms": ["blocker.remote_branch_present", "blocker.worktree_present"]
+  },
+  {
+    "name": "any requirement fails without support",
+    "mode": "any",
+    "requirements": [
+      {"atom": "blocker.remote_branch_present", "failure": "remote branch is absent"},
+      {"atom": "blocker.worktree_present", "failure": "worktree is absent"}
+    ],
+    "facts": [
+      {"atom": "blocker.remote_branch_present", "passed": false},
+      {"atom": "blocker.worktree_present", "passed": false}
+    ],
+    "passed": false,
+    "failures": ["remote branch is absent", "worktree is absent"],
+    "evaluatedAtoms": ["blocker.remote_branch_present", "blocker.worktree_present"]
+  }
+]
