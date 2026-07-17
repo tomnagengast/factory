@@ -21,14 +21,19 @@ import (
 )
 
 func DryRun(root string, options Options) (DryRunReport, error) {
+	options.CompiledRepositories = slices.Clone(options.CompiledRepositories)
 	state, err := readSources(root, options)
+	if err != nil {
+		return DryRunReport{}, err
+	}
+	canonical, err := convertCanonicalSources(state, options)
 	if err != nil {
 		return DryRunReport{}, err
 	}
 	if err := inject(options, "before-audit"); err != nil {
 		return DryRunReport{}, err
 	}
-	audit, totals, err := auditSources(state)
+	audit, totals, err := auditSources(state, canonical)
 	if err != nil {
 		return DryRunReport{}, err
 	}
@@ -58,18 +63,22 @@ func DryRun(root string, options Options) (DryRunReport, error) {
 		return DryRunReport{}, err
 	}
 	migrationID := "migration-" + rootDigest[:16] + "-" + auditDigest[:16]
+	registrySchema := 0
+	if state.registryPresent {
+		registrySchema = state.registry.Schema
+	}
 	manifest := MigrationManifest{
 		Schema: manifestSchema, MigrationID: migrationID, ObservedAt: options.Now.UTC(),
 		SourceRootDigest: rootDigest, Sources: slices.Clone(state.hashes), Directories: slices.Clone(state.directories), AuditDigest: auditDigest,
 		SourceSchemas: map[string]int{
-			"settings": state.settings.Schema, "registry": state.registry.Schema, "routing": state.routing.Schema,
+			"settings": state.settings.Schema, "registry": registrySchema, "routing": state.routing.Schema,
 			"projects": state.projects.Version, "runs": state.runs.Version, "tasks": state.tasks.Schema,
 			"taskControl": state.taskControl.Version, "linearIdentities": state.identities.Version,
 			"workflowDrafts": state.drafts.Schema, "triggerCursors": state.cursors.Schema,
 			"agentEventCursors": state.agentCursors.Version, "githubEvents": state.githubEvents.Version,
 			"linearComments": state.linearComments.Version, "taskCompatibility": state.taskBoundary.Version,
 		},
-		RetainedTotals: totals,
+		TargetSchemas: audit.TargetSchemas, RetainedTotals: totals,
 	}
 	report := DryRunReport{
 		Schema: dryRunReportSchema, Manifest: manifest,
@@ -108,10 +117,7 @@ func VerifyDryRun(root string, options Options, report DryRunReport) error {
 	return nil
 }
 
-func auditSources(state sourceState) (Audit, map[string]uint64, error) {
-	if err := auditReservedWorkflows(state); err != nil {
-		return Audit{}, nil, err
-	}
+func auditSources(state sourceState, canonical canonicalEvidence) (Audit, map[string]uint64, error) {
 	wireByID := make(map[string]uint64, len(state.wireRecords))
 	wireBySequence := make(map[uint64]string, len(state.wireRecords))
 	for _, record := range state.wireRecords {
@@ -299,7 +305,10 @@ func auditSources(state sourceState) (Audit, map[string]uint64, error) {
 		ActivityRetained: uint64(len(state.activity.Events)), PrivatePayloads: uint64(len(state.payloadHashes)),
 		WireTotal: state.wireTotal, WireDispatched: state.wireDispatched,
 		WorkflowDrafts: uint64(len(state.drafts.Drafts)), ScheduleCursors: uint64(len(state.cursors.Cursors)),
-		AgentEventCursors: uint64(len(state.agentCursors.Offsets)),
+		AgentEventCursors:             uint64(len(state.agentCursors.Offsets)),
+		CompiledRepositoryInputDigest: canonical.CompiledRepositoryInputDigest,
+		CanonicalPolicy:               canonical.Policy, CanonicalRepositories: canonical.Repositories,
+		TargetSchemas: canonical.TargetSchemas,
 	}
 	totals := map[string]uint64{
 		"activityLifetime": audit.ActivityLifetime, "activityRetained": audit.ActivityRetained,
@@ -456,28 +465,6 @@ func characterizationDigests(state sourceState, totals map[string]uint64) (map[s
 	}
 	digests["totals"] = totalDigest
 	return digests, nil
-}
-
-func auditReservedWorkflows(state sourceState) error {
-	compiled := map[string]workflow.Definition{
-		workflow.DefaultID:         workflow.Default(time.Time{}),
-		workflow.ProviderNeutralID: workflow.ProviderNeutralDefault(time.Time{}),
-	}
-	for _, definition := range state.settings.Workflows {
-		expected, reserved := compiled[definition.ID]
-		if !reserved {
-			continue
-		}
-		actualDigest, err := workflow.Digest(definition)
-		if err != nil {
-			return err
-		}
-		expectedDigest, err := workflow.Digest(expected)
-		if err != nil || actualDigest != expectedDigest {
-			return fmt.Errorf("migration: customized reserved workflow %s conflicts with compiled policy", definition.ID)
-		}
-	}
-	return nil
 }
 
 func auditPinned(pin workflow.Pinned, expected string, requireComplete bool) error {

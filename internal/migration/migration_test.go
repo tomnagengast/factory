@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/tomnagengast/factory/internal/agentrun"
 	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/projectsetup"
+	"github.com/tomnagengast/factory/internal/repositories"
 	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/taskcontrol"
 	"github.com/tomnagengast/factory/internal/taskmodel"
@@ -43,9 +45,18 @@ func TestDryRunCharacterizesCurrentShapeWithoutActivation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := DryRun(root, testOptions())
+	beforeDirectories, err := directoryModes(root)
 	if err != nil {
 		t.Fatal(err)
+	}
+	options := testOptions()
+	compiledInput := slices.Clone(options.CompiledRepositories)
+	report, err := DryRun(root, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(options.CompiledRepositories, compiledInput) {
+		t.Fatal("dry run mutated compiled repository input")
 	}
 	after, err := hashTree(root)
 	if err != nil {
@@ -54,8 +65,18 @@ func TestDryRunCharacterizesCurrentShapeWithoutActivation(t *testing.T) {
 	if !slicesEqual(before, after) {
 		t.Fatal("dry run changed source artifacts")
 	}
-	if report.Activates || report.Manifest.Schema != 1 || report.Backup.Schema != 1 {
+	afterDirectories, err := directoryModes(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(beforeDirectories, afterDirectories) {
+		t.Fatal("dry run changed source directories")
+	}
+	if report.Schema != 2 || report.Activates || report.Manifest.Schema != 2 || report.Backup.Schema != 1 {
 		t.Fatalf("activating or invalid report: %#v", report)
+	}
+	if report.Manifest.TargetSchemas != (TargetSchemas{Policy: 1, Repositories: 1}) || report.Audit.TargetSchemas != report.Manifest.TargetSchemas {
+		t.Fatalf("target schemas = manifest %#v audit %#v", report.Manifest.TargetSchemas, report.Audit.TargetSchemas)
 	}
 	if report.Audit.Decisions != 1 || report.Audit.Invocations != 1 || report.Audit.Runs != 1 || report.Audit.ActiveRuns != 1 || report.Audit.WorkflowPins != 1 {
 		t.Fatalf("routing/Run audit = %#v", report.Audit)
@@ -66,12 +87,36 @@ func TestDryRunCharacterizesCurrentShapeWithoutActivation(t *testing.T) {
 	if report.Audit.NativeTasks != 1 || report.Audit.NativeOutcomes == 0 || report.Audit.WorkflowDrafts != 1 || report.Audit.ScheduleCursors != 1 || report.Audit.AgentEventCursors != 1 {
 		t.Fatalf("task/cursor audit = %#v", report.Audit)
 	}
+	policyAudit := report.Audit.CanonicalPolicy
+	if policyAudit.Schema != 1 || policyAudit.Generation != 1 || !policyAudit.RegistrySourcePresent || !policyAudit.CompatibilityValidated ||
+		policyAudit.SettingsRevision != 7 || policyAudit.RegistryRevision != 4 || policyAudit.TaskControlRevision != 1 ||
+		policyAudit.Workflows != 2 || policyAudit.Rules != 1 || policyAudit.Schedules != 1 || policyAudit.EnabledProjects != 1 {
+		t.Fatalf("canonical policy audit = %#v", policyAudit)
+	}
+	repositoryAudit := report.Audit.CanonicalRepositories
+	if repositoryAudit.Schema != 1 || repositoryAudit.Generation != 1 || repositoryAudit.Compiled != 1 ||
+		repositoryAudit.Admitted != 1 || repositoryAudit.Awaiting != 0 || repositoryAudit.Routable != 1 {
+		t.Fatalf("canonical repository audit = %#v", repositoryAudit)
+	}
+	if report.Audit.CompiledRepositoryInputDigest != "520744fb78f49dc36b45cf4b8d38efeeb72049a7f775ab9e04177b29981ff8cf" ||
+		policyAudit.Digest != "e3132827aa4041394ba294fd59d521263313f9e60120de968083dbdf86f97e20" ||
+		repositoryAudit.Digest != "cf98d2b7b573d66a1b051dc9e81fc587262c7a10bd77abfdda648adf9b6c16eb" ||
+		report.AuditDigest != "dcd47255dce5e81f85e7cf8729682f6a694e1d6f6c44f7bf3676048981aa4eae" {
+		t.Fatalf("canonical digests = compiled %s policy %s repositories %s audit %s", report.Audit.CompiledRepositoryInputDigest, policyAudit.Digest, repositoryAudit.Digest, report.AuditDigest)
+	}
+	auditJSON, err := json.Marshal(report.Audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"/srv/factory", "git@github.com", "Sanitized fixture workflow"} {
+		if strings.Contains(string(auditJSON), forbidden) {
+			t.Fatalf("body-free canonical audit exposed %q: %s", forbidden, auditJSON)
+		}
+	}
 	if err := VerifyDryRun(root, testOptions(), report); err != nil {
 		t.Fatalf("verify report: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "state-generation.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("dry run created a generation selector: %v", err)
-	}
+	assertNoCanonicalState(t, root)
 }
 
 func TestDryRunAcceptsImplicitRegistryAndAbsentScheduleCursors(t *testing.T) {
@@ -95,8 +140,25 @@ func TestDryRunAcceptsImplicitRegistryAndAbsentScheduleCursors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Audit.ScheduleCursors != 0 || report.Manifest.SourceSchemas["registry"] != triggerregistry.SchemaVersion || report.Manifest.SourceSchemas["triggerCursors"] != 1 {
+	if report.Audit.ScheduleCursors != 0 || report.Manifest.SourceSchemas["registry"] != 0 || report.Manifest.SourceSchemas["triggerCursors"] != 1 ||
+		report.Audit.CanonicalPolicy.RegistrySourcePresent || report.Audit.CanonicalPolicy.RegistryRevision != 0 ||
+		report.Audit.CanonicalPolicy.Rules != 1 || report.Audit.CanonicalPolicy.Schedules != 0 {
 		t.Fatalf("implicit policy audit = %#v schemas=%#v", report.Audit, report.Manifest.SourceSchemas)
+	}
+}
+
+func TestDryRunRejectsActorOnlyReservedRuleAmbiguity(t *testing.T) {
+	root := copyGolden(t)
+	var configuration settings.Snapshot
+	if err := decodeFile(root, "settings.json", &configuration); err != nil {
+		t.Fatal(err)
+	}
+	registry := triggerregistry.Defaults(configuration, "actor-from-stale-source")
+	registry.Revision = 4
+	registry.UpdatedAt = fixtureNow
+	writeJSON(t, filepath.Join(root, "triggers.json"), registry)
+	if _, err := DryRun(root, testOptions()); err == nil || !strings.Contains(err.Error(), "differs from the compiled default only by actor") {
+		t.Fatalf("actor-only reserved rule error = %v", err)
 	}
 }
 
@@ -197,10 +259,22 @@ func TestActivityAuditPreservesInsertionOrderWithoutChronologyAssumption(t *test
 }
 
 func TestDryRunFailureInjection(t *testing.T) {
-	for _, point := range []string{"before-hash", "hash:settings.json", "after-hash", "before-decode", "read:settings.json", "after-decode", "before-audit", "after-audit", "report", "after-report"} {
+	for _, point := range []string{
+		"before-hash", "hash:settings.json", "after-hash", "before-decode", "read:settings.json", "after-decode",
+		"before-policy-conversion", "after-policy-conversion", "before-repository-conversion", "after-repository-conversion",
+		"before-canonical-evidence", "after-canonical-evidence", "before-audit", "after-audit", "report", "after-report",
+	} {
 		point := point
 		t.Run(point, func(t *testing.T) {
 			root := copyGolden(t)
+			before, err := hashTree(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeDirectories, err := directoryModes(root)
+			if err != nil {
+				t.Fatal(err)
+			}
 			options := testOptions()
 			options.Inject = func(current string) error {
 				if current == point {
@@ -211,7 +285,80 @@ func TestDryRunFailureInjection(t *testing.T) {
 			if _, err := DryRun(root, options); err == nil || !strings.Contains(err.Error(), point) {
 				t.Fatalf("injected %s error = %v", point, err)
 			}
+			after, err := hashTree(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterDirectories, err := directoryModes(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slicesEqual(before, after) || !slices.Equal(beforeDirectories, afterDirectories) {
+				t.Fatal("injected dry run changed source tree")
+			}
+			assertNoCanonicalState(t, root)
 		})
+	}
+}
+
+func TestDryRunRejectsCanonicalRepositoryInputConflicts(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, string, *Options)
+		want   string
+	}{
+		{name: "missing compiled input", mutate: func(_ *testing.T, _ string, options *Options) {
+			options.CompiledRepositories = nil
+		}, want: "no longer compiled"},
+		{name: "compiled setup origin conflict", mutate: func(_ *testing.T, _ string, options *Options) {
+			options.CompiledRepositories[0].Repository = "tomnagengast/other"
+			options.CompiledRepositories[0].RepoURL = "git@github.com:tomnagengast/other.git"
+		}, want: "no longer compiled"},
+		{name: "compiled setup path conflict", mutate: func(_ *testing.T, _ string, options *Options) {
+			options.CompiledRepositories[0].ProjectPath = "/srv/factory/repos/other"
+		}, want: "conflicts with compiled"},
+		{name: "compiled setup branch conflict", mutate: func(_ *testing.T, _ string, options *Options) {
+			options.CompiledRepositories[0].BaseBranch = "release"
+		}, want: "conflicts with compiled"},
+		{name: "compiled repository origin conflict", mutate: func(_ *testing.T, _ string, options *Options) {
+			options.CompiledRepositories[0].RepoURL = "git@github.com:tomnagengast/other.git"
+		}, want: "compiled repository conflicts with origin"},
+		{name: "duplicate app", mutate: func(_ *testing.T, _ string, options *Options) {
+			other := options.CompiledRepositories[0]
+			other.Repository, other.RepoURL = "tomnagengast/other", "git@github.com:tomnagengast/other.git"
+			other.RepoPath, other.ProjectPath = "/srv/factory/repos/other", "/srv/factory/projects/other"
+			options.CompiledRepositories = append(options.CompiledRepositories, other)
+		}, want: "share app"},
+		{name: "overlapping compiled paths", mutate: func(_ *testing.T, _ string, options *Options) {
+			other := options.CompiledRepositories[0]
+			other.App, other.Repository, other.RepoURL = "other", "tomnagengast/other", "git@github.com:tomnagengast/other.git"
+			other.RepoPath, other.ProjectPath = options.CompiledRepositories[0].RepoPath+"/nested", "/srv/factory/projects/other"
+			options.CompiledRepositories = append(options.CompiledRepositories, other)
+		}, want: "managed paths"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := copyGolden(t)
+			options := testOptions()
+			test.mutate(t, root, &options)
+			if _, err := DryRun(root, options); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestRepositorySetupStateMappingFailsClosed(t *testing.T) {
+	for _, state := range []projectsetup.State{
+		projectsetup.StateAwaitingMetadata, projectsetup.StatePending, projectsetup.StateRunning,
+		projectsetup.StateSucceeded, projectsetup.StateFailed,
+	} {
+		if _, err := repositorySetupState(state); err != nil {
+			t.Fatalf("known state %q: %v", state, err)
+		}
+	}
+	if _, err := repositorySetupState(projectsetup.State("unknown")); err == nil {
+		t.Fatal("unknown setup state was accepted")
 	}
 }
 
@@ -324,10 +471,51 @@ func TestDryRunDetectsAlteredSourceAndAuditEvidence(t *testing.T) {
 			t.Fatalf("changed mapping error = %v", err)
 		}
 	})
+	t.Run("compiled input after audit", func(t *testing.T) {
+		root := copyGolden(t)
+		report, err := DryRun(root, testOptions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed := testOptions()
+		changed.CompiledRepositories[0].App = "FACTORY"
+		changedReport, err := DryRun(root, changed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if changedReport.Audit.CanonicalRepositories.Digest != report.Audit.CanonicalRepositories.Digest ||
+			changedReport.Audit.CompiledRepositoryInputDigest == report.Audit.CompiledRepositoryInputDigest {
+			t.Fatalf("compiled provenance was not independently bound: original=%#v changed=%#v", report.Audit, changedReport.Audit)
+		}
+		if err := VerifyDryRun(root, changed, report); err == nil || !strings.Contains(err.Error(), "changed") {
+			t.Fatalf("changed compiled input error = %v", err)
+		}
+	})
+}
+
+func assertNoCanonicalState(t *testing.T, root string) {
+	t.Helper()
+	for _, name := range []string{
+		"policy.json", "repositories.json", "generation-manifest.json", "state-generation.json",
+		"canonicalWritesStarted", "canonical-writes-started", "generations",
+	} {
+		if _, err := os.Stat(filepath.Join(root, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("dry run created canonical state %s: %v", name, err)
+		}
+	}
 }
 
 func testOptions() Options {
-	return Options{TriggerActorID: "actor-sanitized", Now: fixtureNow}
+	return Options{
+		TriggerActorID: "actor-sanitized",
+		CompiledRepositories: []repositories.CompiledSource{{
+			App: "factory", Repository: "tomnagengast/factory",
+			RepoURL:  "git@github.com:tomnagengast/factory.git",
+			RepoPath: "/srv/factory/repos/factory", ManagedRoot: "/srv/factory/repos",
+			ProjectPath: "/srv/factory/repos/factory", BaseBranch: "main",
+		}},
+		Now: fixtureNow,
+	}
 }
 
 func copyGolden(t *testing.T) string {

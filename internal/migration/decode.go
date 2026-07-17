@@ -21,6 +21,7 @@ import (
 	"github.com/tomnagengast/factory/internal/githubhook"
 	"github.com/tomnagengast/factory/internal/linearhook"
 	"github.com/tomnagengast/factory/internal/projectsetup"
+	"github.com/tomnagengast/factory/internal/repositories"
 	"github.com/tomnagengast/factory/internal/settings"
 	"github.com/tomnagengast/factory/internal/taskcompat"
 	"github.com/tomnagengast/factory/internal/taskcontrol"
@@ -34,9 +35,10 @@ import (
 const validationLimit = 1_000_000
 
 type Options struct {
-	TriggerActorID string
-	Now            time.Time
-	Inject         func(string) error
+	TriggerActorID       string
+	CompiledRepositories []repositories.CompiledSource
+	Now                  time.Time
+	Inject               func(string) error
 }
 
 type activityRecord struct {
@@ -107,27 +109,29 @@ type linearState struct {
 }
 
 type sourceState struct {
-	settings       settings.Snapshot
-	registry       triggerregistry.Snapshot
-	routing        triggerrouter.Snapshot
-	projects       projectState
-	runs           runState
-	tasks          taskstore.Snapshot
-	taskControl    taskcontrol.Snapshot
-	identities     identityState
-	activity       activityState
-	drafts         workflow.DraftSnapshot
-	wireTotal      uint64
-	wireDispatched uint64
-	wireRecords    []eventwire.Record
-	cursors        cursorState
-	agentCursors   agentCursorState
-	githubEvents   githubState
-	linearComments linearState
-	taskBoundary   taskcompat.Marker
-	payloadHashes  map[string]string
-	hashes         []SourceHash
-	directories    []SourceDirectory
+	settings             settings.Snapshot
+	registry             triggerregistry.Snapshot
+	registryPresent      bool
+	compiledRepositories []repositories.CompiledSource
+	routing              triggerrouter.Snapshot
+	projects             projectState
+	runs                 runState
+	tasks                taskstore.Snapshot
+	taskControl          taskcontrol.Snapshot
+	identities           identityState
+	activity             activityState
+	drafts               workflow.DraftSnapshot
+	wireTotal            uint64
+	wireDispatched       uint64
+	wireRecords          []eventwire.Record
+	cursors              cursorState
+	agentCursors         agentCursorState
+	githubEvents         githubState
+	linearComments       linearState
+	taskBoundary         taskcompat.Marker
+	payloadHashes        map[string]string
+	hashes               []SourceHash
+	directories          []SourceDirectory
 }
 
 func readSources(root string, options Options) (sourceState, error) {
@@ -153,7 +157,10 @@ func readSources(root string, options Options) (sourceState, error) {
 		return sourceState{}, err
 	}
 
-	state := sourceState{hashes: hashes, directories: directories, payloadHashes: make(map[string]string)}
+	state := sourceState{
+		hashes: hashes, directories: directories, payloadHashes: make(map[string]string),
+		compiledRepositories: slices.Clone(options.CompiledRepositories),
+	}
 	if err := inject(options, "before-decode"); err != nil {
 		return sourceState{}, err
 	}
@@ -177,6 +184,8 @@ func readSources(root string, options Options) (sourceState, error) {
 		return sourceState{}, fmt.Errorf("migration: inspect triggers.json: %w", err)
 	} else if err := decodeFile(root, "triggers.json", &state.registry); err != nil {
 		return sourceState{}, err
+	} else {
+		state.registryPresent = true
 	}
 	if err := state.registry.Validate(state.settings); err != nil {
 		return sourceState{}, err
