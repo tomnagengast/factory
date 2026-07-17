@@ -1,5 +1,3 @@
-import "./styles.css";
-
 /**
  * @typedef {{
  *   sequence: number;

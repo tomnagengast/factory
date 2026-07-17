@@ -48,6 +48,7 @@ func (r CommandRunner) Run(ctx context.Context, prompt string, emit func(Output)
 		r.Workspace,
 		"-",
 	)
+	command.Dir = r.Workspace
 	command.Stdin = strings.NewReader(prompt)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
