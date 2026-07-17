@@ -15,7 +15,7 @@ import (
 	"github.com/tomnagengast/factory/internal/repositories"
 )
 
-// Manager is the dormant canonical Run lifecycle owner. It replaces the legacy
+// Manager is the canonical Run lifecycle owner. It replaces the legacy
 // triggerrouter routing loop and agentrun.Manager for the admission→execution→
 // direct-terminal spine. It holds no store lock: it reads a Snapshot, decides,
 // and emits Store.Transition. Every mutation therefore re-validates immutable
@@ -143,8 +143,8 @@ type TerminalDecision struct {
 	Validation CompletionValidation
 }
 
-// NewManager constructs the dormant Run manager. It is the sole non-test
-// constructor; a package test proves production never calls it.
+// NewManager constructs the Run manager. A package test confines production
+// composition of this owner and its external authorities to internal/app.
 func NewManager(
 	store *Store,
 	dispatch EventDispatchGate,

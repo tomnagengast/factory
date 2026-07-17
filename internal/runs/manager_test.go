@@ -839,7 +839,7 @@ func TestManagerEmitsBodyFreeTransitionDeliveries(t *testing.T) {
 
 // ---- constructor + dormancy --------------------------------------------
 
-func TestNewManagerRequiresCollaboratorsAndCanonicalLifecyclePortsRemainDormant(t *testing.T) {
+func TestNewManagerRequiresCollaboratorsAndCanonicalLifecyclePortsAreComposedOnlyByApp(t *testing.T) {
 	store := createEmptyStore(t, filepath.Join(t.TempDir(), "runs.jsonl"), 8)
 	resolver := fakeResolver{fn: func(context.Context, Run) (repositories.Route, error) { return repositories.Route{}, nil }}
 	launcher := fakeLauncher{}
@@ -901,7 +901,7 @@ func TestNewManagerRequiresCollaboratorsAndCanonicalLifecyclePortsRemainDormant(
 	}
 	files := token.NewFileSet()
 	var calls []string
-	dormant := map[string]bool{
+	canonical := map[string]bool{
 		"NewManager":                       true,
 		"NewGitHubCLI":                     true,
 		"NewMechanicalCompletionValidator": true,
@@ -931,21 +931,23 @@ func TestNewManagerRequiresCollaboratorsAndCanonicalLifecyclePortsRemainDormant(
 			if !ok {
 				return true
 			}
-			// Only constructions of these canonical dormant lifecycle ports count:
+			// Only constructions of these canonical lifecycle ports count:
 			// qualified runs selectors, or bare constructors inside package runs.
 			// Same-named constructors elsewhere (agentrun, projectsetup) are unrelated.
 			constructs := false
 			switch function := call.Fun.(type) {
 			case *ast.Ident:
-				constructs = inRunsPackage && dormant[function.Name]
+				constructs = inRunsPackage && canonical[function.Name]
 			case *ast.SelectorExpr:
 				pkg, ok := function.X.(*ast.Ident)
-				constructs = ok && pkg.Name == "runs" && dormant[function.Sel.Name]
+				constructs = ok && pkg.Name == "runs" && canonical[function.Sel.Name]
 			}
 			if constructs {
 				position := files.Position(call.Pos())
 				relative, _ := filepath.Rel(repositoryRoot, position.Filename)
-				calls = append(calls, fmt.Sprintf("%s:%d", relative, position.Line))
+				if !strings.HasPrefix(filepath.ToSlash(relative), "internal/app/") {
+					calls = append(calls, fmt.Sprintf("%s:%d", relative, position.Line))
+				}
 			}
 			return true
 		})
@@ -955,6 +957,6 @@ func TestNewManagerRequiresCollaboratorsAndCanonicalLifecyclePortsRemainDormant(
 		t.Fatal(err)
 	}
 	if len(calls) != 0 {
-		t.Fatalf("production constructs dormant canonical lifecycle port: %v", calls)
+		t.Fatalf("production constructs canonical lifecycle port outside internal/app: %v", calls)
 	}
 }

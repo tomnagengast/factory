@@ -40,8 +40,7 @@ type TaskCompletionProvider interface {
 }
 
 // SystemCompletionEvidence verifies post-merge evidence against one immutable
-// allowlisted repository identity. It is dormant until the Phase 4 composition
-// boundary.
+// allowlisted repository identity from the selected canonical catalog.
 type SystemCompletionEvidence struct {
 	identity repositories.CompletionIdentity
 	options  SystemCompletionOptions

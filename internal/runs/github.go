@@ -27,7 +27,6 @@ type PullRequestDiscoverer interface {
 }
 
 // GitHubCLI is the canonical read-only GitHub authority for pull-request state.
-// It is dormant until the Phase 4 composition boundary.
 type GitHubCLI struct {
 	path      string
 	directory string

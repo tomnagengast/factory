@@ -11,7 +11,7 @@ import (
 )
 
 // OutboxWire is the narrow publication and dispatch-status capability the
-// dormant OutboxCollector needs. It is already satisfied by *eventwire.Wire.
+// OutboxCollector needs. It is satisfied by *eventwire.Wire.
 type OutboxWire interface {
 	Publish(context.Context, eventwire.Event) (eventwire.Record, bool, error)
 	Status() eventwire.Status
@@ -23,8 +23,8 @@ var _ OutboxWire = (*eventwire.Wire)(nil)
 // It republishes the deterministic body-free lifecycle event for every pending
 // delivery, persists the authoritative wire sequence, and acknowledges only a
 // contiguous published prefix that the wire reports globally dispatched. It
-// never cancels a Run transition event. It is dormant: no production caller
-// constructs it, so publication cannot begin before an explicit Phase 4 cutover.
+// never cancels a Run transition event. Startup constructs it only from the
+// selected canonical generation.
 type OutboxCollector struct {
 	store *Store
 	wire  OutboxWire
