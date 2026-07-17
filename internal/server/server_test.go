@@ -61,6 +61,27 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestHealthzCanIdentifyStagedReleaseWhileAdvancementIsGated(t *testing.T) {
+	t.Parallel()
+	ready := false
+	healthReady := true
+	server := &appServer{
+		events: testEventWire(t, 0, 0), projectSetups: &testProjectSetups{},
+		taskStatus: func() taskstore.Status { return taskstore.Status{Healthy: true} },
+		ready:      func() bool { return ready }, healthReady: func() bool { return healthReady }, build: testBuildIdentity(),
+	}
+	recorder := httptest.NewRecorder()
+	server.healthz(recorder, httptest.NewRequest(http.MethodGet, "/api/healthz", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"status":"ok"`) {
+		t.Fatalf("staged health status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	response := httptest.NewRecorder()
+	server.requireReady(response)
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "5" {
+		t.Fatalf("gated mutation status=%d headers=%v", response.Code, response.Header())
+	}
+}
+
 func TestHealthzReportsPendingWireAsDegraded(t *testing.T) {
 	t.Parallel()
 	handler, _, _, _, wire := testHandlerWithRunsAndSettingsAndWire(t)
@@ -98,8 +119,9 @@ func TestHealthzReportsPendingTaskStageAsDegraded(t *testing.T) {
 		taskStatus: func() taskstore.Status {
 			return taskstore.Status{Healthy: false, PendingStages: 1}
 		},
-		ready: func() bool { return true },
-		build: testBuildIdentity(),
+		ready:       func() bool { return true },
+		healthReady: func() bool { return true },
+		build:       testBuildIdentity(),
 	}
 	recorder := httptest.NewRecorder()
 	server.healthz(recorder, httptest.NewRequest(http.MethodGet, "/api/healthz", nil))

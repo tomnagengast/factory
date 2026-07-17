@@ -201,6 +201,7 @@ type Config struct {
 	LinearIdentities   LinearIdentityBinder
 	TaskStatus         func() taskstore.Status
 	Ready              func() bool
+	HealthReady        func() bool
 }
 
 type appServer struct {
@@ -231,6 +232,7 @@ type appServer struct {
 	linearIdentities   LinearIdentityBinder
 	taskStatus         func() taskstore.Status
 	ready              func() bool
+	healthReady        func() bool
 }
 
 type BuildIdentity struct {
@@ -392,6 +394,9 @@ func New(config Config) (http.Handler, error) {
 	if config.Ready == nil {
 		config.Ready = func() bool { return true }
 	}
+	if config.HealthReady == nil {
+		config.HealthReady = config.Ready
+	}
 	if config.TaskStatus == nil {
 		config.TaskStatus = func() taskstore.Status { return taskstore.Status{Healthy: true} }
 	}
@@ -426,6 +431,7 @@ func New(config Config) (http.Handler, error) {
 		linearIdentities:   config.LinearIdentities,
 		taskStatus:         config.TaskStatus,
 		ready:              config.Ready,
+		healthReady:        config.HealthReady,
 	}
 	if err := app.events.Handle(eventwire.Filter{Source: eventwire.SourceLinear}, app.dispatchLinear); err != nil {
 		return nil, err
@@ -502,7 +508,7 @@ func (s *appServer) healthz(w http.ResponseWriter, _ *http.Request) {
 	tasks := s.taskStatus()
 	health := healthResponse{Status: "ok", App: "factory", Wire: wire, Tasks: tasks, ProjectSetups: setups, BuildIdentity: s.build}
 	httpStatus := http.StatusOK
-	if !s.ready() || status.Pending > 0 || setups.Failed > 0 || !tasks.Healthy {
+	if !s.healthReady() || status.Pending > 0 || setups.Failed > 0 || !tasks.Healthy {
 		health.Status = "degraded"
 		httpStatus = http.StatusServiceUnavailable
 	}
