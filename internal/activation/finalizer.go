@@ -101,6 +101,51 @@ type ProviderAcknowledgement struct {
 	FinalizedAt     time.Time           `json:"finalizedAt"`
 }
 
+// SelectedGenerationPath resolves the one selected generation from the
+// provider acknowledgement and cross-checks the immutable generation plus its
+// monotonic write boundary. It performs no mutation and grants no advancement
+// authority; a restart must still call Finalize for the returned path so it
+// reacquires the state lease and revalidates the live provider graph.
+func SelectedGenerationPath(stateRoot, dataRoot string) (string, error) {
+	stateRoot, dataRoot = filepath.Clean(stateRoot), filepath.Clean(dataRoot)
+	if !filepath.IsAbs(stateRoot) || !filepath.IsAbs(dataRoot) || dataRoot != filepath.Join(stateRoot, "data") {
+		return "", errors.New("activation: Factory state paths are invalid")
+	}
+	selection, err := ReadSelection(dataRoot)
+	if err != nil {
+		return "", err
+	}
+	var acknowledgement ProviderAcknowledgement
+	if err := readExactJSON(filepath.Join(dataRoot, providerAcknowledgementFile), &acknowledgement); err != nil {
+		return "", err
+	}
+	if acknowledgement.ContractVersion != selection.ContractVersion || acknowledgement.StateGeneration != selection.StateGeneration ||
+		acknowledgement.MigrationID == "" || acknowledgement.DeploymentID == "" || !hex40Pattern.MatchString(acknowledgement.SourceCommit) ||
+		!hex40Pattern.MatchString(acknowledgement.SourceTree) || acknowledgement.BuildID == "" || acknowledgement.FinalizedAt.IsZero() ||
+		acknowledgement.FinalizedAt.Location() != time.UTC || !hex64Pattern.MatchString(acknowledgement.ReceiptSHA256) {
+		return "", errors.New("activation: provider acknowledgement is invalid")
+	}
+	path := filepath.Join(stateRoot, "generations", acknowledgement.MigrationID)
+	boundary, err := ReadWriteBoundary(path)
+	if err != nil {
+		return "", err
+	}
+	selected, err := migration.OpenSelectedGeneration(path)
+	if err != nil {
+		return "", err
+	}
+	defer selected.Close()
+	if selected.Generation.Manifest.MigrationID != acknowledgement.MigrationID || selected.Generation.Manifest.StateGeneration != selection.StateGeneration {
+		return "", errors.New("activation: selected generation conflicts with provider acknowledgement")
+	}
+	if boundary.MigrationID != acknowledgement.MigrationID || boundary.DeploymentID != acknowledgement.DeploymentID ||
+		boundary.SourceCommit != acknowledgement.SourceCommit || boundary.StateGeneration != acknowledgement.StateGeneration ||
+		boundary.StartedAt != acknowledgement.FinalizedAt {
+		return "", errors.New("activation: selected generation boundary conflicts with provider acknowledgement")
+	}
+	return path, nil
+}
+
 // Finalize acquires the state lease before the provider lock, proves the exact
 // successful deployment graph, fsyncs it, writes the provider acknowledgement,
 // then publishes selection and the write boundary. Its returned Activation
@@ -180,6 +225,72 @@ func Finalize(ctx context.Context, config FinalizerConfig) (*Activation, error) 
 	}
 	succeeded = true
 	return &Activation{Lease: lease, Generation: generation, Acknowledgement: acknowledgement, Boundary: boundary}, nil
+}
+
+// ResumeSelected reacquires continuous advancement authority for an already
+// selected generation. Unlike Finalize, it validates mutable canonical stores
+// by strict replay instead of comparing them with staging hashes, and it never
+// rewrites acknowledgement, selection, or boundary evidence.
+func ResumeSelected(ctx context.Context, config FinalizerConfig) (*Activation, error) {
+	if err := validateFinalizerConfig(config); err != nil {
+		return nil, err
+	}
+	selectedPath, err := SelectedGenerationPath(config.StateRoot, config.DataRoot)
+	if err != nil {
+		return nil, err
+	}
+	if selectedPath != config.GenerationPath {
+		return nil, errors.New("activation: configured generation is not selected")
+	}
+	lease, err := AcquireLease(filepath.Join(config.DataRoot, "state-transition.lock"))
+	if err != nil {
+		return nil, err
+	}
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = lease.Close()
+		}
+	}()
+	providerLock, err := acquireProviderLock(ctx, config.StateRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer providerLock.Close()
+	receipt, receiptDigest, currentTarget, artifacts, err := validateProviderGraph(config)
+	if err != nil {
+		return nil, err
+	}
+	var acknowledgement ProviderAcknowledgement
+	if err := readExactJSON(filepath.Join(config.DataRoot, providerAcknowledgementFile), &acknowledgement); err != nil {
+		return nil, err
+	}
+	selected, err := migration.OpenSelectedGeneration(selectedPath)
+	if err != nil {
+		return nil, err
+	}
+	defer selected.Close()
+	if err := migration.VerifySourceSnapshot(config.DataRoot, selected.Generation.Report); err != nil {
+		return nil, err
+	}
+	boundary, err := ReadWriteBoundary(selectedPath)
+	if err != nil {
+		return nil, err
+	}
+	expected := ProviderAcknowledgement{
+		ContractVersion: selectionContractVersion, StateGeneration: selected.Generation.Manifest.StateGeneration,
+		MigrationID: selected.Generation.Manifest.MigrationID, DeploymentID: receipt.DeploymentID,
+		SourceCommit: receipt.SourceCommit, SourceTree: receipt.SourceTree, BuildID: receipt.BuildID,
+		CurrentTarget: currentTarget, ReceiptSHA256: receiptDigest, Artifacts: artifacts,
+		FinalizedAt: acknowledgement.FinalizedAt,
+	}
+	if !reflect.DeepEqual(acknowledgement, expected) || boundary.MigrationID != acknowledgement.MigrationID ||
+		boundary.DeploymentID != acknowledgement.DeploymentID || boundary.SourceCommit != acknowledgement.SourceCommit ||
+		boundary.StateGeneration != acknowledgement.StateGeneration || boundary.StartedAt != acknowledgement.FinalizedAt {
+		return nil, errors.New("activation: selected deployment graph changed after finalization")
+	}
+	succeeded = true
+	return &Activation{Lease: lease, Generation: selected.Generation, Acknowledgement: acknowledgement, Boundary: boundary}, nil
 }
 
 func validateFinalizerConfig(config FinalizerConfig) error {

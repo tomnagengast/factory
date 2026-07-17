@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/migration"
 )
 
@@ -135,6 +136,101 @@ func TestFinalizePreservesAcknowledgementAcrossPostAckCrash(t *testing.T) {
 	defer activation.Close()
 	if !reflect.DeepEqual(activation.Acknowledgement, first) {
 		t.Fatalf("acknowledgement changed across recovery: first %#v recovered %#v", first, activation.Acknowledgement)
+	}
+}
+
+func TestSelectedGenerationPathRequiresOneExactFinalizedGraph(t *testing.T) {
+	t.Parallel()
+	config, generation := finalizerFixture(t)
+	active, err := Finalize(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := active.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path, err := SelectedGenerationPath(config.StateRoot, config.DataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != generation.Path {
+		t.Fatalf("selected path = %q, want %q", path, generation.Path)
+	}
+	restarted, err := ResumeSelected(context.Background(), config)
+	if err != nil {
+		t.Fatalf("restart did not reacquire exact activation authority: %v", err)
+	}
+	defer restarted.Close()
+	selected, err := migration.OpenSelectedGeneration(path)
+	if err != nil {
+		t.Fatalf("open selected generation: %v", err)
+	}
+	defer selected.Close()
+	if selected.Generation.Manifest.MigrationID != active.Generation.Manifest.MigrationID {
+		t.Fatal("selected mutable generation changed across restart")
+	}
+}
+
+func TestResumeSelectedReplaysCanonicalWritesInsteadOfStagingHashes(t *testing.T) {
+	t.Parallel()
+	config, _ := finalizerFixture(t)
+	active, err := Finalize(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := active.Close(); err != nil {
+		t.Fatal(err)
+	}
+	selected, err := migration.OpenSelectedGeneration(config.GenerationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added, err := selected.Activity.Add("github:after-cut", eventwire.ActivityEvent{
+		Type: "github/pull_request", Action: "synchronize", ReceivedAt: activationNow.Add(time.Minute),
+	}); err != nil || !added {
+		t.Fatalf("append selected activity: added=%v err=%v", added, err)
+	}
+	if err := selected.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if staged, err := migration.OpenStagedGeneration(config.GenerationPath); err == nil {
+		_ = staged
+		t.Fatal("mutable selected generation still passed staging hashes")
+	}
+	restarted, err := ResumeSelected(context.Background(), config)
+	if err != nil {
+		t.Fatalf("resume selected generation: %v", err)
+	}
+	defer restarted.Close()
+	if restarted.Generation.Manifest.MigrationID != active.Generation.Manifest.MigrationID {
+		t.Fatal("resumed a different generation")
+	}
+}
+
+func TestSelectedGenerationPathRejectsBoundaryMismatch(t *testing.T) {
+	t.Parallel()
+	config, _ := finalizerFixture(t)
+	active, err := Finalize(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := active.Close(); err != nil {
+		t.Fatal(err)
+	}
+	boundary, err := ReadWriteBoundary(config.GenerationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary.DeploymentID = "different-deployment"
+	boundaryPath := filepath.Join(config.GenerationPath, writeBoundaryFileName)
+	if err := os.Remove(boundaryPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := installExactJSON(boundaryPath, boundary); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SelectedGenerationPath(config.StateRoot, config.DataRoot); err == nil {
+		t.Fatal("resolved a selected generation with mismatched boundary evidence")
 	}
 }
 
