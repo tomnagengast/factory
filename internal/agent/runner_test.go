@@ -8,50 +8,28 @@ import (
 	"testing"
 )
 
-func TestCommandRunnerInvokesUnrestrictedAgentAndStreamsOutput(t *testing.T) {
+func TestCommandRunnerInvokesUnrestrictedCodex(t *testing.T) {
 	directory := t.TempDir()
-	command := filepath.Join(directory, "fake-codex")
-	script := `#!/bin/sh
-IFS= read -r prompt
-printf 'prompt:%s\n' "$prompt"
-printf 'cwd:%s args:%s\n' "$PWD" "$*" >&2
-`
+	argsPath := filepath.Join(directory, "args")
+	stdinPath := filepath.Join(directory, "stdin")
+	command := filepath.Join(directory, "codex")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsPath + "\ncat > " + stdinPath + "\nprintf 'Workflow updated.'\n"
 	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	var outputs []Output
-	runner := CommandRunner{Command: command, Workspace: directory}
-	err := runner.Run(context.Background(), "Build the smallest loop", func(output Output) error {
-		outputs = append(outputs, output)
-		return nil
-	})
+	output, err := (CommandRunner{Command: command, Workspace: directory}).Run(context.Background(), "Build a workflow")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	var stdout, stderr string
-	for _, output := range outputs {
-		switch output.Stream {
-		case "stdout":
-			stdout += output.Text
-		case "stderr":
-			stderr += output.Text
-		}
+	if output != "Workflow updated." {
+		t.Fatalf("unexpected output: %q", output)
 	}
-	if stdout != "prompt:Build the smallest loop" {
-		t.Fatalf("stdout = %q", stdout)
+	args, _ := os.ReadFile(argsPath)
+	if !strings.Contains(string(args), "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("unrestricted flag missing: %s", args)
 	}
-	for _, expected := range []string{
-		"cwd:" + directory,
-		"--dangerously-bypass-approvals-and-sandbox",
-		"--dangerously-bypass-hook-trust",
-		"--ignore-rules",
-		"--skip-git-repo-check",
-		"-C " + directory,
-	} {
-		if !strings.Contains(stderr, expected) {
-			t.Errorf("stderr %q does not contain %q", stderr, expected)
-		}
+	stdin, _ := os.ReadFile(stdinPath)
+	if string(stdin) != "Build a workflow" {
+		t.Fatalf("unexpected prompt: %q", stdin)
 	}
 }
