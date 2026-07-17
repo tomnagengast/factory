@@ -108,6 +108,7 @@ curl -sS http://127.0.0.1:8092/api/health | jq .
 
 ```text
 main.go             composition, configuration, process lifecycle
+nags.toml           Nags build, run, and release-health adapter
 internal/eventwire  append, replay, wait, and event identities
 internal/state      pure task and Run projection
 internal/agent      sequential loop and Codex process adapter

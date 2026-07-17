@@ -62,6 +62,43 @@ func TestTaskSubmissionRequiresPrompt(t *testing.T) {
 	}
 }
 
+func TestHealthIncludesNagsReleaseIdentity(t *testing.T) {
+	t.Setenv("NAGS_SOURCE_COMMIT", "commit-1")
+	t.Setenv("NAGS_SOURCE_TREE", "tree-1")
+	t.Setenv("NAGS_BUILD_ID", "build-1")
+	t.Setenv("NAGS_DEPLOYMENT_ID", "deployment-1")
+	t.Setenv("NAGS_CONTRACT_VERSION", "1")
+	wire, err := eventwire.Open(filepath.Join(t.TempDir(), "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wire.Close()
+	server := testServer(t, wire)
+
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body)
+	}
+	var health map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &health); err != nil {
+		t.Fatal(err)
+	}
+	for key, expected := range map[string]string{
+		"status":          "ok",
+		"app":             "factory",
+		"commit":          "commit-1",
+		"tree":            "tree-1",
+		"buildId":         "build-1",
+		"deploymentId":    "deployment-1",
+		"contractVersion": "1",
+	} {
+		if health[key] != expected {
+			t.Errorf("%s = %#v, want %q", key, health[key], expected)
+		}
+	}
+}
+
 func TestFrontendAssetsAreServed(t *testing.T) {
 	wire, err := eventwire.Open(filepath.Join(t.TempDir(), "events.jsonl"))
 	if err != nil {

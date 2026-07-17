@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -46,10 +47,16 @@ func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"status": "ok",
-		"agent":  s.agentName,
-		"events": s.wire.LastSequence(),
-		"tasks":  len(tasks),
+		"status":          "ok",
+		"app":             "factory",
+		"commit":          os.Getenv("NAGS_SOURCE_COMMIT"),
+		"tree":            os.Getenv("NAGS_SOURCE_TREE"),
+		"buildId":         os.Getenv("NAGS_BUILD_ID"),
+		"deploymentId":    os.Getenv("NAGS_DEPLOYMENT_ID"),
+		"contractVersion": os.Getenv("NAGS_CONTRACT_VERSION"),
+		"agent":           s.agentName,
+		"events":          s.wire.LastSequence(),
+		"tasks":           len(tasks),
 	})
 }
 
