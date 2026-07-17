@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "revision": 4,
+  "updatedAt": "2026-07-16T18:00:00Z",
+  "rules": [
+    {
+      "id": "custom-visible",
+      "revision": 2,
+      "name": "Visible custom rule",
+      "enabled": true,
+      "filter": {
+        "source": "linear",
+        "type": "Issue",
+        "action": "update",
+        "attributes": {
+          "actorId": "actor-sanitized"
+        }
+      },
+      "workflowId": "custom-review",
+      "target": {
+        "provider": "linear",
+        "kind": "subject"
+      },
+      "maxHop": 4,
+      "maxOutstanding": 10,
+      "admissionsPerHour": 120
+    }
+  ],
+  "schedules": [
+    {
+      "id": "daily-audit",
+      "revision": 2,
+      "name": "Daily audit",
+      "enabled": true,
+      "cron": "0 8 * * *",
+      "timezone": "UTC"
+    }
+  ]
+}

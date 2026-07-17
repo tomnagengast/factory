@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "offsets": {
+    "run-0123456789abcdef/attempt-1-events.jsonl": 128
+  },
+  "prefixes": {
+    "run-0123456789abcdef/attempt-1-events.jsonl": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}

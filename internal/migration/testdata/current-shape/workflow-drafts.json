@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "drafts": [
+    {
+      "workflowId": "draft-review",
+      "revision": 1,
+      "baseWorkflowRevision": 0,
+      "name": "Draft review",
+      "enabled": true,
+      "markdown": "# Draft review\n\nSanitized draft.\n",
+      "updatedAt": "2026-07-16T18:00:00Z"
+    }
+  ]
+}

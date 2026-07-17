@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "projectId": "project-factory",
+      "projectName": "Factory",
+      "repository": "tomnagengast/factory",
+      "repoUrl": "git@github.com:tomnagengast/factory.git",
+      "localPath": "/srv/factory/repos/factory",
+      "managedRoot": "/srv/factory/repos",
+      "baseBranch": "main",
+      "bootstrap": false,
+      "managed": false,
+      "state": "succeeded",
+      "attempts": 0,
+      "createdAt": "2026-07-16T18:00:00Z",
+      "updatedAt": "2026-07-16T18:00:00Z",
+      "provisionedAt": "2026-07-16T18:00:00Z",
+      "providerCoordinated": true
+    }
+  ]
+}

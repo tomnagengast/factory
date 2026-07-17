@@ -1,0 +1,49 @@
+{
+  "schema": 2,
+  "revision": 7,
+  "updatedAt": "2026-07-16T18:00:00Z",
+  "triggers": {
+    "linearLabel": {
+      "enabled": true,
+      "label": "Factory",
+      "workflowId": "custom-review"
+    },
+    "linearComment": {
+      "enabled": true,
+      "workflowId": "custom-review"
+    }
+  },
+  "protectedWorkflows": {
+    "linearFeedback": {
+      "workflowId": "custom-review"
+    }
+  },
+  "workflows": [
+    {
+      "id": "custom-review",
+      "revision": 3,
+      "name": "Custom review",
+      "enabled": true,
+      "markdown": "# Custom review\n\nSanitized fixture workflow.\n",
+      "updatedAt": "2026-07-16T18:00:00Z"
+    }
+  ],
+  "agents": {
+    "principal": {
+      "model": "gpt-5.6-sol",
+      "effort": "high",
+      "maxAttempts": 3
+    },
+    "codexChild": {
+      "model": "gpt-5.6-sol",
+      "effort": "high"
+    },
+    "claudeChild": {
+      "model": "fable",
+      "effort": "high"
+    }
+  },
+  "runtime": {
+    "maxConcurrentRuns": 3
+  }
+}
