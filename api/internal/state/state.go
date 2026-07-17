@@ -3,7 +3,6 @@ package state
 import (
 	"encoding/json"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/tomnagengast/factory/api/internal/eventwire"
@@ -360,7 +359,7 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 			workflowIndex[event.ID] = len(view.Workflows)
 			view.Workflows = append(view.Workflows, Workflow{
 				Record: newRecord(event), Name: name, Description: data.Description,
-				Path: data.Path, Scope: data.Scope, Phases: slices.Clone(data.Phases), Mutating: data.Mutating,
+				Path: data.Path, Scope: data.Scope, Phases: stringSlice(data.Phases), Mutating: data.Mutating,
 			})
 		case WorkflowUpdated:
 			var data WorkflowData
@@ -370,7 +369,7 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 			if index, found := workflowIndex[data.ID]; found {
 				workflow := &view.Workflows[index]
 				workflow.Name, workflow.Description, workflow.Path = data.Name, data.Description, data.Path
-				workflow.Scope, workflow.Phases = data.Scope, slices.Clone(data.Phases)
+				workflow.Scope, workflow.Phases = data.Scope, stringSlice(data.Phases)
 				workflow.Mutating, workflow.UpdatedAt = data.Mutating, event.At
 			}
 		case WorkflowDeleted:
@@ -532,4 +531,8 @@ func decode(event eventwire.Event, target any) error {
 		return fmt.Errorf("decode %s event %d: %w", event.Type, event.ID, err)
 	}
 	return nil
+}
+
+func stringSlice(values []string) []string {
+	return append([]string{}, values...)
 }
