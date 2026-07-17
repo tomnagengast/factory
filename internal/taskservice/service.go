@@ -177,6 +177,16 @@ func (s *Service) Detail(taskID string, after uint64, limit int) (Detail, error)
 	if err != nil {
 		return Detail{}, err
 	}
+	// Empty collections stay JSON arrays, never null, for API and helper consumers.
+	if messages.Messages == nil {
+		messages.Messages = []taskstore.Message{}
+	}
+	if links == nil {
+		links = []taskstore.Link{}
+	}
+	if gates == nil {
+		gates = []taskstore.Gate{}
+	}
 	return Detail{Task: task, Messages: messages, Links: links, Gates: gates}, nil
 }
 
