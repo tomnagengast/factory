@@ -165,6 +165,193 @@ func TestSnapshotDigestIncludesEvictedAdmissionOperationReceipt(t *testing.T) {
 	}
 }
 
+func TestMigrationSnapshotReceiptAccountsForHistoricalBaselines(t *testing.T) {
+	model := testMigrationSnapshotModel(t, privateModelTestRoot(t))
+	snapshot, err := NewSnapshot(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := snapshot.Model()
+	if got.TotalRuns <= uint64(len(got.Runs)) || got.TotalBatches != 2 || got.Migration.RetainedBatches != 2 ||
+		len(got.Migration.EventSequences) != 2 || len(got.RateBuckets) != 3 {
+		t.Fatalf("migration baselines = %#v", got)
+	}
+	if got.AdmissionBatches[0].DecidedAt.Truncate(time.Minute) == got.AdmissionBatches[1].DecidedAt.Truncate(time.Minute) {
+		t.Fatal("migration fixture did not span multiple rate minutes")
+	}
+
+	withoutReceipt := cloneModel(model)
+	withoutReceipt.Migration = nil
+	if _, err := NewSnapshot(withoutReceipt); err == nil || !strings.Contains(err.Error(), "lifetime totals") {
+		t.Fatalf("unaccounted migration lifetime error = %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*Model)
+		want   string
+	}{
+		{name: "lifetime total", mutate: func(value *Model) { value.TotalRuns-- }, want: "lifetime totals"},
+		{name: "retained batch total", mutate: func(value *Model) { value.TotalBatches++ }, want: "lifetime totals"},
+		{name: "rate bucket count", mutate: func(value *Model) {
+			value.Migration.RateBucketCount++
+		}, want: "operation identity"},
+		{name: "residual rate bucket", mutate: func(value *Model) { value.RateBuckets[0].Count++ }, want: "rate bucket digest"},
+		{name: "canonical Run body", mutate: func(value *Model) { value.Runs[0].Detail = "tampered but otherwise valid" }, want: "canonical Runs digest"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := cloneModel(model)
+			test.mutate(&candidate)
+			if _, err := NewSnapshot(candidate); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("NewSnapshot error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestMigrationSnapshotReceiptRejectsMalformedAmbiguousAndIncompleteEvidence(t *testing.T) {
+	base := testMigrationSnapshotModel(t, privateModelTestRoot(t))
+	tests := []struct {
+		name   string
+		mutate func(*Model)
+		want   string
+	}{
+		{name: "origin", mutate: func(value *Model) { value.Migration.Origin = "admission"; resignMigrationReceipt(value) }, want: "identity"},
+		{name: "migration identity", mutate: func(value *Model) { value.Migration.MigrationID = " migration "; resignMigrationReceipt(value) }, want: "identity"},
+		{name: "source root digest", mutate: func(value *Model) { value.Migration.SourceRootDigest = "bad"; resignMigrationReceipt(value) }, want: "identity"},
+		{name: "operation identity", mutate: func(value *Model) { value.Migration.OperationID = strings.Repeat("0", 64) }, want: "operation identity"},
+		{name: "unsorted batch tombstones", mutate: func(value *Model) {
+			slices.Reverse(value.Migration.BatchIDs)
+			resignMigrationReceipt(value)
+		}, want: "sorted and unique"},
+		{name: "duplicate event tombstones", mutate: func(value *Model) {
+			value.Migration.EventIDs[1] = value.Migration.EventIDs[0]
+			resignMigrationReceipt(value)
+		}, want: "sorted and unique"},
+		{name: "unsorted event sequences", mutate: func(value *Model) {
+			slices.Reverse(value.Migration.EventSequences)
+			resignMigrationReceipt(value)
+		}, want: "positive, sorted, and unique"},
+		{name: "zero event sequence", mutate: func(value *Model) {
+			value.Migration.EventSequences[0] = 0
+			resignMigrationReceipt(value)
+		}, want: "positive, sorted, and unique"},
+		{name: "duplicate Run tombstones", mutate: func(value *Model) {
+			value.Migration.RunIDs[1] = value.Migration.RunIDs[0]
+			resignMigrationReceipt(value)
+		}, want: "sorted and unique"},
+		{name: "duplicate admission tombstones", mutate: func(value *Model) {
+			value.Migration.AdmissionIDs[1] = value.Migration.AdmissionIDs[0]
+			resignMigrationReceipt(value)
+		}, want: "sorted and unique"},
+		{name: "batch coverage gap", mutate: func(value *Model) {
+			value.Migration.BatchIDs = value.Migration.BatchIDs[1:]
+			value.Migration.EventIDs = value.Migration.EventIDs[1:]
+			value.Migration.EventSequences = value.Migration.EventSequences[1:]
+			value.Migration.RetainedBatches--
+			resignMigrationReceipt(value)
+		}, want: "lifetime totals"},
+		{name: "event coverage gap", mutate: func(value *Model) {
+			value.Migration.EventIDs[0] = "factory:event-other"
+			slices.Sort(value.Migration.EventIDs)
+			resignMigrationReceipt(value)
+		}, want: "migration snapshot receipt"},
+		{name: "event sequence coverage gap", mutate: func(value *Model) {
+			value.Migration.EventSequences[0] = 99
+			slices.Sort(value.Migration.EventSequences)
+			resignMigrationReceipt(value)
+		}, want: "migration snapshot receipt"},
+		{name: "Run coverage gap", mutate: func(value *Model) {
+			value.Migration.RunIDs = value.Migration.RunIDs[1:]
+			value.Migration.AdmissionIDs = value.Migration.AdmissionIDs[1:]
+			resignMigrationReceipt(value)
+		}, want: "canonical Runs digest"},
+		{name: "admission coverage gap", mutate: func(value *Model) {
+			value.Migration.AdmissionIDs[0] = "admission-other"
+			slices.Sort(value.Migration.AdmissionIDs)
+			resignMigrationReceipt(value)
+		}, want: "migration snapshot receipt"},
+		{name: "live receipt overlap", mutate: func(value *Model) {
+			batch, run := value.AdmissionBatches[0], value.Runs[0]
+			rate := RateBucket{RuleID: run.Causation.RuleID, Minute: batch.DecidedAt.Truncate(time.Minute), Count: 1}
+			value.AdmissionOperations = []AdmissionOperationReceipt{testAdmissionReceipt([]AdmissionBatch{batch}, []Run{run}, []RateBucket{rate})}
+			value.TotalBatches++
+			value.TotalRuns++
+		}, want: "overlaps migration"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := cloneModel(base)
+			test.mutate(&candidate)
+			if _, err := NewSnapshot(candidate); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("NewSnapshot error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestMigrationSnapshotDigestCanonicalizationAndNonAliasing(t *testing.T) {
+	model := testMigrationSnapshotModel(t, privateModelTestRoot(t))
+	reversedBatches := cloneAdmissionBatches(model.AdmissionBatches)
+	reversedRuns := cloneRuns(model.Runs)
+	reversedRates := slices.Clone(model.RateBuckets)
+	slices.Reverse(reversedBatches)
+	slices.Reverse(reversedRuns)
+	slices.Reverse(reversedRates)
+	reversedReceipt, err := NewMigrationSnapshotReceipt(
+		model.Migration.MigrationID, model.Migration.SourceRootDigest, model.Migration.LifetimeRuns,
+		reversedBatches, reversedRuns, reversedRates,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(reversedReceipt, model.Migration) {
+		t.Fatalf("source ordering changed receipt:\n got %#v\nwant %#v", reversedReceipt, model.Migration)
+	}
+
+	snapshot, err := NewSnapshot(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := snapshot.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := snapshot.Model()
+	changed.Migration.MigrationID = "migration-sanitized-2"
+	resignMigrationReceipt(&changed)
+	changedSnapshot, err := NewSnapshot(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedDigest, err := changedSnapshot.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest == changedDigest {
+		t.Fatal("semantic digest omitted migration receipt evidence")
+	}
+
+	model.Migration.BatchIDs[0] = "mutated-input"
+	model.Migration.EventIDs[0] = "mutated-input"
+	model.Migration.EventSequences[0] = 99
+	model.Migration.RunIDs[0] = "mutated-input"
+	model.Migration.AdmissionIDs[0] = "mutated-input"
+	read := snapshot.Model()
+	if slices.Contains(read.Migration.BatchIDs, "mutated-input") || slices.Contains(read.Migration.EventSequences, uint64(99)) {
+		t.Fatal("snapshot aliases migration receipt input slices")
+	}
+	read.Migration.BatchIDs[0] = "mutated-output"
+	read.Migration.EventIDs[0] = "mutated-output"
+	read.Migration.EventSequences[0] = 100
+	read.Migration.RunIDs[0] = "mutated-output"
+	read.Migration.AdmissionIDs[0] = "mutated-output"
+	readAgain := snapshot.Model()
+	if slices.Contains(readAgain.Migration.RunIDs, "mutated-output") || slices.Contains(readAgain.Migration.EventSequences, uint64(100)) {
+		t.Fatal("snapshot Model aliases migration receipt output slices")
+	}
+}
+
 func TestTerminalRunPreservesLegacyAndCompactedWorkflowPins(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -742,6 +929,31 @@ func testSingleAdmissionModel(batch AdmissionBatch, run Run, rate RateBucket) Mo
 
 func testAdmissionReceipt(batches []AdmissionBatch, runs []Run, rates []RateBucket) AdmissionOperationReceipt {
 	return AdmissionOperationReceipt{AdmissionBatches: batches, Runs: runs, RateIncrements: rates}
+}
+
+func testMigrationSnapshotModel(t *testing.T, root string) Model {
+	t.Helper()
+	firstBatch, firstRun, firstRate := testAdmissionProjection(t, root, 1, StateSucceeded)
+	secondBatch, secondRun, secondRate := testAdmissionProjection(t, root, 2, StateSucceeded)
+	residualRate := RateBucket{RuleID: "rule-three", Minute: modelTestNow.Add(-30 * time.Minute), Count: 7}
+	batches := []AdmissionBatch{secondBatch, firstBatch}
+	runs := []Run{secondRun, firstRun}
+	rates := []RateBucket{secondRate, residualRate, firstRate}
+	receipt, err := NewMigrationSnapshotReceipt(
+		"migration-sanitized-1", strings.Repeat("a", 64), 7, batches, runs, rates,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Model{
+		Schema: SchemaVersion, TotalBatches: 2, TotalRuns: 7, Migration: receipt,
+		AdmissionOperations: []AdmissionOperationReceipt{}, AdmissionBatches: batches,
+		Runs: runs, RateBuckets: rates,
+	}
+}
+
+func resignMigrationReceipt(model *Model) {
+	model.Migration.OperationID = migrationSnapshotOperationID(*model.Migration)
 }
 
 func makeMigratedDirect(batch *AdmissionBatch, run *Run) {

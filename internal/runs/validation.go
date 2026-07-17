@@ -57,8 +57,12 @@ func validateModel(model Model) error {
 }
 
 func validateAdmissionOperations(model Model) error {
-	var totalBatches uint64
-	var totalRuns uint64
+	migration, err := validateMigrationSnapshotReceipt(model)
+	if err != nil {
+		return err
+	}
+	totalBatches := migration.retainedBatches
+	totalRuns := migration.lifetimeRuns
 	batches := make(map[string]AdmissionBatch)
 	events := make(map[string]string)
 	sequences := make(map[uint64]string)
@@ -81,6 +85,9 @@ func validateAdmissionOperations(model Model) error {
 		totalBatches += uint64(len(receipt.AdmissionBatches))
 		totalRuns += uint64(len(receipt.Runs))
 		for _, batch := range receipt.AdmissionBatches {
+			if migration.overlapsBatch(batch) {
+				return fmt.Errorf("runs: admission operation batch %q overlaps migration snapshot evidence", batch.ID)
+			}
 			if _, duplicate := batches[batch.ID]; duplicate {
 				return fmt.Errorf("runs: admission operation batch ID %q is duplicated", batch.ID)
 			}
@@ -97,6 +104,9 @@ func validateAdmissionOperations(model Model) error {
 			events[batch.EventID] = batch.ID
 		}
 		for _, run := range receipt.Runs {
+			if migration.overlapsRun(run) {
+				return fmt.Errorf("runs: admission operation Run %q overlaps migration snapshot evidence", run.ID)
+			}
 			if _, duplicate := runs[run.ID]; duplicate {
 				return fmt.Errorf("runs: admission operation Run ID %q is duplicated", run.ID)
 			}
@@ -112,18 +122,150 @@ func validateAdmissionOperations(model Model) error {
 	}
 	for _, batch := range model.AdmissionBatches {
 		original, found := batches[batch.ID]
-		if !found || !reflect.DeepEqual(original, batch) {
+		migrated := migration.batchIDs[batch.ID]
+		if found == migrated {
+			return fmt.Errorf("runs: retained admission batch %q does not have exactly one durable source", batch.ID)
+		}
+		if found && !reflect.DeepEqual(original, batch) {
 			return fmt.Errorf("runs: retained admission batch %q conflicts with its durable operation receipt", batch.ID)
+		}
+		if migrated && (!migration.eventIDs[batch.EventID] || batch.EventSequence != 0 && !migration.eventSequences[batch.EventSequence]) {
+			return fmt.Errorf("runs: retained admission batch %q conflicts with its migration snapshot receipt", batch.ID)
+		}
+		if !migrated && (migration.eventIDs[batch.EventID] || batch.EventSequence != 0 && migration.eventSequences[batch.EventSequence]) {
+			return fmt.Errorf("runs: retained admission batch %q ambiguously overlaps migration snapshot evidence", batch.ID)
 		}
 	}
 	for _, run := range model.Runs {
 		original, found := runs[run.ID]
-		if !found || !reflect.DeepEqual(original.Causation, run.Causation) ||
-			!reflect.DeepEqual(original.MigratedBaseline, run.MigratedBaseline) || original.CreatedAt != run.CreatedAt {
+		migrated := migration.runIDs[run.ID]
+		if found == migrated {
+			return fmt.Errorf("runs: retained Run %q does not have exactly one durable source", run.ID)
+		}
+		if found && (!reflect.DeepEqual(original.Causation, run.Causation) ||
+			!reflect.DeepEqual(original.MigratedBaseline, run.MigratedBaseline) || original.CreatedAt != run.CreatedAt) {
 			return fmt.Errorf("runs: retained Run %q conflicts with its durable operation receipt", run.ID)
+		}
+		if migrated && !migration.admissionIDs[run.Causation.AdmissionID] {
+			return fmt.Errorf("runs: retained Run %q conflicts with its migration snapshot receipt", run.ID)
+		}
+		if !migrated && migration.admissionIDs[run.Causation.AdmissionID] {
+			return fmt.Errorf("runs: retained Run %q ambiguously overlaps migration snapshot evidence", run.ID)
 		}
 	}
 	return nil
+}
+
+type migrationIdentityEvidence struct {
+	retainedBatches uint64
+	lifetimeRuns    uint64
+	batchIDs        map[string]bool
+	eventIDs        map[string]bool
+	eventSequences  map[uint64]bool
+	runIDs          map[string]bool
+	admissionIDs    map[string]bool
+}
+
+func validateMigrationSnapshotReceipt(model Model) (migrationIdentityEvidence, error) {
+	evidence := migrationIdentityEvidence{
+		batchIDs: make(map[string]bool), eventIDs: make(map[string]bool), eventSequences: make(map[uint64]bool),
+		runIDs: make(map[string]bool), admissionIDs: make(map[string]bool),
+	}
+	if model.Migration == nil {
+		return evidence, nil
+	}
+	receipt := *model.Migration
+	if err := validateMigrationSnapshotReceiptShape(receipt); err != nil {
+		return evidence, err
+	}
+	evidence.retainedBatches = receipt.RetainedBatches
+	evidence.lifetimeRuns = receipt.LifetimeRuns
+	for _, value := range receipt.BatchIDs {
+		evidence.batchIDs[value] = true
+	}
+	for _, value := range receipt.EventIDs {
+		evidence.eventIDs[value] = true
+	}
+	for _, value := range receipt.EventSequences {
+		evidence.eventSequences[value] = true
+	}
+	for _, value := range receipt.RunIDs {
+		evidence.runIDs[value] = true
+	}
+	for _, value := range receipt.AdmissionIDs {
+		evidence.admissionIDs[value] = true
+	}
+
+	migratedRuns := make([]Run, 0, len(receipt.RunIDs))
+	migratedBatches := 0
+	for _, batch := range model.AdmissionBatches {
+		if evidence.batchIDs[batch.ID] {
+			migratedBatches++
+		}
+	}
+	for _, run := range model.Runs {
+		if evidence.runIDs[run.ID] {
+			migratedRuns = append(migratedRuns, run)
+		}
+	}
+	fullMigrationProjection := migratedBatches == len(receipt.BatchIDs) && len(migratedRuns) == len(receipt.RunIDs)
+	if fullMigrationProjection {
+		digest, err := canonicalRunsDigest(migratedRuns)
+		if err != nil || digest != receipt.CanonicalRunsDigest {
+			return evidence, errors.New("runs: migration snapshot canonical Runs digest conflicts")
+		}
+	}
+	if len(model.AdmissionOperations) == 0 {
+		if uint64(len(model.RateBuckets)) > receipt.RateBucketCount {
+			return evidence, errors.New("runs: migration snapshot rate bucket count conflicts")
+		}
+		if uint64(len(model.RateBuckets)) == receipt.RateBucketCount {
+			digest, err := canonicalRateBucketsDigest(model.RateBuckets)
+			if err != nil || digest != receipt.RateBucketDigest {
+				return evidence, errors.New("runs: migration snapshot rate bucket digest conflicts")
+			}
+		}
+	}
+	return evidence, nil
+}
+
+func validateMigrationSnapshotReceiptShape(receipt MigrationSnapshotReceipt) error {
+	if receipt.Origin != MigrationSnapshotOrigin || !validIdentity(receipt.MigrationID) ||
+		!digestPattern.MatchString(receipt.SourceRootDigest) || !digestPattern.MatchString(receipt.OperationID) ||
+		!digestPattern.MatchString(receipt.RateBucketDigest) || !digestPattern.MatchString(receipt.CanonicalRunsDigest) {
+		return errors.New("runs: migration snapshot identity is invalid")
+	}
+	for _, values := range [][]string{receipt.BatchIDs, receipt.EventIDs, receipt.RunIDs, receipt.AdmissionIDs} {
+		if !sortStringsUnique(values) {
+			return errors.New("runs: migration snapshot tombstones are not sorted and unique")
+		}
+		for _, value := range values {
+			if !validIdentity(value) {
+				return errors.New("runs: migration snapshot tombstone identity is invalid")
+			}
+		}
+	}
+	for index, sequence := range receipt.EventSequences {
+		if sequence == 0 || index > 0 && receipt.EventSequences[index-1] >= sequence {
+			return errors.New("runs: migration snapshot event sequences are not positive, sorted, and unique")
+		}
+	}
+	if receipt.RetainedBatches != uint64(len(receipt.BatchIDs)) || len(receipt.EventIDs) != len(receipt.BatchIDs) ||
+		receipt.LifetimeRuns < uint64(len(receipt.RunIDs)) || len(receipt.AdmissionIDs) != len(receipt.RunIDs) {
+		return errors.New("runs: migration snapshot baselines conflict with tombstones")
+	}
+	if receipt.OperationID != migrationSnapshotOperationID(receipt) {
+		return errors.New("runs: migration snapshot operation identity conflicts with its evidence")
+	}
+	return nil
+}
+
+func (e migrationIdentityEvidence) overlapsBatch(batch AdmissionBatch) bool {
+	return e.batchIDs[batch.ID] || e.eventIDs[batch.EventID] || batch.EventSequence != 0 && e.eventSequences[batch.EventSequence]
+}
+
+func (e migrationIdentityEvidence) overlapsRun(run Run) bool {
+	return e.runIDs[run.ID] || e.admissionIDs[run.Causation.AdmissionID]
 }
 
 func validateRetainedProjection(model Model) error {

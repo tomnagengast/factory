@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	SchemaVersion  = 2
+	SchemaVersion  = 3
 	JournalVersion = 2
 )
 
@@ -73,10 +73,35 @@ type Model struct {
 	JournalSequence     uint64                      `json:"journalSequence"`
 	TotalBatches        uint64                      `json:"totalBatches"`
 	TotalRuns           uint64                      `json:"totalRuns"`
+	Migration           *MigrationSnapshotReceipt   `json:"migration,omitempty"`
 	AdmissionOperations []AdmissionOperationReceipt `json:"admissionOperations"`
 	AdmissionBatches    []AdmissionBatch            `json:"admissionBatches"`
 	Runs                []Run                       `json:"runs"`
 	RateBuckets         []RateBucket                `json:"rateBuckets"`
+}
+
+const MigrationSnapshotOrigin = "migration_snapshot"
+
+// MigrationSnapshotReceipt is the immutable, body-free evidence for the one
+// initial legacy conversion. OperationID is the NUL-separated SHA-256 of the
+// domain "factory-runs-migration-snapshot-v1" followed by every other field
+// in canonical order. This binds the migration and source-root identities to
+// the complete receipt without inventing historical admission operations.
+type MigrationSnapshotReceipt struct {
+	Origin              string   `json:"origin"`
+	OperationID         string   `json:"operationId"`
+	MigrationID         string   `json:"migrationId"`
+	SourceRootDigest    string   `json:"sourceRootDigest"`
+	BatchIDs            []string `json:"batchIds"`
+	EventIDs            []string `json:"eventIds"`
+	EventSequences      []uint64 `json:"eventSequences"`
+	RunIDs              []string `json:"runIds"`
+	AdmissionIDs        []string `json:"admissionIds"`
+	LifetimeRuns        uint64   `json:"lifetimeRuns"`
+	RetainedBatches     uint64   `json:"retainedBatches"`
+	RateBucketDigest    string   `json:"rateBucketDigest"`
+	RateBucketCount     uint64   `json:"rateBucketCount"`
+	CanonicalRunsDigest string   `json:"canonicalRunsDigest"`
 }
 
 // AdmissionOperationReceipt retains the complete canonical input of one
@@ -271,12 +296,14 @@ func (s Snapshot) Digest() (string, error) {
 		Schema              int                         `json:"schema"`
 		TotalBatches        uint64                      `json:"totalBatches"`
 		TotalRuns           uint64                      `json:"totalRuns"`
+		Migration           *MigrationSnapshotReceipt   `json:"migration,omitempty"`
 		AdmissionOperations []AdmissionOperationReceipt `json:"admissionOperations"`
 		AdmissionBatches    []AdmissionBatch            `json:"admissionBatches"`
 		Runs                []Run                       `json:"runs"`
 		RateBuckets         []RateBucket                `json:"rateBuckets"`
 	}{
 		Schema: s.model.Schema, TotalBatches: s.model.TotalBatches, TotalRuns: s.model.TotalRuns,
+		Migration:           cloneMigrationSnapshotReceipt(s.model.Migration),
 		AdmissionOperations: cloneAdmissionOperations(s.model.AdmissionOperations),
 		AdmissionBatches:    cloneAdmissionBatches(s.model.AdmissionBatches),
 		Runs:                cloneRuns(s.model.Runs), RateBuckets: slices.Clone(s.model.RateBuckets),
@@ -437,11 +464,25 @@ func canonicalizeRun(run *Run) {
 
 func cloneModel(model Model) Model {
 	clone := model
+	clone.Migration = cloneMigrationSnapshotReceipt(model.Migration)
 	clone.AdmissionOperations = cloneAdmissionOperations(model.AdmissionOperations)
 	clone.AdmissionBatches = cloneAdmissionBatches(model.AdmissionBatches)
 	clone.Runs = cloneRuns(model.Runs)
 	clone.RateBuckets = slices.Clone(model.RateBuckets)
 	return clone
+}
+
+func cloneMigrationSnapshotReceipt(receipt *MigrationSnapshotReceipt) *MigrationSnapshotReceipt {
+	if receipt == nil {
+		return nil
+	}
+	clone := *receipt
+	clone.BatchIDs = slices.Clone(receipt.BatchIDs)
+	clone.EventIDs = slices.Clone(receipt.EventIDs)
+	clone.EventSequences = slices.Clone(receipt.EventSequences)
+	clone.RunIDs = slices.Clone(receipt.RunIDs)
+	clone.AdmissionIDs = slices.Clone(receipt.AdmissionIDs)
+	return &clone
 }
 
 func cloneAdmissionOperations(values []AdmissionOperationReceipt) []AdmissionOperationReceipt {

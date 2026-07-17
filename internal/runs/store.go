@@ -298,7 +298,7 @@ func applyOperation(current Model, operation diskOperation) (Snapshot, error) {
 
 func applyAdmissionBatch(current Model, operation diskOperation) (Snapshot, error) {
 	receipt := receiptForAdmissionOperation(operation)
-	if err := classifyAdmissionOperation(current.AdmissionOperations, receipt); err != nil {
+	if err := classifyAdmissionOperation(current.Migration, current.AdmissionOperations, receipt); err != nil {
 		return Snapshot{}, err
 	}
 	if err := validateRateIncrements(operation.AdmissionBatches, operation.RateIncrements); err != nil {
@@ -347,7 +347,10 @@ func receiptForAdmissionOperation(operation diskOperation) AdmissionOperationRec
 	}
 }
 
-func classifyAdmissionOperation(existing []AdmissionOperationReceipt, candidate AdmissionOperationReceipt) error {
+func classifyAdmissionOperation(migration *MigrationSnapshotReceipt, existing []AdmissionOperationReceipt, candidate AdmissionOperationReceipt) error {
+	if migrationSnapshotOverlapsAdmissionOperation(migration, candidate) {
+		return fmt.Errorf("%w: admission operation overlaps migration snapshot evidence", ErrIdentityCollision)
+	}
 	overlaps := false
 	for _, receipt := range existing {
 		if !admissionOperationsOverlap(receipt, candidate) {
@@ -362,6 +365,28 @@ func classifyAdmissionOperation(existing []AdmissionOperationReceipt, candidate 
 		return fmt.Errorf("%w: admission operation overlaps a durable receipt", ErrIdentityCollision)
 	}
 	return nil
+}
+
+func migrationSnapshotOverlapsAdmissionOperation(migration *MigrationSnapshotReceipt, candidate AdmissionOperationReceipt) bool {
+	if migration == nil {
+		return false
+	}
+	for _, batch := range candidate.AdmissionBatches {
+		_, sameBatch := slices.BinarySearch(migration.BatchIDs, batch.ID)
+		_, sameEvent := slices.BinarySearch(migration.EventIDs, batch.EventID)
+		_, sameSequence := slices.BinarySearch(migration.EventSequences, batch.EventSequence)
+		if sameBatch || sameEvent || batch.EventSequence != 0 && sameSequence {
+			return true
+		}
+	}
+	for _, run := range candidate.Runs {
+		_, sameRun := slices.BinarySearch(migration.RunIDs, run.ID)
+		_, sameAdmission := slices.BinarySearch(migration.AdmissionIDs, run.Causation.AdmissionID)
+		if sameRun || sameAdmission {
+			return true
+		}
+	}
+	return false
 }
 
 func admissionOperationsOverlap(left, right AdmissionOperationReceipt) bool {

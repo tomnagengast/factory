@@ -185,6 +185,20 @@ func TestAdmissionBatchPersistsMultipleEventsAsOneOperation(t *testing.T) {
 	}
 }
 
+func TestLiveAdmissionOperationRejectsMultipleRateMinutes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runs.jsonl")
+	store := createEmptyStore(t, path, 10)
+	firstBatch, firstRun, firstRate := testAdmissionProjection(t, filepath.Dir(path), 1, StatePending)
+	secondBatch, secondRun, _ := testAdmissionProjection(t, filepath.Dir(path), 2, StatePending)
+	combinedRate := firstRate
+	combinedRate.Count = 2
+	if err := store.ApplyAdmissionBatch(
+		[]AdmissionBatch{firstBatch, secondBatch}, []Run{firstRun, secondRun}, []RateBucket{combinedRate},
+	); err == nil || !strings.Contains(err.Error(), "share one rate minute") {
+		t.Fatalf("multi-minute live admission error = %v", err)
+	}
+}
+
 func TestSuppressedAdmissionOperationExactRetryAfterReopen(t *testing.T) {
 	root := trustedTestRoot(t, t.TempDir())
 	path := filepath.Join(root, "runs.jsonl")
@@ -388,6 +402,132 @@ func TestAdmissionOperationExactRetrySurvivesTransitionsAndCompaction(t *testing
 	if !bytes.Equal(beforeDisk, afterDisk) || !reflect.DeepEqual(before.Model(), after.Model()) ||
 		after.Model().TotalBatches != 3 || after.Model().TotalRuns != 3 || len(after.Model().RateBuckets) != 0 {
 		t.Fatal("post-compaction exact retry changed disk, memory, lifetime totals, or rates")
+	}
+}
+
+func TestMigrationSnapshotReceiptSurvivesReplayCompactionAndRejectsLiveIdentityReuse(t *testing.T) {
+	root := trustedTestRoot(t, t.TempDir())
+	path := filepath.Join(root, "runs.jsonl")
+	initial, err := NewSnapshot(testMigrationSnapshotModel(t, root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalInitial := initial.Model()
+	wantReceipt := cloneMigrationSnapshotReceipt(canonicalInitial.Migration)
+	store, err := Create(root, path, initial, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(root, path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	replayed, err := store.Snapshot()
+	if err != nil || !reflect.DeepEqual(replayed.Model().Migration, wantReceipt) {
+		t.Fatalf("replayed migration receipt = %#v, %v", replayed.Model().Migration, err)
+	}
+
+	if err := store.Compact(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	compacted, err := store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compacted.Model().AdmissionBatches) != 1 || len(compacted.Model().Runs) != 1 || len(compacted.Model().RateBuckets) != 3 ||
+		!reflect.DeepEqual(compacted.Model().Migration, wantReceipt) {
+		t.Fatalf("compacted migration projection = %#v", compacted.Model())
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(root, path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstBatch := canonicalInitial.AdmissionBatches[0]
+	firstRun := canonicalInitial.Runs[0]
+	firstRate := RateBucket{RuleID: firstRun.Causation.RuleID, Minute: firstBatch.DecidedAt.Truncate(time.Minute), Count: 1}
+	if err := store.ApplyAdmissionBatch([]AdmissionBatch{firstBatch}, []Run{firstRun}, []RateBucket{firstRate}); !errors.Is(err, ErrIdentityCollision) {
+		t.Fatalf("exact migrated body retry error = %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*AdmissionBatch, *Run)
+	}{
+		{name: "batch ID", mutate: func(batch *AdmissionBatch, _ *Run) { batch.ID = firstBatch.ID }},
+		{name: "event ID", mutate: func(batch *AdmissionBatch, _ *Run) { batch.EventID = firstBatch.EventID }},
+		{name: "event sequence", mutate: func(batch *AdmissionBatch, _ *Run) { batch.EventSequence = firstBatch.EventSequence }},
+		{name: "Run ID", mutate: func(_ *AdmissionBatch, run *Run) { run.ID = firstRun.ID }},
+		{name: "admission ID", mutate: func(_ *AdmissionBatch, run *Run) { run.Causation.AdmissionID = firstRun.Causation.AdmissionID }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			batch, run, rate := testAdmissionProjection(t, root, 3, StatePending)
+			test.mutate(&batch, &run)
+			before, _ := store.Snapshot()
+			if err := store.ApplyAdmissionBatch([]AdmissionBatch{batch}, []Run{run}, []RateBucket{rate}); !errors.Is(err, ErrIdentityCollision) {
+				t.Fatalf("migration collision error = %v", err)
+			}
+			after, _ := store.Snapshot()
+			if !reflect.DeepEqual(before.Model(), after.Model()) {
+				t.Fatal("migration collision changed projection")
+			}
+		})
+	}
+
+	liveBatch, liveRun, liveRate := testAdmissionProjection(t, root, 4, StatePending)
+	if err := store.ApplyAdmissionBatch([]AdmissionBatch{liveBatch}, []Run{liveRun}, []RateBucket{liveRate}); err != nil {
+		t.Fatalf("noncolliding live admission: %v", err)
+	}
+	withLive, err := store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withLive.Model().TotalBatches != 3 || withLive.Model().TotalRuns != 8 ||
+		!reflect.DeepEqual(withLive.Model().Migration, wantReceipt) {
+		t.Fatalf("migration plus live totals = %#v", withLive.Model())
+	}
+}
+
+func TestMigrationSnapshotReceiptSurvivesRateExpiration(t *testing.T) {
+	root := trustedTestRoot(t, t.TempDir())
+	path := filepath.Join(root, "runs.jsonl")
+	initial, err := NewSnapshot(testMigrationSnapshotModel(t, root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReceipt := cloneMigrationSnapshotReceipt(initial.Model().Migration)
+	store, err := Create(root, path, initial, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Compact(modelTestNow.Add(10 * time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Model().RateBuckets) != 0 || !reflect.DeepEqual(snapshot.Model().Migration, wantReceipt) {
+		t.Fatalf("expired migration rates = %#v", snapshot.Model())
+	}
+}
+
+func TestLiveJournalOperationsCannotIntroduceMigrationReceipt(t *testing.T) {
+	for _, line := range []string{
+		`{"kind":"admission-batch","version":2,"sequence":1,"admissionBatches":[],"migration":{}}`,
+		`{"kind":"lifecycle-transition","version":2,"sequence":1,"migration":{}}`,
+	} {
+		if _, err := decodeOperation([]byte(line)); err == nil || !strings.Contains(err.Error(), "unknown field") {
+			t.Fatalf("live operation migration field error = %v", err)
+		}
 	}
 }
 
