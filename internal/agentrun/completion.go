@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tomnagengast/factory/internal/predicate"
 	"github.com/tomnagengast/factory/internal/taskmodel"
 )
 
@@ -294,19 +295,28 @@ func (v *MechanicalCompletionValidator) validatePostReadyBlocker(
 	snapshot PullRequestSnapshot,
 	decision CompletionDecision,
 ) CompletionDecision {
-	if snapshot.State == "CLOSED" && result.Blocker == BlockerClosedUnmerged {
+	if result.Blocker == BlockerClosedUnmerged && predicateProfilePassed(
+		singlePredicateProfile("blocker-closed-unmerged", predicate.PullRequestClosedUnmerged),
+		map[predicate.Atom]bool{predicate.PullRequestClosedUnmerged: snapshot.State == "CLOSED"},
+	) {
 		decision.Validation.Accepted = true
 		decision.Validation.Reason = "pull request closed without merge"
 		decision.Detail = decision.Validation.Reason
 		return decision
 	}
-	if snapshot.State == "MERGED" && snapshot.HeadOID != run.Ready.VerifiedHeadOID && result.Blocker == BlockerVerifiedHeadMismatch {
+	if result.Blocker == BlockerVerifiedHeadMismatch && predicateProfilePassed(
+		singlePredicateProfile("blocker-verified-head-mismatch", predicate.PullRequestVerifiedHeadMismatch),
+		map[predicate.Atom]bool{predicate.PullRequestVerifiedHeadMismatch: snapshot.State == "MERGED" && snapshot.HeadOID != run.Ready.VerifiedHeadOID},
+	) {
 		decision.Validation.Accepted = true
 		decision.Validation.Reason = "merged head differs from verified checkpoint"
 		decision.Detail = decision.Validation.Reason
 		return decision
 	}
-	if snapshot.State == "MERGED" && snapshot.SafeguardRegression && result.Blocker == BlockerSafeguardRegression {
+	if result.Blocker == BlockerSafeguardRegression && predicateProfilePassed(
+		singlePredicateProfile("blocker-safeguard-regression", predicate.SafeguardRegression),
+		map[predicate.Atom]bool{predicate.SafeguardRegression: snapshot.State == "MERGED" && snapshot.SafeguardRegression},
+	) {
 		decision.Validation.Accepted = true
 		decision.Validation.Reason = "pull request checks or reviews regressed after the ready checkpoint"
 		decision.Detail = decision.Validation.Reason
@@ -325,13 +335,7 @@ func (v *MechanicalCompletionValidator) validatePostReadyBlocker(
 		}
 		return rejectCompletion(decision, "read blocker evidence: "+err.Error(), true)
 	}
-	matched := result.Blocker == BlockerSafeguardRegression && evidence.SafeguardRegression ||
-		result.Blocker == BlockerVerifiedHeadMismatch && !evidence.VerifiedHeadContained ||
-		result.Blocker == BlockerDeploymentSource && !evidence.SourceValid ||
-		result.Blocker == BlockerExternalAuthentication && evidence.ExternalAuthenticationFailure ||
-		result.Blocker == BlockerDeploymentFailed && evidence.DeploymentFailed ||
-		result.Blocker == BlockerCleanupFailed && (!evidence.RemoteBranchAbsent || !evidence.WorktreeAbsent || !evidence.TaskComplete || !evidence.ChildrenComplete)
-	if !matched {
+	if !completionBlockerSupported(result.Blocker, evidence) {
 		return rejectCompletion(decision, "typed blocker is not supported by mechanical evidence", false)
 	}
 	decision.Validation.Accepted = true
@@ -351,33 +355,9 @@ func rejectCompletion(decision CompletionDecision, reason string, repark bool) C
 }
 
 func completionProblems(evidence CompletionEvidence) []string {
-	type check struct {
-		ok      bool
-		message string
+	evaluation, err := evaluatePredicateProfile(completionProfile(evidence), completionPredicateValues(evidence))
+	if err != nil {
+		return []string{"completion predicate evaluation failed: " + err.Error()}
 	}
-
-	var problems []string
-	var checks []check
-	if evidence.DeploymentRequired {
-		checks = append(checks,
-			check{evidence.Deployment.Status == "success", "deployment receipt is not successful"},
-			check{evidence.HealthMatches, "running health identity does not match the deployment"},
-		)
-	}
-	checks = append(checks, []check{
-		{evidence.SourceValid, "completion source is not clean updated main"},
-		{evidence.MergeContained, "updated main does not contain the merge"},
-		{evidence.VerifiedHeadContained, "merged result does not contain the verified head"},
-		{!evidence.SafeguardRegression, "pull request checks or reviews regressed"},
-		{evidence.RemoteBranchAbsent, "remote issue branch still exists"},
-		{evidence.WorktreeAbsent, "issue worktree still exists"},
-		{evidence.TaskComplete, "task is not complete"},
-		{evidence.ChildrenComplete, "child work remains incomplete"},
-	}...)
-	for _, check := range checks {
-		if !check.ok {
-			problems = append(problems, check.message)
-		}
-	}
-	return problems
+	return evaluation.Failures
 }

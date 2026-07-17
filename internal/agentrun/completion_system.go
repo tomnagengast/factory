@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/tomnagengast/factory/internal/predicate"
 	"github.com/tomnagengast/factory/internal/taskmodel"
 )
 
@@ -129,10 +130,16 @@ func (r *SystemCompletionEvidence) readDeployableCompletion(ctx context.Context,
 		return evidence, err
 	}
 	evidence.Health = health
-	evidence.HealthMatches = health.Status == "ok" && health.App == receipt.App &&
-		health.Commit == receipt.SourceCommit && health.Tree == receipt.SourceTree &&
-		health.BuildID == receipt.BuildID && health.DeploymentID == receipt.DeploymentID &&
-		health.ContractVersion == fmt.Sprint(LifecycleContractVersion) && !health.StartedAt.Before(receipt.StartedAt)
+	evidence.HealthMatches = predicateProfilePassed(healthIdentityProfile, map[predicate.Atom]bool{
+		predicate.HealthStatus:     health.Status == "ok",
+		predicate.HealthApp:        health.App == receipt.App,
+		predicate.HealthCommit:     health.Commit == receipt.SourceCommit,
+		predicate.HealthTree:       health.Tree == receipt.SourceTree,
+		predicate.HealthBuild:      health.BuildID == receipt.BuildID,
+		predicate.HealthDeployment: health.DeploymentID == receipt.DeploymentID,
+		predicate.HealthContract:   health.ContractVersion == fmt.Sprint(LifecycleContractVersion),
+		predicate.HealthStartedAt:  !health.StartedAt.Before(receipt.StartedAt),
+	})
 
 	repository, err := r.readRepository(ctx, run, snapshot, receipt)
 	if err != nil {
@@ -235,18 +242,32 @@ func (r *SystemCompletionEvidence) readRepository(ctx context.Context, run Run, 
 	if !run.Ready.ValidatedAt.IsZero() {
 		checkpointTime = run.Ready.ValidatedAt
 	}
-	baseValid := strings.TrimSpace(string(status)) == "" && strings.TrimSpace(string(branch)) == r.config.BaseBranch &&
-		strings.TrimSpace(string(upstream)) == "origin/"+r.config.BaseBranch && headOnMain &&
-		slices.Contains(r.config.RemoteURLs, strings.TrimSpace(string(remoteURL)))
+	values := map[predicate.Atom]bool{
+		predicate.CheckoutClean:      strings.TrimSpace(string(status)) == "",
+		predicate.CheckoutBaseBranch: strings.TrimSpace(string(branch)) == r.config.BaseBranch,
+		predicate.CheckoutUpstream:   strings.TrimSpace(string(upstream)) == "origin/"+r.config.BaseBranch,
+		predicate.CheckoutHeadOnMain: headOnMain,
+		predicate.CheckoutOrigin:     slices.Contains(r.config.RemoteURLs, strings.TrimSpace(string(remoteURL))),
+	}
 	if r.deploymentRequired {
-		result.sourceValid = baseValid && receiptOnMain && receipt.Status == "success" && receipt.App == r.config.App &&
-			receipt.SourceBranch == r.config.BaseBranch && receipt.SourceTree == receiptTree &&
-			receipt.ContractVersion == LifecycleContractVersion && gitOIDPattern.MatchString(receipt.SourceCommit) && gitOIDPattern.MatchString(receipt.SourceTree) &&
-			sha256Pattern.MatchString(receipt.BinarySHA256) && receipt.DeploymentID != "" && receipt.BuildID != "" &&
-			receipt.SourceRepository == r.config.Repository && !receipt.StartedAt.Before(checkpointTime) && !receipt.FinishedAt.Before(receipt.StartedAt)
+		values[predicate.ReceiptSourceOnMain] = receiptOnMain
+		values[predicate.ReceiptStatus] = receipt.Status == "success"
+		values[predicate.ReceiptApp] = receipt.App == r.config.App
+		values[predicate.ReceiptBranch] = receipt.SourceBranch == r.config.BaseBranch
+		values[predicate.ReceiptTree] = receipt.SourceTree == receiptTree
+		values[predicate.ReceiptContract] = receipt.ContractVersion == LifecycleContractVersion
+		values[predicate.ReceiptCommitFormat] = gitOIDPattern.MatchString(receipt.SourceCommit)
+		values[predicate.ReceiptTreeFormat] = gitOIDPattern.MatchString(receipt.SourceTree)
+		values[predicate.ReceiptBinaryFormat] = sha256Pattern.MatchString(receipt.BinarySHA256)
+		values[predicate.ReceiptDeploymentID] = receipt.DeploymentID != ""
+		values[predicate.ReceiptBuildID] = receipt.BuildID != ""
+		values[predicate.ReceiptRepository] = receipt.SourceRepository == r.config.Repository
+		values[predicate.ReceiptCheckpointTime] = !receipt.StartedAt.Before(checkpointTime)
+		values[predicate.ReceiptFinishOrder] = !receipt.FinishedAt.Before(receipt.StartedAt)
+		result.sourceValid = predicateProfilePassed(deploySourceProfile, values)
 		result.mergeContained = completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, snapshot.MergeCommitOID, receipt.SourceCommit)
 	} else {
-		result.sourceValid = baseValid
+		result.sourceValid = predicateProfilePassed(checkoutSourceProfile, values)
 		result.mergeContained = completionAncestor(ctx, r.config.RepoPath, r.config.GitPath, snapshot.MergeCommitOID, strings.TrimSpace(string(head)))
 	}
 
@@ -371,11 +392,15 @@ func (r *SystemCompletionEvidence) taskComplete(ctx context.Context, run Run, sn
 }
 
 func taskCompletionEvidenceReady(evidence CompletionEvidence) bool {
-	if evidence.DeploymentRequired && (evidence.Deployment.Status != "success" || !evidence.HealthMatches) {
-		return false
+	profile := taskCompletionReadyProfile
+	values := completionPredicateValues(evidence)
+	if evidence.DeploymentRequired {
+		profile.Requirements = appendRequirements([]predicate.Requirement{
+			{Atom: predicate.DeploymentSuccessful, Failure: "deployment is not ready"},
+			{Atom: predicate.HealthMatches, Failure: "health is not ready"},
+		}, profile.Requirements)
 	}
-	return evidence.SourceValid && evidence.MergeContained && evidence.VerifiedHeadContained && !evidence.SafeguardRegression &&
-		evidence.RemoteBranchAbsent && evidence.WorktreeAbsent && evidence.ChildrenComplete
+	return predicateProfilePassed(profile, values)
 }
 
 func completionEvidenceRef(repository string, snapshot PullRequestSnapshot, evidence CompletionEvidence) string {

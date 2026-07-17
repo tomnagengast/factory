@@ -2,7 +2,6 @@ package agentrun
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tomnagengast/factory/internal/predicate"
 	"github.com/tomnagengast/factory/internal/taskmodel"
 )
 
@@ -39,42 +39,50 @@ type ReadyCheckpoint struct {
 }
 
 func (c ReadyCheckpoint) Validate() error {
-	if c.ContractVersion != LifecycleContractVersion {
-		return fmt.Errorf("ready checkpoint: unsupported contract version %d", c.ContractVersion)
-	}
-	if c.RunID == "" {
-		return errors.New("ready checkpoint: run ID is required")
-	}
+	taskValid := true
+	taskFailure := "ready checkpoint: task is invalid"
 	if !c.Task.IsZero() {
 		if err := c.Task.Validate(); err != nil {
-			return fmt.Errorf("ready checkpoint: invalid task: %w", err)
+			taskValid = false
+			taskFailure = fmt.Sprintf("ready checkpoint: invalid task: %v", err)
 		}
 	}
-	if !repositoryPattern.MatchString(c.Repository) {
-		return errors.New("ready checkpoint: repository must be owner/name")
-	}
-	if c.PullRequest < 1 {
-		return errors.New("ready checkpoint: pull request must be positive")
-	}
-	if !validBranch(c.BaseBranch) || !validBranch(c.HeadBranch) {
-		return errors.New("ready checkpoint: base and head branches are invalid")
-	}
+	taskPrefixValid := true
+	taskPrefixFailure := "ready checkpoint: task prefix is invalid"
 	if !c.Task.IsZero() {
 		prefix, err := c.Task.BranchPrefix()
 		if err != nil {
-			return fmt.Errorf("ready checkpoint: derive task branch prefix: %w", err)
+			taskPrefixValid = false
+			taskPrefixFailure = fmt.Sprintf("ready checkpoint: derive task branch prefix: %v", err)
+		} else {
+			taskPrefixValid = strings.HasPrefix(c.HeadBranch, prefix)
+			taskPrefixFailure = fmt.Sprintf("ready checkpoint: head branch must begin with task prefix %q", prefix)
 		}
-		if !strings.HasPrefix(c.HeadBranch, prefix) {
-			return fmt.Errorf("ready checkpoint: head branch must begin with task prefix %q", prefix)
-		}
 	}
-	if !gitOIDPattern.MatchString(c.VerifiedHeadOID) {
-		return errors.New("ready checkpoint: verified head must be a lowercase 40-character Git OID")
-	}
-	if c.CreatedAt.IsZero() {
-		return errors.New("ready checkpoint: creation time is required")
-	}
-	return nil
+	profile := predicate.Profile{Name: "ready-checkpoint", Mode: predicate.All, Requirements: []predicate.Requirement{
+		{Atom: predicate.ReadyContractVersion, Failure: fmt.Sprintf("ready checkpoint: unsupported contract version %d", c.ContractVersion)},
+		{Atom: predicate.ReadyRunID, Failure: "ready checkpoint: run ID is required"},
+		{Atom: predicate.ReadyTaskIdentity, Failure: taskFailure},
+		{Atom: predicate.ReadyRepository, Failure: "ready checkpoint: repository must be owner/name"},
+		{Atom: predicate.ReadyPullRequest, Failure: "ready checkpoint: pull request must be positive"},
+		{Atom: predicate.ReadyBaseBranch, Failure: "ready checkpoint: base and head branches are invalid"},
+		{Atom: predicate.ReadyHeadBranch, Failure: "ready checkpoint: base and head branches are invalid"},
+		{Atom: predicate.ReadyTaskPrefix, Failure: taskPrefixFailure},
+		{Atom: predicate.ReadyVerifiedHead, Failure: "ready checkpoint: verified head must be a lowercase 40-character Git OID"},
+		{Atom: predicate.ReadyCreatedAt, Failure: "ready checkpoint: creation time is required"},
+	}}
+	return predicateProfileFailure(profile, map[predicate.Atom]bool{
+		predicate.ReadyContractVersion: c.ContractVersion == LifecycleContractVersion,
+		predicate.ReadyRunID:           c.RunID != "",
+		predicate.ReadyTaskIdentity:    taskValid,
+		predicate.ReadyRepository:      repositoryPattern.MatchString(c.Repository),
+		predicate.ReadyPullRequest:     c.PullRequest > 0,
+		predicate.ReadyBaseBranch:      validBranch(c.BaseBranch),
+		predicate.ReadyHeadBranch:      validBranch(c.HeadBranch),
+		predicate.ReadyTaskPrefix:      taskPrefixValid,
+		predicate.ReadyVerifiedHead:    gitOIDPattern.MatchString(c.VerifiedHeadOID),
+		predicate.ReadyCreatedAt:       !c.CreatedAt.IsZero(),
+	})
 }
 
 func validBranch(value string) bool {
@@ -87,8 +95,8 @@ func WriteReadyCheckpoint(runDirectory string, checkpoint ReadyCheckpoint) error
 	if err := checkpoint.Validate(); err != nil {
 		return err
 	}
-	if filepath.Base(filepath.Clean(runDirectory)) != checkpoint.RunID {
-		return errors.New("ready checkpoint: run directory does not match run ID")
+	if err := validateReadyRunDirectory(runDirectory, checkpoint); err != nil {
+		return err
 	}
 	return writeJSONFile(filepath.Join(runDirectory, readyCheckpointFileName), checkpoint)
 }
@@ -105,8 +113,17 @@ func ReadReadyCheckpoint(runDirectory string) (ReadyCheckpoint, error) {
 	if err := checkpoint.Validate(); err != nil {
 		return ReadyCheckpoint{}, err
 	}
-	if filepath.Base(filepath.Clean(runDirectory)) != checkpoint.RunID {
-		return ReadyCheckpoint{}, errors.New("ready checkpoint: run directory does not match run ID")
+	if err := validateReadyRunDirectory(runDirectory, checkpoint); err != nil {
+		return ReadyCheckpoint{}, err
 	}
 	return checkpoint, nil
+}
+
+func validateReadyRunDirectory(runDirectory string, checkpoint ReadyCheckpoint) error {
+	profile := predicate.Profile{Name: "ready-run-directory", Mode: predicate.All, Requirements: []predicate.Requirement{{
+		Atom: predicate.ReadyRunDirectory, Failure: "ready checkpoint: run directory does not match run ID",
+	}}}
+	return predicateProfileFailure(profile, map[predicate.Atom]bool{
+		predicate.ReadyRunDirectory: filepath.Base(filepath.Clean(runDirectory)) == checkpoint.RunID,
+	})
 }

@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/tomnagengast/factory/internal/predicate"
 )
 
 type Launcher interface {
@@ -357,22 +359,20 @@ func (m *Manager) finishInvalidReady(run Run, result ProcessResult, cause error)
 }
 
 func validateReadySnapshot(checkpoint ReadyCheckpoint, snapshot PullRequestSnapshot) error {
-	if snapshot.State != "OPEN" {
-		return fmt.Errorf("pull request state is %q, want OPEN", snapshot.State)
-	}
-	if snapshot.IsDraft {
-		return fmt.Errorf("pull request is still a draft")
-	}
-	if snapshot.BaseBranch != checkpoint.BaseBranch {
-		return fmt.Errorf("pull request base branch is %q, want %q", snapshot.BaseBranch, checkpoint.BaseBranch)
-	}
-	if snapshot.HeadBranch != checkpoint.HeadBranch {
-		return fmt.Errorf("pull request head branch is %q, want %q", snapshot.HeadBranch, checkpoint.HeadBranch)
-	}
-	if snapshot.HeadOID != checkpoint.VerifiedHeadOID {
-		return fmt.Errorf("pull request head is %q, want verified head %q", snapshot.HeadOID, checkpoint.VerifiedHeadOID)
-	}
-	return nil
+	profile := predicate.Profile{Name: "ready-pull-request", Mode: predicate.All, Requirements: []predicate.Requirement{
+		{Atom: predicate.PullRequestOpen, Failure: fmt.Sprintf("pull request state is %q, want OPEN", snapshot.State)},
+		{Atom: predicate.PullRequestNotDraft, Failure: "pull request is still a draft"},
+		{Atom: predicate.PullRequestBase, Failure: fmt.Sprintf("pull request base branch is %q, want %q", snapshot.BaseBranch, checkpoint.BaseBranch)},
+		{Atom: predicate.PullRequestHeadBranch, Failure: fmt.Sprintf("pull request head branch is %q, want %q", snapshot.HeadBranch, checkpoint.HeadBranch)},
+		{Atom: predicate.PullRequestVerifiedHead, Failure: fmt.Sprintf("pull request head is %q, want verified head %q", snapshot.HeadOID, checkpoint.VerifiedHeadOID)},
+	}}
+	return predicateProfileFailure(profile, map[predicate.Atom]bool{
+		predicate.PullRequestOpen:         snapshot.State == "OPEN",
+		predicate.PullRequestNotDraft:     !snapshot.IsDraft,
+		predicate.PullRequestBase:         snapshot.BaseBranch == checkpoint.BaseBranch,
+		predicate.PullRequestHeadBranch:   snapshot.HeadBranch == checkpoint.HeadBranch,
+		predicate.PullRequestVerifiedHead: snapshot.HeadOID == checkpoint.VerifiedHeadOID,
+	})
 }
 
 func (m *Manager) validateCheckpoint(run Run, checkpoint ReadyCheckpoint) error {
@@ -382,20 +382,20 @@ func (m *Manager) validateCheckpoint(run Run, checkpoint ReadyCheckpoint) error 
 	if err := checkpoint.Validate(); err != nil {
 		return err
 	}
-	if !checkpoint.Task.Equal(run.Task) {
-		return errors.New("ready checkpoint belongs to another task")
-	}
 	lifecycle := runRepository(run, m.lifecycle)
-	if !strings.EqualFold(checkpoint.Repository, lifecycle.Repository) {
-		return fmt.Errorf("repository is %q, want configured repository %q", checkpoint.Repository, lifecycle.Repository)
-	}
-	if checkpoint.BaseBranch != lifecycle.BaseBranch {
-		return fmt.Errorf("base branch is %q, want configured base %q", checkpoint.BaseBranch, lifecycle.BaseBranch)
-	}
-	if run.SegmentStartedAt == nil || checkpoint.CreatedAt.Before(*run.SegmentStartedAt) {
-		return errors.New("checkpoint predates the current lifecycle segment")
-	}
-	return nil
+	profile := predicate.Profile{Name: "ready-binding", Mode: predicate.All, Requirements: []predicate.Requirement{
+		{Atom: predicate.BindingTask, Failure: "ready checkpoint belongs to another task"},
+		{Atom: predicate.BindingRepository, Failure: fmt.Sprintf("repository is %q, want configured repository %q", checkpoint.Repository, lifecycle.Repository)},
+		{Atom: predicate.BindingBaseBranch, Failure: fmt.Sprintf("base branch is %q, want configured base %q", checkpoint.BaseBranch, lifecycle.BaseBranch)},
+		{Atom: predicate.BindingFreshness, Failure: "checkpoint predates the current lifecycle segment"},
+	}}
+	fresh := run.SegmentStartedAt != nil && !checkpoint.CreatedAt.Before(*run.SegmentStartedAt)
+	return predicateProfileFailure(profile, map[predicate.Atom]bool{
+		predicate.BindingTask:       checkpoint.Task.Equal(run.Task),
+		predicate.BindingRepository: strings.EqualFold(checkpoint.Repository, lifecycle.Repository),
+		predicate.BindingBaseBranch: checkpoint.BaseBranch == lifecycle.BaseBranch,
+		predicate.BindingFreshness:  fresh,
+	})
 }
 
 func runRepository(run Run, fallback LifecycleConfig) LifecycleConfig {
@@ -406,19 +406,20 @@ func runRepository(run Run, fallback LifecycleConfig) LifecycleConfig {
 }
 
 func validateMergedSnapshot(checkpoint ReadyCheckpoint, snapshot PullRequestSnapshot) error {
-	if snapshot.State != "MERGED" {
-		return fmt.Errorf("pull request state is %q, want MERGED", snapshot.State)
-	}
-	if snapshot.BaseBranch != checkpoint.BaseBranch {
-		return fmt.Errorf("merged pull request base branch is %q, want %q", snapshot.BaseBranch, checkpoint.BaseBranch)
-	}
-	if snapshot.HeadBranch != checkpoint.HeadBranch || snapshot.HeadOID != checkpoint.VerifiedHeadOID {
-		return errors.New("merged pull request head does not match the verified checkpoint")
-	}
-	if !gitOIDPattern.MatchString(snapshot.MergeCommitOID) {
-		return errors.New("merged pull request has no valid merge commit OID")
-	}
-	return nil
+	profile := predicate.Profile{Name: "merged-pull-request", Mode: predicate.All, Requirements: []predicate.Requirement{
+		{Atom: predicate.PullRequestMerged, Failure: fmt.Sprintf("pull request state is %q, want MERGED", snapshot.State)},
+		{Atom: predicate.PullRequestBase, Failure: fmt.Sprintf("merged pull request base branch is %q, want %q", snapshot.BaseBranch, checkpoint.BaseBranch)},
+		{Atom: predicate.PullRequestHeadBranch, Failure: "merged pull request head does not match the verified checkpoint"},
+		{Atom: predicate.PullRequestVerifiedHead, Failure: "merged pull request head does not match the verified checkpoint"},
+		{Atom: predicate.PullRequestMergeCommit, Failure: "merged pull request has no valid merge commit OID"},
+	}}
+	return predicateProfileFailure(profile, map[predicate.Atom]bool{
+		predicate.PullRequestMerged:       snapshot.State == "MERGED",
+		predicate.PullRequestBase:         snapshot.BaseBranch == checkpoint.BaseBranch,
+		predicate.PullRequestHeadBranch:   snapshot.HeadBranch == checkpoint.HeadBranch,
+		predicate.PullRequestVerifiedHead: snapshot.HeadOID == checkpoint.VerifiedHeadOID,
+		predicate.PullRequestMergeCommit:  gitOIDPattern.MatchString(snapshot.MergeCommitOID),
+	})
 }
 
 func (m *Manager) reconcileAwaitingMerge(ctx context.Context, run Run) {

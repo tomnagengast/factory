@@ -1,0 +1,93 @@
+[
+  {
+    "name": "repository contract passes",
+    "deploymentRequired": false,
+    "fail": [],
+    "problems": null,
+    "atoms": ["completion.source_valid", "completion.merge_contained", "completion.verified_head_contained", "completion.safeguards_clear", "completion.remote_branch_absent", "completion.worktree_absent", "completion.task_complete", "completion.children_complete"]
+  },
+  {
+    "name": "deployment contract passes",
+    "deploymentRequired": true,
+    "fail": [],
+    "problems": null,
+    "atoms": ["completion.deployment_successful", "completion.health_matches", "completion.source_valid", "completion.merge_contained", "completion.verified_head_contained", "completion.safeguards_clear", "completion.remote_branch_absent", "completion.worktree_absent", "completion.task_complete", "completion.children_complete"]
+  },
+  {
+    "name": "deployment receipt failure",
+    "deploymentRequired": true,
+    "fail": ["deployment"],
+    "problems": ["deployment receipt is not successful"],
+    "atoms": ["completion.deployment_successful", "completion.health_matches", "completion.source_valid", "completion.merge_contained", "completion.verified_head_contained", "completion.safeguards_clear", "completion.remote_branch_absent", "completion.worktree_absent", "completion.task_complete", "completion.children_complete"]
+  },
+  {
+    "name": "health failure",
+    "deploymentRequired": true,
+    "fail": ["health"],
+    "problems": ["running health identity does not match the deployment"],
+    "atoms": ["completion.deployment_successful", "completion.health_matches", "completion.source_valid", "completion.merge_contained", "completion.verified_head_contained", "completion.safeguards_clear", "completion.remote_branch_absent", "completion.worktree_absent", "completion.task_complete", "completion.children_complete"]
+  },
+  {
+    "name": "source failure",
+    "deploymentRequired": false,
+    "fail": ["source"],
+    "problems": ["completion source is not clean updated main"],
+    "atoms": ["completion.source_valid", "completion.merge_contained", "completion.verified_head_contained", "completion.safeguards_clear", "completion.remote_branch_absent", "completion.worktree_absent", "completion.task_complete", "completion.children_complete"]
+  },
+  {
+    "name": "merge failure",
+    "deploymentRequired": false,
+    "fail": ["merge"],
+    "problems": ["updated main does not contain the merge"],
+    "atoms": ["completion.source_valid", "completion.merge_contained", "completion.verified_head_contained", "completion.safeguards_clear", "completion.remote_branch_absent", "completion.worktree_absent", "completion.task_complete", "completion.children_complete"]
+  },
+  {
+    "name": "verified head failure",
+    "deploymentRequired": false,
+    "fail": ["verified"],
+    "problems": ["merged result does not contain the verified head"],
+    "atoms": ["completion.source_valid", "completion.merge_contained", "completion.verified_head_contained", "completion.safeguards_clear", "completion.remote_branch_absent", "completion.worktree_absent", "completion.task_complete", "completion.children_complete"]
+  },
+  {
+    "name": "safeguard failure",
+    "deploymentRequired": false,
+    "fail": ["safeguards"],
+    "problems": ["pull request checks or reviews regressed"],
+    "atoms": ["completion.source_valid", "completion.merge_contained", "completion.verified_head_contained", "completion.safeguards_clear", "completion.remote_branch_absent", "completion.worktree_absent", "completion.task_complete", "completion.children_complete"]
+  },
+  {
+    "name": "remote branch failure",
+    "deploymentRequired": false,
+    "fail": ["remote"],
+    "problems": ["remote issue branch still exists"],
+    "atoms": ["completion.source_valid", "completion.merge_contained", "completion.verified_head_contained", "completion.safeguards_clear", "completion.remote_branch_absent", "completion.worktree_absent", "completion.task_complete", "completion.children_complete"]
+  },
+  {
+    "name": "worktree failure",
+    "deploymentRequired": false,
+    "fail": ["worktree"],
+    "problems": ["issue worktree still exists"],
+    "atoms": ["completion.source_valid", "completion.merge_contained", "completion.verified_head_contained", "completion.safeguards_clear", "completion.remote_branch_absent", "completion.worktree_absent", "completion.task_complete", "completion.children_complete"]
+  },
+  {
+    "name": "task failure",
+    "deploymentRequired": false,
+    "fail": ["task"],
+    "problems": ["task is not complete"],
+    "atoms": ["completion.source_valid", "completion.merge_contained", "completion.verified_head_contained", "completion.safeguards_clear", "completion.remote_branch_absent", "completion.worktree_absent", "completion.task_complete", "completion.children_complete"]
+  },
+  {
+    "name": "children failure",
+    "deploymentRequired": false,
+    "fail": ["children"],
+    "problems": ["child work remains incomplete"],
+    "atoms": ["completion.source_valid", "completion.merge_contained", "completion.verified_head_contained", "completion.safeguards_clear", "completion.remote_branch_absent", "completion.worktree_absent", "completion.task_complete", "completion.children_complete"]
+  },
+  {
+    "name": "all deployment failures preserve order",
+    "deploymentRequired": true,
+    "fail": ["deployment", "health", "source", "merge", "verified", "safeguards", "remote", "worktree", "task", "children"],
+    "problems": ["deployment receipt is not successful", "running health identity does not match the deployment", "completion source is not clean updated main", "updated main does not contain the merge", "merged result does not contain the verified head", "pull request checks or reviews regressed", "remote issue branch still exists", "issue worktree still exists", "task is not complete", "child work remains incomplete"],
+    "atoms": ["completion.deployment_successful", "completion.health_matches", "completion.source_valid", "completion.merge_contained", "completion.verified_head_contained", "completion.safeguards_clear", "completion.remote_branch_absent", "completion.worktree_absent", "completion.task_complete", "completion.children_complete"]
+  }
+]

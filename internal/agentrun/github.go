@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tomnagengast/factory/internal/predicate"
 )
 
 type PullRequestSnapshot struct {
@@ -104,22 +106,30 @@ func (c *GitHubCLI) Snapshot(ctx context.Context, checkpoint ReadyCheckpoint) (P
 }
 
 func pullRequestSafeguardRegression(reviewDecision string, checks []pullRequestCheck) bool {
-	if strings.EqualFold(reviewDecision, "CHANGES_REQUESTED") {
-		return true
-	}
+	checksTerminal := true
+	checksAccepted := true
 	for _, check := range checks {
 		if check.Status != "" && !strings.EqualFold(check.Status, "COMPLETED") {
-			return true
+			checksTerminal = false
 		}
 		outcome := check.Conclusion
 		if outcome == "" {
 			outcome = check.State
 		}
 		if outcome != "" && !slices.Contains([]string{"NEUTRAL", "SKIPPED", "SUCCESS"}, strings.ToUpper(outcome)) {
-			return true
+			checksAccepted = false
 		}
 	}
-	return false
+	profile := predicate.Profile{Name: "pull-request-safeguards", Mode: predicate.All, Requirements: []predicate.Requirement{
+		{Atom: predicate.SafeguardReviewClear, Failure: "pull request has requested changes"},
+		{Atom: predicate.SafeguardChecksTerminal, Failure: "pull request checks are still running"},
+		{Atom: predicate.SafeguardChecksAccepted, Failure: "pull request checks failed"},
+	}}
+	return !predicateProfilePassed(profile, map[predicate.Atom]bool{
+		predicate.SafeguardReviewClear:    !strings.EqualFold(reviewDecision, "CHANGES_REQUESTED"),
+		predicate.SafeguardChecksTerminal: checksTerminal,
+		predicate.SafeguardChecksAccepted: checksAccepted,
+	})
 }
 
 func (c *GitHubCLI) MatchingIssuePullRequests(ctx context.Context, repository, branchPrefix string) ([]PullRequestSnapshot, error) {

@@ -138,8 +138,8 @@ func TestAtomVocabularyIsValidAndUnique(t *testing.T) {
 		HealthStatus, HealthApp, HealthCommit, HealthTree, HealthBuild, HealthDeployment, HealthContract, HealthStartedAt,
 		CheckoutClean, CheckoutBaseBranch, CheckoutUpstream, CheckoutHeadOnMain, CheckoutOrigin,
 		ReceiptSourceOnMain, ReceiptStatus, ReceiptApp, ReceiptBranch, ReceiptTree, ReceiptContract, ReceiptCommitFormat, ReceiptTreeFormat, ReceiptBinaryFormat, ReceiptDeploymentID, ReceiptBuildID, ReceiptRepository, ReceiptCheckpointTime, ReceiptFinishOrder,
-		MergeContained, VerifiedHeadContained, RemoteBranchAbsent, WorktreeAbsent, TaskComplete, ChildrenComplete,
-		ExternalAuthenticationFailure, DeploymentFailed, RemoteBranchPresent, WorktreePresent, TaskIncomplete, ChildrenIncomplete,
+		MergeContained, VerifiedHeadContained, DeploymentSuccessful, HealthMatches, SourceValid, SafeguardsClear, RemoteBranchAbsent, WorktreeAbsent, TaskComplete, ChildrenComplete,
+		ExternalAuthenticationFailure, DeploymentFailed, SourceInvalid, RemoteBranchPresent, WorktreePresent, TaskIncomplete, ChildrenIncomplete,
 	}
 	seen := make(map[Atom]struct{}, len(atoms))
 	for _, atom := range atoms {

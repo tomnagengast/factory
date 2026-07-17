@@ -65,6 +65,10 @@ const (
 
 	MergeContained        Atom = "completion.merge_contained"
 	VerifiedHeadContained Atom = "completion.verified_head_contained"
+	DeploymentSuccessful  Atom = "completion.deployment_successful"
+	HealthMatches         Atom = "completion.health_matches"
+	SourceValid           Atom = "completion.source_valid"
+	SafeguardsClear       Atom = "completion.safeguards_clear"
 	RemoteBranchAbsent    Atom = "completion.remote_branch_absent"
 	WorktreeAbsent        Atom = "completion.worktree_absent"
 	TaskComplete          Atom = "completion.task_complete"
@@ -72,6 +76,7 @@ const (
 
 	ExternalAuthenticationFailure Atom = "blocker.external_authentication"
 	DeploymentFailed              Atom = "blocker.deployment_failed"
+	SourceInvalid                 Atom = "blocker.source_invalid"
 	RemoteBranchPresent           Atom = "blocker.remote_branch_present"
 	WorktreePresent               Atom = "blocker.worktree_present"
 	TaskIncomplete                Atom = "blocker.task_incomplete"
