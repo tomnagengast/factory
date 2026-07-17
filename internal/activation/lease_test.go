@@ -1,15 +1,18 @@
 package activation
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -61,6 +64,80 @@ func TestAcquireLeasePublishesExactPrivateCapability(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("lease mode = %v, %v", info.Mode().Perm(), err)
 	}
+}
+
+func TestLeaseConfigureCommandPassesLockedInodeAndPrivateToken(t *testing.T) {
+	path := filepath.Join(privateTemp(t), "state-transition.lock")
+	lease, err := AcquireLease(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	command := exec.Command(os.Args[0], "-test.run=TestLeaseDescriptorHelper")
+	command.Env = append(os.Environ(), "FACTORY_TEST_LEASE_DESCRIPTOR_HELPER=1", "FACTORY_TEST_LEASE_PATH="+path)
+	if err := lease.ConfigureCommand(command); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("descriptor helper: %v: %s", err, output)
+	}
+}
+
+func TestLeaseDescriptorHelper(t *testing.T) {
+	if os.Getenv("FACTORY_TEST_LEASE_DESCRIPTOR_HELPER") != "1" {
+		return
+	}
+	descriptor, err := strconv.Atoi(os.Getenv("NAGS_FACTORY_STATE_LEASE_FD"))
+	if err != nil || descriptor < 3 || os.Getenv("NAGS_FACTORY_STATE_LEASE_TOKEN") == "" {
+		t.Fatal("inherited lease capability is missing")
+	}
+	file := os.NewFile(uintptr(descriptor), "inherited-state-transition-lease")
+	if file == nil {
+		t.Fatal("inherited lease descriptor is invalid")
+	}
+	info, err := file.Stat()
+	pathInfo, pathErr := os.Stat(os.Getenv("FACTORY_TEST_LEASE_PATH"))
+	if err != nil || pathErr != nil || !os.SameFile(info, pathInfo) {
+		t.Fatal("inherited lease descriptor changed identity")
+	}
+}
+
+func TestQuiesceAndAcquireSignalsExactLeaseOwner(t *testing.T) {
+	path := filepath.Join(privateTemp(t), "state-transition.lock")
+	ready := path + ".ready"
+	command := exec.Command(os.Args[0], "-test.run=TestLeaseOwnerHelper")
+	command.Env = append(os.Environ(),
+		"FACTORY_TEST_LEASE_HELPER=1", "FACTORY_TEST_LEASE_QUIESCE=1",
+		"FACTORY_TEST_LEASE_PATH="+path, "FACTORY_TEST_LEASE_READY="+ready,
+	)
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if command.Process != nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("lease helper did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	lease, err := QuiesceAndAcquire(context.Background(), path, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	if err := command.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	command.Process = nil
 }
 
 func TestAcquireLeaseRejectsUnsafeFiles(t *testing.T) {
@@ -145,8 +222,18 @@ func TestLeaseOwnerHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lease.Close()
+	var quiesce chan os.Signal
+	if os.Getenv("FACTORY_TEST_LEASE_QUIESCE") == "1" {
+		quiesce = make(chan os.Signal, 1)
+		signal.Notify(quiesce, syscall.SIGUSR1)
+		defer signal.Stop(quiesce)
+	}
 	if err := os.WriteFile(os.Getenv("FACTORY_TEST_LEASE_READY"), []byte("ready\n"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	if quiesce != nil {
+		<-quiesce
+		return
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {

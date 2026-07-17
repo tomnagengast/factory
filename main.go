@@ -60,13 +60,13 @@ const (
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
 	defer stop()
 
 	if code, handled := runAgentCommand(ctx, os.Args[1:]); handled {
 		os.Exit(code)
 	}
-	if err := serve(ctx); err != nil {
+	if err := serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("factory stopped", "error", err)
 		os.Exit(1)
 	}

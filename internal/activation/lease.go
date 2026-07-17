@@ -2,6 +2,7 @@ package activation
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const leaseContractVersion = 1
@@ -126,6 +128,97 @@ func (l *Lease) Environment() []string {
 		"NAGS_FACTORY_STATE_LEASE_FD=" + strconv.FormatUint(uint64(l.file.Fd()), 10),
 		"NAGS_FACTORY_STATE_LEASE_TOKEN=" + l.token,
 	}
+}
+
+// ConfigureCommand passes the locked inode through ExtraFiles so Go cannot
+// close it at exec. The provider child receives fd 3 or the next available
+// inherited descriptor while this process continuously retains the lock.
+func (l *Lease) ConfigureCommand(command *exec.Cmd) error {
+	if l == nil || l.file == nil || l.token == "" || command == nil {
+		return errors.New("activation: live lease and provider command are required")
+	}
+	childFD := 3 + len(command.ExtraFiles)
+	command.ExtraFiles = append(command.ExtraFiles, l.file)
+	command.Env = append(command.Environ(),
+		"NAGS_FACTORY_STATE_LEASE_FD="+strconv.Itoa(childFD),
+		"NAGS_FACTORY_STATE_LEASE_TOKEN="+l.token,
+	)
+	return nil
+}
+
+// QuiesceAndAcquire asks the exact live lease owner to stop advancing work,
+// then wins the same exclusion before any provider mutation can begin.
+func QuiesceAndAcquire(ctx context.Context, path string, timeout time.Duration) (*Lease, error) {
+	if timeout <= 0 {
+		return nil, errors.New("activation: positive quiescence timeout is required")
+	}
+	lease, err := AcquireLease(path)
+	if err == nil {
+		return lease, nil
+	}
+	if !errors.Is(err, ErrLeaseUnavailable) {
+		return nil, err
+	}
+	record, err := readLeaseOwner(path)
+	if err != nil {
+		return nil, err
+	}
+	startTime, err := processStartTime(record.OwnerPID)
+	if err != nil || startTime != record.OwnerStartTime {
+		return nil, errors.New("activation: live lease owner identity changed")
+	}
+	process, err := os.FindProcess(record.OwnerPID)
+	if err != nil {
+		return nil, err
+	}
+	if err := process.Signal(syscall.SIGUSR1); err != nil {
+		return nil, fmt.Errorf("activation: quiesce live lease owner: %w", err)
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return nil, errors.New("activation: Factory did not quiesce before timeout")
+		case <-ticker.C:
+			lease, err := AcquireLease(path)
+			if err == nil {
+				return lease, nil
+			}
+			if !errors.Is(err, ErrLeaseUnavailable) {
+				return nil, err
+			}
+		}
+	}
+}
+
+func readLeaseOwner(path string) (leaseRecord, error) {
+	file, err := openLeaseFile(filepath.Clean(path))
+	if err != nil {
+		return leaseRecord{}, err
+	}
+	defer file.Close()
+	if err := validateLeaseFile(filepath.Clean(path), file); err != nil {
+		return leaseRecord{}, err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return leaseRecord{}, err
+	}
+	decoder := json.NewDecoder(io.LimitReader(file, 4097))
+	decoder.DisallowUnknownFields()
+	var record leaseRecord
+	if err := decoder.Decode(&record); err != nil || record.ContractVersion != leaseContractVersion ||
+		record.OwnerPID <= 1 || record.OwnerStartTime == "" || len(record.TokenSHA256) != 64 {
+		return leaseRecord{}, errors.New("activation: live lease owner record is invalid")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return leaseRecord{}, errors.New("activation: live lease owner record has trailing content")
+	}
+	return record, nil
 }
 
 func (l *Lease) Close() error {
