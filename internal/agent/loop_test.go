@@ -81,6 +81,55 @@ func TestLoopRecordsFailureAndContinues(t *testing.T) {
 	}
 }
 
+func TestLoopRunsQueuedTasksInSubmissionOrder(t *testing.T) {
+	wire, err := eventwire.Open(filepath.Join(t.TempDir(), "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wire.Close()
+	for _, task := range []struct {
+		id     string
+		prompt string
+	}{
+		{id: "task-1", prompt: "First"},
+		{id: "task-2", prompt: "Second"},
+	} {
+		if _, err := wire.Publish(eventwire.TaskSubmitted, task.id, "", map[string]string{"prompt": task.prompt}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	loop, err := NewLoop(wire, fakeRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan error, 1)
+	go func() { finished <- loop.Run(ctx) }()
+
+	waitContext, stopWaiting := context.WithTimeout(context.Background(), time.Second)
+	if _, err := wire.Wait(waitContext, 5); err != nil {
+		stopWaiting()
+		t.Fatal(err)
+	}
+	stopWaiting()
+	events := wire.Events(0)
+	if len(events) != 6 {
+		t.Fatalf("events = %d, want 6", len(events))
+	}
+	if events[2].Type != eventwire.RunStarted || events[2].TaskID != "task-1" {
+		t.Fatalf("first run start = %#v", events[2])
+	}
+	if events[4].Type != eventwire.RunStarted || events[4].TaskID != "task-2" {
+		t.Fatalf("second run start = %#v", events[4])
+	}
+
+	cancel()
+	if err := <-finished; !errors.Is(err, context.Canceled) {
+		t.Fatalf("loop error = %v", err)
+	}
+}
+
 func TestLoopFailsRunInterruptedBeforeRestart(t *testing.T) {
 	wire, err := eventwire.Open(filepath.Join(t.TempDir(), "events.jsonl"))
 	if err != nil {
