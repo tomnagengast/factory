@@ -23,6 +23,17 @@ web/    SolidJS application built with Bun and Vite
 The root holds repository orchestration such as `go.mod`, `nags.toml`, and
 this document.
 
+## Documentation
+
+- [Usage](docs/usage.md) covers installation, first run, everyday operation,
+  configuration, and troubleshooting.
+- [Concepts](docs/concepts.md) explains the event wire, projections, task
+  intake, and the sequential agent loop.
+- [Resource reference](docs/resources.md) lists resource fields, HTTP routes,
+  payloads, and matching CLI commands.
+- [Workflow reference](docs/workflows.md) covers discovery, Codex
+  collaboration, workflow files, triggers, and cron behavior.
+
 ## Run locally
 
 Build the web bundle into the API's ignored embed staging directory:
@@ -80,7 +91,7 @@ The new domain wire defaults to
 /triggers/:trigger                     view and edit trigger
 /workflows                             discovered workflow list
 /workflows/new                         create through Codex chat
-/workflows/:workflow                   view and revise through Codex chat
+/workflows/:workflow                   chat beside the live workflow source
 ```
 
 All route IDs are integers. Deletion is soft and list routes omit deleted

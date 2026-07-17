@@ -1,13 +1,70 @@
 # Factory agent instructions
 
+## Product boundary
+
 - Keep Factory focused on its three mechanisms: the event wire, task intake,
   and the sequential agent loop.
 - Factory is an intentionally unsafe trusted-environment demonstrator. Do not
   add authentication, permissions, policy, routing, migration, or deployment
   lifecycle machinery without explicit product direction.
+- Prefer the least code that makes those mechanisms clear. Replace superseded
+  designs completely instead of preserving compatibility paths.
+- Codex is the agent backend. The external `workflow` CLI owns workflow
+  discovery, loading, validation, and execution. Do not duplicate that runtime
+  inside Factory.
+
+## Architecture patterns
+
+- Treat the append-only JSONL wire as the durable source of truth. Resource
+  writes append an event, and `api/internal/state` rebuilds projections by
+  replaying the wire.
+- A resource creation event ID is also its resource ID. All resources and
+  events share one global integer sequence, so gaps in resource IDs are
+  expected.
+- The Solid app and Go CLI are peers over the same HTTP API. A resource change
+  normally touches the state data/event shapes, API handlers, CLI command
+  mapping, Solid types and views, and the matching reference documentation.
+- Keep workflow source outside the repository under the configured workflow
+  workspace. The wire stores workflow metadata and conversation history, while
+  the workflow detail endpoint reads live source from disk.
+- Preserve one sequential worker and its priority: pending workflow
+  conversations, matching event triggers, then due cron triggers. Do not add a
+  queue or parallel worker pool unless the product direction changes.
+- Event triggers only see matching events received after the trigger's latest
+  update. Cron appends a targeted `cron` event and then uses the same trigger
+  path.
+
+## Working in the monorepo
+
+- Start with `nr "<question>" --json` when mapping a feature or change blast
+  radius, then use `rg` for exact symbols.
+- Read the relevant files under `docs/` before changing behavior, and update
+  those references with the implementation.
+- `api/` contains the Go server and embedded frontend, `cli/` contains the Go
+  resource client, and `web/` contains the SolidJS app built with Bun.
+- The frontend must be built and copied into `api/dist` before building the API
+  binary. `web/dist`, `web/node_modules`, and generated `api/dist` contents are
+  ignored.
+- Assume a development server may already be running. Check the target port
+  before starting one, use isolated wire and workflow-workspace paths for smoke
+  tests, and stop every process you start.
+
+## Verification and publication
+
+- Before publication, run the frozen frontend build and all Go checks:
+
+  ```sh
+  bun install --cwd web --frozen-lockfile
+  bun run --cwd web typecheck
+  bun run --cwd web build
+  mkdir -p api/dist/assets
+  cp -R web/dist/. api/dist/
+  go test ./...
+  go test -race ./...
+  go vet ./...
+  ```
+
 - Humans retain merge authority for this repository.
-- Run `go test ./...`, `go test -race ./...`, `go vet ./...`, and the
-  frozen Bun `web/` build before publication.
 - Deploy only clean, merged `main` commits from
   `~/repos/tomnagengast/factory`.
 - Never deploy from the T9 working mirror.
