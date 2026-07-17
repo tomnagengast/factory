@@ -42,8 +42,9 @@ func RecognizeCompiledWorkflow(definition Workflow) (CompiledWorkflow, bool) {
 }
 
 // RecognizeCompiledRule identifies a rule synthesized by the current binary
-// for the supplied legacy settings and trigger actor. Customized persisted
-// rules are intentionally not classified as compiled defaults.
+// for the supplied legacy settings and independently authoritative trigger
+// actor. Customized persisted rules are intentionally not classified as
+// compiled defaults.
 func RecognizeCompiledRule(rule Rule, configuration settings.Snapshot, triggerActor string) (CompiledRule, bool) {
 	if triggerActor == "" {
 		return "", false
@@ -66,4 +67,21 @@ func RecognizeCompiledRule(rule Rule, configuration settings.Snapshot, triggerAc
 		}
 	}
 	return "", false
+}
+
+// recognizeCompiledRuleWithCorrectedActor identifies a persisted reserved
+// rule whose only difference from the authoritative compiled default is its
+// actor. Such a rule is ambiguous: migration cannot know whether the actor was
+// intentionally customized or merely persisted from another actor identity.
+func recognizeCompiledRuleWithCorrectedActor(rule Rule, configuration settings.Snapshot, triggerActor string) (CompiledRule, bool) {
+	if triggerActor == "" {
+		return "", false
+	}
+	actor, found := rule.Filter.Attributes[triggerregistry.AttributeActorID]
+	if found && actor == triggerActor {
+		return "", false
+	}
+	corrected := cloneRule(rule)
+	corrected.Filter.Attributes[triggerregistry.AttributeActorID] = triggerActor
+	return RecognizeCompiledRule(corrected, configuration, triggerActor)
 }

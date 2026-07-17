@@ -98,30 +98,58 @@ func TestConvertSourcesSynthesizesProviderNeutralDefault(t *testing.T) {
 	}
 }
 
-func TestConvertSourcesPreservesCustomizedVisibleCommentRule(t *testing.T) {
-	sources := populatedSources()
-	comment := &sources.Registry.Rules[ruleSourceIndex(t, sources.Registry.Rules, string(CompiledLinearComment))]
-	comment.Name = "Visible Linear comment"
-	comment.WorkflowID = "custom-review"
-	expected := ruleFromSource(*comment)
+func TestConvertSourcesPreservesGenuinelyCustomizedVisibleReservedRules(t *testing.T) {
+	for _, id := range []string{string(CompiledLinearComment), string(CompiledLinearLabel)} {
+		t.Run(id, func(t *testing.T) {
+			sources := populatedSources()
+			custom := &sources.Registry.Rules[ruleSourceIndex(t, sources.Registry.Rules, id)]
+			custom.Name = "Visible customized " + id
+			custom.WorkflowID = "custom-review"
+			custom.Filter.Attributes[triggerregistry.AttributeActorID] = "actor-customized"
+			expected := ruleFromSource(*custom)
 
-	snapshot := mustConvertSources(t, sources)
-	preserved := findRule(t, snapshot.Registry(), string(CompiledLinearComment))
-	if !reflect.DeepEqual(preserved, expected) {
-		t.Fatalf("custom visible comment = %#v, want %#v", preserved, expected)
+			snapshot := mustConvertSources(t, sources)
+			preserved := findRule(t, snapshot.Registry(), id)
+			if !reflect.DeepEqual(preserved, expected) {
+				t.Fatalf("custom visible rule = %#v, want %#v", preserved, expected)
+			}
+		})
 	}
 }
 
-func TestConvertSourcesRequiresActorOnlyForAbsentRegistry(t *testing.T) {
+func TestConvertSourcesRecognizesExactDefaultsWithAuthoritativeActor(t *testing.T) {
 	sources := populatedSources()
-	sources.TriggerActorID = "different-current-actor"
-	if _, err := ConvertSources(sources); err != nil {
-		t.Fatalf("explicit registry unexpectedly required actor: %v", err)
+	snapshot := mustConvertSources(t, sources)
+	if _, found := ruleByID(snapshot.Registry(), string(CompiledLinearComment)); found {
+		t.Fatal("exact authoritative comment default was preserved")
 	}
+	label := findRule(t, snapshot.Registry(), string(CompiledLinearLabel))
+	if label.WorkflowID != workflow.ProviderNeutralID {
+		t.Fatalf("exact authoritative label workflow = %q", label.WorkflowID)
+	}
+
+	sources = populatedSources()
 	sources.TriggerActorID = ""
+	if _, err := ConvertSources(sources); err == nil {
+		t.Fatal("explicit reserved rules were classified without an authoritative actor")
+	}
+
 	sources.Registry = nil
 	if _, err := ConvertSources(sources); err == nil {
-		t.Fatal("implicit registry accepted without actor")
+		t.Fatal("implicit reserved rules were synthesized without an authoritative actor")
+	}
+}
+
+func TestConvertSourcesRejectsActorOnlyReservedRuleCustomization(t *testing.T) {
+	for _, id := range []string{string(CompiledLinearComment), string(CompiledLinearLabel)} {
+		t.Run(id, func(t *testing.T) {
+			sources := populatedSources()
+			custom := &sources.Registry.Rules[ruleSourceIndex(t, sources.Registry.Rules, id)]
+			custom.Filter.Attributes[triggerregistry.AttributeActorID] = "actor-customized"
+			if _, err := ConvertSources(sources); !errors.Is(err, ErrReservedWorkflowConflict) {
+				t.Fatalf("actor-only reserved rule error = %v", err)
+			}
+		})
 	}
 }
 

@@ -73,14 +73,18 @@ func ConvertSources(sources Sources) (Snapshot, error) {
 	rules := make([]Rule, 0, len(registry.Rules))
 	for _, rule := range registry.Rules {
 		converted := ruleFromSource(rule)
-		triggerActor := converted.Filter.Attributes[triggerregistry.AttributeActorID]
-		if kind, recognized := RecognizeCompiledRule(converted, sources.Settings, triggerActor); recognized {
+		if reservedCompiledRuleID(converted.ID) && sources.TriggerActorID == "" {
+			return Snapshot{}, fmt.Errorf("policy: trigger actor is required to classify reserved rule %s", converted.ID)
+		}
+		if kind, recognized := RecognizeCompiledRule(converted, sources.Settings, sources.TriggerActorID); recognized {
 			switch kind {
 			case CompiledLinearComment:
 				continue
 			case CompiledLinearLabel:
 				converted.WorkflowID = workflow.ProviderNeutralID
 			}
+		} else if _, ambiguous := recognizeCompiledRuleWithCorrectedActor(converted, sources.Settings, sources.TriggerActorID); ambiguous {
+			return Snapshot{}, fmt.Errorf("%w: rule %s differs from the compiled default only by actor", ErrReservedWorkflowConflict, converted.ID)
 		} else if converted.WorkflowID == workflow.DefaultID {
 			return Snapshot{}, fmt.Errorf("%w: rule %s references %s", ErrReservedWorkflowConflict, converted.ID, workflow.DefaultID)
 		}
@@ -112,6 +116,10 @@ func ConvertSources(sources Sources) (Snapshot, error) {
 			EnabledProjectIDs: slices.Clone(sources.TaskControl.EnabledProjectIDs),
 		},
 	})
+}
+
+func reservedCompiledRuleID(id string) bool {
+	return id == string(CompiledLinearComment) || id == string(CompiledLinearLabel)
 }
 
 func workflowFromSource(definition workflow.Definition) Workflow {

@@ -56,8 +56,13 @@ func TestRecognizeCompiledRulesByCanonicalDigest(t *testing.T) {
 			t.Fatalf("customized rule %s recognized as compiled", source.ID)
 		}
 	}
-	comment := ruleFromSource(triggerregistry.Defaults(configuration, "actor-tom").Rules[0])
-	if _, recognized := RecognizeCompiledRule(comment, configuration, "different-actor"); recognized {
-		t.Fatal("rule with a different compiled actor was recognized")
+	for _, source := range triggerregistry.Defaults(configuration, "actor-tom").Rules {
+		converted := ruleFromSource(source)
+		if _, recognized := RecognizeCompiledRule(converted, configuration, "different-actor"); recognized {
+			t.Fatalf("rule %s with a different authoritative actor was recognized", source.ID)
+		}
+		if kind, ambiguous := recognizeCompiledRuleWithCorrectedActor(converted, configuration, "different-actor"); !ambiguous || string(kind) != source.ID {
+			t.Fatalf("rule %s actor-only ambiguity = %q, %t", source.ID, kind, ambiguous)
+		}
 	}
 }
