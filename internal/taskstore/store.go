@@ -34,6 +34,8 @@ const (
 	operationState      = "state"
 	operationRouting    = "routing"
 	operationCompletion = "completion"
+	operationTaskSubmit = "task-operation-submit"
+	operationTaskUpdate = "task-operation-transition"
 )
 
 var (
@@ -146,14 +148,15 @@ type CompletionCommand struct {
 }
 
 type diskOperation struct {
-	Kind       string            `json:"kind"`
-	Schema     int               `json:"schema,omitempty"`
-	Checkpoint *Snapshot         `json:"checkpoint,omitempty"`
-	Outcome    *OperationOutcome `json:"outcome,omitempty"`
-	Task       *Task             `json:"task,omitempty"`
-	Message    *Message          `json:"message,omitempty"`
-	Link       *Link             `json:"link,omitempty"`
-	Gate       *Gate             `json:"gate,omitempty"`
+	Kind          string            `json:"kind"`
+	Schema        int               `json:"schema,omitempty"`
+	Checkpoint    *Snapshot         `json:"checkpoint,omitempty"`
+	Outcome       *OperationOutcome `json:"outcome,omitempty"`
+	Task          *Task             `json:"task,omitempty"`
+	Message       *Message          `json:"message,omitempty"`
+	Link          *Link             `json:"link,omitempty"`
+	Gate          *Gate             `json:"gate,omitempty"`
+	TaskOperation *TaskOperation    `json:"taskOperation,omitempty"`
 }
 
 type Store struct {
@@ -164,6 +167,8 @@ type Store struct {
 	links        map[string][]Link
 	gates        map[string][]Gate
 	outcomes     map[string]OperationOutcome
+	operations   map[string]TaskOperation
+	operationIDs map[string]string
 	nextSequence uint64
 	poisoned     error
 	random       io.Reader
@@ -226,6 +231,8 @@ func (s *Store) reset() {
 	s.links = make(map[string][]Link)
 	s.gates = make(map[string][]Gate)
 	s.outcomes = make(map[string]OperationOutcome)
+	s.operations = make(map[string]TaskOperation)
+	s.operationIDs = make(map[string]string)
 	s.nextSequence = 1
 }
 
@@ -592,6 +599,11 @@ func (s *Store) Status() Status {
 	for _, messages := range s.messages {
 		status.Messages += uint64(len(messages))
 	}
+	for _, operation := range s.operations {
+		if operation.State != TaskOperationAcknowledged {
+			status.PendingOperations++
+		}
+	}
 	return status
 }
 
@@ -649,6 +661,12 @@ func (s *Store) persistLocked(operation diskOperation) error {
 func (s *Store) applyLocked(operation diskOperation) error {
 	if operation.Kind == operationCheckpoint {
 		return s.applyCheckpointLocked(operation)
+	}
+	if operation.Kind == operationTaskSubmit || operation.Kind == operationTaskUpdate {
+		return s.applyTaskOperationLocked(operation)
+	}
+	if operation.TaskOperation != nil {
+		return errors.New("task store: task operation evidence belongs only to its journal operation")
 	}
 	if operation.Task == nil || operation.Outcome == nil || operation.Outcome.Task == nil || operation.Outcome.Kind != operation.Kind || operation.Outcome.Scope == "" || operation.Outcome.CommandHash == "" || !reflect.DeepEqual(*operation.Task, *operation.Outcome.Task) {
 		return errors.New("task store: invalid operation envelope")
@@ -722,7 +740,8 @@ func (s *Store) applyLocked(operation diskOperation) error {
 }
 
 func (s *Store) applyCheckpointLocked(operation diskOperation) error {
-	if operation.Checkpoint == nil || operation.Checkpoint.Schema != SchemaVersion || operation.Checkpoint.NextSequence == 0 {
+	if operation.Checkpoint == nil || operation.Checkpoint.Schema != SchemaVersion || operation.Checkpoint.NextSequence == 0 ||
+		operation.Outcome != nil || operation.Task != nil || operation.Message != nil || operation.Link != nil || operation.Gate != nil || operation.TaskOperation != nil {
 		return errors.New("task store: invalid checkpoint projection")
 	}
 	s.reset()
@@ -768,6 +787,11 @@ func (s *Store) applyCheckpointLocked(operation diskOperation) error {
 			return err
 		}
 		s.outcomes[outcome.Scope] = outcome.Clone()
+	}
+	for _, taskOperation := range operation.Checkpoint.Operations {
+		if err := s.installCheckpointTaskOperation(taskOperation); err != nil {
+			return err
+		}
 	}
 	for id, task := range s.tasks {
 		if task.MessageCount != uint64(len(s.messages[id])) || task.LinkCount != uint64(len(s.links[id])) || task.GateCount != uint64(len(s.gates[id])) {
@@ -1003,6 +1027,10 @@ func (s *Store) snapshotLocked() Snapshot {
 		snapshot.Outcomes = append(snapshot.Outcomes, outcome.Clone())
 	}
 	sort.Slice(snapshot.Outcomes, func(i, j int) bool { return snapshot.Outcomes[i].Scope < snapshot.Outcomes[j].Scope })
+	for _, operation := range s.operations {
+		snapshot.Operations = append(snapshot.Operations, operation.Clone())
+	}
+	sort.Slice(snapshot.Operations, func(i, j int) bool { return snapshot.Operations[i].ID < snapshot.Operations[j].ID })
 	return snapshot
 }
 

@@ -149,6 +149,7 @@ type Snapshot struct {
 	Links        []Link             `json:"links"`
 	Gates        []Gate             `json:"gates"`
 	Outcomes     []OperationOutcome `json:"outcomes"`
+	Operations   []TaskOperation    `json:"operations,omitempty"`
 }
 
 type TaskPage struct {
@@ -162,11 +163,12 @@ type MessagePage struct {
 }
 
 type Status struct {
-	Healthy       bool   `json:"healthy"`
-	Poisoned      bool   `json:"poisoned"`
-	Tasks         int    `json:"tasks"`
-	Messages      uint64 `json:"messages"`
-	PendingStages int    `json:"pendingStages"`
+	Healthy           bool   `json:"healthy"`
+	Poisoned          bool   `json:"poisoned"`
+	Tasks             int    `json:"tasks"`
+	Messages          uint64 `json:"messages"`
+	PendingStages     int    `json:"pendingStages"`
+	PendingOperations int    `json:"pendingOperations,omitempty"`
 }
 
 func (t Task) Terminal() bool {
@@ -341,6 +343,10 @@ func (s Snapshot) Clone() Snapshot {
 	clone.Outcomes = make([]OperationOutcome, len(s.Outcomes))
 	for i := range s.Outcomes {
 		clone.Outcomes[i] = s.Outcomes[i].Clone()
+	}
+	clone.Operations = make([]TaskOperation, len(s.Operations))
+	for i := range s.Operations {
+		clone.Operations[i] = s.Operations[i].Clone()
 	}
 	return clone
 }
