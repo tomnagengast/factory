@@ -45,13 +45,25 @@ type RuntimeArtifacts struct {
 // Initial hashes characterize staging only; selected mutable stores validate
 // through strict replay after canonical writes begin.
 type GenerationManifest struct {
-	Schema           int           `json:"schema"`
-	StateGeneration  int           `json:"stateGeneration"`
-	MigrationID      string        `json:"migrationId"`
-	SourceRootDigest string        `json:"sourceRootDigest"`
-	AuditDigest      string        `json:"auditDigest"`
-	TargetSchemas    TargetSchemas `json:"targetSchemas"`
-	Artifacts        []SourceHash  `json:"artifacts"`
+	Schema           int                 `json:"schema"`
+	StateGeneration  int                 `json:"stateGeneration"`
+	MigrationID      string              `json:"migrationId"`
+	SourceRootDigest string              `json:"sourceRootDigest"`
+	AuditDigest      string              `json:"auditDigest"`
+	TargetSchemas    TargetSchemas       `json:"targetSchemas"`
+	Artifacts        []SourceHash        `json:"artifacts"`
+	Activation       ActivationInventory `json:"activation"`
+}
+
+type ActivationRun struct {
+	RunID       string              `json:"runId"`
+	State       runs.LifecycleState `json:"state"`
+	SessionName string              `json:"sessionName,omitempty"`
+}
+
+type ActivationInventory struct {
+	NonterminalRuns []ActivationRun `json:"nonterminalRuns"`
+	LiveSessions    []string        `json:"liveSessions"`
 }
 
 type Generation struct {
@@ -359,7 +371,7 @@ func materializeGeneration(sourceRoot, destination string, report DryRunReport, 
 		Schema: generationManifestSchema, StateGeneration: stateGeneration,
 		MigrationID: report.Manifest.MigrationID, SourceRootDigest: report.Manifest.SourceRootDigest,
 		AuditDigest: report.AuditDigest, TargetSchemas: report.Manifest.TargetSchemas,
-		Artifacts: artifacts,
+		Artifacts: artifacts, Activation: activationInventory(runSnapshot),
 	}
 	for name, value := range map[string]any{
 		generationManifestFile: manifest, generationAuditFile: report.Audit,
@@ -498,6 +510,9 @@ func ValidateStagedGeneration(path string, expected DryRunReport) (Generation, e
 	if err != nil || runDigest != audit.CanonicalRuns.Digest {
 		return Generation{}, errors.New("migration: staged Runs audit changed")
 	}
+	if !reflect.DeepEqual(manifest.Activation, activationInventory(runSnapshot)) {
+		return Generation{}, errors.New("migration: activation inventory changed")
+	}
 	taskStore, err := taskstore.OpenExisting(filepath.Join(path, "tasks.jsonl"))
 	if err != nil {
 		return Generation{}, err
@@ -572,6 +587,9 @@ func validateGenerationManifest(value GenerationManifest, expected DryRunReport)
 	}
 	if !slices.IsSortedFunc(value.Artifacts, func(left, right SourceHash) int { return compare(left.Path, right.Path) }) {
 		return errors.New("migration: staged generation artifact hashes are not canonical")
+	}
+	if err := validateActivationInventory(value.Activation); err != nil {
+		return err
 	}
 	return validateHashes(value.Artifacts)
 }
@@ -668,6 +686,55 @@ func copyBackup(sourceRoot, destination string, receipt BackupReceipt) error {
 		if err := writeExclusive(to, data, os.FileMode(source.Mode)); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func activationInventory(snapshot runs.Snapshot) ActivationInventory {
+	model := snapshot.Model()
+	inventory := ActivationInventory{
+		NonterminalRuns: []ActivationRun{},
+		LiveSessions:    []string{},
+	}
+	for _, run := range model.Runs {
+		if !run.State.Nonterminal() {
+			continue
+		}
+		inventory.NonterminalRuns = append(inventory.NonterminalRuns, ActivationRun{
+			RunID: run.ID, State: run.State, SessionName: run.SessionName,
+		})
+		if run.SessionName != "" {
+			inventory.LiveSessions = append(inventory.LiveSessions, run.SessionName)
+		}
+	}
+	slices.SortFunc(inventory.NonterminalRuns, func(left, right ActivationRun) int {
+		return compare(left.RunID, right.RunID)
+	})
+	slices.Sort(inventory.LiveSessions)
+	return inventory
+}
+
+func validateActivationInventory(inventory ActivationInventory) error {
+	if inventory.NonterminalRuns == nil || inventory.LiveSessions == nil ||
+		!slices.IsSortedFunc(inventory.NonterminalRuns, func(left, right ActivationRun) int {
+			return compare(left.RunID, right.RunID)
+		}) || !slices.IsSorted(inventory.LiveSessions) {
+		return errors.New("migration: activation inventory is not canonical")
+	}
+	sessions := make(map[string]bool, len(inventory.LiveSessions))
+	for _, session := range inventory.LiveSessions {
+		if session == "" || sessions[session] {
+			return errors.New("migration: activation session inventory is invalid")
+		}
+		sessions[session] = true
+	}
+	seen := make(map[string]bool, len(inventory.NonterminalRuns))
+	for _, run := range inventory.NonterminalRuns {
+		if run.RunID == "" || seen[run.RunID] || !run.State.Nonterminal() ||
+			(run.SessionName != "" && !sessions[run.SessionName]) {
+			return errors.New("migration: activation Run inventory is invalid")
+		}
+		seen[run.RunID] = true
 	}
 	return nil
 }

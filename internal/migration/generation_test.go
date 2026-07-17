@@ -28,6 +28,11 @@ func TestBuildGenerationMaterializesAndIdempotentlyReopensCompleteState(t *testi
 	if created.Manifest.StateGeneration != 1 || created.Manifest.MigrationID != created.Report.Manifest.MigrationID {
 		t.Fatalf("created generation = %#v", created)
 	}
+	if len(created.Manifest.Activation.NonterminalRuns) != 1 ||
+		created.Manifest.Activation.NonterminalRuns[0].RunID == "" ||
+		len(created.Manifest.Activation.LiveSessions) != 1 {
+		t.Fatalf("activation inventory = %#v", created.Manifest.Activation)
+	}
 	for _, name := range []string{
 		"policy.json", "repositories.json", "runs.jsonl", "tasks.jsonl", "system-events.jsonl",
 		"task-source-neutral.json", "activity", "runtime", "backup", "generation.json", "audit.json", "migration.json", "backup-receipt.json",
@@ -66,6 +71,28 @@ func TestBuildGenerationMaterializesAndIdempotentlyReopensCompleteState(t *testi
 	}
 	if !reflect.DeepEqual(afterFiles, beforeFiles) || !reflect.DeepEqual(afterDirectories, beforeDirectories) {
 		t.Fatal("generation construction mutated legacy source state")
+	}
+}
+
+func TestValidateStagedGenerationRejectsActivationInventoryRewrite(t *testing.T) {
+	t.Parallel()
+	source := copyGolden(t)
+	generation, err := BuildGeneration(source, filepath.Join(t.TempDir(), "generations"), testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation.Manifest.Activation.NonterminalRuns = []ActivationRun{}
+	generation.Manifest.Activation.LiveSessions = []string{}
+	manifestPath := filepath.Join(generation.Path, generationManifestFile)
+	if err := os.Remove(manifestPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeExclusiveJSON(manifestPath, generation.Manifest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateStagedGeneration(generation.Path, generation.Report); err == nil ||
+		!strings.Contains(err.Error(), "activation inventory") {
+		t.Fatalf("activation inventory rewrite error = %v", err)
 	}
 }
 
