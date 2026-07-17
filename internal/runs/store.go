@@ -56,8 +56,9 @@ type diskOperation struct {
 // nonterminal Run that owned its task when the journal entry was appended.
 // At is the shared timestamp for the rejected bookkeeping Run and owner wake.
 type ContinuationCoalescence struct {
-	OwnerRunID string    `json:"ownerRunId"`
-	At         time.Time `json:"at"`
+	OwnerRunID       string    `json:"ownerRunId"`
+	BookkeepingRunID string    `json:"bookkeepingRunId,omitempty"`
+	At               time.Time `json:"at"`
 }
 
 type ReconcileFailureMode string
@@ -303,11 +304,26 @@ func (s *Store) ApplyAdmissionBatch(batches []AdmissionBatch, runs []Run, increm
 // the same journal operation. Without an owner, the continuation remains an
 // admitted Run and waits for ordinary oldest-per-task manager ownership.
 func (s *Store) ApplyContinuation(batch AdmissionBatch, run Run, increment RateBucket) (Run, error) {
+	return s.ApplyFeedback(batch, run, nil, []RateBucket{increment})
+}
+
+// ApplyFeedback atomically appends one protected feedback Run and any
+// explicitly configured generic Runs matched by the same source event. The
+// protected Run alone is coalesced into an existing task owner; additive Runs
+// retain ordinary admitted ownership order.
+func (s *Store) ApplyFeedback(batch AdmissionBatch, protected Run, additional []Run, increments []RateBucket) (Run, error) {
 	batch = cloneAdmissionBatches([]AdmissionBatch{batch})[0]
 	canonicalizeAdmissionBatch(&batch)
-	run = cloneRun(run)
-	canonicalizeRun(&run)
-	increment.Minute = increment.Minute.UTC().Truncate(time.Minute)
+	protected = cloneRun(protected)
+	canonicalizeRun(&protected)
+	runs := append([]Run{protected}, cloneRuns(additional)...)
+	for index := range runs {
+		canonicalizeRun(&runs[index])
+	}
+	for index := range increments {
+		increments[index].Minute = increments[index].Minute.UTC().Truncate(time.Minute)
+	}
+	slices.SortFunc(increments, compareRateBuckets)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -317,7 +333,7 @@ func (s *Store) ApplyContinuation(batch AdmissionBatch, run Run, increment RateB
 
 	ownerIndex := -1
 	for index, candidate := range s.state.model.Runs {
-		if !candidate.State.Nonterminal() || !candidate.Causation.Task.Equal(run.Causation.Task) {
+		if !candidate.State.Nonterminal() || !candidate.Causation.Task.Equal(protected.Causation.Task) {
 			continue
 		}
 		if ownerIndex < 0 || compareOwnershipOrder(candidate, s.state.model.Runs[ownerIndex]) < 0 {
@@ -331,22 +347,29 @@ func (s *Store) ApplyContinuation(batch AdmissionBatch, run Run, increment RateB
 		// The rejected bookkeeping transition must advance its admitted
 		// transition, while the coalesced owner update must also advance the
 		// owner's last durable mutation. Use the later boundary plus one tick.
-		at := run.UpdatedAt.Add(time.Nanosecond)
+		at := protected.UpdatedAt.Add(time.Nanosecond)
 		if !at.After(owner.UpdatedAt) {
 			at = owner.UpdatedAt.Add(time.Nanosecond)
 		}
-		run.Causation.ParentAdmissionID = owner.Causation.AdmissionID
-		run.Causation.ParentRunID = owner.ID
-		run.State = StateRejected
-		run.Detail = "native-feedback-coalesced"
-		run.UpdatedAt = at
-		run.FinishedAt = &at
-		run.Transitions = append(run.Transitions, LifecycleTransition{
-			ID: transitionID(run, StateRejected), State: StateRejected, Attempts: run.Attempts, At: at,
+		protected.Causation.ParentAdmissionID = owner.Causation.AdmissionID
+		protected.Causation.ParentRunID = owner.ID
+		protected.State = StateRejected
+		protected.Detail = "feedback-coalesced"
+		protected.UpdatedAt = at
+		protected.FinishedAt = &at
+		protected.Transitions = append(protected.Transitions, LifecycleTransition{
+			ID: transitionID(protected, StateRejected), State: StateRejected, Attempts: protected.Attempts, At: at,
 		})
-		continuation = &ContinuationCoalescence{OwnerRunID: owner.ID, At: at}
+		runs[0] = protected
+		continuation = &ContinuationCoalescence{OwnerRunID: owner.ID, BookkeepingRunID: protected.ID, At: at}
 	}
-	deriveAdmissionDeliveries(&run)
+	for index := range runs {
+		deriveAdmissionDeliveries(&runs[index])
+		if runs[index].ID == protected.ID {
+			protected = runs[index]
+		}
+	}
+	slices.SortFunc(runs, compareRuns)
 
 	sequence, err := nextSequence(s.state.model.JournalSequence)
 	if err != nil {
@@ -358,7 +381,7 @@ func (s *Store) ApplyContinuation(batch AdmissionBatch, run Run, increment RateB
 	}
 	operation := diskOperation{
 		Kind: kind, Version: JournalVersion, Sequence: sequence,
-		AdmissionBatches: []AdmissionBatch{batch}, Runs: []Run{run}, RateIncrements: []RateBucket{increment},
+		AdmissionBatches: []AdmissionBatch{batch}, Runs: runs, RateIncrements: slices.Clone(increments),
 		Continuation: continuation,
 	}
 	if _, err := applyOperation(s.state.model, operation); err != nil {
@@ -377,7 +400,7 @@ func (s *Store) ApplyContinuation(batch AdmissionBatch, run Run, increment RateB
 	if err := s.compactIfNeededLocked(); err != nil {
 		return Run{}, err
 	}
-	return cloneRun(run), nil
+	return cloneRun(protected), nil
 }
 
 // deriveAdmissionDeliveries makes the Store the sole owner of fresh Run
@@ -651,11 +674,18 @@ func applyOperation(current Model, operation diskOperation) (Snapshot, error) {
 
 func applyContinuationCoalescence(current Model, operation diskOperation) (Snapshot, error) {
 	coalescence := *operation.Continuation
-	if len(operation.AdmissionBatches) != 1 || len(operation.Runs) != 1 || len(operation.RateIncrements) != 1 {
+	if len(operation.AdmissionBatches) != 1 || len(operation.Runs) == 0 || len(operation.RateIncrements) == 0 {
 		return Snapshot{}, errors.New("runs: continuation coalescence requires one complete admission")
 	}
 	batch := operation.AdmissionBatches[0]
-	bookkeeping := operation.Runs[0]
+	bookkeepingIndex := 0
+	if coalescence.BookkeepingRunID != "" {
+		bookkeepingIndex = slices.IndexFunc(operation.Runs, func(run Run) bool { return run.ID == coalescence.BookkeepingRunID })
+		if bookkeepingIndex < 0 {
+			return Snapshot{}, errors.New("runs: continuation bookkeeping Run is missing")
+		}
+	}
+	bookkeeping := operation.Runs[bookkeepingIndex]
 	ownerIndex := -1
 	for index, candidate := range current.Runs {
 		if candidate.ID == coalescence.OwnerRunID {
@@ -673,8 +703,8 @@ func applyContinuationCoalescence(current Model, operation diskOperation) (Snaps
 			return Snapshot{}, errors.New("runs: continuation owner is not the oldest task owner")
 		}
 	}
-	if batch.Origin != AdmissionOriginContinuation || !owner.State.Nonterminal() || !owner.Causation.Task.Equal(bookkeeping.Causation.Task) ||
-		bookkeeping.State != StateRejected || bookkeeping.Detail != "native-feedback-coalesced" ||
+	if (batch.Origin != AdmissionOriginContinuation && batch.Origin != AdmissionOriginEvent) || !owner.State.Nonterminal() || !owner.Causation.Task.Equal(bookkeeping.Causation.Task) ||
+		bookkeeping.State != StateRejected || bookkeeping.Detail != "feedback-coalesced" ||
 		bookkeeping.Causation.ParentAdmissionID != owner.Causation.AdmissionID || bookkeeping.Causation.ParentRunID != owner.ID ||
 		bookkeeping.UpdatedAt != coalescence.At || bookkeeping.FinishedAt == nil || *bookkeeping.FinishedAt != coalescence.At ||
 		!coalescence.At.After(owner.UpdatedAt) || slices.Contains(owner.DeliveryIDs, batch.EventID) {
@@ -703,7 +733,7 @@ func applyContinuationCoalescence(current Model, operation diskOperation) (Snaps
 		nextOwner.GitHub.ReconcileFailures = 0
 		nextOwner.GitHub.RemediationRequested = false
 		nextOwner.ResumeCount++
-		nextOwner.Detail = "native task feedback received; resuming lifecycle"
+		nextOwner.Detail = "task feedback received; resuming lifecycle"
 		transition := LifecycleTransition{
 			ID: transitionID(owner, StatePending), State: StatePending, Attempts: nextOwner.Attempts, At: coalescence.At,
 		}
@@ -1267,9 +1297,11 @@ func validateOperationShape(operation diskOperation) error {
 		}
 	case operationContinuation:
 		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 1 || operation.Transition != nil ||
-			len(operation.Runs) != 1 || len(operation.RateIncrements) != 1 || operation.Reconcile != nil || operation.PullRequestWake != nil ||
+			len(operation.Runs) == 0 || len(operation.RateIncrements) == 0 || operation.Reconcile != nil || operation.PullRequestWake != nil ||
 			operation.Publication != nil || operation.Acknowledgement != nil || operation.Continuation == nil ||
-			!validIdentity(operation.Continuation.OwnerRunID) || operation.Continuation.At.IsZero() || operation.Continuation.At.Location() != time.UTC {
+			!validIdentity(operation.Continuation.OwnerRunID) ||
+			operation.Continuation.BookkeepingRunID != "" && !validIdentity(operation.Continuation.BookkeepingRunID) ||
+			operation.Continuation.At.IsZero() || operation.Continuation.At.Location() != time.UTC {
 			return errors.New("runs: invalid continuation-coalesce operation")
 		}
 	case operationTransition:

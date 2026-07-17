@@ -78,7 +78,7 @@ func TestNativeAdmissionMatchesLegacySyntheticLifecycle(t *testing.T) {
 	}
 	reflectedAt := continuationAt.Add(time.Nanosecond)
 	legacyRejected, err := legacyRouter.TransitionInvocation(
-		legacyFeedback.ID, triggerrouter.StateRejected, legacyUpdated.ID, "native-feedback-coalesced", &reflectedAt, reflectedAt,
+		legacyFeedback.ID, triggerrouter.StateRejected, legacyUpdated.ID, "feedback-coalesced", &reflectedAt, reflectedAt,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -234,7 +234,7 @@ func TestNativeContinuationCoalescesAtomically(t *testing.T) {
 		if err != nil || !created {
 			t.Fatalf("coalesced continuation = %#v, %t, %v", bookkeeping, created, err)
 		}
-		if bookkeeping.State != StateRejected || bookkeeping.Detail != "native-feedback-coalesced" || bookkeeping.FinishedAt == nil ||
+		if bookkeeping.State != StateRejected || bookkeeping.Detail != "feedback-coalesced" || bookkeeping.FinishedAt == nil ||
 			bookkeeping.Causation.ParentRunID != owner.ID || bookkeeping.Causation.ParentAdmissionID != owner.Causation.AdmissionID ||
 			!bookkeeping.UpdatedAt.After(admission.AdmittedAt) || len(bookkeeping.Transitions) != 2 {
 			t.Fatalf("bookkeeping Run = %#v", bookkeeping)
@@ -305,7 +305,7 @@ func TestNativeContinuationCoalescesAtomically(t *testing.T) {
 		if updated.State != StatePending || updated.TriggerKind != triggerKindComment || updated.ResumeCount != owner.ResumeCount+1 ||
 			updated.GitHub.NextReconcileAt != nil || updated.GitHub.ReconcileFailures != 0 || updated.GitHub.RemediationRequested ||
 			updated.GitHub.LastAuthoritativeRefreshAt == nil || *updated.GitHub.LastAuthoritativeRefreshAt != bookkeeping.UpdatedAt ||
-			updated.Detail != "native task feedback received; resuming lifecycle" || !reflect.DeepEqual(updated.Ready, &ready) ||
+			updated.Detail != "task feedback received; resuming lifecycle" || !reflect.DeepEqual(updated.Ready, &ready) ||
 			len(updated.Transitions) != len(owner.Transitions)+1 || updated.Transitions[len(updated.Transitions)-1].State != StatePending {
 			t.Fatalf("resumed owner = %#v", updated)
 		}
