@@ -1,7 +1,8 @@
-import { createMemo, createResource, createSignal, For, onCleanup, onMount, Show, type JSX, type Resource } from "solid-js";
+import { createMemo, createResource, createSignal, For, onMount, Show, type JSX, type Resource } from "solid-js";
 import { ActivityHeader, formatTime, InlineError, LoadingRows, resourceState } from "./activity";
 import { ActivityChart, type ActivityCount, Pagination } from "./charts";
 import { getJSON } from "./http";
+import { usePolling } from "./poll";
 
 function resourceSnapshot<T>(resource: Resource<T>): T | undefined {
   return resource.error ? undefined : resource();
@@ -84,9 +85,8 @@ export function WirePage(): JSX.Element {
 
   onMount(() => {
     document.title = "System wire | Factory";
-    const timer = window.setInterval(() => void refetch(), 5000);
-    onCleanup(() => window.clearInterval(timer));
   });
+  usePolling(() => void refetch(), 5000);
 
   function changePage(nextPage: number): void {
     setSelectedSequence(undefined);

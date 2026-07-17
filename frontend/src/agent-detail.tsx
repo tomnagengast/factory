@@ -1,6 +1,7 @@
-import { createResource, createSignal, For, onCleanup, onMount, Show, type JSX, type Resource } from "solid-js";
+import { createResource, createSignal, For, onMount, Show, type JSX, type Resource } from "solid-js";
 import { ActivityHeader, resourceState, runStateLabel } from "./activity";
 import { getJSON } from "./http";
+import { usePolling } from "./poll";
 
 const refreshIntervalMs = 2000;
 
@@ -91,13 +92,12 @@ export function AgentPage(props: { load: () => Promise<AgentView> }): JSX.Elemen
 
   onMount(() => {
     document.title = "Agent run | Factory";
-    const timer = window.setInterval(() => {
-      if (shouldRefreshAgent(agentSnapshot())) {
-        void refetch();
-      }
-    }, refreshIntervalMs);
-    onCleanup(() => window.clearInterval(timer));
   });
+  usePolling(
+    () => void refetch(),
+    refreshIntervalMs,
+    () => shouldRefreshAgent(agentSnapshot()),
+  );
 
   return (
     <main class="agent-page" id="main-content">

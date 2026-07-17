@@ -1,6 +1,5 @@
 import {
   createResource,
-  onCleanup,
   onMount,
   Show,
   type JSX,
@@ -14,6 +13,7 @@ import {
 } from "./activity";
 import type { AgentRun } from "./agent";
 import { getJSON } from "./http";
+import { usePolling } from "./poll";
 
 type Health = {
   status: string;
@@ -127,9 +127,8 @@ export function ActivityPage(): JSX.Element {
 
   onMount(() => {
     document.title = "Home | Factory";
-    const timer = window.setInterval(() => void refetch(), refreshIntervalMs);
-    onCleanup(() => window.clearInterval(timer));
   });
+  usePolling(() => void refetch(), refreshIntervalMs);
 
   return (
     <main class="activity-page" id="main-content">

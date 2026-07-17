@@ -1,8 +1,9 @@
-import { createMemo, createResource, For, onCleanup, onMount, Show, type JSX, type Resource } from "solid-js";
+import { createMemo, createResource, For, onMount, Show, type JSX, type Resource } from "solid-js";
 import { ActivityHeader, formatTime, InlineError, LoadingRows, resourceState, runStateLabel, shortOID } from "./activity";
 import { agentRunHref, type AgentActivityRun } from "./agent";
 import { ActivityChart, type ActivityCount } from "./charts";
 import { getJSON } from "./http";
+import { usePolling } from "./poll";
 
 function resourceSnapshot<T>(resource: Resource<T>): T | undefined {
   return resource.error ? undefined : resource();
@@ -29,9 +30,8 @@ export function AgentActivityPage(): JSX.Element {
 
   onMount(() => {
     document.title = "Agent activity | Factory";
-    const timer = window.setInterval(() => void refetch(), 5000);
-    onCleanup(() => window.clearInterval(timer));
   });
+  usePolling(() => void refetch(), 5000);
 
   return (
     <main class="activity-page" id="main-content">
