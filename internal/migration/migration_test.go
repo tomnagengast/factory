@@ -80,7 +80,7 @@ func TestDryRunCharacterizesCurrentShapeWithoutActivation(t *testing.T) {
 	if report.Manifest.MigrationID != "migration-739285404f873b4621049f0e909b0432" {
 		t.Fatalf("pre-audit migration ID = %s", report.Manifest.MigrationID)
 	}
-	if report.Manifest.TargetSchemas != (TargetSchemas{Policy: 1, Repositories: 1, Runs: 4}) || report.Audit.TargetSchemas != report.Manifest.TargetSchemas {
+	if report.Manifest.TargetSchemas != (TargetSchemas{Policy: 1, Repositories: 1, Runs: 5}) || report.Audit.TargetSchemas != report.Manifest.TargetSchemas {
 		t.Fatalf("target schemas = manifest %#v audit %#v", report.Manifest.TargetSchemas, report.Audit.TargetSchemas)
 	}
 	if report.Audit.Decisions != 1 || report.Audit.Invocations != 1 || report.Audit.Runs != 1 || report.Audit.ActiveRuns != 1 || report.Audit.WorkflowPins != 1 {
@@ -104,7 +104,7 @@ func TestDryRunCharacterizesCurrentShapeWithoutActivation(t *testing.T) {
 		t.Fatalf("canonical repository audit = %#v", repositoryAudit)
 	}
 	runsAudit := report.Audit.CanonicalRuns
-	if runsAudit.Schema != 4 || runsAudit.SourceDecisions != 1 || runsAudit.SourceInvocations != 1 || runsAudit.SourceRunsRetained != 1 ||
+	if runsAudit.Schema != 5 || runsAudit.SourceDecisions != 1 || runsAudit.SourceInvocations != 1 || runsAudit.SourceRunsRetained != 1 ||
 		runsAudit.LinkedPairs != 1 || runsAudit.SynthesizedRuns != 0 || runsAudit.DirectRuns != 0 || runsAudit.TransitionReceipts != 4 ||
 		runsAudit.CanonicalBatchesRetained != 1 || runsAudit.CanonicalBatchesLifetime != 1 || !runsAudit.BatchLifetimeMigrationBaseline ||
 		runsAudit.CanonicalRunsRetained != 1 || runsAudit.CanonicalRunsLifetime != 1 || runsAudit.CanonicalRateBuckets != 1 {
@@ -113,8 +113,8 @@ func TestDryRunCharacterizesCurrentShapeWithoutActivation(t *testing.T) {
 	if report.Audit.CompiledRepositoryInputDigest != "520744fb78f49dc36b45cf4b8d38efeeb72049a7f775ab9e04177b29981ff8cf" ||
 		policyAudit.Digest != "e3132827aa4041394ba294fd59d521263313f9e60120de968083dbdf86f97e20" ||
 		repositoryAudit.Digest != "cf98d2b7b573d66a1b051dc9e81fc587262c7a10bd77abfdda648adf9b6c16eb" ||
-		runsAudit.Digest != "efcc0a4205639b1a9e741b173db7b2873c7b76661a8bc7ce48544a55d46dee71" ||
-		report.AuditDigest != "b0b7ff84842ab088fa7a996434babea87fe60d60502582e0c34e3ae6f694167d" {
+		runsAudit.Digest != "a18ea602a4c712a837660626c77ea1d87006f4694f7f5e128de1a7c0beb44640" ||
+		report.AuditDigest != "59faea7372ec4bd47c14a2f14eb6c598c75cdb875919f8db81652b0427634cf7" {
 		t.Fatalf("canonical digests = compiled %s policy %s repositories %s Runs %s audit %s", report.Audit.CompiledRepositoryInputDigest, policyAudit.Digest, repositoryAudit.Digest, runsAudit.Digest, report.AuditDigest)
 	}
 	auditJSON, err := json.Marshal(report.Audit)

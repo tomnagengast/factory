@@ -311,6 +311,7 @@ func newEventRun(record eventwire.Record, batch AdmissionBatch, rule policy.Rule
 		root = record.Event.ID
 	}
 	ancestors := append(slices.Clone(record.Event.AncestorRuleIDs), rule.ID)
+	initialTransitionID := runID + ":admitted"
 	return Run{
 		ID: runID,
 		Causation: Causation{
@@ -324,7 +325,11 @@ func newEventRun(record eventwire.Record, batch AdmissionBatch, rule policy.Rule
 		},
 		TriggerKind: triggerKindConfiguredRule, DeliveryIDs: []string{record.Event.ID},
 		State: StateAdmitted, CreatedAt: now, UpdatedAt: now,
-		Transitions: []LifecycleTransition{{ID: runID + ":admitted", State: StateAdmitted, At: now}},
+		Transitions: []LifecycleTransition{{ID: initialTransitionID, State: StateAdmitted, At: now}},
+		TransitionDeliveries: []TransitionDelivery{{
+			TransitionID: initialTransitionID, EventID: RunTransitionEventID(initialTransitionID),
+			State: DeliveryPending,
+		}},
 	}, nil
 }
 

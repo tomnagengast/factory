@@ -513,6 +513,9 @@ func validateRun(run Run, migrationBacked bool) error {
 	if err := validateTransitions(run); err != nil {
 		return err
 	}
+	if err := validateDeliveries(run); err != nil {
+		return err
+	}
 	if run.Ready != nil {
 		if err := validateReady(*run.Ready, run, migrationBacked); err != nil {
 			return err
@@ -627,6 +630,39 @@ func validateTransitions(run Run) error {
 		}
 		if !transition.At.After(previousAt) || !legalTransition(previousState, transition.State) {
 			return fmt.Errorf("illegal lifecycle transition %s -> %s", previousState, transition.State)
+		}
+	}
+	return nil
+}
+
+// validateDeliveries proves the per-Run outbox: a leading acknowledged prefix
+// counted by DeliveredThrough plus an unacknowledged suffix that corresponds
+// one-for-one, in order, to Transitions[DeliveredThrough:]. Every retained
+// non-migrated transition therefore has exactly one delivery state, while a
+// migrated baseline with empty Transitions carries no delivery obligation.
+func validateDeliveries(run Run) error {
+	if run.DeliveredThrough < 0 || run.DeliveredThrough > len(run.Transitions) {
+		return errors.New("Run delivery watermark is out of range")
+	}
+	if len(run.TransitionDeliveries) != len(run.Transitions)-run.DeliveredThrough {
+		return errors.New("Run transition deliveries do not cover the unacknowledged suffix")
+	}
+	for index, delivery := range run.TransitionDeliveries {
+		transition := run.Transitions[run.DeliveredThrough+index]
+		if delivery.TransitionID != transition.ID || delivery.EventID != RunTransitionEventID(transition.ID) {
+			return errors.New("Run transition delivery is misaligned with its transition")
+		}
+		switch delivery.State {
+		case DeliveryPending:
+			if delivery.Sequence != 0 {
+				return errors.New("Run pending transition delivery cannot carry a wire sequence")
+			}
+		case DeliveryPublished:
+			if delivery.Sequence == 0 {
+				return errors.New("Run published transition delivery is missing its wire sequence")
+			}
+		default:
+			return fmt.Errorf("unsupported transition delivery state %q", delivery.State)
 		}
 	}
 	return nil

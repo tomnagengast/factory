@@ -22,6 +22,8 @@ const (
 	operationCheckpoint     = "checkpoint"
 	operationAdmissionBatch = "admission-batch"
 	operationTransition     = "lifecycle-transition"
+	operationPublish        = "delivery-publish"
+	operationAcknowledge    = "delivery-acknowledge"
 	maxJournalBytes         = 64 << 20
 )
 
@@ -31,15 +33,32 @@ var (
 )
 
 type diskOperation struct {
-	Kind             string           `json:"kind"`
-	Version          int              `json:"version"`
-	Sequence         uint64           `json:"sequence"`
-	Schema           int              `json:"schema,omitempty"`
-	Checkpoint       *Model           `json:"checkpoint,omitempty"`
-	AdmissionBatches []AdmissionBatch `json:"admissionBatches,omitempty"`
-	Runs             []Run            `json:"runs,omitempty"`
-	RateIncrements   []RateBucket     `json:"rateIncrements,omitempty"`
-	Transition       *Run             `json:"transition,omitempty"`
+	Kind             string                   `json:"kind"`
+	Version          int                      `json:"version"`
+	Sequence         uint64                   `json:"sequence"`
+	Schema           int                      `json:"schema,omitempty"`
+	Checkpoint       *Model                   `json:"checkpoint,omitempty"`
+	AdmissionBatches []AdmissionBatch         `json:"admissionBatches,omitempty"`
+	Runs             []Run                    `json:"runs,omitempty"`
+	RateIncrements   []RateBucket             `json:"rateIncrements,omitempty"`
+	Transition       *Run                     `json:"transition,omitempty"`
+	Publication      *DeliveryPublication     `json:"publication,omitempty"`
+	Acknowledgement  *DeliveryAcknowledgement `json:"acknowledgement,omitempty"`
+}
+
+// DeliveryPublication records that one pending Run transition delivery was
+// published to the wire with the returned authoritative positive sequence.
+type DeliveryPublication struct {
+	RunID        string `json:"runId"`
+	TransitionID string `json:"transitionId"`
+	Sequence     uint64 `json:"sequence"`
+}
+
+// DeliveryAcknowledgement advances a Run's DeliveredThrough watermark over a
+// contiguous published prefix of its unacknowledged suffix.
+type DeliveryAcknowledgement struct {
+	RunID string `json:"runId"`
+	Count int    `json:"count"`
 }
 
 type checkpointWriter func(*storeLocation, diskOperation, bool, func(*os.File) error) (bool, error)
@@ -228,6 +247,11 @@ func (s *Store) ApplyAdmissionBatch(batches []AdmissionBatch, runs []Run, increm
 // projection. Immutable admission and causation identity cannot change.
 func (s *Store) Transition(next Run) error {
 	next = cloneRun(next)
+	// Delivery state is store-derived, so a transition delta never carries it.
+	// Stripping here keeps the on-disk operation uniform and canonical while
+	// applyTransition re-derives the durable delivery from the current Run.
+	next.DeliveredThrough = 0
+	next.TransitionDeliveries = nil
 	canonicalizeRun(&next)
 
 	s.mu.Lock()
@@ -256,10 +280,80 @@ func (s *Store) Transition(next Run) error {
 	return s.compactIfNeededLocked()
 }
 
+// RecordPublication marks one pending Run transition delivery published with
+// the authoritative wire sequence returned by the event wire. It never
+// rewrites an already-published delivery; the store derives delivery state so
+// no caller can forge a sequence into an existing entry.
+func (s *Store) RecordPublication(runID, transitionID string, sequence uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.healthyLocked(); err != nil {
+		return err
+	}
+	next, err := nextSequence(s.state.model.JournalSequence)
+	if err != nil {
+		return err
+	}
+	operation := diskOperation{
+		Kind: operationPublish, Version: JournalVersion, Sequence: next,
+		Publication: &DeliveryPublication{RunID: runID, TransitionID: transitionID, Sequence: sequence},
+	}
+	if _, err := applyOperation(s.state.model, operation); err != nil {
+		return err
+	}
+	if err := s.appendOperationLocked(operation); err != nil {
+		return err
+	}
+	state, err := s.apply(s.state.model, operation)
+	if err != nil {
+		s.poisoned = err
+		return fmt.Errorf("runs: apply persisted delivery publication: %w", err)
+	}
+	s.state = state
+	s.operationsSinceCheckpoint++
+	return s.compactIfNeededLocked()
+}
+
+// AcknowledgeDeliveries advances a Run's DeliveredThrough watermark over the
+// leading count of its unacknowledged suffix. Every acknowledged delivery must
+// already be published; the store derives the watermark so no caller can
+// acknowledge a pending delivery.
+func (s *Store) AcknowledgeDeliveries(runID string, count int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.healthyLocked(); err != nil {
+		return err
+	}
+	next, err := nextSequence(s.state.model.JournalSequence)
+	if err != nil {
+		return err
+	}
+	operation := diskOperation{
+		Kind: operationAcknowledge, Version: JournalVersion, Sequence: next,
+		Acknowledgement: &DeliveryAcknowledgement{RunID: runID, Count: count},
+	}
+	if _, err := applyOperation(s.state.model, operation); err != nil {
+		return err
+	}
+	if err := s.appendOperationLocked(operation); err != nil {
+		return err
+	}
+	state, err := s.apply(s.state.model, operation)
+	if err != nil {
+		s.poisoned = err
+		return fmt.Errorf("runs: apply persisted delivery acknowledgement: %w", err)
+	}
+	s.state = state
+	s.operationsSinceCheckpoint++
+	return s.compactIfNeededLocked()
+}
+
 // Compact replaces the journal with one checkpoint, retaining every batch
-// that owns a nonterminal Run and the newest configured number of remaining
-// admission batches. Runs are retained and evicted with their owning batch.
-// A nonzero rate cutoff also expires older rate buckets.
+// that owns a nonterminal Run or a Run with any unacknowledged transition
+// delivery, plus the newest configured number of remaining admission batches.
+// Runs are retained and evicted with their owning batch. The surviving Run's
+// DeliveredThrough watermark remains the proof for evicted acknowledged
+// deliveries. A nonzero rate cutoff also expires older rate buckets.
 func (s *Store) Compact(expireRatesBefore time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -291,6 +385,10 @@ func applyOperation(current Model, operation diskOperation) (Snapshot, error) {
 		return applyAdmissionBatch(current, operation)
 	case operationTransition:
 		return applyTransition(current, operation)
+	case operationPublish:
+		return applyPublish(current, operation)
+	case operationAcknowledge:
+		return applyAcknowledge(current, operation)
 	default:
 		return Snapshot{}, fmt.Errorf("runs: cannot apply operation %q", operation.Kind)
 	}
@@ -509,9 +607,86 @@ func applyTransition(current Model, operation diskOperation) (Snapshot, error) {
 	if currentRun.Repository == nil && nextRun.Repository != nil && (currentRun.State != StateRouting || nextRun.State != StatePending) {
 		return Snapshot{}, errors.New("runs: repository route can only resolve while routing")
 	}
+	// The store owns delivery state: it derives the watermark and unacknowledged
+	// suffix from the durable current Run and appends exactly one pending
+	// delivery for the new transition. Whatever a caller supplied for these
+	// fields is discarded, so no lifecycle transition can rewrite an existing
+	// delivery prefix, forge a published sequence, or move the watermark.
+	nextRun.DeliveredThrough = currentRun.DeliveredThrough
+	nextRun.TransitionDeliveries = append(slices.Clone(currentRun.TransitionDeliveries), TransitionDelivery{
+		TransitionID: transition.ID, EventID: RunTransitionEventID(transition.ID), State: DeliveryPending,
+	})
 	next := cloneModel(current)
 	next.JournalSequence = operation.Sequence
 	next.Runs[index] = nextRun
+	return NewSnapshot(next)
+}
+
+func applyPublish(current Model, operation diskOperation) (Snapshot, error) {
+	publication := *operation.Publication
+	index := -1
+	for candidate, run := range current.Runs {
+		if run.ID == publication.RunID {
+			index = candidate
+			break
+		}
+	}
+	if index < 0 {
+		return Snapshot{}, fmt.Errorf("runs: Run %q not found", publication.RunID)
+	}
+	run := cloneRun(current.Runs[index])
+	deliveryIndex := -1
+	for candidate := range run.TransitionDeliveries {
+		if run.TransitionDeliveries[candidate].TransitionID == publication.TransitionID {
+			deliveryIndex = candidate
+			break
+		}
+	}
+	if deliveryIndex < 0 {
+		return Snapshot{}, fmt.Errorf("runs: Run %q has no unacknowledged delivery for transition %q", publication.RunID, publication.TransitionID)
+	}
+	delivery := run.TransitionDeliveries[deliveryIndex]
+	if delivery.State != DeliveryPending {
+		return Snapshot{}, fmt.Errorf("runs: transition delivery %q is already published", publication.TransitionID)
+	}
+	delivery.State = DeliveryPublished
+	delivery.Sequence = publication.Sequence
+	run.TransitionDeliveries[deliveryIndex] = delivery
+	next := cloneModel(current)
+	next.JournalSequence = operation.Sequence
+	next.Runs[index] = run
+	return NewSnapshot(next)
+}
+
+func applyAcknowledge(current Model, operation diskOperation) (Snapshot, error) {
+	acknowledgement := *operation.Acknowledgement
+	index := -1
+	for candidate, run := range current.Runs {
+		if run.ID == acknowledgement.RunID {
+			index = candidate
+			break
+		}
+	}
+	if index < 0 {
+		return Snapshot{}, fmt.Errorf("runs: Run %q not found", acknowledgement.RunID)
+	}
+	run := cloneRun(current.Runs[index])
+	if acknowledgement.Count < 1 || acknowledgement.Count > len(run.TransitionDeliveries) {
+		return Snapshot{}, errors.New("runs: delivery acknowledgement count is out of range")
+	}
+	for offset := 0; offset < acknowledgement.Count; offset++ {
+		if run.TransitionDeliveries[offset].State != DeliveryPublished {
+			return Snapshot{}, errors.New("runs: delivery acknowledgement includes an unpublished delivery")
+		}
+	}
+	if run.DeliveredThrough > math.MaxInt-acknowledgement.Count {
+		return Snapshot{}, errors.New("runs: delivery watermark exhausted")
+	}
+	run.DeliveredThrough += acknowledgement.Count
+	run.TransitionDeliveries = slices.Clone(run.TransitionDeliveries[acknowledgement.Count:])
+	next := cloneModel(current)
+	next.JournalSequence = operation.Sequence
+	next.Runs[index] = run
 	return NewSnapshot(next)
 }
 
@@ -607,16 +782,31 @@ func validateOperationShape(operation diskOperation) error {
 	switch operation.Kind {
 	case operationCheckpoint:
 		if operation.Schema != SchemaVersion || operation.Checkpoint == nil || len(operation.AdmissionBatches) != 0 || operation.Transition != nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
+			operation.Publication != nil || operation.Acknowledgement != nil ||
 			operation.Checkpoint.Schema != operation.Schema || operation.Checkpoint.JournalSequence != operation.Sequence {
 			return errors.New("runs: invalid checkpoint operation")
 		}
 	case operationAdmissionBatch:
-		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) == 0 || operation.Transition != nil {
+		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) == 0 || operation.Transition != nil ||
+			operation.Publication != nil || operation.Acknowledgement != nil {
 			return errors.New("runs: invalid admission-batch operation")
 		}
 	case operationTransition:
-		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 0 || operation.Transition == nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 {
+		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 0 || operation.Transition == nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
+			operation.Publication != nil || operation.Acknowledgement != nil {
 			return errors.New("runs: invalid lifecycle-transition operation")
+		}
+	case operationPublish:
+		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 0 || operation.Transition != nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
+			operation.Acknowledgement != nil || operation.Publication == nil ||
+			operation.Publication.RunID == "" || operation.Publication.TransitionID == "" || operation.Publication.Sequence == 0 {
+			return errors.New("runs: invalid delivery-publish operation")
+		}
+	case operationAcknowledge:
+		if operation.Sequence == 0 || operation.Schema != 0 || operation.Checkpoint != nil || len(operation.AdmissionBatches) != 0 || operation.Transition != nil || len(operation.Runs) != 0 || len(operation.RateIncrements) != 0 ||
+			operation.Publication != nil || operation.Acknowledgement == nil ||
+			operation.Acknowledgement.RunID == "" || operation.Acknowledgement.Count < 1 {
+			return errors.New("runs: invalid delivery-acknowledge operation")
 		}
 	default:
 		return fmt.Errorf("runs: unknown journal operation %q", operation.Kind)
@@ -837,16 +1027,16 @@ func (s *Store) writeCheckpointLocked(expireRatesBefore time.Time) error {
 }
 
 func retainedSnapshot(current Model, retention int, expireRatesBefore time.Time) (Snapshot, error) {
-	nonterminalBatch := make(map[string]bool)
+	retainBatch := make(map[string]bool)
 	for _, run := range current.Runs {
-		if run.State.Nonterminal() {
-			nonterminalBatch[run.Causation.BatchID] = true
+		if run.State.Nonterminal() || len(run.TransitionDeliveries) > 0 {
+			retainBatch[run.Causation.BatchID] = true
 		}
 	}
 	keep := make(map[string]bool)
 	remaining := make([]string, 0, len(current.AdmissionBatches))
 	for _, batch := range current.AdmissionBatches {
-		if nonterminalBatch[batch.ID] {
+		if retainBatch[batch.ID] {
 			keep[batch.ID] = true
 		} else {
 			remaining = append(remaining, batch.ID)

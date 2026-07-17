@@ -402,6 +402,9 @@ func TestAdmissionOperationExactRetrySurvivesTransitionsAndCompaction(t *testing
 			t.Fatal(err)
 		}
 	}
+	// Fully acknowledge the terminal transition deliveries so the failed runs
+	// become prunable and only their admission receipts must survive compaction.
+	acknowledgeAllDeliveries(t, store)
 	beforeTransitionRetry, _ := store.Snapshot()
 	if err := store.ApplyAdmissionBatch(batches, runs, rates); !errors.Is(err, ErrDuplicateAdmissionBatch) {
 		t.Fatalf("retry after associated Run transitions = %v", err)
@@ -448,7 +451,7 @@ func TestMigrationSnapshotReceiptAcceptsFirstTransitionOfMigratedRun(t *testing.
 	root := trustedTestRoot(t, t.TempDir())
 	path := filepath.Join(root, "runs.jsonl")
 	batch, run, rate := runningProjection(t, root)
-	run.Transitions = nil
+	run.Transitions, run.DeliveredThrough = nil, 0
 	run.MigratedBaseline = &MigratedBaseline{
 		State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true,
 	}
@@ -696,7 +699,7 @@ func TestTransitionDeltaAndOldestTaskOwnership(t *testing.T) {
 		}
 
 		migrated := running.Clone()
-		migrated.Transitions = nil
+		migrated.Transitions, migrated.DeliveredThrough = nil, 0
 		migrated.MigratedBaseline = &MigratedBaseline{State: StateRunning, ObservedAt: migrated.UpdatedAt, PriorTransitionsAcknowledged: true}
 		makeMigratedDirect(&batch, &migrated)
 		migratedSnapshot, err := NewSnapshot(testSingleAdmissionModel(batch, migrated, rate))
@@ -1411,6 +1414,37 @@ func trustedTestRoot(t *testing.T, root string) string {
 	return root
 }
 
+// acknowledgeAllDeliveries publishes every pending transition delivery with a
+// synthetic sequence and then advances each Run's watermark over its complete
+// suffix, leaving every retained Run fully acknowledged.
+func acknowledgeAllDeliveries(t *testing.T, store *Store) {
+	t.Helper()
+	snapshot, err := store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range snapshot.Model().Runs {
+		for _, delivery := range run.TransitionDeliveries {
+			if delivery.State == DeliveryPending {
+				if err := store.RecordPublication(run.ID, delivery.TransitionID, 1); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	snapshot, err = store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range snapshot.Model().Runs {
+		if count := len(run.TransitionDeliveries); count > 0 {
+			if err := store.AcknowledgeDeliveries(run.ID, count); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 func nextLifecycleRun(current Run, state LifecycleState, at time.Time) Run {
 	next := current.Clone()
 	next.State = state
@@ -1419,6 +1453,11 @@ func nextLifecycleRun(current Run, state LifecycleState, at time.Time) Run {
 		ID:    next.ID + ":" + string(state) + ":" + at.UTC().Format("150405.000000000"),
 		State: state, Attempts: next.Attempts, At: at.UTC(),
 	})
+	// Fully acknowledge the outbox so the run is valid when installed directly
+	// as a checkpoint projection. When passed to Store.Transition the store
+	// strips and re-derives delivery, so this watermark is ignored there.
+	next.DeliveredThrough = len(next.Transitions)
+	next.TransitionDeliveries = nil
 	if state.Terminal() {
 		next.FinishedAt = pointerTime(at.UTC())
 	}
@@ -1441,6 +1480,7 @@ func runningProjection(t *testing.T, root string) (AdmissionBatch, Run, RateBuck
 		LifecycleTransition{ID: run.ID + ":starting", State: StateStarting, At: startingAt},
 		LifecycleTransition{ID: run.ID + ":running", State: StateRunning, Attempts: 1, At: runningAt},
 	)
+	run.DeliveredThrough = len(run.Transitions)
 	run.GitHub.LastCursor = 10
 	run.GitHub.LastAuthoritativeRefreshAt = pointerTime(runningAt)
 	return batch, run, rate

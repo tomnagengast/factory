@@ -532,7 +532,7 @@ func TestTerminalRunPreservesLegacyAndCompactedWorkflowPins(t *testing.T) {
 				run.MigratedBaseline = &MigratedBaseline{
 					State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true, WorkflowPinUnavailable: true,
 				}
-				run.Transitions = nil
+				run.Transitions, run.DeliveredThrough = nil, 0
 				makeMigratedDirect(&batch, &run)
 			} else if compactWorkflow(*test.pin) {
 				run.Causation.WorkflowDigest = strings.Repeat("a", 64)
@@ -586,6 +586,7 @@ func TestSnapshotPreservesCompleteLifecycleCompatibilityPayload(t *testing.T) {
 		{ID: "run-1:awaiting", State: StateAwaitingHumanMerge, Attempts: 2, At: awaitingAt},
 		{ID: "run-1:succeeded", State: StateSucceeded, Attempts: 2, At: finishedAt},
 	}
+	run.DeliveredThrough = len(run.Transitions)
 	run.Ready = &ReadyCheckpoint{
 		ContractVersion: readyContractVersion, RunID: run.ID, Task: run.Causation.Task,
 		Repository: run.Repository.Repository, PullRequest: 18, BaseBranch: run.Repository.DefaultBranch,
@@ -649,7 +650,7 @@ func TestMigratedBaselinePreservesAcknowledgedLegacyShapes(t *testing.T) {
 		run.Repository = nil
 		run.Causation.Workflow = pointerPin(workflow.Pinned{ID: "full-sdlc", Revision: 3})
 		run.Causation.WorkflowDigest = ""
-		run.Transitions = nil
+		run.Transitions, run.DeliveredThrough = nil, 0
 		run.MigratedBaseline = &MigratedBaseline{
 			State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true,
 			WorkflowDigestUnavailable: true, HistoricalRepository: historical,
@@ -695,7 +696,7 @@ func TestMigratedBaselinePreservesAcknowledgedLegacyShapes(t *testing.T) {
 		run.RunDirectory = filepath.Join(root, "run-sanitized")
 		run.StartedAt = pointerTime(run.UpdatedAt)
 		run.SegmentStartedAt = pointerTime(run.UpdatedAt)
-		run.Transitions = nil
+		run.Transitions, run.DeliveredThrough = nil, 0
 		run.MigratedBaseline = &MigratedBaseline{State: StateRunning, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true}
 		snapshot, err := NewSnapshot(testSingleAdmissionModel(batch, run, rate))
 		if err != nil {
@@ -751,7 +752,7 @@ func TestMigratedBaselinePreservesAcknowledgedLegacyShapes(t *testing.T) {
 			if test.state == StateRunning {
 				batch, run, rate = runningProjection(t, root)
 			}
-			run.Transitions = nil
+			run.Transitions, run.DeliveredThrough = nil, 0
 			run.MigratedBaseline = &MigratedBaseline{
 				State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true,
 			}
@@ -773,7 +774,7 @@ func TestMigratedBaselinePreservesAcknowledgedLegacyShapes(t *testing.T) {
 			run.Causation.Workflow = nil
 			run.Causation.WorkflowDigest = ""
 			run.Repository = nil
-			run.Transitions = nil
+			run.Transitions, run.DeliveredThrough = nil, 0
 			run.MigratedBaseline = &MigratedBaseline{
 				State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true,
 				WorkflowPinUnavailable: true, RepositoryRouteUnavailable: true,
@@ -816,7 +817,7 @@ func TestMigratedBaselinePreservesAcknowledgedLegacyShapes(t *testing.T) {
 		name   string
 		mutate func(*Run)
 	}{
-		{name: "acknowledged transition history", mutate: func(run *Run) { run.Transitions = nil }},
+		{name: "acknowledged transition history", mutate: func(run *Run) { run.Transitions, run.DeliveredThrough = nil, 0 }},
 		{name: "absent terminal route", mutate: func(run *Run) { run.Repository = nil }},
 		{name: "digestless compact pin", mutate: func(run *Run) {
 			run.Causation.Workflow = pointerPin(workflow.Pinned{ID: "full-sdlc", Revision: 3})
@@ -944,6 +945,7 @@ func TestModelLinksPolicyOwnershipAndCompletionEvidence(t *testing.T) {
 		resumed.Ready = nil
 		resumed.MergeCommitOID = ""
 		resumed.Transitions = resumed.Transitions[:1]
+		resumed.DeliveredThrough = len(resumed.Transitions)
 		resumed.Completion = &CompletionValidation{Accepted: false, Intent: string(StateSucceeded), State: StateFailed, Reason: "retry", ValidatedAt: resumed.UpdatedAt}
 		resumedModel := cloneModel(base)
 		resumedModel.Runs[0] = resumed
@@ -1074,6 +1076,11 @@ func testAdmissionProjection(t *testing.T, root string, number int, state Lifecy
 		run.State = state
 		run.Transitions = append(run.Transitions, LifecycleTransition{ID: runID + ":" + string(state), State: state, Attempts: 0, At: finished})
 	}
+	// Directly built fixtures represent a fully acknowledged outbox: the
+	// DeliveredThrough watermark covers every transition and the
+	// unacknowledged suffix is empty. Store.Transition callers append pending
+	// deliveries themselves.
+	run.DeliveredThrough = len(run.Transitions)
 	return batch, run, RateBucket{RuleID: ruleID, Minute: at.Truncate(time.Minute), Count: 1}
 }
 
@@ -1127,7 +1134,7 @@ func testLinkedMigrationRouteModel(t *testing.T, origin AdmissionOrigin, state L
 	}
 	route := *run.Repository
 	run.Repository = nil
-	run.Transitions = nil
+	run.Transitions, run.DeliveredThrough = nil, 0
 	run.MigratedBaseline = &MigratedBaseline{
 		State: run.State, ObservedAt: run.UpdatedAt, PriorTransitionsAcknowledged: true,
 	}

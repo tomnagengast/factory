@@ -16,9 +16,21 @@ import (
 )
 
 const (
-	SchemaVersion  = 4
-	JournalVersion = 3
+	SchemaVersion  = 5
+	JournalVersion = 4
 )
+
+// runTransitionEventIDPrefix is the immutable legacy-compatible wire event ID
+// prefix for a Run lifecycle transition. The complete event ID is this prefix
+// followed by the deterministic transition ID.
+const runTransitionEventIDPrefix = "factory:run-transition:"
+
+// RunTransitionEventID returns the deterministic body-free wire event ID for a
+// Run lifecycle transition. It is the sole owner of that identity so the store,
+// validation, and the outbox collector cannot drift.
+func RunTransitionEventID(transitionID string) string {
+	return runTransitionEventIDPrefix + transitionID
+}
 
 type AdmissionOrigin string
 
@@ -164,33 +176,35 @@ type Causation struct {
 }
 
 type Run struct {
-	ID                  string                `json:"id"`
-	Causation           Causation             `json:"causation"`
-	MigratedBaseline    *MigratedBaseline     `json:"migratedBaseline,omitempty"`
-	Repository          *repositories.Route   `json:"repository,omitempty"`
-	RepositoryRejection string                `json:"repositoryRejection,omitempty"`
-	TriggerKind         string                `json:"triggerKind"`
-	DeliveryIDs         []string              `json:"deliveryIds"`
-	DuplicateDeliveries uint64                `json:"duplicateDeliveries"`
-	State               LifecycleState        `json:"state"`
-	SessionName         string                `json:"sessionName,omitempty"`
-	RunDirectory        string                `json:"runDirectory,omitempty"`
-	Attempts            int                   `json:"attempts"`
-	Detail              string                `json:"detail,omitempty"`
-	CreatedAt           time.Time             `json:"createdAt"`
-	UpdatedAt           time.Time             `json:"updatedAt"`
-	StartedAt           *time.Time            `json:"startedAt,omitempty"`
-	SegmentStartedAt    *time.Time            `json:"segmentStartedAt,omitempty"`
-	SegmentAttempt      int                   `json:"segmentAttemptOffset,omitempty"`
-	FinishedAt          *time.Time            `json:"finishedAt,omitempty"`
-	Transitions         []LifecycleTransition `json:"transitions"`
-	Ready               *ReadyCheckpoint      `json:"ready,omitempty"`
-	MergeCommitOID      string                `json:"mergeCommitOid,omitempty"`
-	GitHub              GitHubState           `json:"github"`
-	ResumeCount         int                   `json:"resumeCount,omitempty"`
-	TerminalIntent      string                `json:"terminalIntent,omitempty"`
-	TerminalRejection   string                `json:"terminalRejection,omitempty"`
-	Completion          *CompletionValidation `json:"completion,omitempty"`
+	ID                   string                `json:"id"`
+	Causation            Causation             `json:"causation"`
+	MigratedBaseline     *MigratedBaseline     `json:"migratedBaseline,omitempty"`
+	Repository           *repositories.Route   `json:"repository,omitempty"`
+	RepositoryRejection  string                `json:"repositoryRejection,omitempty"`
+	TriggerKind          string                `json:"triggerKind"`
+	DeliveryIDs          []string              `json:"deliveryIds"`
+	DuplicateDeliveries  uint64                `json:"duplicateDeliveries"`
+	State                LifecycleState        `json:"state"`
+	SessionName          string                `json:"sessionName,omitempty"`
+	RunDirectory         string                `json:"runDirectory,omitempty"`
+	Attempts             int                   `json:"attempts"`
+	Detail               string                `json:"detail,omitempty"`
+	CreatedAt            time.Time             `json:"createdAt"`
+	UpdatedAt            time.Time             `json:"updatedAt"`
+	StartedAt            *time.Time            `json:"startedAt,omitempty"`
+	SegmentStartedAt     *time.Time            `json:"segmentStartedAt,omitempty"`
+	SegmentAttempt       int                   `json:"segmentAttemptOffset,omitempty"`
+	FinishedAt           *time.Time            `json:"finishedAt,omitempty"`
+	Transitions          []LifecycleTransition `json:"transitions"`
+	DeliveredThrough     int                   `json:"deliveredThrough,omitempty"`
+	TransitionDeliveries []TransitionDelivery  `json:"transitionDeliveries,omitempty"`
+	Ready                *ReadyCheckpoint      `json:"ready,omitempty"`
+	MergeCommitOID       string                `json:"mergeCommitOid,omitempty"`
+	GitHub               GitHubState           `json:"github"`
+	ResumeCount          int                   `json:"resumeCount,omitempty"`
+	TerminalIntent       string                `json:"terminalIntent,omitempty"`
+	TerminalRejection    string                `json:"terminalRejection,omitempty"`
+	Completion           *CompletionValidation `json:"completion,omitempty"`
 }
 
 // MigratedBaseline is immutable source evidence for a retained legacy Run.
@@ -225,6 +239,24 @@ type LifecycleTransition struct {
 	State    LifecycleState `json:"state"`
 	Attempts int            `json:"attempts"`
 	At       time.Time      `json:"at"`
+}
+
+type DeliveryState string
+
+const (
+	DeliveryPending   DeliveryState = "pending"
+	DeliveryPublished DeliveryState = "published"
+)
+
+// TransitionDelivery is the outbox obligation for exactly one LifecycleTransition
+// whose event is not yet globally acknowledged. Deliveries correspond one-for-one,
+// in order, to Transitions[DeliveredThrough:]. A pending delivery carries a zero
+// Sequence; a published delivery carries the authoritative positive wire Sequence.
+type TransitionDelivery struct {
+	TransitionID string        `json:"transitionId"`
+	EventID      string        `json:"eventId"`
+	State        DeliveryState `json:"state"`
+	Sequence     uint64        `json:"sequence,omitempty"`
 }
 
 type GitHubState struct {
@@ -459,6 +491,9 @@ func canonicalizeRun(run *Run) {
 	for index := range run.Transitions {
 		run.Transitions[index].At = run.Transitions[index].At.UTC()
 	}
+	if len(run.TransitionDeliveries) == 0 {
+		run.TransitionDeliveries = nil
+	}
 	if run.Ready != nil {
 		ready := *run.Ready
 		ready.PullRequestUpdatedAt = ready.PullRequestUpdatedAt.UTC()
@@ -551,6 +586,7 @@ func cloneRun(run Run) Run {
 	run.SegmentStartedAt = cloneTime(run.SegmentStartedAt)
 	run.FinishedAt = cloneTime(run.FinishedAt)
 	run.Transitions = slices.Clone(run.Transitions)
+	run.TransitionDeliveries = slices.Clone(run.TransitionDeliveries)
 	if run.Ready != nil {
 		ready := *run.Ready
 		run.Ready = &ready
