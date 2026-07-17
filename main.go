@@ -60,30 +60,34 @@ const (
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	quiesce := make(chan os.Signal, 1)
+	signal.Notify(quiesce, syscall.SIGUSR1)
+	defer signal.Stop(quiesce)
 
 	if code, handled := runAgentCommand(ctx, os.Args[1:]); handled {
 		os.Exit(code)
 	}
-	if err := serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	if err := serve(ctx, quiesce); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("factory stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func serve(ctx context.Context) error {
+func serve(ctx context.Context, quiesce <-chan os.Signal) error {
 	address, err := resolveManagementAddress(managementFlags{}, nil)
 	if err != nil {
 		return fmt.Errorf("server address: %w", err)
 	}
-	return serveConfigured(ctx, serveOptions{address: address})
+	return serveConfigured(ctx, serveOptions{address: address, quiesce: quiesce})
 }
 
 type serveOptions struct {
 	address    managementAddress
 	localStart bool
 	output     io.Writer
+	quiesce    <-chan os.Signal
 }
 
 func serveConfigured(ctx context.Context, options serveOptions) error {

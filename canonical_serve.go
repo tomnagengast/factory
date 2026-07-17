@@ -168,23 +168,27 @@ func serveCanonicalConfigured(ctx context.Context, options serveOptions) error {
 		}
 	}}
 	runtimeComponent := app.Component{Name: "generation-runtime", Run: func(componentContext context.Context) error {
-		return generationService.Run(componentContext, func(runtimeContext context.Context, selected *migration.SelectedGeneration) error {
-			return app.RunSelectedRuntime(runtimeContext, app.RuntimeConfig{
-				Generation: selected, Web: web, ViewerAuth: viewerAuth,
-				LinearSecret: []byte(linearSecret), GitHubSecret: []byte(githubSecret), LinearAPIKey: linearAPIKey,
-				TriggerActorID: triggerActorID, ProviderLabel: "Factory", ProviderCoordinator: providerCoordinator,
-				ProjectParser: projectParser, StateRoot: stateRoot, BinaryPath: binaryPath,
-				GitPath: gitPath, GitHubPath: githubPath, WorktrunkPath: worktrunkPath,
-				TmuxPath: tmuxPath, TmuxSocket: tmuxSocket, NagsPath: nagsPath,
-				TaskEndpoint:       "http://127.0.0.1:" + strconv.Itoa(options.address.Port) + "/api/agent/task",
-				ProviderRepository: defaultRepository, Build: build,
-				Redactions: []string{
-					linearAPIKey, githubSecret, os.Getenv("FACTORY_GOOGLE_CLIENT_SECRET"),
-					os.Getenv("FACTORY_SESSION_KEY"), os.Getenv("GITHUB_TOKEN"),
-				},
-				InstallHandler: switcher.Install, Now: time.Now, Logger: slog.Default(),
-				RunPoll: 2 * time.Second, MergePoll: mergeReconcileInterval, ProjectPoll: projectSetupRetryPoll,
-				SchedulePoll: 30 * time.Second, HeartbeatPoll: serviceHeartbeatInterval, RecoveryPoll: 5 * time.Second,
+		return runQuiesceableRuntime(componentContext, options.quiesce, func() {
+			switcher.Install(canonicalBootstrapHandler(build))
+		}, func(runtimeContext context.Context) error {
+			return generationService.Run(runtimeContext, func(selectedContext context.Context, selected *migration.SelectedGeneration) error {
+				return app.RunSelectedRuntime(selectedContext, app.RuntimeConfig{
+					Generation: selected, Web: web, ViewerAuth: viewerAuth,
+					LinearSecret: []byte(linearSecret), GitHubSecret: []byte(githubSecret), LinearAPIKey: linearAPIKey,
+					TriggerActorID: triggerActorID, ProviderLabel: "Factory", ProviderCoordinator: providerCoordinator,
+					ProjectParser: projectParser, StateRoot: stateRoot, BinaryPath: binaryPath,
+					GitPath: gitPath, GitHubPath: githubPath, WorktrunkPath: worktrunkPath,
+					TmuxPath: tmuxPath, TmuxSocket: tmuxSocket, NagsPath: nagsPath,
+					TaskEndpoint:       "http://127.0.0.1:" + strconv.Itoa(options.address.Port) + "/api/agent/task",
+					ProviderRepository: defaultRepository, Build: build,
+					Redactions: []string{
+						linearAPIKey, githubSecret, os.Getenv("FACTORY_GOOGLE_CLIENT_SECRET"),
+						os.Getenv("FACTORY_SESSION_KEY"), os.Getenv("GITHUB_TOKEN"),
+					},
+					InstallHandler: switcher.Install, Now: time.Now, Logger: slog.Default(),
+					RunPoll: 2 * time.Second, MergePoll: mergeReconcileInterval, ProjectPoll: projectSetupRetryPoll,
+					SchedulePoll: 30 * time.Second, HeartbeatPoll: serviceHeartbeatInterval, RecoveryPoll: 5 * time.Second,
+				})
 			})
 		})
 	}}
@@ -193,6 +197,40 @@ func serveCanonicalConfigured(ctx context.Context, options serveOptions) error {
 		return err
 	}
 	return supervisor.Run(ctx)
+}
+
+// runQuiesceableRuntime withdraws every mutable HTTP route before canceling
+// advancing owners and releasing the transition lease. The outer service and
+// bootstrap health stay alive until the provider later replaces the process.
+func runQuiesceableRuntime(
+	ctx context.Context,
+	quiesce <-chan os.Signal,
+	onQuiesce func(),
+	run func(context.Context) error,
+) error {
+	runtimeContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- run(runtimeContext) }()
+
+	select {
+	case err := <-result:
+		return err
+	case <-quiesce:
+		onQuiesce()
+		cancel()
+		if err := <-result; err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	case <-ctx.Done():
+		cancel()
+		if err := <-result; err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+		return ctx.Err()
+	}
 }
 
 func canonicalViewerAuth(options serveOptions) (server.ViewerAuthenticator, error) {

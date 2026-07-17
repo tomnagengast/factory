@@ -674,4 +674,3 @@ function validateTriggerDraft(registry: TriggerRegistry, workflows: WorkflowSumm
   }
   return undefined;
 }
-
