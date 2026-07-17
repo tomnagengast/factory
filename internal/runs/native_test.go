@@ -11,9 +11,92 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tomnagengast/factory/internal/agentrun"
+	"github.com/tomnagengast/factory/internal/eventwire"
 	"github.com/tomnagengast/factory/internal/taskmodel"
+	"github.com/tomnagengast/factory/internal/triggerrouter"
 	"github.com/tomnagengast/factory/internal/workflow"
 )
+
+func TestNativeAdmissionMatchesLegacySyntheticLifecycle(t *testing.T) {
+	root := t.TempDir()
+	canonicalStore := createEmptyStore(t, filepath.Join(root, "canonical-runs.jsonl"), 10)
+	canonicalAdmitter, _ := NewAdmitter(canonicalStore)
+	legacyRouter, err := triggerrouter.Open(filepath.Join(root, "legacy-routing.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission := nativeAdmissionFixture(t, modelTestNow)
+	legacyAdmission := triggerrouter.NativeAdmission{
+		Task: admission.Task, Workflow: admission.Workflow, WorkflowDigest: admission.WorkflowDigest,
+		PolicyRevision: admission.PolicyRevision, RegistryRevision: admission.RegistryRevision, AdmittedAt: admission.AdmittedAt,
+	}
+
+	legacyStart, legacyCreated, err := legacyRouter.AdmitNative(legacyAdmission)
+	if err != nil || !legacyCreated {
+		t.Fatalf("legacy native start = %#v, %t, %v", legacyStart, legacyCreated, err)
+	}
+	canonicalStart, canonicalCreated, err := canonicalAdmitter.AdmitNative(admission)
+	if err != nil || !canonicalCreated {
+		t.Fatalf("canonical native start = %#v, %t, %v", canonicalStart, canonicalCreated, err)
+	}
+	assertNativeInvocationParity(t, legacyStart, canonicalStart)
+	canonicalModel := snapshotModel(t, canonicalStore)
+	legacyModel := legacyRouter.Snapshot()
+	if len(canonicalModel.AdmissionBatches) != 1 || len(legacyModel.Decisions) != 1 || len(canonicalModel.RateBuckets) != 1 || len(legacyModel.RateBuckets) != 1 ||
+		canonicalModel.AdmissionBatches[0].RegistryRevision != legacyModel.Decisions[0].RegistryRevision ||
+		canonicalModel.AdmissionBatches[0].SettingsRevision != legacyModel.Decisions[0].SettingsRevision ||
+		canonicalModel.RateBuckets[0].RuleID != legacyModel.RateBuckets[0].RuleID ||
+		canonicalModel.RateBuckets[0].Minute != legacyModel.RateBuckets[0].Minute || canonicalModel.RateBuckets[0].Count != legacyModel.RateBuckets[0].Count {
+		t.Fatalf("native admission evidence differs: canonical %#v legacy %#v", canonicalModel, legacyModel)
+	}
+	if canonicalModel.AdmissionBatches[0].EventSequence != 0 || legacyStart.EventSequence == 0 {
+		t.Fatalf("canonical source sequence = %d, legacy synthetic sequence = %d", canonicalModel.AdmissionBatches[0].EventSequence, legacyStart.EventSequence)
+	}
+
+	canonicalOwner := admitExistingNativeToPending(t, canonicalStore, canonicalStart, root)
+	legacyRuns, err := agentrun.Open(filepath.Join(root, "legacy-runs.json"), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyOwner, created, err := legacyRuns.EnsureInvocationRun(legacyClaim(legacyStart, legacyRepository(root), false), canonicalOwner.CreatedAt)
+	if err != nil || !created {
+		t.Fatalf("legacy native owner = %#v, %t, %v", legacyOwner, created, err)
+	}
+
+	continuationAt := canonicalOwner.UpdatedAt.Add(time.Second)
+	admission.AdmittedAt = continuationAt
+	legacyAdmission.AdmittedAt = continuationAt
+	eventKey := "message:msg-0123456789abcdef"
+	legacyFeedback, legacyCreated, err := legacyRouter.AdmitNativeContinuation(legacyAdmission, eventKey)
+	if err != nil || !legacyCreated {
+		t.Fatalf("legacy continuation = %#v, %t, %v", legacyFeedback, legacyCreated, err)
+	}
+	legacyUpdated, created, err := legacyRuns.EnsureInvocationRun(legacyClaim(legacyFeedback, legacyRepository(root), true), continuationAt.Add(time.Nanosecond))
+	if err != nil || created {
+		t.Fatalf("legacy coalescence = %#v, %t, %v", legacyUpdated, created, err)
+	}
+	reflectedAt := continuationAt.Add(time.Nanosecond)
+	legacyRejected, err := legacyRouter.TransitionInvocation(
+		legacyFeedback.ID, triggerrouter.StateRejected, legacyUpdated.ID, "native-feedback-coalesced", &reflectedAt, reflectedAt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalBookkeeping, canonicalCreated, err := canonicalAdmitter.Continue(admission, eventKey)
+	if err != nil || !canonicalCreated {
+		t.Fatalf("canonical continuation = %#v, %t, %v", canonicalBookkeeping, canonicalCreated, err)
+	}
+	canonicalUpdated := modelRun(t, snapshotModel(t, canonicalStore), canonicalOwner.ID)
+	assertNativeInvocationParity(t, legacyFeedback, canonicalBookkeeping)
+	if legacyRejected.State != triggerrouter.StateRejected || legacyRejected.RunID != canonicalBookkeeping.Causation.ParentRunID ||
+		legacyRejected.Reason != canonicalBookkeeping.Detail || legacyRejected.ReflectedAt == nil || *legacyRejected.ReflectedAt != canonicalBookkeeping.UpdatedAt ||
+		canonicalBookkeeping.State != StateRejected || canonicalBookkeeping.Causation.ParentAdmissionID != legacyStart.ID ||
+		!equalSortedStrings(legacyUpdated.DeliveryIDs, canonicalUpdated.DeliveryIDs) || legacyUpdated.DuplicateTriggers != canonicalUpdated.DuplicateDeliveries ||
+		legacyUpdated.UpdatedAt != canonicalUpdated.UpdatedAt || string(legacyUpdated.State) != string(canonicalUpdated.State) {
+		t.Fatalf("native continuation differs: legacy invocation %#v owner %#v; canonical bookkeeping %#v owner %#v", legacyRejected, legacyUpdated, canonicalBookkeeping, canonicalUpdated)
+	}
+}
 
 func TestNativeAdmissionIdentityRetryAndRestart(t *testing.T) {
 	root := t.TempDir()
@@ -348,12 +431,38 @@ func nativeAdmissionFixture(t *testing.T, at time.Time) NativeAdmission {
 	}
 }
 
-func admitNativeToPending(t *testing.T, store *Store, admitter *Admitter, admission NativeAdmission, root string) Run {
+func assertNativeInvocationParity(t *testing.T, legacy triggerrouter.Invocation, canonical Run) {
 	t.Helper()
-	admitted, created, err := admitter.AdmitNative(admission)
-	if err != nil || !created {
-		t.Fatalf("admit native owner = %#v, %t, %v", admitted, created, err)
+	wantRunID := "run-" + admissionDigest("factory-trigger-run-v1", legacy.ID)[:16]
+	if canonical.ID != wantRunID || canonical.Causation.AdmissionID != legacy.ID || canonical.Causation.EventID != legacy.EventID ||
+		canonical.Causation.EventSource != eventwire.SourceFactory || canonical.Causation.RuleID != legacy.Rule.ID ||
+		canonical.Causation.RuleRevision != legacy.Rule.Revision || !reflect.DeepEqual(canonical.Causation.Workflow, &legacy.Workflow) ||
+		canonical.Causation.WorkflowDigest != legacy.WorkflowDigest || canonical.Causation.PolicyRevision != legacy.PolicyRevision ||
+		!canonical.Causation.Task.Equal(legacy.Task) || canonical.Causation.RootEventID != legacy.RootEventID ||
+		canonical.Causation.Hop != legacy.Hop || !slices.Equal(canonical.Causation.AncestorRuleIDs, legacy.AncestorRuleIDs) ||
+		canonical.Causation.AdmittedAt != legacy.AdmittedAt {
+		t.Fatalf("native immutable identity differs: legacy %#v canonical %#v", legacy, canonical)
 	}
+}
+
+func legacyRepository(root string) agentrun.RepositoryConfig {
+	return agentrun.RepositoryConfig{
+		App: "factory", Repository: "tomnagengast/factory", RepoURL: "git@github.com:tomnagengast/factory.git",
+		RepoPath: filepath.Join(root, "factory"), ManagedRoot: root, BaseBranch: "main", CloudURL: "https://factory.nags.cloud",
+	}
+}
+
+func legacyClaim(invocation triggerrouter.Invocation, repository agentrun.RepositoryConfig, feedback bool) agentrun.InvocationClaim {
+	return agentrun.InvocationClaim{
+		RunID: "run-" + admissionDigest("factory-trigger-run-v1", invocation.ID)[:16], InvocationID: invocation.ID, EventID: invocation.EventID,
+		Task: invocation.Task, IssueIdentifier: invocation.IssueIdentifier, RootEventID: invocation.RootEventID,
+		Hop: invocation.Hop, AncestorRuleIDs: slices.Clone(invocation.AncestorRuleIDs), Workflow: invocation.Workflow,
+		WorkflowDigest: invocation.WorkflowDigest, PolicyRevision: invocation.PolicyRevision, Repository: repository, Feedback: feedback,
+	}
+}
+
+func admitExistingNativeToPending(t *testing.T, store *Store, admitted Run, root string) Run {
+	t.Helper()
 	routing := nextLifecycleRun(admitted, StateRouting, admitted.UpdatedAt.Add(time.Second))
 	if err := store.Transition(routing); err != nil {
 		t.Fatal(err)
@@ -365,6 +474,15 @@ func admitNativeToPending(t *testing.T, store *Store, admitter *Admitter, admiss
 		t.Fatal(err)
 	}
 	return modelRun(t, snapshotModel(t, store), admitted.ID)
+}
+
+func admitNativeToPending(t *testing.T, store *Store, admitter *Admitter, admission NativeAdmission, root string) Run {
+	t.Helper()
+	admitted, created, err := admitter.AdmitNative(admission)
+	if err != nil || !created {
+		t.Fatalf("admit native owner = %#v, %t, %v", admitted, created, err)
+	}
+	return admitExistingNativeToPending(t, store, admitted, root)
 }
 
 func admitNativeToAwaiting(t *testing.T, store *Store, admitter *Admitter, admission NativeAdmission, root string) Run {
@@ -415,4 +533,12 @@ func modelRun(t *testing.T, model Model, runID string) Run {
 	}
 	t.Fatalf("Run %q not found", runID)
 	return Run{}
+}
+
+func equalSortedStrings(left, right []string) bool {
+	left = slices.Clone(left)
+	right = slices.Clone(right)
+	slices.Sort(left)
+	slices.Sort(right)
+	return slices.Equal(left, right)
 }

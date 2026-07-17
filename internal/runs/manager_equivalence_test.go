@@ -18,8 +18,9 @@ import (
 // the legacy agentrun manager and repository routing it replaces, by driving the
 // real legacy owners (agentrun.Manager, agentrun.MechanicalCompletionValidator,
 // agentrun.LinearRepositoryResolver) alongside the canonical manager through
-// shared scenarios. Only the non-PR spine that this slice implements is
-// exercised; merge parking and GitHub reconciliation are deferred.
+// shared scenarios. Merge parking and GitHub reconciliation have their full
+// state matrix in merge_test.go; native synthetic admission and feedback
+// equivalence live in native_test.go.
 
 // ---- shared legacy collaborators ---------------------------------------
 
