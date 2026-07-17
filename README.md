@@ -1,143 +1,186 @@
 # Factory
 
-Factory turns a prompt into an observable agent run on one event wire.
+Factory is an intentionally unsafe trusted-environment demonstrator for three
+mechanisms:
 
-It is intentionally a small, unsafe trusted-environment demonstrator. There is
-no authentication, permission boundary, webhook verification, policy engine,
-repository routing, workflow registry, approval gate, migration layer, or
-deployment lifecycle.
+1. an append-only event wire,
+2. resource and task intake,
+3. one sequential Codex loop.
 
-## The loop
+Projects, tasks, comments, artifacts, triggers, and workflow metadata are
+projections of a JSONL event log. The Solid web app and `factory` CLI use the
+same HTTP API. No authentication, permissions, policy engine, migration
+framework, or deployment lifecycle lives in the application.
+
+## Monorepo
 
 ```text
-POST /api/tasks
-        |
-        v
-  task.submitted
-        |
-        v
-   events.jsonl  ---> task projection ---> HTTP API + browser
-        |
-        v
-   agent loop ---> unrestricted Codex process
-        |
-        +-------> run.started
-        +-------> agent.output
-        +-------> run.completed | run.failed
+api/    Go API, event wire, projections, workflow adapter, sequential loop
+cli/    Go resource client
+web/    SolidJS application built with Bun and Vite
 ```
 
-The append-only JSONL wire is Factory's only durable state. Task and Run views
-are rebuilt by replaying these five event types:
-
-- `task.submitted`
-- `run.started`
-- `agent.output`
-- `run.completed`
-- `run.failed`
-
-One sequential worker always selects the oldest queued task. It runs an
-ephemeral Codex process with approval prompts and sandboxing disabled, streams
-stdout and stderr back through the wire, and records the terminal result before
-selecting another task.
-
-If Factory restarts while an agent is running, the interrupted Run becomes
-failed during replay. Queued tasks continue normally.
+The root holds repository orchestration such as `go.mod`, `nags.toml`, and
+this document.
 
 ## Run locally
 
-Factory requires Go 1.26.5, Bun 1.3.11, and an authenticated `codex` CLI.
+Build the web bundle into the API's ignored embed staging directory:
 
-```bash
-export MISE_BUN_VERSION=1.3.11
-bun install --cwd frontend --frozen-lockfile
-bun run --cwd frontend typecheck
-bun run --cwd frontend build
-go build -o factory .
-./factory --workspace /path/to/a/workspace
+```sh
+bun install --cwd web --frozen-lockfile
+bun run --cwd web typecheck
+bun run --cwd web build
+mkdir -p api/dist/assets
+cp -R web/dist/. api/dist/
 ```
 
-Open [http://127.0.0.1:8092](http://127.0.0.1:8092).
+Then run the API:
 
-The defaults are:
-
-| Option | Default |
-| --- | --- |
-| `--addr` | `127.0.0.1:${PORT:-8092}` |
-| `--data` | `~/.local/share/factory/events.jsonl` |
-| `--workspace` | current directory |
-| `--agent` | `codex` |
-
-Use `./factory --help` for the complete command surface.
-
-## HTTP API
-
-Submit a task:
-
-```bash
-curl -sS http://127.0.0.1:8092/api/tasks \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"Explain this repository and improve its README."}' | jq .
+```sh
+go run ./api
 ```
 
-Read projected tasks:
-
-```bash
-curl -sS http://127.0.0.1:8092/api/tasks | jq .
-```
-
-Read the wire from the beginning or after a sequence:
-
-```bash
-curl -sS http://127.0.0.1:8092/api/events | jq .
-curl -sS 'http://127.0.0.1:8092/api/events?after=20' | jq .
-```
-
-Follow the wire as server-sent events:
-
-```bash
-curl -N 'http://127.0.0.1:8092/api/events/stream?after=0'
-```
-
-Inspect health:
-
-```bash
-curl -sS http://127.0.0.1:8092/api/health | jq .
-```
-
-## Source layout
+Factory listens on `127.0.0.1:8092` by default.
 
 ```text
-main.go             composition, configuration, process lifecycle
-nags.toml           Nags build, run, and release-health adapter
-internal/eventwire  append, replay, wait, and event identities
-internal/state      pure task and Run projection
-internal/agent      sequential loop and Codex process adapter
-internal/server     HTTP, SSE, and embedded frontend delivery
-frontend            one-page task, Run, and wire interface
+Usage: factory-api [options]
+
+  -addr string
+        HTTP listen address
+  -agent string
+        Codex executable
+  -data string
+        append-only event wire path
+  -workflow string
+        workflow CLI executable
+  -workflow-workspace string
+        untracked dynamic workflow workspace
 ```
 
-The frontend source is embedded directly into the Go binary. Vite is retained
-only for TypeScript checking and production-build verification.
+The new domain wire defaults to
+`~/.local/share/factory/wire.jsonl`. The prior demonstrator's
+`events.jsonl` is left untouched as an archive.
 
-## Deliberate non-goals
+## Web routes
 
-Factory trusts every caller, prompt, event, configured path, and agent process.
-Prompts and complete agent output are written to the wire in plain text. Codex
-runs with unrestricted host access in the configured workspace.
+```text
+/                                      overview
+/projects                              project list
+/projects/new                          create project
+/projects/:project                     view and edit project
+/tasks                                 sortable and groupable task list
+/tasks/new                             create task
+/tasks/:task                           view and edit task, comments, artifacts
+/tasks/:task/comments/:comment         directly address a comment
+/events                                live event wire
+/events/:event                         directly address an event
+/triggers                              trigger list
+/triggers/new                          create trigger
+/triggers/:trigger                     view and edit trigger
+/workflows                             discovered workflow list
+/workflows/new                         create through Codex chat
+/workflows/:workflow                   view and revise through Codex chat
+```
 
-Do not expose this service to untrusted users or networks.
+All route IDs are integers. Deletion is soft and list routes omit deleted
+records.
 
-Git history retains the previous production-oriented implementation and its
-security, lifecycle, migration, Linear, GitHub, and deployment machinery.
-Those capabilities are intentionally absent from this core.
+## Resource API
+
+The API exposes JSON CRUD routes under `/api`:
+
+```text
+projects     GET / POST, GET / PUT / DELETE by ID
+tasks        GET / POST, GET / PUT / DELETE by ID
+comments     POST under a task or workflow, GET / PUT / DELETE by ID
+artifacts    GET / POST, GET / PUT / DELETE by ID
+events       GET / POST, GET by ID, GET types, SSE stream
+triggers     GET / POST, GET / PUT / DELETE by ID
+workflows    GET / POST, GET / PUT / DELETE by ID
+```
+
+`POST /api/events` accepts any event:
+
+```json
+{
+  "type": "release.ready",
+  "data": {
+    "version": "1.0"
+  }
+}
+```
+
+Every accepted event type appears in the trigger event selector. `cron` is
+always included.
+
+## CLI
+
+Build the agent-facing client:
+
+```sh
+go build -o factory ./cli
+```
+
+The client prints JSON and accepts inline JSON or `@file` bodies:
+
+```text
+factory [--url URL] <resource> <action> [id] [json|@file]
+```
+
+Examples:
+
+```sh
+factory project list
+factory task create '{"title":"Review the PR","status":"todo"}'
+factory task comment 12 '{"content":"The build passed."}'
+factory artifact get 18
+factory workflow create '{"message":"Build a review-panel workflow."}'
+factory workflow update 24 '{"message":"Add a security reviewer."}'
+factory event create '{"type":"release.ready","data":{"version":"1.0"}}'
+```
+
+`FACTORY_URL` changes the default server from `http://127.0.0.1:8092`.
+
+## Workflow loop
+
+Factory asks the external `workflow` CLI to discover and execute dynamic
+workflows. It does not embed that CLI's loader, DSL, or agent runtime.
+
+Factory-created workflow files live outside git at:
+
+```text
+~/.local/share/factory/workflow-workspace/.claude/workflows/
+```
+
+Creating or updating a workflow appends a user chat comment. The sequential
+loop sends that conversation to unrestricted Codex, Codex writes the workflow
+file, and Factory appends the agent reply. Trigger execution is also explicit
+Codex:
+
+```text
+workflow --cwd <workspace> run <name> \
+  --backend codex \
+  --allow-mutating \
+  --no-validate \
+  --codex-yolo \
+  --args <source-event-and-trigger>
+```
+
+Event triggers match events received after the trigger's latest update. Cron
+triggers append a targeted `cron` event and follow the same execution path.
+Workflow conversations and trigger runs share one sequential worker.
 
 ## Verify
 
-```bash
+```sh
 go test ./...
 go test -race ./...
 go vet ./...
-MISE_BUN_VERSION=1.3.11 bun install --cwd frontend --frozen-lockfile
-MISE_BUN_VERSION=1.3.11 bun run --cwd frontend typecheck
-MISE_BUN_VERSION=1.3.11 bun run --cwd frontend build
+bun install --cwd web --frozen-lockfile
+bun run --cwd web typecheck
+bun run --cwd web build
 ```
+
+The Nags adapter builds both Go binaries, embeds the frozen Solid bundle in
+`factory-api`, and runs `factory-api`.

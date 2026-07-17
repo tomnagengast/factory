@@ -1,0 +1,305 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/robfig/cron/v3"
+
+	"github.com/tomnagengast/factory/api/internal/eventwire"
+	"github.com/tomnagengast/factory/api/internal/state"
+	"github.com/tomnagengast/factory/api/internal/workflow"
+)
+
+const (
+	authoringStarted   = "workflow.authoring.started"
+	authoringCompleted = "workflow.authoring.completed"
+	authoringFailed    = "workflow.authoring.failed"
+)
+
+type Loop struct {
+	wire      *eventwire.Wire
+	agent     Runner
+	workflows workflow.Runner
+}
+
+func NewLoop(wire *eventwire.Wire, runner Runner, workflows workflow.Runner) (*Loop, error) {
+	if wire == nil || runner == nil || workflows == nil {
+		return nil, errors.New("agent loop requires a wire, agent, and workflow CLI")
+	}
+	return &Loop{wire: wire, agent: runner, workflows: workflows}, nil
+}
+
+// Run owns Factory's only worker. Workflow conversations, event triggers, and
+// cron triggers all wait their turn here.
+func (l *Loop) Run(ctx context.Context) error {
+	if err := l.syncWorkflows(ctx); err != nil {
+		return err
+	}
+	for {
+		worked, nextCron, err := l.step(ctx)
+		if err != nil {
+			return err
+		}
+		if worked {
+			continue
+		}
+		after := l.wire.LastID()
+		waitContext := ctx
+		cancel := func() {}
+		if !nextCron.IsZero() {
+			waitContext, cancel = context.WithDeadline(ctx, nextCron)
+		}
+		_, err = l.wire.Wait(waitContext, after)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func (l *Loop) step(ctx context.Context) (bool, time.Time, error) {
+	events := l.wire.Events(0)
+	view, err := state.ProjectEvents(events)
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	if comment, found := view.PendingWorkflowComment(); found {
+		return true, time.Time{}, l.authorWorkflow(ctx, view, comment)
+	}
+	if trigger, source, found := pendingTrigger(view, events); found {
+		return true, time.Time{}, l.runTrigger(ctx, view, trigger, source)
+	}
+	due, next := nextCron(view, time.Now().UTC())
+	if due != nil {
+		_, err := l.wire.Publish(state.CronFired, state.CronData{TriggerID: due.ID})
+		return true, time.Time{}, err
+	}
+	return false, next, nil
+}
+
+func (l *Loop) authorWorkflow(ctx context.Context, view state.Snapshot, comment state.Comment) error {
+	selected, found := view.Workflow(comment.RelationID)
+	if !found {
+		return nil
+	}
+	target := l.workflows.LocalPath(selected.ID)
+	if filepath.Clean(stringValue(selected.Path)) != filepath.Clean(target) {
+		if _, err := l.wire.Publish(state.WorkflowUpdated, state.WorkflowData{
+			ID: selected.ID, Name: selected.Name, Description: selected.Description,
+			Path: &target, Scope: selected.Scope, Phases: slices.Clone(selected.Phases),
+			Mutating: selected.Mutating,
+		}); err != nil {
+			return err
+		}
+	}
+	if _, err := l.wire.Publish(authoringStarted, map[string]int64{
+		"workflowId": selected.ID, "commentId": comment.ID,
+	}); err != nil {
+		return err
+	}
+	output, runErr := l.agent.Run(ctx, authorPrompt(selected, view.CommentsFor("workflow", selected.ID), target))
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if runErr == nil {
+		runErr = l.syncWorkflows(ctx)
+	}
+	response := strings.TrimSpace(output)
+	if response == "" {
+		response = "Workflow updated."
+	}
+	eventType := authoringCompleted
+	if runErr != nil {
+		eventType = authoringFailed
+		response = strings.TrimSpace(response + "\n\nError: " + runErr.Error())
+	}
+	if _, err := l.wire.Publish(eventType, map[string]any{
+		"workflowId": selected.ID, "commentId": comment.ID, "response": response,
+	}); err != nil {
+		return err
+	}
+	_, err := l.wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "workflow", RelationID: selected.ID, ParentCommentID: &comment.ID,
+		Author: "agent", Content: response,
+	})
+	return err
+}
+
+func (l *Loop) runTrigger(
+	ctx context.Context,
+	view state.Snapshot,
+	trigger state.Trigger,
+	source eventwire.Event,
+) error {
+	selected, found := view.Workflow(trigger.WorkflowID)
+	run := state.WorkflowRunData{
+		TriggerID: trigger.ID, WorkflowID: trigger.WorkflowID, SourceEventID: source.ID,
+	}
+	if _, err := l.wire.Publish(state.WorkflowRunStarted, run); err != nil {
+		return err
+	}
+	if !found || selected.DeletedAt != nil {
+		run.Error = "workflow not found"
+		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
+		return err
+	}
+	output, runErr := l.workflows.Run(ctx, selected.Name, map[string]any{
+		"event": source, "trigger": trigger,
+	})
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	run.Output = output
+	if runErr != nil {
+		run.Error = runErr.Error()
+		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
+		return err
+	}
+	_, err := l.wire.Publish(state.WorkflowRunCompleted, run)
+	return err
+}
+
+func (l *Loop) syncWorkflows(ctx context.Context) error {
+	definitions, err := l.workflows.List(ctx)
+	if err != nil {
+		return err
+	}
+	view, err := state.ProjectEvents(l.wire.Events(0))
+	if err != nil {
+		return err
+	}
+	for _, definition := range definitions {
+		existing, found := matchingWorkflow(view, definition, l.workflows)
+		data := state.WorkflowData{
+			Name: definition.Name, Description: stringPointer(definition.Description),
+			Path: stringPointer(definition.Path), Scope: stringPointer(definition.Scope),
+			Phases: slices.Clone(definition.Phases), Mutating: definition.Mutating,
+		}
+		if !found {
+			if _, err := l.wire.Publish(state.WorkflowDiscovered, data); err != nil {
+				return err
+			}
+			continue
+		}
+		data.ID = existing.ID
+		if workflowChanged(existing, data) {
+			if _, err := l.wire.Publish(state.WorkflowUpdated, data); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func pendingTrigger(view state.Snapshot, events []eventwire.Event) (state.Trigger, eventwire.Event, bool) {
+	for _, event := range events {
+		for _, trigger := range view.Triggers {
+			if trigger.DeletedAt != nil || trigger.EventType != event.Type || !event.At.After(trigger.UpdatedAt) {
+				continue
+			}
+			if event.Type == state.CronFired {
+				var cronEvent state.CronData
+				if json.Unmarshal(event.Data, &cronEvent) != nil || cronEvent.TriggerID != trigger.ID {
+					continue
+				}
+			}
+			if !view.RunStarted(trigger.ID, event.ID) {
+				return trigger, event, true
+			}
+		}
+	}
+	return state.Trigger{}, eventwire.Event{}, false
+}
+
+func nextCron(view state.Snapshot, now time.Time) (*state.Trigger, time.Time) {
+	var next time.Time
+	for index := range view.Triggers {
+		trigger := &view.Triggers[index]
+		if trigger.DeletedAt != nil || trigger.EventType != state.CronFired || trigger.Schedule == nil {
+			continue
+		}
+		schedule, err := cron.ParseStandard(*trigger.Schedule)
+		if err != nil {
+			continue
+		}
+		anchor := trigger.CreatedAt
+		if last, found := view.LastCron(trigger.ID); found {
+			anchor = last
+		}
+		due := schedule.Next(anchor)
+		if !due.After(now) {
+			return trigger, due
+		}
+		if next.IsZero() || due.Before(next) {
+			next = due
+		}
+	}
+	return nil, next
+}
+
+func matchingWorkflow(view state.Snapshot, definition workflow.Definition, runner workflow.Runner) (state.Workflow, bool) {
+	if selected, found := view.WorkflowByPath(definition.Path); found {
+		return selected, true
+	}
+	for _, selected := range view.Workflows {
+		if filepath.Clean(runner.LocalPath(selected.ID)) == filepath.Clean(definition.Path) {
+			return selected, true
+		}
+	}
+	return view.WorkflowByName(definition.Name)
+}
+
+func workflowChanged(existing state.Workflow, data state.WorkflowData) bool {
+	return existing.Name != data.Name ||
+		stringValue(existing.Description) != stringValue(data.Description) ||
+		stringValue(existing.Path) != stringValue(data.Path) ||
+		stringValue(existing.Scope) != stringValue(data.Scope) ||
+		!slices.Equal(existing.Phases, data.Phases) ||
+		existing.Mutating != data.Mutating
+}
+
+func authorPrompt(selected state.Workflow, comments []state.Comment, target string) string {
+	var conversation strings.Builder
+	for _, comment := range comments {
+		fmt.Fprintf(&conversation, "%s: %s\n\n", comment.Author, comment.Content)
+	}
+	source := ""
+	if selected.Path != nil {
+		source = *selected.Path
+	}
+	return fmt.Sprintf(`You are collaborating with a user to author one dynamic workflow.
+
+Read workflow CLI help and examples under ~/cmptr/config/ai/workflows when useful.
+Write the complete workflow to %s. This Factory-owned path is outside git.
+The first statement must export const meta with name, description, and phases.
+Use the workflow runtime globals such as phase, agent, parallel, workflow, gate, and log.
+If an existing workflow is being edited, its resolved source is %s. Preserve its name unless the user asks to change it.
+Edit no other file. Return a concise, useful response to the user after writing the workflow.
+
+Conversation:
+%s`, target, source, conversation.String())
+}
+
+func stringPointer(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}

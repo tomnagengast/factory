@@ -7,7 +7,7 @@
   lifecycle machinery without explicit product direction.
 - Humans retain merge authority for this repository.
 - Run `go test ./...`, `go test -race ./...`, `go vet ./...`, and the
-  frozen Bun frontend build before publication.
+  frozen Bun `web/` build before publication.
 - Deploy only clean, merged `main` commits from
   `~/repos/tomnagengast/factory`.
 - Never deploy from the T9 working mirror.

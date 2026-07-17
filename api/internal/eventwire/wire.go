@@ -3,8 +3,6 @@ package eventwire
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,31 +13,19 @@ import (
 	"time"
 )
 
-const (
-	TaskSubmitted = "task.submitted"
-	RunStarted    = "run.started"
-	AgentOutput   = "agent.output"
-	RunCompleted  = "run.completed"
-	RunFailed     = "run.failed"
-)
-
 var ErrClosed = errors.New("event wire is closed")
 
-// Event is the only durable fact in Factory. Task and Run state are projections
-// of these ordered records.
+// Event is the only durable fact in Factory. Its ordered ID is also used as
+// the integer ID for an entity created by the event.
 type Event struct {
-	Sequence uint64          `json:"sequence"`
-	ID       string          `json:"id"`
-	Type     string          `json:"type"`
-	At       time.Time       `json:"at"`
-	TaskID   string          `json:"taskId,omitempty"`
-	RunID    string          `json:"runId,omitempty"`
-	Data     json.RawMessage `json:"data"`
+	ID   int64           `json:"id"`
+	Type string          `json:"type"`
+	At   time.Time       `json:"at"`
+	Data json.RawMessage `json:"data"`
 }
 
-// Wire owns one append-only JSONL file and broadcasts a wake whenever a record
-// is appended. Consumers always catch up from the log, so a wake carries no
-// payload and may be coalesced safely.
+// Wire owns one append-only JSONL file. Consumers catch up from the log after
+// every coalesced wake, so there is no broker or delivery state to maintain.
 type Wire struct {
 	mu      sync.RWMutex
 	file    *os.File
@@ -55,7 +41,6 @@ func Open(path string) (*Wire, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o777); err != nil {
 		return nil, fmt.Errorf("create event wire directory: %w", err)
 	}
-
 	data, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read event wire: %w", err)
@@ -64,7 +49,6 @@ func Open(path string) (*Wire, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o666)
 	if err != nil {
 		return nil, fmt.Errorf("open event wire: %w", err)
@@ -83,8 +67,7 @@ func decode(data []byte) ([]Event, error) {
 		if err := json.Unmarshal(line, &event); err != nil {
 			return nil, fmt.Errorf("decode event wire line %d: %w", index+1, err)
 		}
-		expected := uint64(len(events) + 1)
-		if event.Sequence != expected || event.ID == "" || event.Type == "" || event.At.IsZero() {
+		if event.ID != int64(len(events)+1) || event.Type == "" || event.At.IsZero() {
 			return nil, fmt.Errorf("event wire line %d is invalid", index+1)
 		}
 		events = append(events, event)
@@ -92,17 +75,13 @@ func decode(data []byte) ([]Event, error) {
 	return events, nil
 }
 
-func (w *Wire) Publish(eventType, taskID, runID string, payload any) (Event, error) {
+func (w *Wire) Publish(eventType string, payload any) (Event, error) {
 	if eventType == "" {
 		return Event{}, errors.New("event type is required")
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return Event{}, fmt.Errorf("encode event payload: %w", err)
-	}
-	id, err := NewID("evt")
-	if err != nil {
-		return Event{}, err
 	}
 
 	w.mu.Lock()
@@ -111,53 +90,67 @@ func (w *Wire) Publish(eventType, taskID, runID string, payload any) (Event, err
 		return Event{}, ErrClosed
 	}
 	event := Event{
-		Sequence: uint64(len(w.events) + 1),
-		ID:       id,
-		Type:     eventType,
-		At:       time.Now().UTC(),
-		TaskID:   taskID,
-		RunID:    runID,
-		Data:     data,
+		ID:   int64(len(w.events) + 1),
+		Type: eventType,
+		At:   time.Now().UTC(),
+		Data: data,
 	}
 	encoded, err := json.Marshal(event)
 	if err != nil {
 		return Event{}, fmt.Errorf("encode event: %w", err)
 	}
-	encoded = append(encoded, '\n')
-	if _, err := w.file.Write(encoded); err != nil {
+	if _, err := w.file.Write(append(encoded, '\n')); err != nil {
 		return Event{}, fmt.Errorf("append event: %w", err)
 	}
 	w.events = append(w.events, event)
 	close(w.changed)
 	w.changed = make(chan struct{})
-	return cloneEvent(event), nil
+	return clone(event), nil
 }
 
-func (w *Wire) Events(after uint64) []Event {
+func (w *Wire) Events(after int64) []Event {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return eventsAfter(w.events, after)
 }
 
-func (w *Wire) LastSequence() uint64 {
+func (w *Wire) Event(id int64) (Event, bool) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	if len(w.events) == 0 {
-		return 0
+	if id < 1 || id > int64(len(w.events)) {
+		return Event{}, false
 	}
-	return w.events[len(w.events)-1].Sequence
+	return clone(w.events[id-1]), true
 }
 
-// Wait returns every event after the requested sequence, waiting for the next
-// append when the caller is current.
-func (w *Wire) Wait(ctx context.Context, after uint64) ([]Event, error) {
+func (w *Wire) Types() []string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	seen := make(map[string]bool)
+	types := make([]string, 0)
+	for _, event := range w.events {
+		if !seen[event.Type] {
+			seen[event.Type] = true
+			types = append(types, event.Type)
+		}
+	}
+	sort.Strings(types)
+	return types
+}
+
+func (w *Wire) LastID() int64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return int64(len(w.events))
+}
+
+func (w *Wire) Wait(ctx context.Context, after int64) ([]Event, error) {
 	for {
 		w.mu.RLock()
 		events := eventsAfter(w.events, after)
 		changed := w.changed
 		closed := w.closed
 		w.mu.RUnlock()
-
 		if len(events) > 0 {
 			return events, nil
 		}
@@ -183,26 +176,18 @@ func (w *Wire) Close() error {
 	return w.file.Close()
 }
 
-func eventsAfter(events []Event, after uint64) []Event {
+func eventsAfter(events []Event, after int64) []Event {
 	index := sort.Search(len(events), func(index int) bool {
-		return events[index].Sequence > after
+		return events[index].ID > after
 	})
 	cloned := make([]Event, len(events)-index)
 	for offset := range cloned {
-		cloned[offset] = cloneEvent(events[index+offset])
+		cloned[offset] = clone(events[index+offset])
 	}
 	return cloned
 }
 
-func cloneEvent(event Event) Event {
+func clone(event Event) Event {
 	event.Data = append(json.RawMessage(nil), event.Data...)
 	return event
-}
-
-func NewID(prefix string) (string, error) {
-	var value [8]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return "", fmt.Errorf("create identity: %w", err)
-	}
-	return prefix + "-" + hex.EncodeToString(value[:]), nil
 }
