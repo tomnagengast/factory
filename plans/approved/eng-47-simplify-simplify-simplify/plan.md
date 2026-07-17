@@ -1,300 +1,428 @@
-# ENG-47: Simplify the Frontend Tasks Boundary
+# ENG-47 First-Principles Simplification Plan, Revision 2
 
-> updated: 2026-07-16T09:05:45-07:00
+> updated: 2026-07-17T00:08:04Z
 
-## Issue context
+## Issue context and outcome
 
-Linear ENG-47 asks to apply the `codebase-steward` lens and make Factory as simple as possible without giving up feature capabilities. The issue intentionally supplies no narrower acceptance criteria. Research therefore selects the smallest high-leverage slice supported by code, history, tests, and runtime evidence instead of treating the request as permission for a rewrite.
+ENG-47 originally approved and implemented a conservative provider-typed Tasks frontend extraction. Tom's later reply changes the governing scope: Factory is unreleased greenfield software at its explicit first-principles rewrite stage, and high-risk consolidation plus legacy deletion is preferred over a safe narrow patch.
 
-Factory is routed through the allowlisted `tomnagengast/factory` project metadata. Work occurs only on `eng-47-simplify-simplify-simplify` in its Worktrunk checkout. Human merge authority, exact verified-head ancestry, clean-main deployment, rollback compatibility, and mechanical completion safeguards remain out of scope for redesign.
+This revision keeps the completed Tasks extraction but replaces the revision-1 endpoint. The implementation will make Factory's architecture express one owner for each durable concept:
+
+1. one authoritative event ledger;
+2. one admission and Run lifecycle;
+3. one private task transaction log;
+4. one published policy owner;
+5. one repository model and catalog;
+6. one supervised application runtime;
+7. one frontend feature owner and one shared owner for each repeated invariant.
+
+The implementation must preserve live Factory data through a fail-closed one-shot migration. Greenfield status does not authorize deleting the current active Run, retained history, tasks, workflow pins, routing evidence, or completion evidence.
+
+## Repositories, branches, pull requests, and sequencing
+
+This is one coordinated ENG-47 change across two admitted repositories under Factory's machine-wide run authority:
+
+| Repository | Admitted checkout | Branch | Pull request |
+| --- | --- | --- | --- |
+| `tomnagengast/factory` | `/Users/tom/repos/tomnagengast/factory` | `eng-47-simplify-simplify-simplify` | existing draft PR 18 |
+| `tomnagengast/network` | `/Volumes/T9/Repos/tomnagengast/network` | `eng-47-network-generation-guard` | create one draft PR after plan approval |
+
+Both branches use the required `eng-47-` prefix. Both diffs are covered by the same adversarial plan reviews and final green loop. Humans merge Network with a merge commit first and Factory with a merge commit second. The post-merge continuation then reconciles and deploys Network before it deploys Factory; Factory remains undeployed unless the provider prerequisite is healthy. The routed-primary ready checkpoint remains bound to Factory PR 18; durable PR and Linear evidence record the exact verified Network head and merge ancestry as the additional-repository checkpoint.
 
 ## Acceptance criteria
 
-- [ ] The Tasks frontend has one cohesive vertical owner outside the global application entrypoint.
-- [ ] Native and managed Linear task details use provider-typed fetch and page owners; the broad native-or-Linear response union and runtime `"task" in value` discrimination are removed.
-- [ ] `/tasks` and `/tasks/(factory|linear)/{id}` retain all existing URLs, presentation states, navigation, and capabilities.
-- [ ] Native creation, editing, messages, replies, links, gates, decisions, start, cancel, revision conflicts, lifecycle evidence, and completion evidence behave unchanged.
-- [ ] Managed Linear detail remains live and completely read-only, including discussion and its external Linear link.
-- [ ] Same-origin credentials, per-request idempotency keys, expected revisions, conflict refetch, and current error semantics remain unchanged.
-- [ ] The entrypoint remains an explicit dependency-light composition and exact-route owner; no router, query/state framework, generated client, or universal mutation abstraction is added.
-- [ ] Backend APIs, persisted formats, global CSS, package dependencies, and protected lifecycle behavior are unchanged.
-- [ ] Focused checks, full Factory checks, frontend typecheck/build, and proportional desktop/mobile browser verification pass.
+1. Every current page, API, webhook, helper, task operation, workflow edit, trigger/schedule operation, project activation, repository setup, agent observation, and deployment/completion flow remains available with the same security and user-visible capability.
+2. `system-events.jsonl` is the only event journal opened and written by Factory. GitHub and Linear normalization and helper cursor behavior remain, but the provider projection journals, seeds, mirrors, interfaces, and tests are deleted.
+3. One durable Run authority owns admission outcomes, workflow/task/policy/repository causation, runnable state, retries, merge parking, GitHub remediation, and terminal completion. There is no separate Invocation lifecycle, reflection receipt, or claim manager.
+4. Linear rules, schedules, native starts, protected feedback, native task feedback, and GitHub remediation enter that same Run owner without weakening hop/cycle/rate limits, same-task serialization, repository routing, or idempotency.
+5. A normal human Linear comment performs protected continuation only. The compiled duplicate generic comment rule is gone; an explicitly configured visible generic comment rule remains supported and intentionally additive.
+6. Native task commands and their pending/apply/result lifecycle live in the native task journal. Private bodies remain outside the global wire, and `task-operations/` plus its duplicate execution protocol are deleted.
+7. Published workflows, protected bindings, trigger rules, schedules, agent/runtime settings, and project task activation have one durable policy owner and one internal admission generation while preserving their current independent public conflict revisions. Drafts remain separate and nonauthoritative.
+8. New admissions use one compiled provider-neutral Full SDLC default. Existing retained Runs preserve their exact immutable old pins, and the old pin executor remains only for retained nonterminal compatibility.
+9. One repository record and catalog supply onboarding, task routing, launch configuration, completion evidence, and UI choices. No legacy resolver can invent or bypass an allowlisted route.
+10. All service-owned components recover before readiness and are started, canceled, error-propagated, and joined by one supervisor. In-process loops and ephemeral subprocesses leave no residue; durable Run-owned `factory-agents` tmux sessions intentionally survive service shutdown and are reconciled after restart.
+11. Current state migrates into one canonical generation without losing or duplicating Runs, tasks, gates, messages, links, policy, repository routes, event cursors, or evidence. Unknown or ambiguous source state fails before activation.
+12. The Run that implements ENG-47 remains resumable after deployment even though it is pinned to the old provider-specific workflow.
+13. Human-only merge, exact verified-head ancestry, allowlisted routing, clean updated-main deployment, review/check non-regression, task/child completion, and branch/worktree cleanup remain mechanically enforced and covered by rejection tests.
+14. `frontend/src/index.tsx` becomes a small exact-route composition root. Home/activity, wire, agents/observer, workflows, triggers, settings, and Tasks have cohesive owners.
+15. Frontend reads and writes share one transport core with semantic wrappers; tasks-only idempotency and endpoint-specific conflict semantics remain exact. Settings/triggers/protected binding share one optimistic-save machine, workflows retain their distinct autosave queue, and polling has one owner.
+16. Full Go tests, race detector, vet, frozen Bun install, typecheck, production build, migration/crash/security matrices, and authenticated desktop/mobile browser verification pass.
+17. The result moves toward 10 to 12 Go packages, removes at least 15 percent of production Go lines unless preserved invariants prove a lower honest result, removes roughly half of the current durable authorities, and reduces the frontend entry to roughly 70 to 120 lines. Budgets never justify deleting a safeguard.
+18. Network `nags deploy` rejects source incompatibility before creating a release, receipt, or artifact backup and rejects copied/build output drift before selection or process mutation. `nags rollback` rejects incompatibility before any receipt, runtime artifact, process, or `current` mutation. Once a guarded Factory release is active, rollback also requires the continuously held process- and token-bound Factory state-transition lease, including the success-receipt-to-manifest cutover window.
+19. Every existing Linear display-identifier/provider-UUID binding migrates into the canonical task owner with its one-to-one conflict semantics intact across restart.
+20. Home activity lifetime totals and retained history plus the private Linear payload corpus migrate into the canonical event owner without exposing bodies, breaking authenticated historical detail, or preventing project-setup replay.
 
-## Research summary and evidence
+## Evidence and root cause
 
-The complete evidence is in `plans/planning/eng-47-simplify-simplify-simplify/research.md`.
+- Production Go is approximately 22,277 lines across 20 packages. The root imports every internal package, and the HTTP server imports 17.
+- The data root contains 16 named durable artifacts plus sidecars and run directories.
+- `system-events.jsonl` is authoritative. `github-events.json` and `linear-comments.json` contain zero retained records and are not read by current agent helpers.
+- Generic admission persists `Decision` and `Invocation`, then a second manager copies the same identity, workflow, task, causation, policy, and repository data into `agentrun.Run`. Terminal state is reflected back with receipts.
+- Native task mutation persists a private filesystem stage, publishes a body-free wire record, applies the command through dispatch, then calls the task store a second time to recover the result.
+- Published policy is split across settings, workflows, registry, schedules, and task control despite coordinated mutation requirements.
+- Repository identity is translated among setup specs, existing repositories, run configs, resolvers, registrar adapters, and completion readers.
+- `serveConfigured` opens the stores and starts five post-readiness loops without a join-owning runtime supervisor.
+- After the revision-1 Tasks extraction, `index.tsx` is still 2,584 lines with 35 feature types, four write transports, three copied optimistic-save machines, four polling loops, and repeated route shells.
+- Live state has 59 retained Runs and one active ENG-47 Run. Settings are schema 2. The wire has no pending records, task staging is empty, workflow drafts are empty, and no registry file exists. These facts make a fail-closed one-shot migration possible, but the code must also reject non-empty or ambiguous variants safely.
+- Current Factory main explicitly grants this Run coordinated authority over all admitted repositories. Network is admitted at its clean T9 checkout, and its direct deploy/rollback paths converge in `bin/nags` under one per-app provider lock before `activate_release`. Its strict manifest parser has no Factory generation declaration and its rollback validates receipt status and provider contract version but not retained-manifest SHA or a Factory lease.
 
-### Current architecture
+The root cause is parallel ownership, not insufficient abstraction. Rapid feature delivery added transitional journals, state machines, models, stores, and UI implementations beside earlier authorities. The plan removes or folds those authorities before extracting shared mechanics.
 
-- `frontend/src/index.tsx` is 3,273 lines and owns 44 API/domain types, all frontend transport, every workspace, shared UI, formatting, polling, and route dispatch.
-- `frontend/src/styles.css` is 3,321 lines. Its cascade and responsive order are behavior and will remain unchanged.
-- The frontend has one Vite entry (`frontend/index.html` -> `/src/index.tsx`) and one eagerly built application bundle. The Go server owns authentication, canonical paths, and API behavior.
-- History shows the monolith grew additively as Settings, Triggers, Workflows, and Tasks were delivered; it is not one stable domain.
+## Architectural decisions
 
-### Representative Tasks flow
+### Canonical state generation
 
-1. `/tasks` builds a filtered query, loads the retained task ledger and eligible projects, and creates native tasks only for enabled projects.
-2. `/tasks/(factory|linear)/{id}` already knows the provider from the route regex.
-3. The current `getTaskDetail` nevertheless returns `NativeTaskDetail | TaskSummary`.
-4. `TaskDetailPage` rediscovers the provider with `"task" in value`, initializes both branches' state owners, and combines the read-only Linear surface with native mutation state.
-5. Native writes use `credentials: "same-origin"`, JSON, one new `Idempotency-Key`, exact `expectedRevision` fields, refetch after success, and refetch after `409`. The server independently enforces authentication, origin, idempotency, provider ownership, strict decoding, terminal state, and revision rules.
+Add one small state manifest that selects a complete canonical generation. On first start of the cutover release:
 
-### Baseline
+1. open and strictly validate every source artifact without mutating it;
+2. create a permission-preserving complete backup receipt;
+3. build canonical `policy`, `repositories`, `runs`, `tasks`, and `activity` artifacts plus one private Linear payload corpus in a new private generation directory;
+4. validate cross-artifact identities, counts, digests, ownership, cursors, and active states;
+5. fsync files and directories;
+6. recover the authoritative wire and open the staged canonical stores read-only, then serve exact deployment identity health while every advancing endpoint and manager remains gated and no manifest selects the generation;
+7. after the deployment provider writes the exact successful receipt, acquire the state-transition lease and then the provider's existing deployment lock, revalidate unchanged source hashes, the complete staged generation, exact selected release, generated runtime artifacts, and successful receipt, recursively fsync the release/runtime/receipt graph and parent directories, write and fsync a Factory-owned provider-finalization acknowledgement, atomically publish and fsync the manifest, fsync `canonicalWritesStarted`, and start advancing work.
 
-- `go test ./...` passes.
-- Bun 1.3.11 frozen install, frontend typecheck, and production build pass.
-- Baseline production output is one JavaScript application asset and one CSS asset.
-- Existing local and public Factory health match main commit `e5034d6208fbc7cfaa41fc24aa4793f2c8870c4b` with lifecycle contract 1.
-- The connected in-app browser is unavailable and the `agent-browser` CLI is not installed. Browser verification will use macOS Computer Use against a bounded candidate fixture on a distinct loopback port. The already-running port 8092 and public deployment remain read-only baseline and post-deploy surfaces.
+The existing wire, run directories, and deployment receipts are not copied into new domain stores. The migration copies each retained private Linear payload once into the canonical generation, validates its delivery-ID mapping, hash, mode, and cross-reference, and leaves the source corpus intact as archival evidence after activation. The service never dual-writes old and canonical stores or payloads.
 
-## Root cause
+The manifest records source artifact hashes, source and target schema versions, migration ID/time, initial canonical artifact hashes and counts as immutable audit evidence, the activation inventory of every nonterminal Run and live effect-capable agent session, and the release contract. Initial hashes are never treated as current hashes after activation. Mutable canonical stores validate themselves through strict schema, replay, operation, poison, and cross-reference rules on every open.
 
-Feature implementations were appended to `frontend/src/index.tsx` because it was the only frontend module. That made the composition root an owner of unrelated domain contracts, transports, state machines, and page bodies. The Tasks route already encodes a provider distinction, but the client erased that distinction into a union and reconstructed it at runtime. This creates unnecessary invalid states and obscures which code owns native mutations versus read-only Linear presentation.
+The generation also owns a monotonic, fsynced `canonicalWritesStarted` boundary. The staged generation is not selected before the exact successful deployment receipt. Under the state-transition lease, manifest publication is followed by the boundary write and directory sync before the first canonical domain mutation. Recovery and rollback preflight read the boundary rather than infer write state from mutable artifact hashes.
 
-## Decisions
+One data-root state-transition lease excludes canonical manifest publication and boundary advancement from rollback. `bin/network-app` acquires the lease before it quiesces Factory and retains the same lease token through preflight, optional restore, manifest deactivation, provider activation, health verification, and deployment-receipt finalization. The application must acquire that same exclusion before observing a receipt as authority, publishing the manifest, fsyncing `canonicalWritesStarted`, or starting advancing managers. If rollback owns it, the service remains health-identifiable but advancement-gated. The lease is fail closed, process- and token-bound, and cannot be bypassed by a stale file or a second wrapper.
 
-### 1. Extract one vertical feature, not the whole frontend
+Factory finalizes provider durability without adding a second provider protocol. After `nags deploy` exits, the application acquires the provider's existing `$HOME/.local/share/factory/.deployment-lock` while still holding the state-transition lease. It revalidates the exact `current` target, release identity, generated wrappers/plists, successful `deployments/current.json`, and health identity; recursively fsyncs the immutable release, selection directory, runtime artifacts, receipt, and every affected parent directory; and writes a durable acknowledgement containing their paths, identities, and hashes. Manifest publication requires that acknowledgement. If another direct provider action won the lock first, revalidation must either prove the same exact deployment graph or refuse activation and require a forward correction.
 
-Tasks is the largest recent cohesive feature and has a concrete provider-typing problem. This issue will establish one clear module convention without forcing unrelated Workflows, Triggers, Wire, Settings, Agents, or CSS through a repository-wide shuffle.
+This finalization does not make direct provider activation safe after Factory releases the lock. The coordinated Network change therefore adds a strict optional `[compatibility.factory]` manifest table with `state_generations`, `deployment_contracts`, and `rollback_lease_contract`. `platform/nags_factory_guard.py`, invoked by `bin/nags` while the provider lock is held and before any mutable deploy or rollback work, reads the selected Factory generation manifest at `~/.local/share/factory/data/state-generation.json`. If canonical state is selected, the target release must declare the exact generation and deployment contract. Rollback also requires lease contract 1 when canonical state is selected or when the active Factory release already declares that lease contract, closing the success-receipt-to-manifest race.
 
-### 2. Keep exact route composition explicit
+The provider validates the original source manifest before deploy creates a release or receipt, then revalidates the copied release manifest and original SHA immediately before `activate_release` so the build cannot change compatibility metadata. Rollback validates the retained receipt's `manifestSha256` against the retained release before the same generation check. A lease is one nonsymlink `0600` file at `~/.local/share/factory/data/state-transition.lock`, exclusively held with an OS advisory lock by the Factory wrapper. Its strict contract records the owner PID/process identity and SHA-256 of a random token passed privately through `NAGS_FACTORY_STATE_LEASE_TOKEN`. The wrapper passes an inherited `NAGS_FACTORY_STATE_LEASE_FD` for that exact locked inode to the provider child and waits rather than `exec`ing it. `nags` retains the descriptor through activation, health, and receipt finalization. Guard validation proves the descriptor and path are the same inode, the lock is continuously held, the token matches, the recorded owner is a live ancestor, and the file owner, mode, JSON shape, and contract are exact. Rollback repeats lease-owner, generation, target-manifest, and receipt-hash validation at the last possible point immediately before `activate_release`; the manifest is opened without following symlinks and its verified descriptor supplies the activation metadata. Unlocked, stale, replaced, malformed, foreign, symlinked, PID-only, dead-owner, wrong-descriptor, or wrong-token leases fail before activation.
 
-`frontend/src/index.tsx` will continue to inspect the pathname and render exact components. For a task detail route, it will explicitly choose `NativeTaskDetailPage` or `LinearTaskDetailPage` from the already validated provider segment. No client router dependency is needed.
+### Unified Run model
 
-### 3. Extract only proven shared capabilities
+Create a single append-only Run journal with operations for:
 
-Shared code will be placed in narrowly named modules only where at least two current features consume the concept:
+- admission batch and durable suppressed/rejected outcomes;
+- runnable Run creation;
+- repository route resolved/rejected;
+- lifecycle transitions and attempts;
+- delivery coalescing and feedback resume;
+- GitHub cursor/remediation scheduling;
+- ready checkpoint and post-merge resume;
+- completion validation;
+- rate-bucket increments and expiry;
+- checkpoint compaction and retention.
 
-- `frontend/src/activity.tsx`: the existing activity header, connection/loading elements, and generic activity formatting/state helpers used by Tasks and other workspaces.
-- `frontend/src/agent.ts`: retained agent-run summary contracts and `agentRunHref`, used by the Agents workspace and task lifecycle evidence.
-- `frontend/src/http.ts`: the existing read-only `getJSON` helper used by multiple feature reads.
+A Run stores one immutable admission/causation ID, rule identity, workflow pin/digest, policy revision, task identity, root event, parent Run, hop/ancestor rules, delivery IDs, repository, lifecycle, checkpoint, and completion once. Migrated Invocation IDs become admission IDs. New IDs remain deterministic from event/rule identity. Derived wire events continue populating the retained `parentInvocationId` field from that immutable admission ID and also carry `parentRunId`, so retained wire decoding does not change even though admission has no separate lifecycle.
 
-These modules are not generic dumping grounds. Task-only types, errors, transport, state, and helpers remain in `tasks.tsx`.
+`AdmitBatch` runs synchronously inside the existing event/policy serialization boundary and appends one atomic batch operation for all outcomes and new Runs. Event-derived Runs cannot route or start until their source event sequence is globally dispatched. Repository resolution remains an asynchronous transition within the same Run manager because it can depend on provider state. The oldest admitted Run per task owns routing/start; later Runs remain admitted until ownership clears. Protected feedback and native feedback coalesce into the active Run when required.
 
-### 4. Preserve meaningful transport differences
+Run transitions use a journal-owned outbox. One journal operation records the transition and its pending body-free wire event atomically. The collector publishes idempotently, records publication, and acknowledges only after the event wire reports the sequence dispatched. Terminal events are therefore never publishable before terminal Run state and the corresponding admission outcome are durable, replacing the old reflection receipt without weakening ordering.
 
-The native task request stays task-owned because it requires a fresh idempotency key and has task-specific conflict semantics. Workflow, Trigger, and Settings mutation paths remain separate. The change must not create a universal HTTP abstraction that hides incompatible conflict payloads or empty-response behavior.
+### Task outbox
 
-### 5. Preserve CSS and runtime graph
+Extend the task journal with explicit `pending-unpublished`, `published`, `applied-result`, and `acknowledged` operation states keyed by the request's idempotency scope and command hash. Submission reuses an existing pending or result record for the same key. It returns the existing idempotent result only after the exact result is durable and synchronous wire publication/dispatch returns, but it reads that result from the same task projection rather than executing the domain command again.
 
-The global stylesheet remains byte-for-byte unchanged. Static imports remain eager so Vite continues producing one normal application entry rather than route chunks with new loading behavior.
+The body-free wire event contains only the opaque operation ID, task identity, kind, producer, and provenance and has a deterministic ID known before publication. When dispatch receives the authoritative record, the task handler first appends its event ID and sequence as `published`, then validates metadata equality, applies once, and appends the result. If append succeeded but dispatch failed before that handler, recovery republishes the deterministic event idempotently, obtains the same record, and advances the same operation. The private command remains available while a later event handler can still fail. A named task-outbox reconciler marks it `acknowledged` only after the global wire dispatched cursor reaches its sequence. On startup and live transient failure, that owner republishes `pending-unpublished` operations or durably cancels one only when the wire proves its event absent and no publication attempt remains in flight.
 
-## Alternatives considered
+### Coordinated policy
 
-- Delete the near-duplicate Linear and GitHub legacy journals: rejected because they are documented exact-sequence rollback projections, even though current helper reads use the unified wire.
-- Generalize atomic persistence across Go stores: rejected because durability, fsync, temporary-file, and recovery details differ across critical stores.
-- Split every frontend feature and CSS block: rejected as a broad review-obscuring shuffle with cascade risk.
-- Add a client router or state/query library: rejected because current exact dispatch and Solid primitives are simpler and server authentication/canonicalization remains authoritative.
-- Generalize all mutation requests: rejected because conflict, idempotency, and response contracts differ meaningfully.
-- Remove dead CSS in the same change: rejected as unrelated scope.
+Create one immutable policy snapshot containing:
+
+- published workflow definitions and protected feedback binding;
+- trigger rules and schedules;
+- principal/child model settings and runtime limits;
+- enabled native-task projects;
+- one internal global policy generation used for immutable admission pins, plus the existing independent settings, registry, task-control, workflow, rule, and schedule revision domains used by current APIs.
+
+Policy mutation stays serialized against pending wire admission. One app-level coordinator owns the non-reentrant policy/admission lock while policy and Run admission remain separate packages. Existing request fields continue validating their current revision domains, so an unrelated settings or workflow write does not cause a new task-control or registry conflict. Every accepted mutation also advances the internal global policy generation captured by later admissions.
+
+The migration recognizes the known compiled old `full-sdlc` and `full-sdlc-provider-neutral` definitions by exact canonical digest, publishes the provider-neutral body as the single default, repoints protected feedback and default label admission, and deletes only the exact compiled duplicate. Unknown customized definitions are preserved when non-conflicting or stop migration when they occupy a reserved identity. Custom visible rules are preserved; only the exact compiled default generic comment rule is removed.
+
+### Repository catalog
+
+Create one repository model containing project identity, repository/origin, local and managed paths, default branch, bootstrap/cloud/deployment metadata, setup state, provider-coordination evidence, and timestamps. One catalog API resolves a `TaskRef`, lists UI choices, supplies launch configuration, and creates completion readers.
+
+Linear project metadata and compiled repositories remain input providers. Exact normalized-origin and path checks remain fail closed. Provider coordination remains an explicit onboarding state transition.
+
+### Runtime and durable primitives
+
+`internal/app` owns construction, recovery, readiness, and a supervisor. Named service components return errors, cancellation propagates, and shutdown joins in-process loops and ephemeral subprocesses. Durable `factory-agents` tmux sessions are Run-owned resources outside the supervisor process tree; they survive service restart and the Run manager reconciles them from canonical state. Schedules and heartbeat share one clock component; Run routing/execution share one manager; repository onboarding remains one manager.
+
+`internal/durable` supplies only the identical private atomic replacement sequence: create temp in the destination directory, chmod `0600`, encode/write, fsync file, close, rename, open parent, fsync parent. Append journal truncation, poison latches, compaction, retention, and operation validation stay with their domains.
+
+### Frontend ownership
+
+Keep one eager bundle, plain anchors, server-owned auth, exact pathname dispatch, and the stylesheet cascade. Feature modules may import shared `http`, `activity`, `forms`, `editor`, `poll`, and `agent` modules; shared modules never import features.
+
+One `sendJSON` core owns credentials, `no-store`, JSON encoding, empty responses, response text, and status. Thin feature wrappers retain tasks-only `Idempotency-Key`, typed conflict payloads, and caller-specific conflict delivery. One optimistic-editor primitive is used only where current state machines are equivalent. Workflow autosave remains bespoke.
 
 ## Non-goals
 
-- No product redesign, new task capability, copy change, route change, styling change, or accessibility redesign.
-- No production Go API, server route, authorization, lifecycle, persistence, settings, workflow, trigger, deployment, or rollback change. One environment-gated test fixture may compose existing production handlers for browser verification only.
-- No package or lockfile change.
-- No migration, compatibility alias, feature flag, or staged rollout.
-- No refactor of Workflows, Triggers, Wire, Settings, Agents, or their state machines beyond importing the exact shared symbols moved from the entrypoint.
-- No removal of compatibility projections or weakening of human-merge and exact-head safeguards.
+- Do not remove Linear provider capability, provider project routing, managed Linear task detail, or comments.
+- Do not weaken, relocate into editable policy, or generalize away human merge, exact-head, completion, routing, deployment-source, authentication, privacy, or security validation.
+- Do not wipe live Factory state or silently discard unknown records.
+- Do not rewrite `system-events.jsonl`, payload bodies, deployment receipts, or run output directories.
+- Do not retain runtime dual writes to make pre-cut binaries appear compatible.
+- Do not add a client router, query/state framework, generated client, lazy route chunks, or runtime dependency.
+- Do not force workflow autosave into the simpler optimistic-editor lifecycle.
+- Do not create a universal persistence framework. Only identical atomic replacement is shared.
+- Do not reorganize completion gate semantics merely to meet a package or line budget.
 
 ## Impacted files and interfaces
 
-| File | Planned responsibility and change |
+The implementation will prefer moves followed by deletion over parallel packages. Expected final ownership is:
+
+| Target owner | Absorbs or replaces |
 | --- | --- |
-| `frontend/src/index.tsx` | Remain the application entry and exact router. Remove Tasks contracts/transport/pages/helpers and moved shared symbols. Import the new modules. Explicitly dispatch native versus Linear task detail from the validated provider route. Keep all other page bodies unchanged. |
-| `frontend/src/tasks.tsx` | New cohesive Tasks vertical. Own task contracts, task/project reads, native mutation transport, list/create page, provider-typed detail pages, and task-only actor/error helpers. Export only route-level page components. |
-| `frontend/src/activity.tsx` | New narrow shared activity UI module. Own the unchanged `ActivityHeader`, `InlineError`, `LoadingRows`, `formatTime`, `runStateLabel`, and `resourceState` symbols that have multiple current consumers. |
-| `frontend/src/agent.ts` | New shared lifecycle model. Own the unchanged run summary/checkpoint/completion types and canonical `agentRunHref`. |
-| `frontend/src/http.ts` | New shared read-only JSON helper, preserving cache, credential, status, and JSON behavior. |
-| `frontend/src/styles.css` | Must not change. |
-| `frontend/package.json`, `frontend/bun.lock` | Must not change. |
-| `internal/server/tasks_test.go`, `internal/server/server_test.go` | Existing verification evidence for backend invariants consumed by the moved client code. |
-| `internal/server/browser_fixture_test.go` | New environment-gated browser fixture. Serve this worktree's built `frontend/dist` through the production handler on a caller-selected loopback port, local auth, and disposable stores; seed native and managed Linear tasks; provide deterministic native success plus a fixture-only revision-advance control for a real stale-form conflict. The fixture is not a production route or binary. |
+| `internal/events` | `internal/eventwire`, hook wire normalization, migrated Home activity total/history, and the private Linear payload corpus; deletes hook journals but never treats nonderivable activity totals or bodies as wire projections |
+| `internal/policy` | `settings`, published `workflow`, `triggerregistry`, `triggerscheduler` policy, `taskcontrol`; drafts remain a small separate file/owner |
+| `internal/repositories` | `projectsetup`, root setup adapters, `agentrun` repository config/resolvers/readers |
+| `internal/tasks` | `taskmodel`, `taskstore`, `taskservice`, and the complete Linear identifier/UUID bijection; retains Linear provider adapter but replaces stage directory with journal outbox |
+| `internal/runs` | `triggerrouter` decision/invocation/rates plus `agentrun` store/manager/launcher/observer/checkpoint/GitHub/completion |
+| `internal/app` | `serveConfigured`, recovery/readiness, component lifecycle |
+| `internal/cli` | root command dispatch and agent helper implementations |
+| `internal/auth` | existing viewer authentication and capability authentication, with behavior unchanged |
+| `internal/durable` | private atomic replacement only |
+| `internal/server` | HTTP transport and provider webhook normalization; interfaces narrowed to canonical owners |
 
-### Public and internal interface rules
+Package folding is complete only after callers import the canonical owner and the obsolete package is deleted. Compatibility decoders needed by the one-shot migration may live under an unexported migration package until post-cut validation, but no runtime writer may target old formats.
 
-- `tasks.tsx` exports `TasksPage`, `NativeTaskDetailPage`, and `LinearTaskDetailPage`; other task types and helpers stay module-private unless a real current caller requires them.
-- `activity.tsx`, `agent.ts`, and `http.ts` export only symbols used by both `index.tsx` and `tasks.tsx`.
-- Imports must remain acyclic: `index.tsx` composes feature modules; feature modules may use shared modules; shared modules never import `index.tsx` or Tasks.
-- The browser-visible endpoint set, method set, body fields, headers, and error messages remain unchanged.
+Frontend target files are `index.tsx`, `home.tsx`, `wire.tsx`, `agents.tsx`, `tasks.tsx`, `workflows.tsx`, `triggers.tsx`, `settings.tsx`, plus narrow `http.ts`, `activity.tsx`, `forms.tsx`, `editor.ts`, `poll.ts`, and `agent.ts` shared owners.
+
+Factory also changes root `nags.toml` to declare generation 1, provider deployment contract 1, and rollback lease contract 1; `bin/network-app` and its tests become the owner of continuous lease acquisition, quiescence, generation-aware preflight/restore, provider invocation, and receipt finalization.
+
+The coordinated Network diff is deliberately narrow:
+
+| Network file or interface | Change |
+| --- | --- |
+| `platform/nags_config.py` | Strictly validate and expose optional `[compatibility.factory]`; reject unknown keys, invalid generations/contracts, and Factory compatibility on non-Factory apps. |
+| `platform/nags_factory_guard.py` | Read and strictly validate the selected generation, target compatibility, retained manifest SHA, and live token-bound lease without mutating Factory state. |
+| `bin/nags` | Invoke the guard under the existing deployment lock before any deploy/rollback mutation and revalidate the copied release immediately before `activate_release`. |
+| `tests/test_nags_config.py`, `tests/test_nags_factory_guard.py`, `tests/test_nags_release_guard.py` | Schema, generation, lease, target-integrity, no-mutation refusal, race, and direct CLI coverage. |
+| provider console tests/text if needed | Prove console actions inherit identical guard refusal through the canonical CLI; no second guard implementation. |
 
 ## Vertical implementation phases
 
-### Phase 1: Establish narrow shared ownership
+Each phase ends in a logical commit and its focused verification. If evidence disproves a migration or ownership premise, stop and return to revised research and dual-provider planning rather than adding a bridge.
 
-1. Move the existing generic read-only `getJSON` body unchanged into `frontend/src/http.ts`.
-2. Move the run summary/checkpoint/completion types and `agentRunHref` unchanged into `frontend/src/agent.ts`.
-3. Move the activity shell/error/loading and generic formatting/resource-state symbols unchanged into `frontend/src/activity.tsx`.
-4. Update the existing `index.tsx` callers and imports without changing rendered markup, copy, timing, or state transitions.
-5. Run frontend typecheck and production build.
+### Provider prerequisite: make direct Network activation generation-aware
 
-Success criteria: imports are acyclic, all existing non-Tasks routes still typecheck, and the production build still emits one application entry and the stylesheet.
+- Create the Network Worktrunk branch `eng-47-network-generation-guard` from current `origin/main` and one draft pull request.
+- Add the strict optional Factory compatibility table and pure guard module. Legacy Factory releases and every non-Factory app remain unchanged while no generation manifest exists and no active Factory release declares a rollback lease contract.
+- In deploy, validate the source manifest and selected generation before creating the release directory, pending receipt, receipt backup, or artifact backup. After copy/build, require the copied `nags.toml` SHA and compatibility values to equal the original immediately before activation.
+- In rollback, validate the target receipt identity and `manifestSha256`, retained release manifest, selected generation, and required lease before artifact backup, process stop, symlink selection, runtime artifact write, health call, or receipt mutation.
+- Require a valid live lease for rollback whenever canonical state is selected or the currently active Factory release declares `rollback_lease_contract = 1`. This protects the interval after the cutover release becomes active but before Factory publishes `state-generation.json`.
+- Keep guard order as Factory state-transition lease first, provider deployment lock second. The wrapper passes the exact locked descriptor to `nags` and remains the live parent; the provider retains but never creates or releases application state authority.
+- Revalidate the inherited locked inode, live ancestor, private token, generation, retained/source manifest descriptor, and receipt hash immediately before `activate_release`. Use the same already-open verified manifest identity for activation so a path replacement cannot win after the check.
+- Add a disposable runtime harness that snapshots release, receipt, selection, wrapper/plist, process-call, and Factory-state paths before every refusal and proves they remain byte-for-byte unchanged. Cover build-time manifest mutation, retained-manifest replacement, wrapper death after first preflight, and lease-versus-finalization contention at deterministic pauses before activation.
 
-### Phase 2: Extract and type the Tasks vertical
+Focused checks: `bash -n bin/nags bin/network-app bin/caddy-run bin/cloudflared-run`; focused config/guard/release tests; `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'`; `(cd apps/network && PYTHONDONTWRITEBYTECODE=1 /opt/homebrew/bin/uv run --frozen pytest -q)`; `bin/nags validate --all`; `bin/nags generate --check`; `git diff --check`.
 
-1. Move task-specific contracts, reads, `TaskConflict`, `taskRequest`, `TasksPage`, detail UI, and task-only helpers into `frontend/src/tasks.tsx`.
-2. Replace `getTaskDetail(provider, id): NativeTaskDetail | TaskSummary` with separate typed native and Linear reads.
-3. Split the detail implementation into `NativeTaskDetailPage` and `LinearTaskDetailPage`, preserving the existing native effects, form reset timing, mutations, conflict refresh, notices, and all existing JSX.
-4. Make `index.tsx` dispatch the already validated task provider explicitly to the matching page.
-5. Do not touch CSS, dependencies, server code, endpoint shapes, or text.
-6. Run exact simplification searches, focused server tests, frontend typecheck, and production build.
+### Phase 0: characterize invariants and build the migration harness
 
-Success criteria: no broad detail union or runtime `"task" in value` discrimination remains; every task capability still has the same code path and transport contract under a provider-typed owner.
+- Add golden fixtures derived from sanitized current state shapes for settings/policy, registry defaults/custom rules, task control, repository setup, routing decisions/invocations/rates, Run pins/states/checkpoints, native tasks/outcomes, the Linear identifier/UUID bijection, activity lifetime/history, private payload mappings, empty and pending outbox cases, workflow drafts, and event cursors.
+- Add a cross-artifact audit that proves task and Linear provider identity, workflow digest, policy revision, repository route, invocation/Run linkage, active ownership, event sequence, activity total/history, payload hashes, and retained total counts.
+- Define and test the source decoders, audit report, immutable manifest schema, backup receipt, source hashing, failure injection, and non-activating dry-run harness. Phase 0 does not create an authoritative canonical generation or alter startup selection because canonical readers and writers do not exist yet.
+- Exercise unknown schema, unknown customized reserved workflow, duplicate active task, duplicate identifier, duplicate UUID, changed identifier/UUID mapping, orphan invocation, missing Run, conflicting route, incomplete stage, missing/orphaned/altered private payload, pending wire, unsafe file mode/path/symlink, and altered source/audit rejection.
+- Later owner phases add their canonical converter and validator to this harness. Atomic generation construction, activation, and startup selection are integrated only in Phase 4 after all canonical readers and writers exist.
 
-### Phase 3: Review and full verification
+Focused checks: source decoder/audit tests with injected read/hash/report failures; existing settings/routing/Run/task/project tests; `go test -race` for the new migration owner. Generation write/sync/rename/activation injection belongs to Phase 4.
 
-1. Review the base diff with moved-code detection for accidental edits, duplicated code, stale exports, circular imports, debug output, secrets, generated assets, and unrelated churn.
-2. Confirm `styles.css`, `package.json`, and `bun.lock` have no diff.
-3. Run focused server tests and every required Factory publication command.
-4. Build the candidate frontend, then run `TestCandidateBrowserFixture` on `127.0.0.1:18092` with a temporary `HOME` and fixture root. The test must compose the production server handler, serve this worktree's exact `frontend/dist`, use local viewer authentication and disposable stores, seed one native task and one read-only managed Linear task, and remain alive only while `FACTORY_BROWSER_FIXTURE=1` is set.
-5. Exercise the candidate browser matrix with macOS Computer Use at desktop and mobile sizes. Verify the built JavaScript and CSS assets are loaded from the candidate fixture. Check keyboard focus/navigation, console and network failures, native mutation success, a real stale-revision `409` induced through the fixture-only revision-advance control, managed Linear read-only behavior, and loading, empty, offline/error, conflict, and recovery states. Port 8092 and the public deployment remain read-only baseline surfaces.
-6. Record the fixture PID, install a cleanup trap, stop and wait for the fixture, remove its temporary root, and assert port 18092 is free. Refuse to start if that port is already occupied. Never create or modify production task data for verification.
+### Phase 1: consolidate policy and repositories
 
-Success criteria: the complete matrix passes, the worktree contains only the planned source and artifact changes, and no temporary process remains.
+- Implement the canonical policy snapshot/store and migrate settings, workflows, protected binding, registry, schedules, agent/runtime settings, and project activation.
+- Preserve current API JSON and independent settings, registry, task-control, workflow, rule, and schedule conflict revisions through adapters backed by one policy snapshot, then simplify internal callers to the canonical owner.
+- Publish one provider-neutral default and remove only the recognized compiled duplicate workflow/default generic comment rule.
+- Keep existing immutable pins and the legacy pin executor; new policy never emits legacy pins.
+- Implement the canonical repository model/catalog and migrate compiled plus admitted project/setup state.
+- Replace setup, task, launch, and completion resolver conversions with catalog lookups.
+- Replace `workflow-rollback-preflight` with `state-rollback-preflight` before deleting schema-specific rollback code. In the same commit, update `bin/network-app` and its tests so every rollback acquires the state-transition lease before quiescence and retains it across generation validation, proof-bounded optional restore, manifest deactivation, `nags rollback`, health, and receipt finalization. The application receipt transition uses the same exclusion, closing the gap between preflight and the provider's later deployment lock.
+- Delete schema-1 settings migration/backup preflight, rollback latches, task-control store, default registry seeding from legacy settings, and the legacy repository fallback only after the generation-aware preflight and canonical fixtures pass.
+- Keep the old compatibility marker files untouched on disk for archival/old-release refusal; the new runtime does not consult or update them.
 
-## Data, security, compatibility, migration, rollout, and rollback
+Focused checks: policy pending-admission serialization, workflow publish/delete/binding conflicts, schedule CRUD/status, project activation, exact default migration, custom preservation/conflict, repository origin/path/routing/completion fixtures, current API contract tests.
 
-### Data and migration
+### Phase 2: unify admission and Runs
 
-There is no database, journal, file-format, task-record, API, route, configuration, or dependency migration. The server remains the authority for all task data and lifecycle rules.
+- Introduce the canonical Run journal, admission outcomes, rates, state transitions, compaction, retention, and poison behavior.
+- Migrate every old routing decision/invocation and every retained Run into the canonical model. Merge linked pairs; retain direct historical Runs; create a routed Run for a recoverable queued/claiming invocation; reject ambiguous links or duplicate active ownership.
+- Move registry batch admission under the policy/wire lock to `runs.AdmitBatch`.
+- Preserve each old Invocation ID as the Run's immutable admission/causation ID; generate the same identity deterministically for new admissions and keep derived wire `parentInvocationId` compatibility.
+- Add the Run-transition outbox. Transition and pending event append atomically; publication is idempotent; acknowledgement waits for the global dispatched cursor; terminal event publication requires durable terminal state and admission outcome.
+- Move repository resolution, oldest-per-task ownership, starting/running lifecycle, retries, feedback coalescing, merge parking, GitHub reconciliation, and terminal completion into one manager.
+- Replace native start/continuation synthetic invocations with `runs.AdmitNative` and `runs.Continue` using deterministic event/idempotency identity but no synthetic event sequence.
+- Preserve active ENG-47 session, segment, attempts, pin, delivery IDs, invocation causation, checkpoint, and completion fields through fixture and live-shape migration.
+- Delete `triggerrouter.Manager`, invocation transition/reflection APIs, `EnsureInvocationRun`, duplicated `IssueIdentifier` writes, `GenericTriggers`, and the old routing store after the canonical manager passes restart/fault tests.
 
-### Security
+Focused checks: all old admission and Run manager/completion suites translated to one store; multi-match and suppression; rate/hop/cycle/global limits; routing transient/permanent failure; crash at every transition; duplicate/coalesced feedback; ready/post-merge/terminal rejection; exact G1-G8 negative matrix.
 
-- Page and API authentication remain server-owned.
-- Task requests preserve `credentials: "same-origin"`.
-- Native task writes preserve JSON content type and a fresh cryptographically generated `Idempotency-Key`.
-- Expected revision fields remain attached to each mutation that currently requires them.
-- Managed Linear tasks remain read-only in the client and server.
-- No browser credentials, cookies, local storage, or private payloads may be printed during verification.
+### Phase 3: fold task operations into the task journal and delete event projections
 
-### Compatibility
+- Add task `pending-unpublished`, `published`, `applied-result`, and `acknowledged` operations keyed by idempotency scope/hash, plus strict replay validation.
+- Replace stager/coordinator/dispatcher with one task submission/outbox API and one wire apply handler.
+- Add the task-outbox reconciler that republishes unpublished operations after startup/live transient failures, records authoritative event identity/sequence, reuses durable results, and cancels only with proof that publication never occurred. Acknowledgement waits for global dispatch, not merely the task apply handler.
+- Require deployment migration to find no unaccounted staged file. Convert a valid pending file only when one exact pending wire record references it; otherwise fail.
+- Preserve task API response, replay flag, idempotency scope/hash, expected revision, entity IDs, human feedback continuation, gates, routing snapshot, and completion evidence.
+- Fold every Linear identifier/UUID binding into the canonical task artifact in the same generation transaction. Preserve exact one-to-one conflict rejection at webhook and provider lookup boundaries; do not reconstruct bindings only from retained tasks.
+- Delete `task-operations/` runtime creation and staging code after fault-injection tests pass.
+- Migrate `linear-activity.json` into the canonical event activity projection without changing its lifetime total, retained order, delivery IDs, or pruning semantics. Copy its retained private payload files into the canonical corpus with `0600` modes and exact hash/reference validation. Historical authenticated detail and project-setup replay read that owner; bodies never enter the global wire or logs.
+- Delete GitHub/Linear journal implementations, store interfaces, startup open/seed, dispatch mirror writes, and provider journal tests. Keep hook event parsing and unified-wire helper adapters. Activity and private payload state are distinct from those deletable provider projections.
+- Remove the unreachable direct label claim path and build label event metadata only once for generic admission.
 
-- Exact URLs, endpoint methods, payloads, response parsing, errors, styles, eager loading, and browser history behavior remain unchanged.
-- Go behavior and persisted state are unchanged.
-- Source rollback is an ordinary Git revert because no durable state changes.
+Focused checks: task command crash matrix; private-body scans; idempotent result replay; stale conflicts; human continuation; helper cursor golden tests; event-wire sequence/ack/reject/recovery; server webhook and GitHub remediation tests.
 
-### Rollout
+### Phase 4: supervise runtime, centralize exact durable replacement, and shrink CLI/composition
 
-The merged frontend bundle is deployed as part of the normal immutable Factory release. There is no partial or feature-flag rollout.
+- Move construction and recovery to `internal/app` with explicit dependency groups.
+- Complete the sibling generation build with every canonical converter/reader/writer, full cross-artifact validation, fsync, immutable audit hashes, receipt-gated atomic manifest activation, abandoned/interrupted-generation cleanup, and idempotent reopen. Mutable stores validate by replay rather than against their initial audit hashes.
+- Add a supervisor for HTTP, unified Run manager, task outbox, repository onboarding, and clock work. Migration recovery and health identity may be served while advancing endpoints and managers remain gated. Canonical writes cannot begin until `deployments/current.json` is a successful receipt for the exact running deployment ID and the service acquires the unopposed state-transition lease.
+- Before the first post-receipt mutation, acquire the state-transition lease and then the provider's existing deployment lock. Revalidate the exact receipt, selected release, runtime artifact set, unchanged source hashes, and staged generation; recursively fsync the release/runtime/receipt graph and parent directories; write and fsync the exact provider-finalization acknowledgement; publish and fsync the manifest; fsync the monotonic `canonicalWritesStarted` boundary; and only then start advancing managers. Recovery and `state-rollback-preflight` use that boundary and acknowledgement to choose safe manifest deactivation versus proof-bounded whole-backup restoration.
+- Propagate component failure through cancellation and join all in-process loops and ephemeral subprocesses with bounded shutdown evidence. Never signal, kill, or join durable Run-owned `factory-agents` tmux sessions; reconcile them after restart.
+- Move schedules and heartbeat to one clock component.
+- Introduce the narrow atomic replacement primitive and migrate only stores whose byte/permission/sync behavior is identical under golden tests.
+- Move CLI parsing and agent helpers to `internal/cli`; keep the current helper command names required by retained workflow pins. Add generation-aware `state-rollback-preflight` and fail-closed `state-restore` commands and update `bin/network-app` to use the preflight.
+- Reduce root `main` to command dispatch and `app.Run`.
+- Delete dead helpers and obsolete adapters after exact-call searches.
 
-### Operational rollback and recovery
+Focused checks: activation only after exact success receipt and Factory-owned provider finalization, provider automatic fallback after candidate health failure and success-receipt-finalization failure with a staged but unselected generation, deployment-lock contention/revalidation, failure injection at every release/selection/runtime/receipt/acknowledgement sync boundary, canonical-write boundary fsync/failure, pre-write manifest deactivation, post-write whole-backup restore, component failure/cancel/join tests, durable tmux survival and old-helper-path self-deploy restart, shutdown leak checks, signal behavior, helper environment/redaction, byte-identical store goldens, complete Go/race/vet suites.
 
-If post-deploy identity or browser verification fails, preserve the failed deployment receipt and use the previously successful deployment ID through the repository's verified rollback entrypoint:
+### Phase 5: complete frontend feature ownership and invariant consolidation
+
+- Extend `http.ts` with `sendJSON`; migrate settings first, then triggers/protected binding, workflows, and Tasks one wrapper at a time.
+- Add the optimistic-editor primitive for settings, triggers, and protected binding only.
+- Add the polling helper with conditional support for the live agent observer.
+- Move shared forms, resource gate, page shell, chart, pagination, and truly shared agent types/helpers into acyclic shared owners.
+- Extract settings, home/activity, wire, agents/observer, workflows, and triggers one vertical at a time, leaving exact route composition in `index.tsx`.
+- Keep the completed Tasks provider typing and migrate it to the shared transport without weakening tasks-only idempotency.
+- Remove confirmed dead selectors in one final CSS-only commit after desktop/mobile screenshots. Do not reorder remaining CSS.
+- Broaden the candidate fixture to provide all canonical collaborators and render every authenticated route. Keep it environment gated and process bounded.
+
+Focused checks after each slice: frontend typecheck/build; no dependency/lock/CSS diff except the CSS slice; exact transport/poll/save-state searches; route asset identity; focused server contract tests; candidate browser route and state matrix.
+
+### Phase 6: delete transitional code and align documentation
+
+- Delete empty packages, old schemas/writers, duplicate models, stale tests, migration-only defaults, obsolete comments, and unused exports proven by exact searches and package imports.
+- Keep the one-shot source decoder needed to install from the immediately previous production state. Isolate it from runtime owners and record its removal condition after production cutover plus retained-state expiry.
+- Rewrite README architecture, state inventory, event helpers, policy, migration, recovery, runtime supervision, frontend ownership, and troubleshooting to match executable behavior.
+- Record actual package, LOC, exported declaration, durable artifact, loop, and frontend entry reductions. Explain every target miss with the distinct invariant that remains.
+- Review the complete diff for secrets, debug output, generated artifacts, accidental public contract changes, and unrelated churn.
+
+Focused checks: `rg` for obsolete paths/symbols, `go list` import boundaries, `git diff --check`, complete required verification.
+
+## Migration, rollout, and rollback
+
+### Before publication
+
+- Tests create and destroy only disposable state roots.
+- The production data root remains read-only during implementation and PR verification.
+- A migration dry-run reads a copied current-state fixture, never the live directory, and emits the manifest/audit comparison.
+
+### Deployment cutover
+
+Humans use **Create a merge commit** on Network first and Factory second. After both exact verified heads are human-merged and all safeguards remain green:
+
+1. Fresh-read both GitHub pull requests and Linear. Prove each reported merge commit contains its recorded exact verified head with `git merge-base --is-ancestor`; reject squash/rebase replay in either repository.
+2. Resolve exactly one main Worktrunk checkout for Network at `/Volumes/T9/Repos/tomnagengast/network`. Require it clean, on `main`, tracking the official origin, and exactly equal to fetched `origin/main`; do not run a service from this T9 checkout.
+3. Run `bin/nags refresh-env` and `bin/nags reconcile --json`. Require the internal provider checkout at `~/.local/share/nags/provider` to be clean `main`, equal to its `origin/main`, and equal to the verified Network merge commit.
+4. From the internal provider checkout only, deploy the Network service with:
+
+   ```text
+   ~/.local/bin/nags deploy network --expected-commit "$(git rev-parse HEAD)" --json
+   ```
+
+5. Require exact Network identity across `~/.local/bin/nags app show network --json`, `releases network --json`, `doctor network --json`, `http://127.0.0.1:8090/healthz`, `https://network.nags.cloud/healthz`, receipt, current symlink, and active release. Run a disposable guard probe that confirms incompatible direct Factory deploy and lease-free rollback fail without mutation.
+6. Resolve the single primary Factory Worktrunk checkout at `/Users/tom/repos/tomnagengast/factory` and require it clean, on `main`, tracking the official origin, and exactly equal to fetched `origin/main`.
+7. Record the prior successful Factory deployment ID and current health/receipt identity. Require the live wire to have zero pending records, task staging to be fully accounted for, no policy mutation in flight, and the migration dry-run against a fresh permission-preserving copy to pass.
+8. Deploy Factory only with:
+
+   ```text
+   ~/.local/bin/nags deploy --expected-commit "$(git rev-parse HEAD)"
+   ```
+
+9. Startup creates the permission-preserving backup and staged canonical generation, validates and opens it read-only, recovers the authoritative wire, and serves exact health identity with advancing work gated. It does not publish the generation manifest. Capture the migration/backup receipt path from diagnostics.
+10. `nags deploy` verifies loopback and public health and writes the exact successful current deployment receipt. Only then may the application acquire the state-transition lease and the provider's existing deployment lock, revalidate the exact selection, release, runtime artifacts, receipt, source hashes, staged generation, and installed provider guard, fsync that complete graph and its parents, and write a durable Factory-owned provider-finalization acknowledgement. Manifest publication, `canonicalWritesStarted`, advancing managers, and mutations remain gated until that acknowledgement is fsynced. A concurrent rollback guard wins the state exclusion and keeps advancement gated; a concurrent direct provider action that won its lock first must be detected by exact revalidation.
+11. Verify active advancement state, receipt and provider-finalization identity, immutable migration audit hashes, mutable store replay/counts, wire cursor, policy defaults/custom data, repository choices, task detail, retained Run history, and the active ENG-47 Run identity.
+12. Exercise read-only APIs plus bounded duplicate-safe operations approved by the verification matrix.
+
+### Recovery
+
+- `bin/network-app rollback factory --to <deployment-id>` first acquires one process- and token-bound state-transition lease, asks the current service to quiesce advancing work, proves quiescence, and retains the lease until the provider has completed activation, health, and receipt finalization. While holding it, the wrapper runs the new binary's read-only equivalent of:
+
+  ```text
+  factory state-rollback-preflight \
+    --data-root /Users/tom/.local/share/factory/data \
+    --to-deployment <deployment-id>
+  ```
+
+  The preflight validates the same lease token, requires a quiescent service, validates the target successful receipt and release contract, generation manifest, immutable migration audit, source backup receipt, and `canonicalWritesStarted`, and refuses to invoke the provider when source state would be stale. The provider's later deployment lock is additive; it does not replace this continuously held state exclusion.
+- When canonical writes have started, whole-state restoration is an explicit preceding operation by the current compatible binary:
+
+  ```text
+  factory state-restore \
+    --data-root /Users/tom/.local/share/factory/data \
+    --migration-receipt <absolute-receipt-path>
+  ```
+
+  `state-restore` verifies the held lease, stopped service, exact receipt, and backup hashes. It then replays every canonical journal and compares its semantic digest, operation count, cursor, and identity graph to the immutable activation snapshot. It also proves that the event wire has not advanced and no post-cut admission, task, policy, repository, Run transition, external-effect receipt, or completion exists. A pre-cut backup is categorically ineligible after the write boundary when the activation inventory contained any nonterminal Run or live effect-capable agent session, including a retained legacy session: that process can mutate GitHub, Linear, or a repository before Factory receives an event or receipt. The proof also rejects any session created after activation. Only an activation snapshot with no such Run or session and exact no-post-cut-work equality may restore the complete source generation with modes, validate it, deactivate the canonical manifest, and write a restoration receipt. Any changed canonical state, activation-spanning Run/session, or unaccounted later session refuses restoration and requires a forward correction. The read-only preflight must then pass under the same lease before `bin/network-app` invokes `nags rollback`.
+- If migration, startup, loopback/public health, or successful-receipt finalization fails, the manifest has not been published and source state remains authoritative. The provider's automatic fallback may therefore reactivate the previous release without a Factory rollback hook. Preserve failed staged-generation evidence; a later candidate must discard or independently revalidate and rebuild it after any source-store change.
+- If the exact success receipt exists but manifest publication or boundary sync fails, advancing work remains gated. Recovery under the state-transition lease either completes the same validated activation when no rollback owns it, or deactivates a published pre-write manifest before an explicit provider rollback. The provider has no automatic fallback branch after a successful receipt, so it cannot restart the old release across this boundary.
+- After `canonicalWritesStarted`, never start the old release against stale source stores. Under the continuous state-transition lease, quiesce Factory and preserve the failed canonical generation. Run fail-closed `state-restore` only when replay proves the canonical generation is still exactly the no-post-cut-work activation snapshot and the activation inventory proves there was no nonterminal Run or live effect-capable agent session. An activation-spanning retained session, any later session, or any post-cut work or effect makes restoration and rollback forbidden even when journals and the wire appear unchanged; merge and deploy a forward correction. Only an eligible no-session snapshot may proceed to `state-rollback-preflight` and `nags rollback` under the same lease.
+- Never mix individual old and canonical store files. Recovery is whole-generation or whole-backup only.
+- Preserve migration, deployment, and failed-release receipts for diagnosis.
+- If Network reconciliation or self-deployment fails, keep Factory undeployed. The previous Network application release can be provider-restored, but a faulty installed CLI guard requires a human-merged Network revert or forward fix followed by reconciliation; never bypass the guard. If the provider succeeds but Factory cutover fails, retain the backward-compatible provider guard and follow the Factory recovery rules above.
+
+Exact health and receipt probes:
 
 ```text
-bin/network-app rollback factory --to <previous-successful-deployment-id>
 curl -fsS http://127.0.0.1:8092/api/healthz | jq .
 curl -fsS https://factory.nags.cloud/api/healthz | jq .
+jq . /Users/tom/.local/share/factory/deployments/current.json
 ```
-
-Do not stash, reset, deploy from the issue worktree, or delete branches to hide a failed deployment.
-
-### Candidate browser fixture lifecycle
-
-Run the candidate fixture only after the frontend production build has completed. It must fail closed unless `FACTORY_BROWSER_FIXTURE=1`, bind only the caller-selected loopback address, use disposable state, and serve this worktree's built assets through the production handler. Start this entire block as one PTY command and retain the returned live session for the browser run:
-
-```sh
-if lsof -nP -iTCP:18092 -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "candidate browser fixture port is occupied" >&2
-  exit 1
-fi
-fixture_root="$(mktemp -d)"
-mkdir -p "$fixture_root/home" "$fixture_root/state"
-fixture_pid=
-cleanup_fixture() {
-  if [ -n "$fixture_pid" ]; then
-    kill "$fixture_pid" 2>/dev/null || true
-    wait "$fixture_pid" 2>/dev/null || true
-    fixture_pid=
-  fi
-  if [ -d "$fixture_root" ]; then
-    rm -R "$fixture_root"
-  fi
-}
-trap cleanup_fixture EXIT INT TERM
-HOME="$fixture_root/home" \
-FACTORY_BROWSER_FIXTURE=1 \
-FACTORY_BROWSER_FIXTURE_ADDR=127.0.0.1:18092 \
-FACTORY_BROWSER_FIXTURE_ROOT="$fixture_root/state" \
-go test ./internal/server -run '^TestCandidateBrowserFixture$' -count=1 -timeout=15m >"$fixture_root/fixture.log" 2>&1 &
-fixture_pid=$!
-fixture_ready=
-for attempt in $(seq 1 150); do
-  if curl -fsS http://127.0.0.1:18092/api/healthz >/dev/null 2>&1; then
-    fixture_ready=1
-    break
-  fi
-  if ! kill -0 "$fixture_pid" 2>/dev/null; then
-    echo "candidate browser fixture exited before readiness" >&2
-    cat "$fixture_root/fixture.log" >&2
-    exit 1
-  fi
-  sleep 0.2
-done
-if [ -z "$fixture_ready" ]; then
-  echo "candidate browser fixture readiness timed out" >&2
-  cat "$fixture_root/fixture.log" >&2
-  exit 1
-fi
-echo "FACTORY_BROWSER_FIXTURE_READY http://127.0.0.1:18092"
-wait "$fixture_pid"
-```
-
-The foreground `wait` keeps the PTY session, its variables, and its `EXIT` trap alive after the readiness marker. Use `POST /__fixture/advance` between loading and saving the seeded native task form to advance its authoritative revision and make the browser exercise the real production conflict path. After the matrix, send Ctrl-C to that same PTY session, poll it until the shell exits, inspect any resulting output, and require `lsof -nP -iTCP:18092 -sTCP:LISTEN` to report no listener. The trap signals and waits for the child before removing the temporary root on success, failure, timeout, or interruption.
 
 ## Verification matrix
 
-| Acceptance criterion or risk | Exact verification |
+| Surface | Exact verification |
 | --- | --- |
-| Native and Linear API/security invariants remain server-enforced | `go test ./internal/server -run 'Test(Task|ManagedLinear|NativeTask)'` |
-| Tasks has one vertical owner | Review `frontend/src/tasks.tsx` ownership and `rg -n '^(type (Task|NativeTask)|function (TasksPage|TaskDetailPage|NativeTaskDetailPage|LinearTaskDetailPage)|async function (getTask|getNativeTask|getLinearTask|taskRequest))' frontend/src` to confirm task code is not duplicated across modules. |
-| Provider distinction is retained in types | `rg -n 'NativeTaskDetail \| TaskSummary|"task" in value|function TaskDetailPage' frontend/src` returns no obsolete union discrimination or combined detail owner. |
-| Imports remain acyclic and types remain valid | `MISE_BUN_VERSION=1.3.11 bun run --cwd frontend typecheck` |
-| Dependency and CSS behavior remain unchanged | `git diff --exit-code origin/main...HEAD -- frontend/package.json frontend/bun.lock frontend/src/styles.css` after implementation commits. |
-| Production entry remains buildable | `MISE_BUN_VERSION=1.3.11 bun install --cwd frontend --frozen-lockfile`; `MISE_BUN_VERSION=1.3.11 bun run --cwd frontend build`; inspect build output for one normal app entry and CSS asset. |
-| Repository behavior remains intact | `go test ./...` |
-| Concurrency safety remains intact | `go test -race ./...` |
-| Static correctness remains intact | `go vet ./...` |
-| Public page parity | At desktop and mobile widths, load `/` and `/home`; confirm title, navigation, health state, and responsive layout. |
-| Authenticated route parity | Load `/wire`, `/agents`, `/tasks`, `/workflows`, `/triggers`, `/settings`, one canonical agent observer, one native task detail, and one managed Linear detail. Confirm active navigation and no route/auth regression. |
-| Candidate asset identity | Build first, run the environment-gated fixture on port 18092, and confirm browser network activity loads the JavaScript and CSS asset names present in this worktree's `frontend/dist`. Port 8092 and the public deployment are not candidate evidence. |
-| Native Tasks success path | On the disposable candidate fixture, exercise create/edit/message/link/gate request behavior and confirm authoritative revision refresh. Retain focused server tests for idempotency and request-contract coverage. Production browser inspection remains read-only. |
-| Conflict path | Load the seeded native edit form on the candidate fixture, call its fixture-only revision-advance control, submit the stale form, and confirm the real production `409` path refetches authoritative state and preserves the established conflict/error semantics. |
-| Managed Linear read-only path | On the candidate fixture, confirm seeded description/discussion/external link render and no mutation controls appear. |
-| Loading, empty, error, and offline states | On the candidate fixture, observe the seeded and empty filtered lists; use bounded request blocking or stop/restart the disposable fixture for loading/error/offline, then restore connectivity and confirm recovery. |
-| Accessibility and browser diagnostics | Keyboard through navigation and forms, inspect visible focus, desktop/mobile layout, console errors, and failed network requests. |
-| Diff hygiene | `git diff --check`; `git status --short`; inspect `git diff --stat origin/main...HEAD` and `git diff --color-moved=dimmed-zebra origin/main...HEAD -- frontend/src`. |
+| Network provider guard | Strict optional manifest table; legacy/non-Factory parity; malformed/unknown/symlinked/torn generation manifest; supported/unsupported generation and deployment contract; source/copy/build manifest SHA equality; retained receipt/manifest SHA equality; missing/unlocked/stale/wrong-token/wrong-owner/unrelated-holder/valid inherited lease descriptor; active cutover release lease requirement before manifest publication; second pre-activation validation; wrapper death and retained-manifest replacement at deterministic pauses; direct CLI and console refusal; byte-for-byte no-mutation snapshots; lease-before-provider-lock race; `bash -n`; focused and complete provider/console suites; validate/generate checks |
+| Migration | Fresh and current-shape fixtures; non-activating dry-run audit; immutable initial source/canonical hashes and counts including Linear identity bindings, activity total/history, and private payloads; mutable journal replay after legitimate writes; manifest absent through candidate health, receipt finalization, and Factory-owned provider finalization; provider fallback after health failure and success-receipt-finalization failure; deployment-lock contention and exact selection/artifact/receipt revalidation; failure injection at every release/selection/runtime/receipt/acknowledgement fsync; exact-acknowledgement activation; monotonic write boundary; rollback-versus-receipt race paused after preflight; unknown/ambiguous rejection; injected failure at every write/sync/rename/activation; idempotent reopen; no-post-cut-work restore rehearsal; restore refusal after task creation, Run transition, wire advance, external-effect receipt, later live tmux session, or an activation-spanning retained legacy session that makes a GitHub/Linear mutation with delayed or absent webhook delivery while journals and wire remain unchanged |
+| Event wire | duplicate IDs, batch order, channel cursors, retention, torn tail, append/sync rollback, poison latch, handler retry/permanent reject, restart catch-up, body-free audit |
+| Unified Runs | rule match/no-match/multi-match, suppression, hop/cycle/rate/global limits, same-task serialization, source-dispatch gate, immutable admission/causation identity, transition outbox publication/ack ordering, routing failures, native start, protected/native feedback, retry, crash transitions, GitHub remediation, retention/compaction |
+| G1-G8 safeguards | human merge only, checkpoint binding, changed head, squash/rebase mismatch, unmerged close, review/check regression, dirty/divergent main, deployment identity mismatch, incomplete task/children, branch/worktree residue |
+| Task outbox | every command kind, fresh/duplicate idempotency, stale revision, unpublished/published/applied/acknowledged crashes, pre-append failure, live/startup republish, proven cancellation, missing/conflicting pending body, private-body scans, restart recovery |
+| Linear identity and activity | Complete identifier/UUID bijection migration; duplicate identifier, duplicate UUID, and changed mapping refusal; activity lifetime/retained-order parity; delivery/payload mapping; hash/mode/pruning validation; authenticated historical detail; project-setup replay; missing/orphan/tampered payload refusal; body-free wire/log audit |
+| Policy | workflow draft/publish/delete, protected binding, rules, schedules, agent/runtime settings, project activation, independent public revision domains, internal admission generation, pending-admission lock, default consolidation, custom preservation/conflict |
+| Repositories | compiled/admitted routes, project metadata, normalized origin, local/managed path containment, default branch, bootstrap/cloud metadata, provider coordination, completion reader equality |
+| Runtime | migration health before advancement, exact success-receipt activation, component start failure, runtime failure propagation, cancellation, bounded in-process/ephemeral joins, durable tmux survival/reconciliation, old-pin self-deploy restart, signals, no owned leak |
+| Security | webhook signatures/timestamps/replay, OAuth/local auth, task capability token, same-origin, JSON limits/strict decoding, file modes, symlink/path traversal, environment allowlist/redaction |
+| Frontend static | frozen install, typecheck, build, one JS/one CSS asset, no package/lock changes, exact route dispatch, raw `fetch` only in transport, `setInterval` only in poll owner, copied normal save state removed |
+| Browser | candidate assets, all public/authenticated routes, desktop/mobile, keyboard/focus, loading, empty, error, 409 conflict, offline/recovery, success, console/network clean, Linear read-only, native idempotency |
+| Required Factory suites | `go test ./...`; `go test -race ./...`; `go vet ./...`; `MISE_BUN_VERSION=1.3.11 bun install --cwd frontend --frozen-lockfile`; `MISE_BUN_VERSION=1.3.11 bun run --cwd frontend typecheck`; `MISE_BUN_VERSION=1.3.11 bun run --cwd frontend build` |
+| Required Network suites | `bash -n bin/nags bin/network-app bin/caddy-run bin/cloudflared-run`; `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'`; `(cd apps/network && PYTHONDONTWRITEBYTECODE=1 /opt/homebrew/bin/uv run --frozen pytest -q)`; `bin/nags validate --all`; `bin/nags generate --check` |
+| Diff quality | `git diff --check`; no secret/debug/generated/unrelated files; actual package/LOC/artifact/API budgets recorded |
 
-## Exact post-merge deployment and recovery commands
+## Principal risks and mitigations
 
-After GitHub authoritatively reports that a human created a merge commit containing the exact checkpointed head:
-
-```text
-wt -C /Users/tom/repos/tomnagengast/factory list --format=json --branches
-git -C /Users/tom/repos/tomnagengast/factory fetch --prune origin
-git -C /Users/tom/repos/tomnagengast/factory merge --ff-only origin/main
-test "$(git -C /Users/tom/repos/tomnagengast/factory rev-parse HEAD)" = "$(git -C /Users/tom/repos/tomnagengast/factory rev-parse origin/main)"
-```
-
-Require the primary checkout to be the single Worktrunk `is_main` checkout, tracked state to be clean, and the default branch to be `main`. From that updated primary checkout only:
-
-```text
-~/.local/bin/nags deploy --expected-commit "$(git rev-parse HEAD)"
-curl -fsS http://127.0.0.1:8092/api/healthz | jq .
-curl -fsS https://factory.nags.cloud/api/healthz | jq .
-jq . ~/.local/share/factory/deployments/current.json
-```
-
-Require commit, tree, build ID, deployment ID, and contract version to agree across local health, public health, the current receipt, and the active release. If verification fails, do not clean up the issue branch; inspect the failed receipt and recover with:
-
-```text
-bin/network-app rollback factory --to <previous-successful-deployment-id>
-curl -fsS http://127.0.0.1:8092/api/healthz | jq .
-curl -fsS https://factory.nags.cloud/api/healthz | jq .
-```
-
-After successful deployment, require GitHub's automatic remote-branch deletion, fetch/prune, consume every child result, remove the clean integrated issue checkout through foreground Worktrunk without force, and repeat the final health and receipt ancestry checks.
+- **P0: a protected lifecycle gate moves or weakens.** Keep G1-G8 behavior in explicit negative tests before and after package folding. Editable policy cannot alter the validators.
+- **P0: migration loses or ambiguously merges durable ownership.** Validate the complete source graph first, generate side-by-side, activate once, and reject every orphan, collision, unknown schema, or count/hash mismatch.
+- **P0: private bodies enter the wire or logs.** Keep opaque operation references and scan serialized wire, logs, errors, and APIs with secret sentinel fixtures.
+- **P1: unified Run admission creates duplicate active ownership.** Append one admission batch, use deterministic identities, retain oldest-per-task serialization, and fault-test each state transition.
+- **P1: task outbox acknowledges too early.** The private pending append precedes publication; applied result precedes acknowledgement; each boundary is restart tested.
+- **P1: policy mutation races undecided events.** Retain one non-reentrant policy/admission lock and prove pending decisions block mutation.
+- **P1: post-cut rollback starts against stale source stores.** Fsync the monotonic write boundary before mutation; require generation-aware preflight; require exact whole-backup restoration after the boundary.
+- **P1: preflight races receipt-triggered advancement.** Hold one state-transition lease from pre-quiescence through provider receipt finalization, and require the application boundary transition to acquire the same exclusion.
+- **P1: provider fallback bypasses Factory rollback state repair.** Keep the canonical generation staged and unselected through both provider failure branches; publish the manifest only after the exact successful receipt under the state-transition lease.
+- **P1: power loss reverts provider selection, artifacts, or receipt after canonical activation.** Under the state-transition lease and provider deployment lock, revalidate and fsync the complete provider graph, persist the Factory-owned finalization acknowledgement, and require it before manifest publication.
+- **P1: direct provider entry points bypass Factory state compatibility.** Merge and deploy the coordinated Network guard first; validate source and copied target contracts before mutation, bind rollback to the live token-bound Factory lease, and revalidate retained manifest SHA under the provider lock.
+- **P1: the wrapper dies after a point-in-time lease check.** Inherit and retain the exact locked descriptor in `nags`, keep the wrapper as live parent, and repeat inode/owner/token/generation/manifest/receipt validation immediately before activation using already-open verified descriptors.
+- **P1: migration forgets Linear identity conflicts.** Move the complete bijection into the canonical task transaction, audit its digest/count and task references, and reject any duplicate or changed mapping before activation.
+- **P1: activity totals or private payloads become orphaned.** Give the canonical event owner an explicit migrated activity projection and private payload corpus with delivery/hash/mode/reference validation; never infer nonderivable totals or bodies from the global wire.
+- **P1: backup restore discards post-cut state or misses an agent side effect.** Permit restoration only when canonical replay, wire cursors, effect receipts, and live-session inventory prove the exact no-post-cut-work activation snapshot, and categorically refuse when any nonterminal Run or effect-capable session spanned activation; otherwise require a forward correction.
+- **P1: terminal or derived Run events publish before their source state.** Preserve immutable causation identity and require the transition/outbox journal operation before publication and global-dispatch acknowledgement.
+- **P1: active ENG-47 cannot resume.** Preserve exact pin/session/segment/attempt identity and keep required helper commands plus legacy pin execution until no retained nonterminal pin needs them.
+- **P1: supervisor cancellation loses an acknowledgement.** Component shutdown has explicit ownership, ordering, and bounded join tests.
+- **P2: API or frontend DOM changes during consolidation.** Preserve current server contracts through projections, move one caller/feature per commit, and use fixture/browser parity.
+- **P2: abstraction hides different durability semantics.** Share only atomic replacement; keep append/outbox/compaction logic domain owned.
+- **P3: package/LOC budgets encourage cosmetic movement.** Count owners, exports, artifacts, and state machines, not only lines; explain preserved distinct invariants.
 
 ## Unresolved questions
 
-None.
+None. Current Factory main grants this Run coordinated authority over the admitted Network repository, the Network guard design and rollout order are evidence-backed, and the current `Yolo` label covers the complete reviewed scope after the normal plan-gate publication. The plan deliberately chooses non-destructive one-shot migration, preserves current Linear capability plus the active old workflow pin, and deploys the provider prerequisite before Factory.
