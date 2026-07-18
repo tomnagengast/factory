@@ -5,6 +5,12 @@ export default defineConfig({
   plugins: [solid()],
   build: {
     cssCodeSplit: false,
+    rollupOptions: {
+      output: {
+        entryFileNames: "assets/factory-[hash].js",
+        assetFileNames: "assets/factory-[hash][extname]",
+      },
+    },
   },
   server: {
     proxy: {
