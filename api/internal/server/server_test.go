@@ -269,7 +269,7 @@ func TestSolidAppFallbackAndAssets(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
 	handler := testServer(t, wire).Handler()
-	for _, path := range []string{"/", "/tasks/12", "/assets/app.js", "/assets/styles.css"} {
+	for _, path := range []string{"/", "/tasks/12", "/assets/app-a1.js", "/assets/styles-b2.css"} {
 		response := requestJSON(t, handler, http.MethodGet, path, "")
 		if response.Code != http.StatusOK {
 			t.Fatalf("%s status = %d, body = %s", path, response.Code, response.Body)
@@ -323,9 +323,9 @@ func openWire(t *testing.T) *eventwire.Wire {
 func testServer(t *testing.T, wire *eventwire.Wire) *Server {
 	t.Helper()
 	assets := fstest.MapFS{
-		"index.html":        &fstest.MapFile{Data: []byte("<html></html>")},
-		"assets/app.js":     &fstest.MapFile{Data: []byte("export {};")},
-		"assets/styles.css": &fstest.MapFile{Data: []byte("body {}")},
+		"index.html":           &fstest.MapFile{Data: []byte("<html></html>")},
+		"assets/app-a1.js":     &fstest.MapFile{Data: []byte("export {};")},
+		"assets/styles-b2.css": &fstest.MapFile{Data: []byte("body {}")},
 	}
 	var filesystem fs.FS = assets
 	server, err := New(wire, filesystem)

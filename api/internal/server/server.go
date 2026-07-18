@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"mime"
 	"net/http"
 	"os"
+	"path"
 	"strconv"
 
 	"github.com/tomnagengast/factory/api/internal/eventwire"
@@ -75,8 +77,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/history", s.history)
 	mux.HandleFunc("GET /api/history/{item}", s.historyItem)
 
-	mux.HandleFunc("GET /assets/app.js", s.asset("assets/app.js", "application/javascript; charset=utf-8"))
-	mux.HandleFunc("GET /assets/styles.css", s.asset("assets/styles.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /assets/{file}", func(writer http.ResponseWriter, request *http.Request) {
+		file := request.PathValue("file")
+		s.asset("assets/"+file, mime.TypeByExtension(path.Ext(file)))(writer, request)
+	})
 	mux.HandleFunc("GET /api/{rest...}", http.NotFound)
 	mux.HandleFunc("GET /", s.asset("index.html", "text/html; charset=utf-8"))
 	return mux
