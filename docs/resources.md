@@ -100,6 +100,11 @@ The API task list is sorted by ID descending. The web application can re-sort
 or group it by any task field. The project must exist and not be deleted. Task
 detail includes comments and artifacts.
 
+The web task detail is rendered by default and enters its form only after
+selecting **Edit task**. Save persists the task; cancel discards the form.
+Task titles use inline Markdown, while descriptions and comments use full
+trusted Markdown or HTML with syntax-highlighted code blocks.
+
 ## Comments
 
 Comments are polymorphic records related to a task or workflow. Task comments

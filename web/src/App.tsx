@@ -1,5 +1,6 @@
 import { A, Route, Router, useNavigate, useParams } from "@solidjs/router";
 import {
+  createEffect,
   createMemo,
   createResource,
   createSignal,
@@ -9,6 +10,9 @@ import {
   Show,
   type JSX,
 } from "solid-js";
+import hljs from "highlight.js/lib/common";
+import { marked } from "marked";
+import "highlight.js/styles/github-dark.css";
 import { get, optional, optionalID, post, put, remove } from "./api";
 import {
   taskStatuses,
@@ -96,7 +100,7 @@ function Shell(props: { children?: JSX.Element }) {
   );
 }
 
-function PageHeader(props: { eyebrow?: string; title: string; description?: string; actions?: JSX.Element }) {
+function PageHeader(props: { eyebrow?: string; title: JSX.Element; description?: string; actions?: JSX.Element }) {
   return (
     <header class="page-header">
       <div>
@@ -138,6 +142,21 @@ function Load<T>(props: {
 
 function Empty(props: { children: JSX.Element }) {
   return <div class="empty">{props.children}</div>;
+}
+
+function Markdown(props: { content?: string; inline?: boolean }) {
+  let body: HTMLDivElement | undefined;
+  const html = createMemo(() => props.inline
+    ? marked.parseInline(props.content ?? "", { async: false, gfm: true, breaks: true })
+    : marked.parse(props.content ?? "", { async: false, gfm: true, breaks: true }));
+  createEffect(() => {
+    html();
+    if (!props.inline) queueMicrotask(() =>
+      body?.querySelectorAll<HTMLElement>("pre code").forEach((code) => hljs.highlightElement(code)));
+  });
+  return props.inline
+    ? <span class="markdown inline" innerHTML={html()} />
+    : <div ref={body} class="markdown" innerHTML={html()} />;
 }
 
 function Meta(props: { value: { id: number; createdAt: string; updatedAt: string; deletedAt?: string } }) {
@@ -533,24 +552,39 @@ function TaskView() {
     return { projects: projects.projects, tasks: tasks.tasks };
   });
   const action = mutation();
+  const [editing, setEditing] = createSignal(false);
   return (
     <div class="page">
       <Load data={data} error={() => data.error}>
-        {(value) => (
+        {(value) => {
+          const current = () => data() ?? value;
+          return (
           <>
-            <PageHeader eyebrow={`Task ${value.task.id}`} title={value.task.title} />
+            <PageHeader eyebrow={`Task ${current().task.id}`} title={<Markdown content={current().task.title} inline />}
+              actions={<Show when={!editing()}>
+                <button class="button" onClick={() => setEditing(true)}>Edit task</button>
+              </Show>} />
+            <TaskProperties task={current().task} projects={options()?.projects ?? []} tasks={options()?.tasks ?? []} />
             <div class="detail-grid">
-              <Show when={options()}>
-                {(available) => <TaskForm task={value.task} projects={available().projects} tasks={available().tasks}
-                  pending={action.pending()} error={action.error()} onSave={(body) => action.run(async () => {
-                    await put<Task>(`/api/tasks/${value.task.id}`, body);
-                    await refetch();
-                  })} />}
+              <Show when={editing()} fallback={<section class="task-document">
+                <Show when={current().task.description} fallback={<p class="muted">No description.</p>}>
+                  <Markdown content={current().task.description} />
+                </Show>
+              </section>}>
+                <Show when={options()} fallback={<div class="state">Loading task editor…</div>}>
+                  {(available) => <TaskForm task={current().task} projects={available().projects} tasks={available().tasks}
+                    pending={action.pending()} error={action.error()} onCancel={() => setEditing(false)}
+                    onSave={(body) => action.run(async () => {
+                      await put<Task>(`/api/tasks/${current().task.id}`, body);
+                      await refetch();
+                      setEditing(false);
+                    })} />}
+                </Show>
               </Show>
               <aside class="side-detail">
-                <Meta value={value.task} />
+                <Meta value={current().task} />
                 <button class="button danger" onClick={() => action.run(async () => {
-                  await remove(`/api/tasks/${value.task.id}`);
+                  await remove(`/api/tasks/${current().task.id}`);
                   navigate("/tasks");
                 })}>Delete task</button>
               </aside>
@@ -558,13 +592,27 @@ function TaskView() {
             <div class="split lower">
               <section>
                 <SectionTitle title="Comments" />
-                <CommentThread comments={value.comments} taskID={value.task.id} onChange={refetch} />
+                <CommentThread comments={current().comments} taskID={current().task.id} onChange={refetch} />
               </section>
-              <ArtifactPanel artifacts={value.artifacts} relationType="task" relationID={value.task.id} onChange={refetch} />
+              <ArtifactPanel artifacts={current().artifacts} relationType="task" relationID={current().task.id} onChange={refetch} />
             </div>
           </>
-        )}
+          );
+        }}
       </Load>
+    </div>
+  );
+}
+
+function TaskProperties(props: { task: Task; projects: Project[]; tasks: Task[] }) {
+  const parent = () => props.tasks.find((task) => task.id === props.task.parentTaskId);
+  return (
+    <div class="task-properties">
+      <span class={`status ${slug(props.task.status)}`}>{props.task.status}</span>
+      <A href={`/projects/${props.task.projectId}`}>{projectName(props.task.projectId, props.projects)}</A>
+      <Show when={props.task.parentTaskId}>
+        <A href={`/tasks/${props.task.parentTaskId}`}>Parent #{props.task.parentTaskId} {parent()?.title}</A>
+      </Show>
     </div>
   );
 }
@@ -575,6 +623,7 @@ function TaskForm(props: {
   tasks: Task[];
   pending: boolean;
   error?: string;
+  onCancel?: () => void;
   onSave: (body: unknown) => void;
 }) {
   return (
@@ -606,7 +655,8 @@ function TaskForm(props: {
           {(task) => <option value={task.id}>#{task.id} {task.title}</option>}
         </For>
       </select></label>
-      <FormFooter pending={props.pending} error={props.error} label={props.task ? "Save task" : "Create task"} />
+      <FormFooter pending={props.pending} error={props.error} onCancel={props.onCancel}
+        label={props.task ? "Save task" : "Create task"} />
     </form>
   );
 }
@@ -638,7 +688,7 @@ function CommentBranch(props: {
             <A href={`/tasks/${props.taskID}/comments/${comment.id}`}>#{comment.id}</A>
             <time>{date(comment.createdAt)}</time>
           </header>
-          <p>{comment.content}</p>
+          <Markdown content={comment.content} />
           <CommentForm taskID={props.taskID} parentCommentID={comment.id} compact onChange={props.onChange} />
           <div class="replies">
             <CommentBranch
@@ -694,13 +744,13 @@ function CommentView() {
               actions={<A class="button" href={`/tasks/${params.task}`}>Back to task</A>} />
             <article class="comment featured">
               <header><strong>{value.comment.author}</strong><time>{date(value.comment.createdAt)}</time></header>
-              <p>{value.comment.content}</p>
+              <Markdown content={value.comment.content} />
             </article>
             <Show when={value.replies.length}>
               <section><SectionTitle title="Direct replies" />
                 <div class="comments"><For each={value.replies}>{(reply) => <article class="comment"><header>
                   <strong>{reply.author}</strong><A href={`/tasks/${params.task}/comments/${reply.id}`}>#{reply.id}</A>
-                  <time>{date(reply.createdAt)}</time></header><p>{reply.content}</p></article>}</For></div>
+                  <time>{date(reply.createdAt)}</time></header><Markdown content={reply.content} /></article>}</For></div>
               </section>
             </Show>
             <ArtifactPanel artifacts={value.artifacts} relationType="comment" relationID={value.comment.id} onChange={refetch} />
@@ -1131,10 +1181,13 @@ function WorkflowView() {
   );
 }
 
-function FormFooter(props: { pending: boolean; error?: string; label: string }) {
+function FormFooter(props: { pending: boolean; error?: string; label: string; onCancel?: () => void }) {
   return (
     <footer class="form-footer">
       <Show when={props.error}><span class="form-error">{props.error}</span></Show>
+      <Show when={props.onCancel}>
+        <button type="button" class="button quiet" disabled={props.pending} onClick={props.onCancel}>Cancel</button>
+      </Show>
       <button class="button primary" disabled={props.pending}>{props.pending ? "Saving…" : props.label}</button>
     </footer>
   );

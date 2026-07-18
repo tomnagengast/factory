@@ -141,6 +141,17 @@ main { min-width: 0; }
 .controls label { min-width: 150px; color: var(--muted); font: 10px var(--mono); text-transform: uppercase; }
 .controls select { display: block; width: 100%; margin-top: 6px; padding: 8px; border: 1px solid var(--line); background: var(--paper); }
 .detail-grid { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 32px; align-items: start; }
+.task-properties {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: -18px 0 26px;
+  color: var(--muted); font: 10px var(--mono);
+}
+.task-properties a {
+  padding: 4px 7px; border: 1px solid #bcc5b7; background: #edf1e8;
+  color: #445447; text-decoration: none;
+}
+.task-properties a:hover { border-color: #8e998c; }
+.task-document { min-width: 0; padding: 6px 2px 28px; }
+.muted { color: var(--muted); }
 .form-panel, .composer, .artifact-form, .comment-form {
   padding: 24px; display: grid; gap: 18px; border: 1px solid var(--line); background: var(--paper);
 }
@@ -166,7 +177,8 @@ label small { color: var(--muted); font-weight: 400; }
 .comment header, .message header { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; }
 .comment header strong, .message header strong { color: var(--ink); text-transform: capitalize; }
 .comment header time, .message header time { margin-left: auto; }
-.comment p, .message p { margin: 10px 0 0; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.comment .markdown, .message p { margin-top: 10px; }
+.message p { margin-bottom: 0; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .replies { margin: 14px 0 0 16px; display: grid; gap: 10px; }
 .comment-form { padding: 14px; grid-template-columns: 1fr auto; gap: 8px; }
 .comment-form textarea { grid-column: 1 / -1; }
@@ -177,6 +189,34 @@ label small { color: var(--muted); font-weight: 400; }
 .artifact-type { width: fit-content; }
 .artifacts p { margin: 0; color: var(--muted); white-space: pre-wrap; }
 .artifact-form { padding: 14px; gap: 8px; }
+
+.markdown { min-width: 0; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.markdown.inline { display: inline; font-size: inherit; line-height: inherit; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown p, .markdown ul, .markdown ol, .markdown blockquote, .markdown pre, .markdown table { margin: 0 0 18px; }
+.markdown h1, .markdown h2, .markdown h3, .markdown h4 {
+  margin: 30px 0 12px; line-height: 1.2; letter-spacing: -.025em;
+}
+.markdown h1 { font-size: 28px; }
+.markdown h2 { font-size: 22px; }
+.markdown h3 { font-size: 18px; }
+.markdown ul, .markdown ol { padding-left: 24px; }
+.markdown li + li { margin-top: 5px; }
+.markdown a { color: var(--green); }
+.markdown blockquote {
+  padding: 2px 0 2px 16px; border-left: 3px solid #9bab93; color: var(--muted);
+}
+.markdown code { padding: 2px 5px; background: #dfe4da; font: .88em var(--mono); }
+.markdown pre {
+  max-width: 100%; padding: 16px 18px; overflow: auto; border: 1px solid #303a31;
+  background: #171c18; color: #d9e6d6; font: 12px/1.65 var(--mono); tab-size: 2;
+}
+.markdown pre code, .markdown pre code.hljs { padding: 0; background: transparent; font: inherit; }
+.markdown table { width: 100%; display: block; overflow-x: auto; border-collapse: collapse; }
+.markdown th, .markdown td { padding: 8px 10px; border: 1px solid var(--line); text-align: left; }
+.markdown th { background: #e4e8df; }
+.markdown img { max-width: 100%; height: auto; }
 
 .connection { display: flex; align-items: center; gap: 8px; color: var(--muted); font: 10px var(--mono); text-transform: uppercase; }
 .connection span { width: 8px; height: 8px; border-radius: 50%; background: #a69054; }
