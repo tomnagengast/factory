@@ -44,6 +44,9 @@
 - Event triggers only see matching events received after the trigger's latest
   update. Cron appends a targeted `cron` event and then uses the same trigger
   path.
+- Universal HTTP intake uses `/api/ingest` and its descendant paths. Preserve
+  every request as an `ingress.<source>` event without provider adapters;
+  provider interpretation belongs in workflows.
 - Every project requires a local path, which the API creates on save. Every
   task requires a project. Workflows triggered by `task.created`,
   `task.updated`, or `task.deleted` run from that project's configured local

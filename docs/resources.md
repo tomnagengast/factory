@@ -222,11 +222,40 @@ POST /api/events
 GET  /api/events/{id}
 GET  /api/events/types
 GET  /api/events/stream
+ANY  /api/ingest
+ANY  /api/ingest/{remaining-path...}
 ```
 
 `GET /api/events?after=42` returns events after ID 42.
 `GET /api/events/stream?after=42` opens a server-sent event stream after ID
 42. Event types returns all observed types plus `cron`.
+
+Universal ingress records any HTTP request without validating or normalizing
+its payload:
+
+```sh
+curl -X POST \
+  -H 'X-GitHub-Event: pull_request' \
+  --data-binary '{"action":"opened"}' \
+  'http://127.0.0.1:8092/api/ingest?source=github'
+```
+
+The optional `source` query value becomes a namespaced event type:
+
+```text
+?source=github  -> ingress.github
+?source=linear  -> ingress.linear
+no source       -> ingress.received
+```
+
+Event data contains `method`, `url`, `headers`, `bodyEncoding`, and `body`.
+Valid UTF-8 bodies use `utf-8`; all other bytes use lossless `base64`. Headers
+are stored without redaction. Every receipt, including a producer retry,
+becomes a separate event.
+
+The handler accepts configured paths beneath `/api/ingest` and returns an
+empty successful OTLP/HTTP response for protobuf or `{}` for JSON. It does not
+support OTLP/gRPC or provider-specific challenge responses.
 
 ## Triggers
 

@@ -1,15 +1,18 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/tomnagengast/factory/api/internal/state"
 )
@@ -727,6 +730,41 @@ func (s *Server) eventCreate(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writeJSON(writer, http.StatusCreated, event)
+}
+
+func (s *Server) ingest(writer http.ResponseWriter, request *http.Request) {
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	encoding, content := "utf-8", string(body)
+	if !utf8.Valid(body) {
+		encoding, content = "base64", base64.StdEncoding.EncodeToString(body)
+	}
+	eventType := "ingress.received"
+	if source := strings.TrimSpace(request.URL.Query().Get("source")); source != "" {
+		eventType = "ingress." + source
+	}
+	if _, err := s.wire.Publish(eventType, map[string]any{
+		"method": request.Method, "url": request.URL.RequestURI(), "headers": request.Header,
+		"bodyEncoding": encoding, "body": content,
+	}); err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	contentType := request.Header.Get("Content-Type")
+	switch lower := strings.ToLower(contentType); {
+	case strings.HasPrefix(lower, "application/json"):
+		writer.Header().Set("Content-Type", contentType)
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte("{}"))
+	case strings.HasPrefix(lower, "application/x-protobuf"):
+		writer.Header().Set("Content-Type", contentType)
+		writer.WriteHeader(http.StatusOK)
+	default:
+		writer.WriteHeader(http.StatusOK)
+	}
 }
 
 func (s *Server) stream(writer http.ResponseWriter, request *http.Request) {

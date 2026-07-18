@@ -120,6 +120,7 @@ triggers     GET / POST, GET / PUT / DELETE by ID
 workflows    GET / POST, GET / PUT / DELETE by ID
 history      GET list, GET run and event detail by ID
 settings     GET / PUT singleton selection and option catalog
+ingress      ANY request at /api/ingest or a path beneath it
 ```
 
 `POST /api/events` accepts any event:
@@ -135,6 +136,11 @@ settings     GET / PUT singleton selection and option catalog
 
 Every accepted event type appears in the trigger event selector. `cron` is
 always included.
+
+`/api/ingest?source=<name>` accepts any HTTP payload and records it as
+`ingress.<name>` without a provider adapter. The event preserves the method,
+URL, headers, and lossless UTF-8 or base64 body. Paths below `/api/ingest`
+support configurable OTLP/HTTP signal endpoints.
 
 ## CLI
 

@@ -37,6 +37,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/events/types", s.eventTypes)
 	mux.HandleFunc("GET /api/events/stream", s.stream)
 	mux.HandleFunc("GET /api/events/{event}", s.event)
+	mux.HandleFunc("/api/ingest", s.ingest)
+	mux.HandleFunc("/api/ingest/{rest...}", s.ingest)
 
 	mux.HandleFunc("GET /api/projects", s.projects)
 	mux.HandleFunc("POST /api/projects", s.projectCreate)
@@ -81,8 +83,14 @@ func (s *Server) Handler() http.Handler {
 		file := request.PathValue("file")
 		s.asset("assets/"+file, mime.TypeByExtension(path.Ext(file)))(writer, request)
 	})
-	mux.HandleFunc("GET /api/{rest...}", http.NotFound)
-	mux.HandleFunc("GET /", s.asset("index.html", "text/html; charset=utf-8"))
+	mux.HandleFunc("/api/{rest...}", http.NotFound)
+	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			http.NotFound(writer, request)
+			return
+		}
+		s.asset("index.html", "text/html; charset=utf-8")(writer, request)
+	})
 	return mux
 }
 

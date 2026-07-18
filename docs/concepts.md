@@ -47,6 +47,12 @@ whose data refers back to that resource ID.
 triggers. Prefer names that do not collide with Factory's reserved resource
 events because reserved event data is interpreted by the projection.
 
+`/api/ingest` and every path below it accept any HTTP request without a
+provider adapter. Factory records the method, URL, headers, and exact body as
+one event. UTF-8 bodies remain text and other bytes use base64. A `source`
+query value selects an automatically namespaced event type such as
+`ingress.github`; requests without one use `ingress.received`.
+
 `GET /api/events/stream` exposes new events as server-sent events. The web
 event page and detail views use that stream to update without a page reload.
 

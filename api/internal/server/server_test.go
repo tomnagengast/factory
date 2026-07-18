@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -212,6 +214,87 @@ func TestArbitraryEventIntakeAndTypes(t *testing.T) {
 	types := requestJSON(t, handler, http.MethodGet, "/api/events/types", "")
 	if !strings.Contains(types.Body.String(), "release.ready") || !strings.Contains(types.Body.String(), "cron") {
 		t.Fatalf("event types = %s", types.Body)
+	}
+}
+
+func TestUniversalIngress(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	tests := []struct {
+		method, path, contentType, response, eventType, encoding, body string
+		payload                                                        []byte
+	}{
+		{
+			http.MethodPatch, "/api/ingest/deliveries?source=github&attempt=1",
+			"application/json", "{}", "ingress.github", "utf-8",
+			`{"action":"opened"}`, []byte(`{"action":"opened"}`),
+		},
+		{
+			http.MethodPost, "/api/ingest/v1/logs?source=otel", "application/x-protobuf",
+			"", "ingress.otel", "base64", base64.StdEncoding.EncodeToString([]byte{0xff, 0, 0x80}),
+			[]byte{0xff, 0, 0x80},
+		},
+		{
+			http.MethodDelete, "/api/ingest", "text/plain", "",
+			"ingress.received", "utf-8", "deploy complete", []byte("deploy complete"),
+		},
+	}
+	for _, test := range tests {
+		request := httptest.NewRequest(test.method, test.path, bytes.NewReader(test.payload))
+		request.Header.Set("Content-Type", test.contentType)
+		request.Header.Set("X-Delivery", "delivery-1")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || response.Body.String() != test.response {
+			t.Fatalf("%s response = %d %q", test.path, response.Code, response.Body.String())
+		}
+		if strings.HasPrefix(test.contentType, "application/") &&
+			response.Header().Get("Content-Type") != test.contentType {
+			t.Fatalf("%s response content type = %q", test.path, response.Header().Get("Content-Type"))
+		}
+		event := wire.Events(0)[len(wire.Events(0))-1]
+		var data struct {
+			Method, URL, BodyEncoding, Body string
+			Headers                         http.Header
+		}
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type != test.eventType || data.Method != test.method || data.URL != test.path ||
+			data.BodyEncoding != test.encoding || data.Body != test.body ||
+			data.Headers.Get("X-Delivery") != "delivery-1" {
+			t.Fatalf("%s event = %#v, data = %#v", test.path, event, data)
+		}
+	}
+}
+
+func TestUniversalIngressSurvivesReplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wire.jsonl")
+	wire, err := eventwire.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := requestJSON(t, testServer(t, wire).Handler(), http.MethodPost,
+		"/api/ingest?source=linear", `{"type":"Issue","action":"update"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body)
+	}
+	if err := wire.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := eventwire.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	events := reopened.Events(0)
+	var data struct {
+		Body string
+	}
+	if len(events) != 1 || json.Unmarshal(events[0].Data, &data) != nil ||
+		events[0].Type != "ingress.linear" || data.Body != `{"type":"Issue","action":"update"}` {
+		t.Fatalf("replayed events = %#v", events)
 	}
 }
 

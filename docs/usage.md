@@ -154,7 +154,30 @@ The CLI performs the same operations:
 Every CLI response is JSON. Use the returned integer `id` for later `get`,
 `update`, `delete`, or `comment` commands.
 
-### 5. Create the first workflow
+### 5. Connect an external producer
+
+Point any HTTP webhook or log drain at the universal ingress endpoint:
+
+```text
+http://127.0.0.1:8092/api/ingest?source=my-service
+```
+
+Factory records each request as `ingress.my-service`. The complete headers
+and body are retained, so credentials sent in headers are retained too. No
+signature verification, payload schema, deduplication, or provider adapter is
+involved.
+
+OTLP/HTTP exporters can use paths below the same endpoint:
+
+```sh
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:8092/api/ingest/v1/traces?source=otel.traces
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://127.0.0.1:8092/api/ingest/v1/metrics?source=otel.metrics
+export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://127.0.0.1:8092/api/ingest/v1/logs?source=otel.logs
+```
+
+Use OTLP/HTTP with JSON or protobuf encoding. OTLP/gRPC is not supported.
+
+### 6. Create the first workflow
 
 Open **Workflows**, select **New workflow**, and describe the orchestration
 you want. For example:
