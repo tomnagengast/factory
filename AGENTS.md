@@ -12,6 +12,9 @@
 - Codex is the agent backend. The external `workflow` CLI owns workflow
   discovery, loading, validation, and execution. Do not duplicate that runtime
   inside Factory.
+- Install and document that dependency from the public
+  `tomnagengast/workflow` Homebrew cask. Do not introduce private repository
+  dependencies.
 
 ## Architecture patterns
 

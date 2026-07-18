@@ -9,11 +9,16 @@ not embed the workflow loader, DSL, or subagent runtime.
 Codex and the workflow runner must be on `PATH` when `factory-api` starts:
 
 ```sh
+brew tap tomnagengast/tap
+brew install --cask workflow-cli
 codex --version
+workflow --version
 workflow --help
 codex login status
 ```
 
+The workflow CLI and its documentation are public at
+[`tomnagengast/workflow`](https://github.com/tomnagengast/workflow).
 The built `factory` resource CLI defaults to `./factory`. Use `-agent`,
 `-factory`, or `-workflow` to supply explicit paths. See [usage.md](usage.md)
 for installation.

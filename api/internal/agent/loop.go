@@ -314,7 +314,7 @@ func authorPrompt(selected state.Workflow, comments []state.Comment, target stri
 	}
 	return fmt.Sprintf(`You are collaborating with a user to author one dynamic workflow.
 
-Read workflow CLI help and examples under ~/cmptr/config/ai/workflows when useful.
+Read workflow CLI help and https://github.com/tomnagengast/workflow when useful.
 Write the complete workflow to %s. This Factory-owned path is outside git.
 You may use $FACTORY_CLI to inspect Factory resources and create or update a trigger; $FACTORY_URL targets this server.
 The first statement must export const meta with name, description, and phases.

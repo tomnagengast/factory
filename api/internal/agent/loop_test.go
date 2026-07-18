@@ -64,7 +64,8 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	}
 	if !worked || len(runner.prompts) != 1 ||
 		!strings.Contains(runner.prompts[0], "Build a review panel") ||
-		!strings.Contains(runner.prompts[0], "$FACTORY_CLI") {
+		!strings.Contains(runner.prompts[0], "$FACTORY_CLI") ||
+		!strings.Contains(runner.prompts[0], "github.com/tomnagengast/workflow") {
 		t.Fatalf("workflow was not authored: %#v", runner.prompts)
 	}
 	view, err := state.ProjectEvents(wire.Events(0))

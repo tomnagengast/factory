@@ -158,8 +158,9 @@ factory event create '{"type":"release.ready","data":{"version":"1.0"}}'
 
 ## Workflow loop
 
-Factory asks the external `workflow` CLI to discover and execute dynamic
-workflows. It does not embed that CLI's loader, DSL, or agent runtime.
+Factory asks the external [`workflow`](https://github.com/tomnagengast/workflow)
+CLI to discover and execute dynamic workflows. It does not embed that CLI's
+loader, DSL, or agent runtime.
 
 Factory-created workflow files live outside git at:
 

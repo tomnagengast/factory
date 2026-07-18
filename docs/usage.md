@@ -14,49 +14,35 @@ trust. Do not bind it to a public interface.
 
 ### 1. Get access and install prerequisites
 
-The current setup uses two private repositories. Your GitHub account needs
-access to:
-
-- `tomnagengast/factory`, the application
-- `tomnagengast/cmptr`, which contains the standalone `workflow` runner and
-  workflow examples
+Your GitHub account needs access to `tomnagengast/factory`. The standalone
+[`workflow`](https://github.com/tomnagengast/workflow) runner is public and
+installed through Homebrew.
 
 Install these tools:
 
 - Git
 - Go compatible with the version in `go.mod` (currently Go 1.26.5)
 - Bun 1.3.11
-- Node.js 22 or newer for the `workflow` runner
 - the current [OpenAI Codex CLI](https://github.com/openai/codex)
 
-On macOS, Codex can be installed with Homebrew:
+On macOS, install Codex and the workflow runner with Homebrew:
 
 ```sh
 brew install --cask codex
+brew tap tomnagengast/tap
+brew install --cask workflow-cli
 ```
 
 The official Codex repository also documents standalone and npm installation
 options for macOS and Linux.
 
-Clone both repositories at the paths expected by Factory:
+Clone Factory:
 
 ```sh
 mkdir -p "$HOME/repos/tomnagengast"
 git clone git@github.com:tomnagengast/factory.git \
   "$HOME/repos/tomnagengast/factory"
-git clone git@github.com:tomnagengast/cmptr.git "$HOME/cmptr"
 ```
-
-Put the standalone workflow runner on `PATH`:
-
-```sh
-mkdir -p "$HOME/.local/bin"
-ln -sfn "$HOME/cmptr/bin/workflow" "$HOME/.local/bin/workflow"
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Add that `PATH` export to your shell profile if `~/.local/bin` is not already
-available in new terminals.
 
 Authenticate Codex:
 
@@ -70,8 +56,8 @@ Verify the complete toolchain:
 ```sh
 go version
 bun --version
-node --version
 codex --version
+workflow --version
 workflow --help
 ```
 
@@ -256,7 +242,7 @@ Use `-agent`, `-factory`, and `-workflow` to supply explicit executables:
 ./factory-api \
   -agent /path/to/codex \
   -factory /path/to/factory \
-  -workflow "$HOME/cmptr/bin/workflow"
+  -workflow /path/to/workflow
 ```
 
 ## Stopping, restarting, and preserving data
