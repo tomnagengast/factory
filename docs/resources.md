@@ -392,13 +392,15 @@ Settings are one global projection rather than an ID-addressed resource.
 | `harness` | string | `codex` or `claude` |
 | `model` | string | Must belong to the selected harness |
 | `reasoning` | string | Must be supported by the selected model |
+| `workflowCapacity` | integer | Concurrent triggered runs, from `0` through `10` |
 
 ```sh
 factory settings get
 factory settings update '{
   "harness":"claude",
   "model":"sonnet",
-  "reasoning":"high"
+  "reasoning":"high",
+  "workflowCapacity":6
 }'
 ```
 
@@ -411,8 +413,9 @@ PUT /api/settings
 
 The GET response contains `settings` and a `harnesses` option catalog used by
 the web form. An update appends `settings.updated`; replay restores the latest
-selection. Codex, `gpt-5.6-sol`, and `low` are the defaults before the first
-update.
+selection. Codex, `gpt-5.6-sol`, `low`, and workflow capacity `6` are the
+defaults before the first update. Capacity zero pauses new event and cron
+trigger runs. Lowering it does not cancel active runs.
 
 ## Health
 
@@ -420,8 +423,9 @@ update.
 GET /api/health
 ```
 
-The response includes status, active harness, event and resource counts, and
-release identity when deployment environment variables are set.
+The response includes status, active harness, workflow capacity, event and
+resource counts, and release identity when deployment environment variables
+are set.
 
 ## CLI command matrix
 

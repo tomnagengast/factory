@@ -4,7 +4,7 @@ Factory intentionally concentrates on three mechanisms:
 
 1. an append-only event wire,
 2. resource and task intake,
-3. one sequential agent loop.
+3. one capacity-limited workflow coordinator.
 
 Everything else exists to make those mechanisms visible and usable.
 
@@ -16,13 +16,13 @@ Web UI ─┐
 CLI ────┘                              │
                                       ├─> projected resources
                                       ├─> live event stream
-                                      └─> one sequential loop
+                                      └─> one coordinator
                                                │
-                         ┌─────────────────────┴────────────────────┐
-                         │                                          │
-             selected harness authoring                  workflow CLI run
-                         │                                          │
-                         └──────────────> new events <──────────────┘
+                         ┌─────────────────────┴──────────────────────┐
+                         │                                            │
+             sequential harness authoring             bounded workflow CLI runs
+                         │                                            │
+                         └────────────────> new events <──────────────┘
 ```
 
 There is no database, queue service, permission layer, or embedded workflow
@@ -63,9 +63,10 @@ run history, and the singleton agent settings are rebuilt by replaying the
 wire. The wire is the durable source of truth; the resource view is derived
 state.
 
-Agent settings select a harness, model, and reasoning level. They default to
-Codex and change through one `settings.updated` event. New authoring sessions
-and trigger runs read the latest projection when they start.
+Agent settings select a harness, model, reasoning level, and workflow
+capacity. They default to Codex and six concurrent workflow runs, and change
+through one `settings.updated` event. New authoring sessions and trigger runs
+read the latest projection when they start.
 
 Every project has a required local path. The API creates that directory when
 the project is created or updated.
@@ -102,19 +103,27 @@ The CLI and web application are peers. Both call the same API, which means an
 agent can create a task or comment and a human sees the result immediately in
 the web application.
 
-## Sequential agent loop
+## Workflow coordinator
 
-Factory owns one worker. It checks work in this order:
+Factory owns one coordinator. It checks work in this order:
 
 1. the oldest workflow conversation awaiting an agent reply,
 2. an event trigger that has not started a run,
 3. a due cron trigger.
 
-Only one authoring session or workflow CLI run executes at a time. A long run
-delays later work. This is the intentional sequential-loop demonstration, not
-an attempt at distributed scheduling.
+Workflow authoring remains sequential. Triggered workflow CLI runs execute in
+parallel until they reach the capacity projected from settings. The
+coordinator starts eligible event and cron runs in deterministic wire order
+and each start event claims its trigger and source-event pair before the
+process begins.
 
-The loop records progress back on the same wire:
+Capacity accepts values from zero through ten and defaults to six. Zero pauses
+new trigger and cron dispatch while leaving authoring available. Lowering the
+capacity never cancels active runs; the coordinator waits for enough of them
+to finish before dispatching more. There is no queue service or distributed
+worker pool.
+
+The coordinator records progress back on the same wire:
 
 - workflow authoring started, completed, or failed,
 - agent replies as workflow comments,
@@ -123,7 +132,7 @@ The loop records progress back on the same wire:
 - workflow runs completed or failed,
 - cron ticks as targeted `cron` events.
 
-The event page therefore shows both user intake and the loop's response.
+The event page therefore shows both user intake and the coordinator's response.
 The history pages project those wire events into live and completed workflow
 runs without a separate log store. Each semantic runtime event remains one
 distinct wire record; the projection never collapses lifecycle pairs.

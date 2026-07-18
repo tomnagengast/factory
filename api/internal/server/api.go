@@ -28,20 +28,37 @@ func (s *Server) settings(writer http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) settingsUpdate(writer http.ResponseWriter, request *http.Request) {
-	var input state.Settings
+	var input struct {
+		Harness          string `json:"harness"`
+		Model            string `json:"model"`
+		Reasoning        string `json:"reasoning"`
+		WorkflowCapacity *int   `json:"workflowCapacity"`
+	}
 	if err := decodeJSON(request, &input); err != nil {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if !state.ValidSettings(input) {
-		writeError(writer, http.StatusBadRequest, errors.New("unknown harness, model, or reasoning level"))
+	if input.WorkflowCapacity == nil {
+		writeError(writer, http.StatusBadRequest, errors.New("workflow capacity is required"))
 		return
 	}
-	if _, err := s.wire.Publish(state.SettingsUpdated, input); err != nil {
+	settings := state.Settings{
+		Harness: input.Harness, Model: input.Model, Reasoning: input.Reasoning,
+		WorkflowCapacity: *input.WorkflowCapacity,
+	}
+	if !state.ValidSettings(settings) {
+		writeError(
+			writer,
+			http.StatusBadRequest,
+			errors.New("unknown harness, model, reasoning level, or workflow capacity"),
+		)
+		return
+	}
+	if _, err := s.wire.Publish(state.SettingsUpdated, settings); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, input)
+	writeJSON(writer, http.StatusOK, settings)
 }
 
 func (s *Server) projects(writer http.ResponseWriter, _ *http.Request) {

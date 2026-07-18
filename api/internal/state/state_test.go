@@ -119,7 +119,9 @@ func TestSettingsDefaultAndReplay(t *testing.T) {
 	if view.Settings != DefaultSettings {
 		t.Fatalf("default settings = %#v", view.Settings)
 	}
-	selected := Settings{Harness: Claude, Model: "sonnet", Reasoning: "high"}
+	selected := Settings{
+		Harness: Claude, Model: "sonnet", Reasoning: "high", WorkflowCapacity: 4,
+	}
 	view, err = ProjectEvents([]eventwire.Event{
 		event(1, SettingsUpdated, time.Now().UTC(), selected),
 	})
@@ -129,8 +131,39 @@ func TestSettingsDefaultAndReplay(t *testing.T) {
 	if view.Settings != selected || !ValidSettings(view.Settings) {
 		t.Fatalf("replayed settings = %#v", view.Settings)
 	}
-	if ValidSettings(Settings{Harness: Claude, Model: "gpt-5.6-sol", Reasoning: "high"}) {
+	for _, capacity := range []int{MinWorkflowCapacity, MaxWorkflowCapacity} {
+		valid := selected
+		valid.WorkflowCapacity = capacity
+		if !ValidSettings(valid) {
+			t.Fatalf("workflow capacity %d was rejected", capacity)
+		}
+	}
+	if ValidSettings(Settings{
+		Harness: Claude, Model: "gpt-5.6-sol", Reasoning: "high", WorkflowCapacity: 4,
+	}) {
 		t.Fatal("cross-harness model was accepted")
+	}
+	for _, capacity := range []int{-1, 11} {
+		invalid := selected
+		invalid.WorkflowCapacity = capacity
+		if ValidSettings(invalid) {
+			t.Fatalf("workflow capacity %d was accepted", capacity)
+		}
+	}
+}
+
+func TestSettingsReplayDefaultsMissingWorkflowCapacity(t *testing.T) {
+	at := time.Now().UTC()
+	view, err := ProjectEvents([]eventwire.Event{{
+		ID: 1, Type: SettingsUpdated, At: at,
+		Data: json.RawMessage(`{"harness":"claude","model":"sonnet","reasoning":"high"}`),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Settings.Harness != Claude ||
+		view.Settings.WorkflowCapacity != DefaultWorkflowCapacity {
+		t.Fatalf("legacy settings = %#v", view.Settings)
 	}
 }
 

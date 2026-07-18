@@ -58,7 +58,7 @@ Creating a workflow requires a conversation message, not source code:
 }
 ```
 
-The sequential loop:
+The coordinator's sequential authoring path:
 
 1. finds the pending user message,
 2. assigns `<workflow-workspace>/.claude/workflows/workflow-<id>.js`,
@@ -81,11 +81,12 @@ The workflow detail page polls the current file once per second while a user
 message awaits an agent reply. Chat and source scroll independently on wide
 screens and stack on narrow screens.
 
-Use `/settings` or `factory settings update` to select the harness, model, and
-reasoning level. The API supplies the supported option catalog, so changing a
-harness also changes the available models and reasoning levels. The newest
-`settings.updated` event applies when the next authoring session or trigger
-run starts; it does not alter a process already running.
+Use `/settings` or `factory settings update` to select the harness, model,
+reasoning level, and workflow capacity. The API supplies the supported option
+catalog, so changing a harness also changes the available models and reasoning
+levels. Capacity accepts zero through ten and defaults to six. The newest
+`settings.updated` event applies when the coordinator next chooses work. It
+does not alter a process already running.
 
 Revising a discovered user workflow creates or updates the Factory-owned
 local copy. The original resolved source is provided to the agent as context,
@@ -121,8 +122,9 @@ The standalone runtime provides:
 | `log(message)` | Emit progress |
 | `budget` | Inspect the run token budget |
 
-Although workflows can use internal concurrency, Factory starts only one
-workflow authoring session or trigger run at a time.
+Workflow authoring remains one session at a time. Triggered workflows may
+overlap up to Factory's configured workflow capacity, and each workflow may
+also use the runtime's internal concurrency.
 
 The workflow loader expects deterministic source:
 
@@ -245,17 +247,25 @@ Schedules use standard five-field cron syntax:
 minute hour day-of-month month day-of-week
 ```
 
-Factory does not validate schedules when a trigger is written. The loop
-ignores an invalid schedule. When a valid schedule is due, Factory appends a
-targeted `cron` event and lets the normal event-trigger path run the workflow.
+Factory does not validate schedules when a trigger is written. The
+coordinator ignores an invalid schedule. When a valid schedule is due and
+dispatch capacity is available, Factory appends a targeted `cron` event and
+lets the normal event-trigger path run the workflow.
 
 Only cron triggers need a schedule. Non-cron triggers ignore it operationally.
 
 ## Ordering and failures
 
-One worker handles all authoring and trigger work. It prioritizes pending
-workflow conversations, then event triggers, then due cron ticks. Later work
-waits for the current authoring or workflow process to finish.
+One coordinator prioritizes pending workflow conversations, then event
+triggers, then due cron ticks. Authoring remains sequential. When no
+conversation is pending, the coordinator claims matching trigger and source
+event pairs in wire order and starts workflow processes until it reaches the
+configured capacity.
+
+Capacity zero pauses new event and cron dispatch while leaving authoring
+available. Lowering capacity does not cancel active runs; new runs wait until
+the active count falls below the new value. Raising it lets the coordinator
+fill the new slots. There is no separate queue or retry service.
 
 Failures remain observable:
 

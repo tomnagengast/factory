@@ -27,47 +27,49 @@ type Loop struct {
 	wire      *eventwire.Wire
 	agent     Runner
 	workflows workflow.Runner
+	active    int
+	completed chan error
 }
 
 func NewLoop(wire *eventwire.Wire, runner Runner, workflows workflow.Runner) (*Loop, error) {
 	if wire == nil || runner == nil || workflows == nil {
-		return nil, errors.New("agent loop requires a wire, agent, and workflow CLI")
+		return nil, errors.New("workflow coordinator requires a wire, agent, and workflow CLI")
 	}
-	return &Loop{wire: wire, agent: runner, workflows: workflows}, nil
+	return &Loop{
+		wire: wire, agent: runner, workflows: workflows,
+		completed: make(chan error, state.MaxWorkflowCapacity),
+	}, nil
 }
 
-// Run owns Factory's only worker. Workflow conversations, event triggers, and
-// cron triggers all wait their turn here.
+// Run owns Factory's coordinator. Workflow conversations remain sequential,
+// while event and cron trigger runs are dispatched up to the selected capacity.
 func (l *Loop) Run(ctx context.Context) error {
-	if err := l.syncWorkflows(ctx); err != nil {
+	runContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if err := l.syncWorkflows(runContext); err != nil {
 		return err
 	}
 	for {
-		worked, nextCron, err := l.step(ctx)
+		after := l.wire.LastID()
+		worked, nextCron, err := l.step(runContext)
 		if err != nil {
-			return err
+			cancel()
+			return l.stop(err)
 		}
 		if worked {
 			continue
 		}
-		after := l.wire.LastID()
-		waitContext := ctx
-		cancel := func() {}
-		if !nextCron.IsZero() {
-			waitContext, cancel = context.WithDeadline(ctx, nextCron)
-		}
-		_, err = l.wire.Wait(waitContext, after)
-		cancel()
-		if errors.Is(err, context.DeadlineExceeded) {
-			continue
-		}
-		if err != nil {
-			return err
+		if err := l.wait(runContext, after, nextCron); err != nil {
+			cancel()
+			return l.stop(err)
 		}
 	}
 }
 
 func (l *Loop) step(ctx context.Context) (bool, time.Time, error) {
+	if err := l.collectCompleted(); err != nil {
+		return false, time.Time{}, err
+	}
 	events := l.wire.Events(0)
 	view, err := state.ProjectEvents(events)
 	if err != nil {
@@ -76,15 +78,75 @@ func (l *Loop) step(ctx context.Context) (bool, time.Time, error) {
 	if comment, found := view.PendingWorkflowComment(); found {
 		return true, time.Time{}, l.authorWorkflow(ctx, view, comment)
 	}
-	if trigger, source, found := pendingTrigger(view, events); found {
-		return true, time.Time{}, l.runTrigger(ctx, view, trigger, source)
+	if l.active < view.Settings.WorkflowCapacity {
+		if trigger, source, found := pendingTrigger(view, events); found {
+			return true, time.Time{}, l.startTrigger(ctx, view, trigger, source)
+		}
+		due, next := nextCron(view, time.Now().UTC())
+		if due != nil {
+			_, err := l.wire.Publish(state.CronFired, state.CronData{TriggerID: due.ID})
+			return true, time.Time{}, err
+		}
+		return false, next, nil
 	}
-	due, next := nextCron(view, time.Now().UTC())
-	if due != nil {
-		_, err := l.wire.Publish(state.CronFired, state.CronData{TriggerID: due.ID})
-		return true, time.Time{}, err
+	return false, time.Time{}, nil
+}
+
+func (l *Loop) wait(ctx context.Context, after int64, nextCron time.Time) error {
+	var waitContext context.Context
+	var cancel context.CancelFunc
+	if !nextCron.IsZero() {
+		waitContext, cancel = context.WithDeadline(ctx, nextCron)
+	} else {
+		waitContext, cancel = context.WithCancel(ctx)
 	}
-	return false, next, nil
+	defer cancel()
+	wireResult := make(chan error, 1)
+	go func() {
+		_, err := l.wire.Wait(waitContext, after)
+		wireResult <- err
+	}()
+	select {
+	case err := <-l.completed:
+		l.active--
+		cancel()
+		<-wireResult
+		return err
+	case err := <-wireResult:
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
+		return err
+	}
+}
+
+func (l *Loop) collectCompleted() error {
+	for {
+		select {
+		case err := <-l.completed:
+			l.active--
+			if err != nil {
+				return err
+			}
+		default:
+			return nil
+		}
+	}
+}
+
+func (l *Loop) stop(cause error) error {
+	var executionErr error
+	for l.active > 0 {
+		err := <-l.completed
+		l.active--
+		if err != nil && !errors.Is(err, context.Canceled) && executionErr == nil {
+			executionErr = err
+		}
+	}
+	if executionErr != nil && errors.Is(cause, context.Canceled) {
+		return executionErr
+	}
+	return cause
 }
 
 func (l *Loop) authorWorkflow(ctx context.Context, view state.Snapshot, comment state.Comment) error {
@@ -139,7 +201,7 @@ func (l *Loop) authorWorkflow(ctx context.Context, view state.Snapshot, comment 
 	return err
 }
 
-func (l *Loop) runTrigger(
+func (l *Loop) startTrigger(
 	ctx context.Context,
 	view state.Snapshot,
 	trigger state.Trigger,
@@ -167,16 +229,35 @@ func (l *Loop) runTrigger(
 		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
 		return err
 	}
+	l.active++
+	go func() {
+		l.completed <- l.executeTrigger(
+			ctx, selected, trigger, source, started.ID, directory, view.Settings, run,
+		)
+	}()
+	return nil
+}
+
+func (l *Loop) executeTrigger(
+	ctx context.Context,
+	selected state.Workflow,
+	trigger state.Trigger,
+	source eventwire.Event,
+	runID int64,
+	directory string,
+	settings state.Settings,
+	run state.WorkflowRunData,
+) error {
 	output, runErr := l.workflows.Run(
 		ctx,
 		directory,
 		selected.Name,
 		stringValue(selected.Path),
-		view.Settings,
+		settings,
 		map[string]any{"event": source, "trigger": trigger},
 		func(event workflow.Event) error {
 			_, err := l.wire.Publish(state.WorkflowRunEventRecorded, state.WorkflowRunEventData{
-				RunID: started.ID, Event: event.Raw,
+				RunID: runID, Event: event.Raw,
 			})
 			return err
 		},
@@ -190,7 +271,7 @@ func (l *Loop) runTrigger(
 		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
 		return err
 	}
-	_, err = l.wire.Publish(state.WorkflowRunCompleted, run)
+	_, err := l.wire.Publish(state.WorkflowRunCompleted, run)
 	return err
 }
 

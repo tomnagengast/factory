@@ -329,22 +329,38 @@ func TestSettingsAPIUpdatesHarnessSelection(t *testing.T) {
 	response := requestJSON(t, handler, http.MethodGet, "/api/settings", "")
 	if response.Code != http.StatusOK ||
 		!strings.Contains(response.Body.String(), `"harness":"codex"`) ||
+		!strings.Contains(response.Body.String(), `"workflowCapacity":6`) ||
 		!strings.Contains(response.Body.String(), `"name":"Claude Code"`) {
 		t.Fatalf("default settings = %d %s", response.Code, response.Body)
 	}
 	response = requestJSON(t, handler, http.MethodPut, "/api/settings",
-		`{"harness":"claude","model":"sonnet","reasoning":"high"}`)
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":4}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("update settings = %d %s", response.Code, response.Body)
 	}
 	health := requestJSON(t, handler, http.MethodGet, "/api/health", "")
-	if !strings.Contains(health.Body.String(), `"harness":"claude"`) {
+	if !strings.Contains(health.Body.String(), `"harness":"claude"`) ||
+		!strings.Contains(health.Body.String(), `"workflowCapacity":4`) {
 		t.Fatalf("health = %s", health.Body)
 	}
 	response = requestJSON(t, handler, http.MethodPut, "/api/settings",
-		`{"harness":"claude","model":"gpt-5.6-sol","reasoning":"high"}`)
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":0}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("pause settings = %d %s", response.Code, response.Body)
+	}
+	response = requestJSON(t, handler, http.MethodPut, "/api/settings",
+		`{"harness":"claude","model":"gpt-5.6-sol","reasoning":"high","workflowCapacity":4}`)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("invalid settings = %d %s", response.Code, response.Body)
+	}
+	for _, body := range []string{
+		`{"harness":"claude","model":"sonnet","reasoning":"high"}`,
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":11}`,
+	} {
+		response = requestJSON(t, handler, http.MethodPut, "/api/settings", body)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid capacity settings = %d %s", response.Code, response.Body)
+		}
 	}
 }
 

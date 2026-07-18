@@ -3,10 +3,13 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/tomnagengast/factory/api/internal/eventwire"
 	"github.com/tomnagengast/factory/api/internal/state"
@@ -27,9 +30,20 @@ func (f *fakeAgent) Run(_ context.Context, settings state.Settings, prompt strin
 
 type fakeWorkflows struct {
 	definitions []workflow.Definition
+	mu          sync.Mutex
 	runs        []struct {
 		directory, name, source string
 		settings                state.Settings
+	}
+	active, maxActive int
+	started, finished chan struct{}
+	release           chan struct{}
+}
+
+func newFakeWorkflows() *fakeWorkflows {
+	return &fakeWorkflows{
+		started:  make(chan struct{}, state.MaxWorkflowCapacity+1),
+		finished: make(chan struct{}, state.MaxWorkflowCapacity+1),
 	}
 }
 
@@ -38,16 +52,34 @@ func (f *fakeWorkflows) List(context.Context) ([]workflow.Definition, error) {
 }
 
 func (f *fakeWorkflows) Run(
-	_ context.Context,
+	ctx context.Context,
 	directory, name, source string,
 	settings state.Settings,
 	_ any,
 	emit func(workflow.Event) error,
 ) (string, error) {
+	f.mu.Lock()
 	f.runs = append(f.runs, struct {
 		directory, name, source string
 		settings                state.Settings
 	}{directory, name, source, settings})
+	f.active++
+	f.maxActive = max(f.maxActive, f.active)
+	f.mu.Unlock()
+	f.started <- struct{}{}
+	defer func() {
+		f.mu.Lock()
+		f.active--
+		f.mu.Unlock()
+		f.finished <- struct{}{}
+	}()
+	if f.release != nil {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-f.release:
+		}
+	}
 	if emit != nil {
 		events := []string{
 			`{"sequence":1,"at":"2026-07-17T12:00:00Z","type":"step.started","workflow":"review","phase":"Review","stepId":1,"kind":"agent","message":"Review it"}`,
@@ -69,6 +101,12 @@ func (f *fakeWorkflows) LocalPath(id int64) string {
 	return filepath.Join("/workflows", "workflow-"+strconv.FormatInt(id, 10)+".js")
 }
 
+func (f *fakeWorkflows) snapshot() (runs int, maxActive int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.runs), f.maxActive
+}
+
 func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
@@ -86,7 +124,7 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &fakeAgent{output: "Created the review panel."}
-	workflows := &fakeWorkflows{}
+	workflows := newFakeWorkflows()
 	loop, err := NewLoop(wire, runner, workflows)
 	if err != nil {
 		t.Fatal(err)
@@ -127,18 +165,26 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	})
 	source, _ := wire.Publish("release.ready", map[string]string{"version": "1.0"})
 
-	workflows := &fakeWorkflows{}
+	workflows := newFakeWorkflows()
 	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
 	worked, _, err := loop.step(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !worked || len(workflows.runs) != 1 || workflows.runs[0].name != "review" || workflows.runs[0].directory != "" {
+	waitForSignal(t, workflows.started, "workflow start")
+	waitForSignal(t, workflows.finished, "workflow finish")
+	waitForActiveCount(t, loop, 0)
+	if !worked {
+		t.Fatal("trigger was not dispatched")
+	}
+	workflows.mu.Lock()
+	if len(workflows.runs) != 1 || workflows.runs[0].name != "review" || workflows.runs[0].directory != "" {
 		t.Fatalf("trigger did not run: %#v", workflows.runs)
 	}
 	if workflows.runs[0].settings != state.DefaultSettings {
 		t.Fatalf("trigger settings = %#v", workflows.runs[0].settings)
 	}
+	workflows.mu.Unlock()
 	view, _ := state.ProjectEvents(wire.Events(0))
 	if !view.RunStarted(triggerEvent.ID, source.ID) {
 		t.Fatal("run marker missing")
@@ -186,16 +232,189 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 				wire.Publish(eventType, state.IDData{ID: task.ID})
 			}
 
-			workflows := &fakeWorkflows{}
+			workflows := newFakeWorkflows()
 			loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
 			worked, _, err := loop.step(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
+			waitForSignal(t, workflows.started, "workflow start")
+			waitForSignal(t, workflows.finished, "workflow finish")
+			waitForActiveCount(t, loop, 0)
+			workflows.mu.Lock()
+			defer workflows.mu.Unlock()
 			if !worked || len(workflows.runs) != 1 || workflows.runs[0].directory != path {
 				t.Fatalf("runs = %#v, want project path %q", workflows.runs, path)
 			}
 		})
+	}
+}
+
+func TestLoopRunsTriggersUpToWorkflowCapacity(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	settings := state.DefaultSettings
+	settings.WorkflowCapacity = 2
+	wire.Publish(state.SettingsUpdated, settings)
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: "release.ready", WorkflowID: workflowEvent.ID,
+	})
+	for version := 1; version <= 3; version++ {
+		wire.Publish("release.ready", map[string]int{"version": version})
+	}
+
+	workflows := newFakeWorkflows()
+	workflows.release = make(chan struct{})
+	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	for range settings.WorkflowCapacity {
+		worked, _, err := loop.step(context.Background())
+		if err != nil || !worked {
+			t.Fatalf("dispatch = %v, %v", worked, err)
+		}
+		waitForSignal(t, workflows.started, "workflow start")
+	}
+	worked, _, err := loop.step(context.Background())
+	if err != nil || worked {
+		t.Fatalf("capacity did not stop dispatch: %v, %v", worked, err)
+	}
+	select {
+	case <-workflows.started:
+		t.Fatal("third workflow started above capacity")
+	default:
+	}
+	if runs, maxActive := workflows.snapshot(); runs != 2 || maxActive != 2 {
+		t.Fatalf("runs = %d, max active = %d", runs, maxActive)
+	}
+
+	settings.WorkflowCapacity = 1
+	wire.Publish(state.SettingsUpdated, settings)
+	workflows.release <- struct{}{}
+	waitForSignal(t, workflows.finished, "first workflow finish")
+	waitForActiveCount(t, loop, 1)
+	worked, _, err = loop.step(context.Background())
+	if err != nil || worked {
+		t.Fatalf("lower capacity did not hold dispatch: %v, %v", worked, err)
+	}
+	select {
+	case <-workflows.started:
+		t.Fatal("third workflow started before active count fell below the new capacity")
+	default:
+	}
+
+	workflows.release <- struct{}{}
+	waitForSignal(t, workflows.finished, "second workflow finish")
+	waitForActiveCount(t, loop, 0)
+	worked, _, err = loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("dispatch after capacity freed = %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "third workflow start")
+	workflows.release <- struct{}{}
+	waitForSignal(t, workflows.finished, "third workflow finish")
+	waitForActiveCount(t, loop, 0)
+	if runs, maxActive := workflows.snapshot(); runs != 3 || maxActive != 2 {
+		t.Fatalf("runs = %d, max active = %d", runs, maxActive)
+	}
+}
+
+func TestLoopPausesTriggerDispatchAtZeroCapacity(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	settings := state.DefaultSettings
+	settings.WorkflowCapacity = 0
+	wire.Publish(state.SettingsUpdated, settings)
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: "release.ready", WorkflowID: workflowEvent.ID,
+	})
+	wire.Publish("release.ready", map[string]int{"version": 1})
+
+	workflows := newFakeWorkflows()
+	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	worked, _, err := loop.step(context.Background())
+	if err != nil || worked {
+		t.Fatalf("zero-capacity step = %v, %v", worked, err)
+	}
+	select {
+	case <-workflows.started:
+		t.Fatal("workflow started at zero capacity")
+	default:
+	}
+
+	settings.WorkflowCapacity = 1
+	wire.Publish(state.SettingsUpdated, settings)
+	worked, _, err = loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("resumed dispatch = %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "resumed workflow start")
+	waitForSignal(t, workflows.finished, "resumed workflow finish")
+	waitForActiveCount(t, loop, 0)
+}
+
+func TestLoopRunCancelsAndWaitsForActiveWorkflows(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	settings := state.DefaultSettings
+	settings.WorkflowCapacity = 2
+	wire.Publish(state.SettingsUpdated, settings)
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: "release.ready", WorkflowID: workflowEvent.ID,
+	})
+	for version := 1; version <= 3; version++ {
+		wire.Publish("release.ready", map[string]int{"version": version})
+	}
+
+	workflows := newFakeWorkflows()
+	workflows.release = make(chan struct{})
+	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan error, 1)
+	go func() { stopped <- loop.Run(ctx) }()
+	waitForSignal(t, workflows.started, "first workflow start")
+	waitForSignal(t, workflows.started, "second workflow start")
+	cancel()
+	select {
+	case err := <-stopped:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("loop stop error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop did not wait for active workflows to stop")
+	}
+	waitForSignal(t, workflows.finished, "first canceled workflow")
+	waitForSignal(t, workflows.finished, "second canceled workflow")
+	if runs, _ := workflows.snapshot(); runs != 2 {
+		t.Fatalf("runs = %d, want two active workflows only", runs)
+	}
+}
+
+func waitForSignal(t *testing.T, channel <-chan struct{}, label string) {
+	t.Helper()
+	select {
+	case <-channel:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", label)
+	}
+}
+
+func waitForActiveCount(t *testing.T, loop *Loop, want int) {
+	t.Helper()
+	for loop.active > want {
+		select {
+		case err := <-loop.completed:
+			loop.active--
+			if err != nil {
+				t.Fatalf("workflow completion error = %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %d active workflows", want)
+		}
+	}
+	if loop.active != want {
+		t.Fatalf("active workflows = %d, want %d", loop.active, want)
 	}
 }
 

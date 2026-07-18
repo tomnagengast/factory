@@ -50,7 +50,8 @@ func TestSettingsUseSingletonAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	updateRequest, err := parse([]string{
-		"settings", "update", `{"harness":"claude","model":"sonnet","reasoning":"high"}`,
+		"settings", "update",
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6}`,
 	})
 	if err != nil {
 		t.Fatal(err)

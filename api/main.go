@@ -88,7 +88,7 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 	flags.StringVar(&configuration.FactoryCommand, "factory", "./factory", "Factory CLI exposed to the authoring harness")
 	flags.StringVar(&configuration.WorkflowCommand, "workflow", "workflow", "workflow CLI executable")
 	flags.Usage = func() {
-		fmt.Fprintln(output, "Factory serves the event wire, resource API, Solid UI, and sequential agent loop.")
+		fmt.Fprintln(output, "Factory serves the event wire, resource API, Solid UI, and workflow coordinator.")
 		fmt.Fprintln(output)
 		fmt.Fprintln(output, "Usage: factory-api [options]")
 		fmt.Fprintln(output)
@@ -149,7 +149,7 @@ func run(ctx context.Context, configuration config) error {
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan componentResult, 2)
-	go func() { results <- componentResult{name: "agent loop", err: loop.Run(runContext)} }()
+	go func() { results <- componentResult{name: "workflow coordinator", err: loop.Run(runContext)} }()
 	go func() { results <- componentResult{name: "HTTP server", err: httpServer.Serve(listener)} }()
 
 	slog.Info(

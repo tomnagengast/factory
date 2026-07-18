@@ -3,7 +3,7 @@
 ## Product boundary
 
 - Keep Factory focused on its three mechanisms: the event wire, task intake,
-  and the sequential agent loop.
+  and the capacity-limited workflow coordinator.
 - Factory is an intentionally unsafe trusted-environment demonstrator. Do not
   add authentication, permissions, policy, routing, migration, or deployment
   lifecycle machinery without explicit product direction.
@@ -24,8 +24,9 @@
 - A resource creation event ID is also its resource ID. All resources and
   events share one global integer sequence, so gaps in resource IDs are
   expected.
-- The singleton harness, model, and reasoning selection is projected from
-  `settings.updated` events and defaults to Codex.
+- The singleton harness, model, reasoning, and workflow capacity selection is
+  projected from `settings.updated` events. It defaults to Codex and a
+  workflow capacity of six.
 - The Solid app and Go CLI are peers over the same HTTP API. A resource change
   normally touches the state data/event shapes, API handlers, CLI command
   mapping, Solid types and views, and the matching reference documentation.
@@ -34,9 +35,12 @@
   the workflow detail endpoint reads live source from disk.
 - The selected workflow-authoring harness runs in that workspace and receives
   the current server and resource CLI as `FACTORY_URL` and `FACTORY_CLI`.
-- Preserve one sequential worker and its priority: pending workflow
-  conversations, matching event triggers, then due cron triggers. Do not add a
-  queue or parallel worker pool unless the product direction changes.
+- Preserve one coordinator and its priority: pending workflow conversations,
+  matching event triggers, then due cron triggers. Workflow conversations
+  remain sequential. Triggered workflows may overlap up to the projected
+  capacity. Capacity zero pauses new trigger and cron dispatch without
+  canceling active runs. Do not add a queue or external worker pool unless the
+  product direction changes.
 - Forward every workflow CLI semantic journal line as its own
   `workflow.run.event`. Never derive history from human stdout/stderr, filter
   journal fields, or collapse lifecycle pairs. Cancel the workflow if its next

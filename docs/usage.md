@@ -1,10 +1,10 @@
 # Factory usage
 
 Factory is a local, intentionally unsafe demonstrator for an event wire,
-resource and task intake, and one sequential agent loop. It serves a Solid
-web application and a JSON API from one Go process. A separate `factory`
-binary provides the same resource operations to people and agents at the
-command line.
+resource and task intake, and one capacity-limited workflow coordinator. It
+serves a Solid web application and a JSON API from one Go process. A separate
+`factory` binary provides the same resource operations to people and agents
+at the command line.
 
 Factory has no authentication or permission boundary. It invokes the selected
 Codex or Claude Code harness without approvals or sandboxing. Run it only on a
@@ -117,7 +117,7 @@ Leave that terminal open. Factory logs its listening address, wire path, and
 workflow workspace at startup.
 
 Open [http://127.0.0.1:8092](http://127.0.0.1:8092) in a browser. The overview
-should load and the lower-left status should say `Agent loop connected`.
+should load and the lower-left status should say `Coordinator connected`.
 
 Verify the API from a second terminal:
 
@@ -128,6 +128,8 @@ curl -fsS http://127.0.0.1:8092/api/health
 The response should contain `"status":"ok"` and `"harness":"codex"`.
 If you want Claude Code, open **Settings** and select its model and reasoning
 level before starting workflow collaboration or publishing a triggered event.
+The same page controls workflow capacity from zero through ten; the default is
+six.
 
 ### 4. Create the first resources
 
@@ -233,7 +235,7 @@ Common operations:
 ./factory history list
 ./factory history get 30
 ./factory settings get
-./factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high"}'
+./factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6}'
 ```
 
 Pass request JSON inline or from a file:
@@ -293,8 +295,8 @@ executables:
 
 ## Stopping, restarting, and preserving data
 
-Press `Ctrl-C` in the server terminal. Factory stops the HTTP server and
-sequential loop together.
+Press `Ctrl-C` in the server terminal. Factory stops the HTTP server,
+coordinator, and active workflow processes together.
 
 Restarting with the same `-data` and `-workflow-workspace` values preserves
 resources, comments, events, triggers, workflow run history, and generated
@@ -375,6 +377,8 @@ port with `-addr`.
 ### A trigger did not run
 
 The event must be received after the trigger was created or last updated.
+Check `/settings` too: workflow capacity zero pauses new trigger runs, and a
+full capacity makes later runs wait for an active run to finish.
 For cron triggers, use a valid standard five-field cron expression. Invalid
 cron schedules are ignored. See [workflows.md](workflows.md) for trigger
 semantics.

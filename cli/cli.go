@@ -231,5 +231,5 @@ Examples:
   factory workflow create '{"message":"Build a review-panel workflow."}'
   factory workflow update 24 '{"message":"Add a security reviewer."}'
   factory history get 30
-  factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high"}'`)
+  factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6}'`)
 }

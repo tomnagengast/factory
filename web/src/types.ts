@@ -101,6 +101,7 @@ export type WorkflowRunEvent = {
 export type Health = {
   status: string;
   harness: string;
+  workflowCapacity: number;
   events: number;
   projects: number;
   tasks: number;
@@ -113,6 +114,7 @@ export type Settings = {
   harness: string;
   model: string;
   reasoning: string;
+  workflowCapacity: number;
 };
 
 export type ModelOption = {

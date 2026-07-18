@@ -5,7 +5,7 @@ mechanisms:
 
 1. an append-only event wire,
 2. resource and task intake,
-3. one sequential agent loop.
+3. one capacity-limited workflow coordinator.
 
 Projects, tasks, comments, artifacts, triggers, and workflow metadata are
 projections of a JSONL event log. The Solid web app and `factory` CLI use the
@@ -15,7 +15,7 @@ framework, or deployment lifecycle lives in the application.
 ## Monorepo
 
 ```text
-api/    Go API, event wire, projections, workflow adapter, sequential loop
+api/    Go API, event wire, projections, workflow adapter, run coordinator
 cli/    Go resource client
 web/    SolidJS application built with Bun and Vite
 ```
@@ -27,7 +27,7 @@ The root holds repository orchestration, module metadata, and this document.
 - [Usage](docs/usage.md) covers installation, first run, everyday operation,
   configuration, and troubleshooting.
 - [Concepts](docs/concepts.md) explains the event wire, projections, task
-  intake, and the sequential agent loop.
+  intake, and the workflow coordinator.
 - [Resource reference](docs/resources.md) lists resource fields, HTTP routes,
   payloads, and matching CLI commands.
 - [Workflow reference](docs/workflows.md) covers discovery, agent
@@ -100,7 +100,7 @@ The new domain wire defaults to
 /workflows/:workflow                   chat beside the live workflow source
 /history                               live and completed workflow runs
 /history/:item                         phase-grouped semantic event timeline
-/settings                              select harness, model, and reasoning
+/settings                              select harness, model, reasoning, and run capacity
 ```
 
 All route IDs are integers. Deletion is soft and list routes omit deleted
@@ -167,12 +167,12 @@ factory workflow create '{"message":"Build a review-panel workflow."}'
 factory workflow update 24 '{"message":"Add a security reviewer."}'
 factory event create '{"type":"release.ready","data":{"version":"1.0"}}'
 factory history get 30
-factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high"}'
+factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6}'
 ```
 
 `FACTORY_URL` changes the default server from `http://127.0.0.1:8092`.
 
-## Workflow loop
+## Workflow coordinator
 
 Factory asks the external [`workflow`](https://github.com/tomnagengast/workflow)
 CLI to discover and execute dynamic workflows. It does not embed that CLI's
@@ -184,8 +184,8 @@ Factory-created workflow files live outside git at:
 ~/.local/share/factory/workflow-workspace/.claude/workflows/
 ```
 
-Creating or updating a workflow appends a user chat comment. The sequential
-loop sends that conversation to the selected unrestricted harness, which
+Creating or updating a workflow appends a user chat comment. The coordinator
+sends that conversation to the selected unrestricted harness, which
 writes the workflow file before Factory appends its reply. The authoring
 harness runs from the workflow workspace and can use `$FACTORY_CLI` against
 `$FACTORY_URL` to inspect resources or create a trigger when asked. Trigger
@@ -206,8 +206,9 @@ triggers append a targeted `cron` event and follow the same execution path.
 Task events resolve their required project and run from its configured local
 path, so workflow agents operate in the task's repository.
 Workflow runs stream every ordered semantic journal event onto the durable
-wire for the live and historical views. Workflow conversations and trigger
-runs share one sequential worker.
+wire for the live and historical views. Workflow conversations remain
+sequential. Triggered workflows run in parallel up to the configured capacity,
+which defaults to six and can be set from zero through ten in `/settings`.
 
 ## Verify
 

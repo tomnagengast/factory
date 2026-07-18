@@ -109,19 +109,20 @@ func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"status":          "ok",
-		"app":             "factory",
-		"commit":          os.Getenv("FACTORY_RELEASE_COMMIT"),
-		"tree":            os.Getenv("FACTORY_RELEASE_TREE"),
-		"buildId":         os.Getenv("FACTORY_RELEASE_BUILD"),
-		"deploymentId":    os.Getenv("FACTORY_RELEASE_DEPLOYMENT"),
-		"contractVersion": os.Getenv("FACTORY_RELEASE_CONTRACT"),
-		"harness":         view.Settings.Harness,
-		"events":          s.wire.LastID(),
-		"tasks":           len(active(view.Tasks, func(value state.Task) bool { return value.DeletedAt == nil })),
-		"projects":        len(active(view.Projects, func(value state.Project) bool { return value.DeletedAt == nil })),
-		"triggers":        len(active(view.Triggers, func(value state.Trigger) bool { return value.DeletedAt == nil })),
-		"workflows":       len(active(view.Workflows, func(value state.Workflow) bool { return value.DeletedAt == nil })),
+		"status":           "ok",
+		"app":              "factory",
+		"commit":           os.Getenv("FACTORY_RELEASE_COMMIT"),
+		"tree":             os.Getenv("FACTORY_RELEASE_TREE"),
+		"buildId":          os.Getenv("FACTORY_RELEASE_BUILD"),
+		"deploymentId":     os.Getenv("FACTORY_RELEASE_DEPLOYMENT"),
+		"contractVersion":  os.Getenv("FACTORY_RELEASE_CONTRACT"),
+		"harness":          view.Settings.Harness,
+		"workflowCapacity": view.Settings.WorkflowCapacity,
+		"events":           s.wire.LastID(),
+		"tasks":            len(active(view.Tasks, func(value state.Task) bool { return value.DeletedAt == nil })),
+		"projects":         len(active(view.Projects, func(value state.Project) bool { return value.DeletedAt == nil })),
+		"triggers":         len(active(view.Triggers, func(value state.Trigger) bool { return value.DeletedAt == nil })),
+		"workflows":        len(active(view.Workflows, func(value state.Workflow) bool { return value.DeletedAt == nil })),
 	})
 }
 

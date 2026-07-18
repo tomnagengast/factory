@@ -42,6 +42,12 @@ const (
 	Claude = "claude"
 )
 
+const (
+	MinWorkflowCapacity     = 0
+	MaxWorkflowCapacity     = 10
+	DefaultWorkflowCapacity = 6
+)
+
 type Record struct {
 	ID        int64      `json:"id"`
 	CreatedAt time.Time  `json:"createdAt"`
@@ -155,9 +161,10 @@ type WorkflowRunEvent struct {
 }
 
 type Settings struct {
-	Harness   string `json:"harness"`
-	Model     string `json:"model"`
-	Reasoning string `json:"reasoning"`
+	Harness          string `json:"harness"`
+	Model            string `json:"model"`
+	Reasoning        string `json:"reasoning"`
+	WorkflowCapacity int    `json:"workflowCapacity"`
 }
 
 type ModelOption struct {
@@ -173,8 +180,11 @@ type HarnessOption struct {
 }
 
 var (
-	DefaultSettings = Settings{Harness: Codex, Model: "gpt-5.6-sol", Reasoning: "low"}
-	Harnesses       = []HarnessOption{
+	DefaultSettings = Settings{
+		Harness: Codex, Model: "gpt-5.6-sol", Reasoning: "low",
+		WorkflowCapacity: DefaultWorkflowCapacity,
+	}
+	Harnesses = []HarnessOption{
 		{ID: Codex, Name: "Codex", Models: []ModelOption{
 			{ID: "gpt-5.6-sol", Reasoning: []string{"low", "medium", "high", "xhigh", "max", "ultra"}, DefaultReasoning: "low"},
 			{ID: "gpt-5.6-terra", Reasoning: []string{"low", "medium", "high", "xhigh", "max", "ultra"}, DefaultReasoning: "medium"},
@@ -194,6 +204,10 @@ var (
 )
 
 func ValidSettings(settings Settings) bool {
+	if settings.WorkflowCapacity < MinWorkflowCapacity ||
+		settings.WorkflowCapacity > MaxWorkflowCapacity {
+		return false
+	}
 	for _, harness := range Harnesses {
 		if harness.ID != settings.Harness {
 			continue
@@ -496,9 +510,14 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 			}
 
 		case SettingsUpdated:
-			if err := decode(event, &view.Settings); err != nil {
+			settings := DefaultSettings
+			if err := decode(event, &settings); err != nil {
 				return Snapshot{}, err
 			}
+			if !ValidSettings(settings) {
+				return Snapshot{}, fmt.Errorf("settings event %d is invalid", event.ID)
+			}
+			view.Settings = settings
 
 		case CronFired:
 			var data CronData

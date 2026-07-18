@@ -78,7 +78,7 @@ function Shell(props: { children?: JSX.Element }) {
           <span class="brand-mark">F</span>
           <span>
             <strong>Factory</strong>
-            <small>one wire / one loop</small>
+            <small>one wire / bounded runs</small>
           </span>
         </A>
         <nav aria-label="Primary navigation">
@@ -92,7 +92,7 @@ function Shell(props: { children?: JSX.Element }) {
         </nav>
         <div class="rail-status">
           <span class="pulse" aria-hidden="true" />
-          Agent loop connected
+          Coordinator connected
         </div>
       </aside>
       <main>{props.children}</main>
@@ -190,7 +190,7 @@ function Home() {
       <PageHeader
         eyebrow="Trusted environment demonstrator"
         title="Factory overview"
-        description="Projects and tasks enter one observable wire. The selected harness handles workflow authoring and triggered runs sequentially."
+        description="Projects and tasks enter one observable wire. The selected harness authors workflows and executes triggered runs within the configured capacity."
       />
       <Load data={data} error={() => data.error}>
         {(value) => (
@@ -234,7 +234,7 @@ function SettingsPage() {
       <PageHeader
         eyebrow="Factory"
         title="Settings"
-        description="This selection applies to new workflow conversations and triggered workflow runs."
+        description="Harness selection applies to new work. Workflow capacity controls how many triggered runs may execute at once."
       />
       <Load data={data} error={() => data.error}>
         {(value) => (
@@ -262,6 +262,7 @@ function SettingsForm(props: {
   const [harness, setHarness] = createSignal(props.detail.settings.harness);
   const [model, setModel] = createSignal(props.detail.settings.model);
   const [reasoning, setReasoning] = createSignal(props.detail.settings.reasoning);
+  const [workflowCapacity, setWorkflowCapacity] = createSignal(props.detail.settings.workflowCapacity);
   const selectedHarness = createMemo(() =>
     props.detail.harnesses.find((option) => option.id === harness()) ?? props.detail.harnesses[0]);
   const selectedModel = createMemo(() =>
@@ -280,7 +281,10 @@ function SettingsForm(props: {
   return (
     <form class="form-panel" onSubmit={(event) => {
       event.preventDefault();
-      props.onSave({ harness: harness(), model: model(), reasoning: reasoning() });
+      props.onSave({
+        harness: harness(), model: model(), reasoning: reasoning(),
+        workflowCapacity: workflowCapacity(),
+      });
     }}>
       <label>Harness<select name="harness" value={harness()}
         onChange={(event) => changeHarness(event.currentTarget.value)}>
@@ -294,6 +298,11 @@ function SettingsForm(props: {
         onChange={(event) => setReasoning(event.currentTarget.value)}>
         <For each={selectedModel()?.reasoning}>{(level) => <option value={level}>{level}</option>}</For>
       </select></label>
+      <label>Workflow capacity<input name="workflowCapacity" type="number" min="0" max="10" step="1" required
+        value={workflowCapacity()}
+        onInput={(event) => setWorkflowCapacity(event.currentTarget.valueAsNumber)} />
+        <small>Maximum triggered workflow runs at once. Set to 0 to pause new runs.</small>
+      </label>
       <FormFooter pending={props.pending} error={props.error} label="Save settings" />
     </form>
   );
