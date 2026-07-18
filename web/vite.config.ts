@@ -5,13 +5,6 @@ export default defineConfig({
   plugins: [solid()],
   build: {
     cssCodeSplit: false,
-    rollupOptions: {
-      output: {
-        entryFileNames: "assets/app.js",
-        assetFileNames: (asset) =>
-          asset.name === "style.css" ? "assets/styles.css" : "assets/[name][extname]",
-      },
-    },
   },
   server: {
     proxy: {
