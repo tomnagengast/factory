@@ -187,8 +187,20 @@ Claude Code it adds `--claude-yolo` and passes
 the executable path configured by `-codex` or `-claude`.
 
 The workflow receives `args.event` and `args.trigger`. Run progress is
-recorded as `workflow.run.started`, `workflow.run.completed`, or
-`workflow.run.failed`.
+recorded on the event wire:
+
+1. `workflow.run.started` creates the history item and captures the workflow
+   name and phase list,
+2. the workflow CLI journal and `log()` output become `workflow.run.step`
+   events while the process is active,
+3. `workflow.run.completed` or `workflow.run.failed` closes the run.
+
+The CLI journal remains the runtime's record of agent and gate dispatches.
+Factory passes an explicit temporary `--journal` path, copies each start and
+result onto its durable wire, then removes the temporary file. `/history`
+lists every projected run and `/history/{id}` groups its chronological steps
+by workflow phase. Both views update from the same server-sent event stream
+as the event wire.
 
 ### Task event triggers
 
@@ -244,7 +256,7 @@ Failures remain observable:
 
 - authoring errors become `workflow.authoring.failed` and an agent reply,
 - run errors become `workflow.run.failed`,
-- the event detail contains the recorded error,
+- the history detail and event detail contain the recorded error,
 - the server terminal contains process-level diagnostics.
 
 There is no retry queue. A human can continue a failed workflow conversation

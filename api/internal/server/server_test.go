@@ -177,6 +177,28 @@ func TestWorkflowDetailIncludesLiveSource(t *testing.T) {
 	}
 }
 
+func TestWorkflowHistoryListsRunsAndSteps(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	started, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 2, WorkflowID: 1, WorkflowName: "review",
+		WorkflowPhases: []string{"Review"}, SourceEventID: 3,
+	})
+	wire.Publish(state.WorkflowRunStepRecorded, state.WorkflowRunStepData{
+		RunID: started.ID, Phase: "Review", Kind: "log", Message: "Inspecting the change", Done: true,
+	})
+	handler := testServer(t, wire).Handler()
+	list := requestJSON(t, handler, http.MethodGet, "/api/history", "")
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"workflowName":"review"`) {
+		t.Fatalf("history = %d %s", list.Code, list.Body)
+	}
+	detail := requestJSON(t, handler, http.MethodGet, fmt.Sprintf("/api/history/%d", started.ID), "")
+	if detail.Code != http.StatusOK ||
+		!strings.Contains(detail.Body.String(), `"message":"Inspecting the change"`) {
+		t.Fatalf("history detail = %d %s", detail.Code, detail.Body)
+	}
+}
+
 func TestArbitraryEventIntakeAndTypes(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()

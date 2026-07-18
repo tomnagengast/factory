@@ -18,7 +18,14 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 	command := filepath.Join(directory, "workflow")
 	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + logPath + "\n" +
 		"if [ \"$3\" = \"list\" ]; then printf '[{\"name\":\"demo\",\"path\":\"/demo.js\",\"scope\":\"user\",\"description\":\"Demo\",\"phases\":[\"Run\"],\"mutating\":false}]'; " +
-		"else set -- \"$2\"/.claude/workflows/~factory-*.js; [ -L \"$1\" ] || exit 9; printf 'complete'; fi\n"
+		"else cwd=\"$2\"; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = \"--journal\" ]; then shift; journal=\"$1\"; fi; shift; done; " +
+		"set -- \"$cwd\"/.claude/workflows/~factory-*.js; [ -L \"$1\" ] || exit 9; " +
+		"printf '[workflow:demo] phase: Review\\n[workflow:demo] Checking inputs\\n' >&2; " +
+		"printf '%s\\n' '{\"type\":\"started\",\"key\":\"one\",\"agentId\":\"reviewer\",\"backend\":\"codex\",\"kind\":\"agent\"}' " +
+		"'{\"type\":\"started\",\"key\":\"one\",\"agentId\":\"reviewer\",\"backend\":\"codex\",\"kind\":\"agent\"}' " +
+		"'{\"type\":\"result\",\"key\":\"one\",\"agentId\":\"reviewer\",\"backend\":\"codex\",\"kind\":\"agent\",\"result\":\"done\"}' " +
+		"'{\"type\":\"result\",\"key\":\"one\",\"agentId\":\"reviewer\",\"backend\":\"codex\",\"kind\":\"agent\",\"result\":\"done\"}' > \"$journal\"; " +
+		"printf 'complete'; fi\n"
 	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -43,12 +50,19 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 		{Harness: state.Codex, Model: "gpt-5.6-sol", Reasoning: "high"},
 		{Harness: state.Claude, Model: "sonnet", Reasoning: "medium"},
 	} {
-		output, err := cli.Run(context.Background(), project, "demo", source, settings, map[string]int{"id": 1})
+		var logs []Log
+		output, err := cli.Run(context.Background(), project, "demo", source, settings, map[string]int{"id": 1},
+			func(log Log) { logs = append(logs, log) })
 		if err != nil {
 			t.Fatal(err)
 		}
 		if output != "complete" {
 			t.Fatalf("unexpected output: %q", output)
+		}
+		if len(logs) != 5 || logs[0].Kind != "log" || logs[0].Phase != "Review" ||
+			logs[1].Done || logs[2].Done || !logs[3].Done ||
+			logs[1].Key == logs[2].Key || string(logs[3].Result) != `"done"` {
+			t.Fatalf("unexpected workflow logs: %#v", logs)
 		}
 		if entries, err := os.ReadDir(filepath.Join(project, ".claude", "workflows")); err != nil || len(entries) != 0 {
 			t.Fatalf("temporary project workflows remain: %#v, %v", entries, err)

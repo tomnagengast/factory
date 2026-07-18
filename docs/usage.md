@@ -204,6 +204,8 @@ Common operations:
 ./factory event list
 ./factory workflow list
 ./factory workflow comment 24 '{"message":"Add a test-coverage reviewer."}'
+./factory history list
+./factory history get 30
 ./factory settings get
 ./factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high"}'
 ```
@@ -269,7 +271,8 @@ Press `Ctrl-C` in the server terminal. Factory stops the HTTP server and
 sequential loop together.
 
 Restarting with the same `-data` and `-workflow-workspace` values preserves
-resources, comments, events, triggers, and generated workflow files.
+resources, comments, events, triggers, workflow run history, and generated
+workflow files.
 
 To begin with empty state, stop Factory and move both paths aside:
 

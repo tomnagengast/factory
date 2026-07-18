@@ -96,6 +96,8 @@ The new domain wire defaults to
 /workflows                             discovered workflow list
 /workflows/new                         create through agent chat
 /workflows/:workflow                   chat beside the live workflow source
+/history                               live and completed workflow runs
+/history/:item                         phase-grouped run steps and results
 /settings                              select harness, model, and reasoning
 ```
 
@@ -114,6 +116,7 @@ artifacts    GET / POST, GET / PUT / DELETE by ID
 events       GET / POST, GET by ID, GET types, SSE stream
 triggers     GET / POST, GET / PUT / DELETE by ID
 workflows    GET / POST, GET / PUT / DELETE by ID
+history      GET list, GET run and step detail by ID
 settings     GET / PUT singleton selection and option catalog
 ```
 
@@ -155,6 +158,7 @@ factory artifact get 18
 factory workflow create '{"message":"Build a review-panel workflow."}'
 factory workflow update 24 '{"message":"Add a security reviewer."}'
 factory event create '{"type":"release.ready","data":{"version":"1.0"}}'
+factory history get 30
 factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high"}'
 ```
 
@@ -193,7 +197,8 @@ Event triggers match events received after the trigger's latest update. Cron
 triggers append a targeted `cron` event and follow the same execution path.
 Task events resolve their required project and run from its configured local
 path, so workflow agents operate in the task's repository.
-Workflow conversations and trigger runs share one sequential worker.
+Workflow runs stream journal steps onto the wire for the live and historical
+views. Workflow conversations and trigger runs share one sequential worker.
 
 ## Verify
 

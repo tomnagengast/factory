@@ -311,6 +311,41 @@ POST   /api/workflows/{id}/comments
 Workflow detail includes metadata, conversation comments, artifacts, and the
 current source file text.
 
+## Workflow history
+
+Workflow history is read-only and projected from workflow run events. A run
+ID is its `workflow.run.started` event ID.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `id` | integer | Run start event ID |
+| `createdAt` | timestamp | Run start time |
+| `updatedAt` | timestamp | Latest run event time |
+| `triggerId` | integer | Trigger that started the run |
+| `workflowId` | integer | Workflow metadata ID |
+| `workflowName` | string | Name captured when the run started |
+| `workflowPhases` | string array | Phases captured when the run started |
+| `sourceEventId` | integer | Event matched by the trigger |
+| `status` | string | `running`, `completed`, or `failed` |
+| `output` | string or omitted | Final workflow result |
+| `error` | string or omitted | Terminal error |
+
+Run detail includes chronological steps copied from the workflow CLI journal
+and workflow `log()` calls. Each step contains its phase, kind, label or
+message, backend, result or error, and whether it has finished.
+
+```sh
+factory history list
+factory history get 30
+```
+
+Routes:
+
+```text
+GET /api/history
+GET /api/history/{id}
+```
+
 ## Settings
 
 Settings are one global projection rather than an ID-addressed resource.
@@ -361,6 +396,7 @@ artifact  list, get, create, update, delete
 event     list, get, create
 trigger   list, get, create, update, delete
 workflow  list, get, create, update, delete, comment
+history   list, get
 settings  get, update
 ```
 

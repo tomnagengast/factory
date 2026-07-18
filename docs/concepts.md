@@ -52,9 +52,10 @@ event page and detail views use that stream to update without a page reload.
 
 ## Projections and resources
 
-Projects, tasks, comments, artifacts, triggers, workflow metadata, and the
-singleton agent settings are rebuilt by replaying the wire. The wire is the
-durable source of truth; the resource view is derived state.
+Projects, tasks, comments, artifacts, triggers, workflow metadata, workflow
+run history, and the singleton agent settings are rebuilt by replaying the
+wire. The wire is the durable source of truth; the resource view is derived
+state.
 
 Agent settings select a harness, model, and reasoning level. They default to
 Codex and change through one `settings.updated` event. New authoring sessions
@@ -111,10 +112,13 @@ The loop records progress back on the same wire:
 
 - workflow authoring started, completed, or failed,
 - agent replies as workflow comments,
-- workflow runs started, completed, or failed,
+- workflow runs and their phase, agent, gate, and log steps,
+- workflow runs completed or failed,
 - cron ticks as targeted `cron` events.
 
 The event page therefore shows both user intake and the loop's response.
+The history pages project those run events into live and completed workflow
+runs without a separate log store.
 
 ## Workflow source and metadata
 

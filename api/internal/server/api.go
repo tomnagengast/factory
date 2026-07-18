@@ -625,6 +625,34 @@ func (s *Server) workflowDelete(writer http.ResponseWriter, request *http.Reques
 	s.delete(writer, request, "workflow", state.WorkflowDeleted)
 }
 
+func (s *Server) history(writer http.ResponseWriter, _ *http.Request) {
+	view, ok := s.snapshot(writer)
+	if !ok {
+		return
+	}
+	runs := slices.Clone(view.Runs)
+	sort.SliceStable(runs, func(i, j int) bool { return runs[i].ID > runs[j].ID })
+	writeJSON(writer, http.StatusOK, map[string]any{"history": runs})
+}
+
+func (s *Server) historyItem(writer http.ResponseWriter, request *http.Request) {
+	id, err := pathID(request, "item")
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	view, ok := s.snapshot(writer)
+	if !ok {
+		return
+	}
+	run, found := view.Run(id)
+	if !found {
+		writeError(writer, http.StatusNotFound, errors.New("workflow run not found"))
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"run": run, "steps": view.StepsFor(id)})
+}
+
 func messageBody(request *http.Request) (string, error) {
 	var input struct {
 		Message string `json:"message"`

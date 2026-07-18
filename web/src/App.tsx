@@ -17,6 +17,7 @@ import {
   type CommentDetail,
   type Event,
   type Health,
+  type HistoryDetail,
   type Project,
   type ProjectDetail,
   type SettingsDetail,
@@ -26,6 +27,7 @@ import {
   type Trigger,
   type Workflow,
   type WorkflowDetail,
+  type WorkflowRun,
 } from "./types";
 
 export function App() {
@@ -47,6 +49,8 @@ export function App() {
       <Route path="/workflows" component={Workflows} />
       <Route path="/workflows/new" component={WorkflowNew} />
       <Route path="/workflows/:workflow" component={WorkflowView} />
+      <Route path="/history" component={History} />
+      <Route path="/history/:item" component={HistoryView} />
       <Route path="/settings" component={SettingsPage} />
     </Router>
   );
@@ -60,6 +64,7 @@ function Shell(props: { children?: JSX.Element }) {
     ["/events", "Event wire"],
     ["/triggers", "Triggers"],
     ["/workflows", "Workflows"],
+    ["/history", "History"],
     ["/settings", "Settings"],
   ];
   return (
@@ -817,6 +822,89 @@ function EventView() {
   );
 }
 
+function History() {
+  const [data, { refetch }] = createResource(() => get<{ history: WorkflowRun[] }>("/api/history"));
+  liveRefetch(["workflow.run.started", "workflow.run.completed", "workflow.run.failed"], refetch);
+  return (
+    <div class="page">
+      <PageHeader title="Workflow history"
+        description="Live and completed workflow runs, newest first." />
+      <Load data={data} error={() => data.error}>
+        {(value) => <Show when={value.history.length} fallback={<Empty>No workflows have run yet.</Empty>}>
+          <div class="rows">
+            <For each={value.history}>{(run) => <A class="history-row" href={`/history/${run.id}`}>
+              <span class={`run-status ${run.status}`}>{run.status}</span>
+              <span class="run-title"><strong>{run.workflowName || `Workflow ${run.workflowId}`}</strong>
+                <small>Event #{run.sourceEventId} · Trigger #{run.triggerId}</small></span>
+              <span class="id">#{run.id}</span>
+              <time>{date(run.createdAt)}</time>
+            </A>}</For>
+          </div>
+        </Show>}
+      </Load>
+    </div>
+  );
+}
+
+function HistoryView() {
+  const params = useParams();
+  const [data, { refetch }] = createResource(() => get<HistoryDetail>(`/api/history/${params.item}`));
+  liveRefetch(["workflow.run.step", "workflow.run.completed", "workflow.run.failed"], refetch);
+  return (
+    <div class="page">
+      <Load data={data} error={() => data.error}>
+        {(value) => {
+          const current = () => data() ?? value;
+          return <>
+            <PageHeader eyebrow={`Run ${value.run.id}`}
+              title={value.run.workflowName || `Workflow ${value.run.workflowId}`}
+              description={`Started from event ${value.run.sourceEventId}`}
+              actions={<A class="button" href="/history">Back to history</A>} />
+            <div class="run-summary">
+              <span class={`run-status ${current().run.status}`}>{current().run.status}</span>
+              <A href={`/workflows/${value.run.workflowId}`}>Workflow #{value.run.workflowId}</A>
+              <A href={`/events/${value.run.sourceEventId}`}>Event #{value.run.sourceEventId}</A>
+              <span>Trigger #{value.run.triggerId}</span>
+              <time>Started {date(value.run.createdAt)}</time>
+              <time>Updated {date(current().run.updatedAt)}</time>
+            </div>
+            <Show when={phaseGroups(current()).length} fallback={<Empty>
+              {current().run.status === "running" ? "Waiting for the first workflow step…" : "No step logs were recorded for this run."}
+            </Empty>}>
+              <div class="run-phases">
+                <For each={phaseGroups(current())}>{([phase, steps]) => <section class="run-phase">
+                  <header><h2>{phase}</h2><span>{steps.length} {steps.length === 1 ? "step" : "steps"}</span></header>
+                  <div class="run-steps">
+                    <For each={steps}>{(step) => <article classList={{ "run-step": true, pending: !step.done }}>
+                      <header>
+                        <span class="artifact-type">{step.kind}</span>
+                        <strong>{step.message || step.kind}</strong>
+                        <Show when={step.backend}><span>{step.backend}</span></Show>
+                        <time>{date(step.createdAt)}</time>
+                      </header>
+                      <Show when={step.done} fallback={<p class="step-pending">Running…</p>}>
+                        <Show when={step.error}><pre class="step-error">{step.error}</pre></Show>
+                        <Show when={step.result != null}><pre>{formatResult(step.result)}</pre></Show>
+                      </Show>
+                    </article>}</For>
+                  </div>
+                </section>}</For>
+              </div>
+            </Show>
+            <Show when={current().run.output || current().run.error}>
+              <section class="run-output"><SectionTitle title={current().run.error ? "Run error" : "Final result"} />
+                <pre classList={{ "step-error": Boolean(current().run.error) }}>
+                  {current().run.error || current().run.output}
+                </pre>
+              </section>
+            </Show>
+          </>;
+        }}
+      </Load>
+    </div>
+  );
+}
+
 function Triggers() {
   const [data] = createResource(async () => {
     const [triggers, workflows] = await Promise.all([
@@ -1119,6 +1207,24 @@ function compactJSON(value: unknown) {
 
 function fileName(path: string | undefined) {
   return path?.split("/").at(-1) ?? "workflow.js";
+}
+
+function phaseGroups(detail: HistoryDetail) {
+  const groups = new Map<string, HistoryDetail["steps"]>();
+  for (const step of detail.steps) {
+    const phase = step.phase || "Run";
+    groups.set(phase, [...(groups.get(phase) ?? []), step]);
+  }
+  const order = [...detail.run.workflowPhases, "Run"];
+  return [...groups.entries()].sort(([left], [right]) => {
+    const leftIndex = order.indexOf(left);
+    const rightIndex = order.indexOf(right);
+    return (leftIndex < 0 ? order.length : leftIndex) - (rightIndex < 0 ? order.length : rightIndex);
+  });
+}
+
+function formatResult(value: unknown) {
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
 
 function date(value: string) {

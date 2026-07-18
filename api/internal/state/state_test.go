@@ -73,7 +73,21 @@ func TestRunAndCronMarkersAreProjected(t *testing.T) {
 	at := time.Now().UTC()
 	events := []eventwire.Event{
 		event(1, CronFired, at, CronData{TriggerID: 8}),
-		event(2, WorkflowRunStarted, at, WorkflowRunData{TriggerID: 8, SourceEventID: 1}),
+		event(2, WorkflowRunStarted, at, WorkflowRunData{
+			TriggerID: 8, WorkflowID: 7, WorkflowName: "review",
+			WorkflowPhases: []string{"Review"}, SourceEventID: 1,
+		}),
+		event(3, WorkflowRunStepRecorded, at.Add(time.Second), WorkflowRunStepData{
+			RunID: 2, Key: "reviewer", Phase: "Review", Kind: "agent",
+			Backend: Codex, Message: "reviewer",
+		}),
+		event(4, WorkflowRunStepRecorded, at.Add(2*time.Second), WorkflowRunStepData{
+			RunID: 2, Key: "reviewer", Phase: "Review", Kind: "agent",
+			Backend: Codex, Message: "reviewer", Result: json.RawMessage(`"done"`), Done: true,
+		}),
+		event(5, WorkflowRunCompleted, at.Add(3*time.Second), WorkflowRunData{
+			TriggerID: 8, WorkflowID: 7, SourceEventID: 1, Output: "complete",
+		}),
 	}
 	view, err := ProjectEvents(events)
 	if err != nil {
@@ -84,6 +98,13 @@ func TestRunAndCronMarkersAreProjected(t *testing.T) {
 	}
 	if last, found := view.LastCron(8); !found || !last.Equal(at) {
 		t.Fatalf("cron marker missing: %v, %v", last, found)
+	}
+	if len(view.Runs) != 1 || view.Runs[0].Status != "completed" || view.Runs[0].Output != "complete" {
+		t.Fatalf("run missing: %#v", view.Runs)
+	}
+	steps := view.StepsFor(2)
+	if len(steps) != 1 || !steps[0].Done || string(steps[0].Result) != `"done"` {
+		t.Fatalf("run steps missing: %#v", steps)
 	}
 }
 

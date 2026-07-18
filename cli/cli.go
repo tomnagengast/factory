@@ -76,6 +76,9 @@ func parse(args []string) (command, error) {
 		return command{}, errors.New("resource and action are required")
 	}
 	resource, action := args[0], args[1]
+	if resource == "history" && action != "list" && action != "get" {
+		return command{}, errors.New("history supports list and get")
+	}
 	if resource == "settings" {
 		switch {
 		case action == "get" && len(args) == 2:
@@ -90,6 +93,7 @@ func parse(args []string) (command, error) {
 	plural, found := map[string]string{
 		"project": "projects", "task": "tasks", "comment": "comments",
 		"artifact": "artifacts", "event": "events", "trigger": "triggers", "workflow": "workflows",
+		"history": "history",
 	}[resource]
 	if !found {
 		return command{}, fmt.Errorf("unknown resource %q", resource)
@@ -216,6 +220,7 @@ Resources:
   event     list, get, create
   trigger   list, get, create, update, delete
   workflow  list, get, create, update, delete, comment
+  history   list, get
   settings  get, update
 
 Examples:
@@ -225,5 +230,6 @@ Examples:
   factory artifact get 18
   factory workflow create '{"message":"Build a review-panel workflow."}'
   factory workflow update 24 '{"message":"Add a security reviewer."}'
+  factory history get 30
   factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high"}'`)
 }

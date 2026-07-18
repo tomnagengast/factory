@@ -61,6 +61,23 @@ func TestSettingsUseSingletonAPI(t *testing.T) {
 	}
 }
 
+func TestHistoryIsReadOnly(t *testing.T) {
+	list, err := parse([]string{"history", "list"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := parse([]string{"history", "get", "12"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.path != "/api/history" || item.path != "/api/history/12" {
+		t.Fatalf("unexpected history requests: %#v %#v", list, item)
+	}
+	if _, err := parse([]string{"history", "delete", "12"}); err == nil {
+		t.Fatal("history delete was accepted")
+	}
+}
+
 func TestRejectsInvalidIdentityAndJSON(t *testing.T) {
 	for _, args := range [][]string{
 		{"task", "get", "nope"},

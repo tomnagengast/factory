@@ -72,6 +72,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/workflows/{workflow}", s.workflowDelete)
 	mux.HandleFunc("POST /api/workflows/{workflow}/comments", s.workflowComment)
 
+	mux.HandleFunc("GET /api/history", s.history)
+	mux.HandleFunc("GET /api/history/{item}", s.historyItem)
+
 	mux.HandleFunc("GET /assets/app.js", s.asset("assets/app.js", "application/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /assets/styles.css", s.asset("assets/styles.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /api/{rest...}", http.NotFound)

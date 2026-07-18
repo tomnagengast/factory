@@ -62,6 +62,35 @@ export type Workflow = Record & {
   mutating: boolean;
 };
 
+export type WorkflowRun = {
+  id: number;
+  createdAt: string;
+  updatedAt: string;
+  triggerId: number;
+  workflowId: number;
+  workflowName: string;
+  workflowPhases: string[];
+  sourceEventId: number;
+  status: "running" | "completed" | "failed";
+  output?: string;
+  error?: string;
+};
+
+export type WorkflowRunStep = {
+  id: number;
+  runId: number;
+  createdAt: string;
+  updatedAt: string;
+  key?: string;
+  phase?: string;
+  kind: string;
+  backend?: string;
+  message: string;
+  result?: unknown;
+  error?: string;
+  done: boolean;
+};
+
 export type Health = {
   status: string;
   harness: string;
@@ -92,6 +121,7 @@ export type HarnessOption = {
 };
 
 export type SettingsDetail = { settings: Settings; harnesses: HarnessOption[] };
+export type HistoryDetail = { run: WorkflowRun; steps: WorkflowRunStep[] };
 export type ProjectDetail = { project: Project; tasks: Task[] };
 export type TaskDetail = { task: Task; comments: Comment[]; artifacts: Artifact[] };
 export type CommentDetail = { comment: Comment; replies: Comment[]; artifacts: Artifact[] };

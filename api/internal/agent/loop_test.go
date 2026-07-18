@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -41,11 +42,19 @@ func (f *fakeWorkflows) Run(
 	directory, name, source string,
 	settings state.Settings,
 	_ any,
+	emit func(workflow.Log),
 ) (string, error) {
 	f.runs = append(f.runs, struct {
 		directory, name, source string
 		settings                state.Settings
 	}{directory, name, source, settings})
+	if emit != nil {
+		emit(workflow.Log{Key: "review", Phase: "Review", Kind: "agent", Backend: settings.Harness, Message: "reviewer"})
+		emit(workflow.Log{
+			Key: "review", Phase: "Review", Kind: "agent", Backend: settings.Harness,
+			Message: "reviewer", Result: json.RawMessage(`"approved"`), Done: true,
+		})
+	}
 	return "complete", nil
 }
 
@@ -126,6 +135,13 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	view, _ := state.ProjectEvents(wire.Events(0))
 	if !view.RunStarted(triggerEvent.ID, source.ID) {
 		t.Fatal("run marker missing")
+	}
+	if len(view.Runs) != 1 || view.Runs[0].Status != "completed" || view.Runs[0].WorkflowName != "review" {
+		t.Fatalf("run history missing: %#v", view.Runs)
+	}
+	steps := view.StepsFor(view.Runs[0].ID)
+	if len(steps) != 1 || !steps[0].Done || string(steps[0].Result) != `"approved"` {
+		t.Fatalf("run steps missing: %#v", steps)
 	}
 }
 
