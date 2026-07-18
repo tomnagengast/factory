@@ -87,6 +87,29 @@ func TestRunAndCronMarkersAreProjected(t *testing.T) {
 	}
 }
 
+func TestSettingsDefaultAndReplay(t *testing.T) {
+	view, err := ProjectEvents(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Settings != DefaultSettings {
+		t.Fatalf("default settings = %#v", view.Settings)
+	}
+	selected := Settings{Harness: Claude, Model: "sonnet", Reasoning: "high"}
+	view, err = ProjectEvents([]eventwire.Event{
+		event(1, SettingsUpdated, time.Now().UTC(), selected),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Settings != selected || !ValidSettings(view.Settings) {
+		t.Fatalf("replayed settings = %#v", view.Settings)
+	}
+	if ValidSettings(Settings{Harness: Claude, Model: "gpt-5.6-sol", Reasoning: "high"}) {
+		t.Fatal("cross-harness model was accepted")
+	}
+}
+
 func event(id int64, eventType string, at time.Time, data any) eventwire.Event {
 	encoded, err := json.Marshal(data)
 	if err != nil {

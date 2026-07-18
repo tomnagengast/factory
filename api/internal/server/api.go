@@ -14,6 +14,33 @@ import (
 	"github.com/tomnagengast/factory/api/internal/state"
 )
 
+func (s *Server) settings(writer http.ResponseWriter, _ *http.Request) {
+	view, ok := s.snapshot(writer)
+	if !ok {
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"settings": view.Settings, "harnesses": state.Harnesses,
+	})
+}
+
+func (s *Server) settingsUpdate(writer http.ResponseWriter, request *http.Request) {
+	var input state.Settings
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	if !state.ValidSettings(input) {
+		writeError(writer, http.StatusBadRequest, errors.New("unknown harness, model, or reasoning level"))
+		return
+	}
+	if _, err := s.wire.Publish(state.SettingsUpdated, input); err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, input)
+}
+
 func (s *Server) projects(writer http.ResponseWriter, _ *http.Request) {
 	view, ok := s.snapshot(writer)
 	if !ok {

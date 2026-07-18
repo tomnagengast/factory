@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/tomnagengast/factory/api/internal/state"
 )
 
 type Definition struct {
@@ -24,18 +26,20 @@ type Definition struct {
 
 type Runner interface {
 	List(context.Context) ([]Definition, error)
-	Run(context.Context, string, string, string, any) (string, error)
+	Run(context.Context, string, string, string, state.Settings, any) (string, error)
 	LocalPath(int64) string
 }
 
 type CLI struct {
-	Command   string
-	Workspace string
+	Command       string
+	Workspace     string
+	CodexCommand  string
+	ClaudeCommand string
 }
 
 func (c CLI) Prepare() error {
-	if c.Command == "" || c.Workspace == "" {
-		return errors.New("workflow command and workspace are required")
+	if c.Command == "" || c.Workspace == "" || c.CodexCommand == "" || c.ClaudeCommand == "" {
+		return errors.New("workflow command, workspace, and agent commands are required")
 	}
 	return os.MkdirAll(filepath.Join(c.Workspace, ".claude", "workflows"), 0o777)
 }
@@ -52,7 +56,12 @@ func (c CLI) List(ctx context.Context) ([]Definition, error) {
 	return definitions, nil
 }
 
-func (c CLI) Run(ctx context.Context, directory, name, source string, args any) (string, error) {
+func (c CLI) Run(
+	ctx context.Context,
+	directory, name, source string,
+	settings state.Settings,
+	args any,
+) (string, error) {
 	encoded, err := json.Marshal(args)
 	if err != nil {
 		return "", fmt.Errorf("encode workflow arguments: %w", err)
@@ -75,17 +84,34 @@ func (c CLI) Run(ctx context.Context, directory, name, source string, args any) 
 		}
 		defer os.Remove(link.Name())
 	}
-	command := exec.CommandContext(
-		ctx,
-		c.Command,
+	commandArgs := []string{
 		"--cwd", directory,
 		"run", name,
 		"--args", string(encoded),
-		"--backend", "codex",
+		"--backend", settings.Harness,
+		"--model", settings.Model,
 		"--allow-mutating",
 		"--no-validate",
-		"--codex-yolo",
-	)
+	}
+	switch settings.Harness {
+	case state.Codex:
+		commandArgs = append(commandArgs,
+			"--codex-bin", c.CodexCommand,
+			"--codex-yolo",
+			"--codex-arg", "-c",
+			"--codex-arg", `model_reasoning_effort="`+settings.Reasoning+`"`,
+		)
+	case state.Claude:
+		commandArgs = append(commandArgs,
+			"--claude-bin", c.ClaudeCommand,
+			"--claude-yolo",
+			"--claude-arg", "--effort",
+			"--claude-arg", settings.Reasoning,
+		)
+	default:
+		return "", fmt.Errorf("unknown harness %q", settings.Harness)
+	}
+	command := exec.CommandContext(ctx, c.Command, commandArgs...)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err = command.Run()

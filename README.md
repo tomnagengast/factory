@@ -5,7 +5,7 @@ mechanisms:
 
 1. an append-only event wire,
 2. resource and task intake,
-3. one sequential Codex loop.
+3. one sequential agent loop.
 
 Projects, tasks, comments, artifacts, triggers, and workflow metadata are
 projections of a JSONL event log. The Solid web app and `factory` CLI use the
@@ -31,7 +31,7 @@ this document.
   intake, and the sequential agent loop.
 - [Resource reference](docs/resources.md) lists resource fields, HTTP routes,
   payloads, and matching CLI commands.
-- [Workflow reference](docs/workflows.md) covers discovery, Codex
+- [Workflow reference](docs/workflows.md) covers discovery, agent
   collaboration, workflow files, triggers, and cron behavior.
 
 ## Run locally
@@ -60,12 +60,14 @@ Usage: factory-api [options]
 
   -addr string
         HTTP listen address
-  -agent string
+  -claude string
+        Claude Code executable
+  -codex string
         Codex executable
   -data string
         append-only event wire path
   -factory string
-        Factory CLI exposed to Codex
+        Factory CLI exposed to the authoring harness
   -workflow string
         workflow CLI executable
   -workflow-workspace string
@@ -93,8 +95,9 @@ The new domain wire defaults to
 /triggers/new                          create trigger
 /triggers/:trigger                     view and edit trigger
 /workflows                             discovered workflow list
-/workflows/new                         create through Codex chat
+/workflows/new                         create through agent chat
 /workflows/:workflow                   chat beside the live workflow source
+/settings                              select harness, model, and reasoning
 ```
 
 All route IDs are integers. Deletion is soft and list routes omit deleted
@@ -112,6 +115,7 @@ artifacts    GET / POST, GET / PUT / DELETE by ID
 events       GET / POST, GET by ID, GET types, SSE stream
 triggers     GET / POST, GET / PUT / DELETE by ID
 workflows    GET / POST, GET / PUT / DELETE by ID
+settings     GET / PUT singleton selection and option catalog
 ```
 
 `POST /api/events` accepts any event:
@@ -152,6 +156,7 @@ factory artifact get 18
 factory workflow create '{"message":"Build a review-panel workflow."}'
 factory workflow update 24 '{"message":"Add a security reviewer."}'
 factory event create '{"type":"release.ready","data":{"version":"1.0"}}'
+factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high"}'
 ```
 
 `FACTORY_URL` changes the default server from `http://127.0.0.1:8092`.
@@ -169,17 +174,19 @@ Factory-created workflow files live outside git at:
 ```
 
 Creating or updating a workflow appends a user chat comment. The sequential
-loop sends that conversation to unrestricted Codex, Codex writes the workflow
-file, and Factory appends the agent reply. Authoring Codex runs from the
-workflow workspace and can use `$FACTORY_CLI` against `$FACTORY_URL` to inspect
-resources or create a trigger when asked. Trigger execution is also explicit Codex:
+loop sends that conversation to the selected unrestricted harness, which
+writes the workflow file before Factory appends its reply. The authoring
+harness runs from the workflow workspace and can use `$FACTORY_CLI` against
+`$FACTORY_URL` to inspect resources or create a trigger when asked. Trigger
+execution uses the same selected harness, model, and reasoning:
 
 ```text
 workflow --cwd <task.project.path-or-workspace> run <name> \
-  --backend codex \
+  --backend <codex-or-claude> \
+  --model <selected-model> \
   --allow-mutating \
   --no-validate \
-  --codex-yolo \
+  --<harness>-yolo \
   --args <source-event-and-trigger>
 ```
 

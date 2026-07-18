@@ -279,7 +279,7 @@ Workflow metadata is projected from discovery and authoring events.
 | `phases` | string array | workflow source `meta` |
 | `mutating` | boolean | workflow discovery |
 
-Create through a Codex conversation:
+Create through an agent conversation:
 
 ```sh
 factory workflow create '{
@@ -311,13 +311,44 @@ POST   /api/workflows/{id}/comments
 Workflow detail includes metadata, conversation comments, artifacts, and the
 current source file text.
 
+## Settings
+
+Settings are one global projection rather than an ID-addressed resource.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `harness` | string | `codex` or `claude` |
+| `model` | string | Must belong to the selected harness |
+| `reasoning` | string | Must be supported by the selected model |
+
+```sh
+factory settings get
+factory settings update '{
+  "harness":"claude",
+  "model":"sonnet",
+  "reasoning":"high"
+}'
+```
+
+Routes:
+
+```text
+GET /api/settings
+PUT /api/settings
+```
+
+The GET response contains `settings` and a `harnesses` option catalog used by
+the web form. An update appends `settings.updated`; replay restores the latest
+selection. Codex, `gpt-5.6-sol`, and `low` are the defaults before the first
+update.
+
 ## Health
 
 ```text
 GET /api/health
 ```
 
-The response includes status, active agent backend, event and resource
+The response includes status, active harness, event and resource
 counts, and Nags release identity when those environment variables are set.
 
 ## CLI command matrix
@@ -330,6 +361,7 @@ artifact  list, get, create, update, delete
 event     list, get, create
 trigger   list, get, create, update, delete
 workflow  list, get, create, update, delete, comment
+settings  get, update
 ```
 
 General form:

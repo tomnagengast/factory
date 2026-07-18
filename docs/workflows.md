@@ -1,27 +1,33 @@
 # Factory workflow reference
 
-Factory collaborates with Codex to write dynamic JavaScript workflows, then
-uses the standalone `workflow` CLI to discover and execute them. Factory does
-not embed the workflow loader, DSL, or subagent runtime.
+Factory collaborates with the selected Codex or Claude Code harness to write
+dynamic JavaScript workflows, then uses the standalone `workflow` CLI to
+discover and execute them. Factory does not embed the workflow loader, DSL, or
+subagent runtime.
 
 ## Required commands
 
-Codex and the workflow runner must be on `PATH` when `factory-api` starts:
+The workflow runner and at least the selected harness must be on `PATH`:
 
 ```sh
 brew tap tomnagengast/tap
 brew install --cask workflow-cli
-codex --version
 workflow --version
 workflow --help
+
+# Codex
+codex --version
 codex login status
+
+# Claude Code
+claude --version
 ```
 
 The workflow CLI and its documentation are public at
 [`tomnagengast/workflow`](https://github.com/tomnagengast/workflow).
-The built `factory` resource CLI defaults to `./factory`. Use `-agent`,
-`-factory`, or `-workflow` to supply explicit paths. See [usage.md](usage.md)
-for installation.
+The built `factory` resource CLI defaults to `./factory`. Use `-codex`,
+`-claude`, `-factory`, or `-workflow` to supply explicit paths. See
+[usage.md](usage.md) for installation.
 
 ## Discovery
 
@@ -57,12 +63,12 @@ The sequential loop:
 1. finds the pending user message,
 2. assigns `<workflow-workspace>/.claude/workflows/workflow-<id>.js`,
 3. appends `workflow.authoring.started`,
-4. runs unrestricted, ephemeral `codex exec`,
+4. runs the selected unrestricted harness with its model and reasoning level,
 5. asks the workflow CLI to rediscover the written file,
 6. appends a completed or failed event,
-7. appends Codex's response as an agent comment.
+7. appends the harness response as an agent comment.
 
-Codex runs with the workflow workspace as its working directory. Factory
+The harness runs with the workflow workspace as its working directory. Factory
 exposes the resource client as `$FACTORY_CLI` and the current server as
 `$FACTORY_URL`. A user can therefore ask the same authoring conversation to
 create or update the trigger that will run the workflow:
@@ -75,14 +81,20 @@ The workflow detail page polls the current file once per second while a user
 message awaits an agent reply. Chat and source scroll independently on wide
 screens and stack on narrow screens.
 
+Use `/settings` or `factory settings update` to select the harness, model, and
+reasoning level. The API supplies the supported option catalog, so changing a
+harness also changes the available models and reasoning levels. The newest
+`settings.updated` event applies when the next authoring session or trigger
+run starts; it does not alter a process already running.
+
 Revising a discovered user workflow creates or updates the Factory-owned
-local copy. The original resolved source is provided to Codex as context, but
-Factory does not write back to the source repository.
+local copy. The original resolved source is provided to the agent as context,
+but Factory does not write back to the source repository.
 
 ## Authoring contract
 
-Codex is prompted to write one complete plain-JavaScript file. The first
-statement must be a literal metadata export:
+The selected harness is prompted to write one complete plain-JavaScript file.
+The first statement must be a literal metadata export:
 
 ```js
 export const meta = {
@@ -157,16 +169,22 @@ Only events received after the trigger's latest update are eligible. The
 first event above makes the type selectable; it does not run the trigger
 created afterward.
 
-Factory calls:
+Factory passes the current settings to the public workflow CLI:
 
 ```text
 workflow --cwd <event-working-directory> run <name> \
   --args <event-and-trigger-json> \
-  --backend codex \
+  --backend <selected-harness> \
+  --model <selected-model> \
   --allow-mutating \
-  --no-validate \
-  --codex-yolo
+  --no-validate
 ```
+
+For Codex it adds `--codex-yolo` and passes
+`model_reasoning_effort="<selected-reasoning>"` through `--codex-arg`. For
+Claude Code it adds `--claude-yolo` and passes
+`--effort <selected-reasoning>` through `--claude-arg`. Factory also supplies
+the executable path configured by `-codex` or `-claude`.
 
 The workflow receives `args.event` and `args.trigger`. Run progress is
 recorded as `workflow.run.started`, `workflow.run.completed`, or
@@ -220,7 +238,7 @@ Only cron triggers need a schedule. Non-cron triggers ignore it operationally.
 
 One worker handles all authoring and trigger work. It prioritizes pending
 workflow conversations, then event triggers, then due cron ticks. Later work
-waits for the current Codex or workflow process to finish.
+waits for the current authoring or workflow process to finish.
 
 Failures remain observable:
 
@@ -235,8 +253,9 @@ with another comment or publish another event after correcting the cause.
 ## Trust boundary
 
 Factory invokes Codex with approval, sandbox, hook-trust, and rule checks
-disabled. Triggered workflows also receive `--allow-mutating` and
-`--codex-yolo`.
+disabled. It invokes Claude Code with permission checks disabled. Triggered
+workflows also receive `--allow-mutating` and the selected backend's yolo
+option.
 
 Treat every prompt, workflow, event payload, and referenced repository as
 trusted input. Keep Factory on loopback and do not use it as a multi-user or

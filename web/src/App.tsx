@@ -19,6 +19,7 @@ import {
   type Health,
   type Project,
   type ProjectDetail,
+  type SettingsDetail,
   type Task,
   type TaskDetail,
   type TaskStatus,
@@ -46,6 +47,7 @@ export function App() {
       <Route path="/workflows" component={Workflows} />
       <Route path="/workflows/new" component={WorkflowNew} />
       <Route path="/workflows/:workflow" component={WorkflowView} />
+      <Route path="/settings" component={SettingsPage} />
     </Router>
   );
 }
@@ -58,6 +60,7 @@ function Shell(props: { children?: JSX.Element }) {
     ["/events", "Event wire"],
     ["/triggers", "Triggers"],
     ["/workflows", "Workflows"],
+    ["/settings", "Settings"],
   ];
   return (
     <div class="shell">
@@ -80,7 +83,7 @@ function Shell(props: { children?: JSX.Element }) {
         </nav>
         <div class="rail-status">
           <span class="pulse" aria-hidden="true" />
-          Codex connected
+          Agent loop connected
         </div>
       </aside>
       <main>{props.children}</main>
@@ -163,7 +166,7 @@ function Home() {
       <PageHeader
         eyebrow="Trusted environment demonstrator"
         title="Factory overview"
-        description="Projects and tasks enter one observable wire. Codex handles workflow authoring and triggered runs sequentially."
+        description="Projects and tasks enter one observable wire. The selected harness handles workflow authoring and triggered runs sequentially."
       />
       <Load data={data} error={() => data.error}>
         {(value) => (
@@ -196,6 +199,79 @@ function Home() {
         )}
       </Load>
     </div>
+  );
+}
+
+function SettingsPage() {
+  const [data, { refetch }] = createResource(() => get<SettingsDetail>("/api/settings"));
+  const action = mutation();
+  return (
+    <div class="page narrow">
+      <PageHeader
+        eyebrow="Factory"
+        title="Settings"
+        description="This selection applies to new workflow conversations and triggered workflow runs."
+      />
+      <Load data={data} error={() => data.error}>
+        {(value) => (
+          <SettingsForm
+            detail={value}
+            pending={action.pending()}
+            error={action.error()}
+            onSave={(body) => action.run(async () => {
+              await put("/api/settings", body);
+              await refetch();
+            })}
+          />
+        )}
+      </Load>
+    </div>
+  );
+}
+
+function SettingsForm(props: {
+  detail: SettingsDetail;
+  pending: boolean;
+  error?: string;
+  onSave: (body: unknown) => void;
+}) {
+  const [harness, setHarness] = createSignal(props.detail.settings.harness);
+  const [model, setModel] = createSignal(props.detail.settings.model);
+  const [reasoning, setReasoning] = createSignal(props.detail.settings.reasoning);
+  const selectedHarness = createMemo(() =>
+    props.detail.harnesses.find((option) => option.id === harness()) ?? props.detail.harnesses[0]);
+  const selectedModel = createMemo(() =>
+    selectedHarness()?.models.find((option) => option.id === model()) ?? selectedHarness()?.models[0]);
+  const changeHarness = (value: string) => {
+    const option = props.detail.harnesses.find((candidate) => candidate.id === value)!;
+    setHarness(value);
+    setModel(option.models[0].id);
+    setReasoning(option.models[0].defaultReasoning);
+  };
+  const changeModel = (value: string) => {
+    const option = selectedHarness()!.models.find((candidate) => candidate.id === value)!;
+    setModel(value);
+    setReasoning(option.defaultReasoning);
+  };
+  return (
+    <form class="form-panel" onSubmit={(event) => {
+      event.preventDefault();
+      props.onSave({ harness: harness(), model: model(), reasoning: reasoning() });
+    }}>
+      <label>Harness<select name="harness" value={harness()}
+        onChange={(event) => changeHarness(event.currentTarget.value)}>
+        <For each={props.detail.harnesses}>{(option) => <option value={option.id}>{option.name}</option>}</For>
+      </select></label>
+      <label>Model<select name="model" value={model()}
+        onChange={(event) => changeModel(event.currentTarget.value)}>
+        <For each={selectedHarness()?.models}>{(option) => <option value={option.id}>{option.id}</option>}</For>
+      </select></label>
+      <label>Reasoning level<select name="reasoning" value={reasoning()}
+        onChange={(event) => setReasoning(event.currentTarget.value)}>
+        <For each={selectedModel()?.reasoning}>{(level) => <option value={level}>{level}</option>}</For>
+      </select></label>
+      <FormFooter pending={props.pending} error={props.error} label="Save settings" />
+    </form>
   );
 }
 
@@ -876,7 +952,7 @@ function WorkflowNew() {
   return (
     <div class="page chat-page">
       <PageHeader eyebrow="Workflow studio" title="Describe the workflow"
-        description="Codex will generate the dynamic workflow code. There is no manual editor." />
+        description="The selected harness will generate the dynamic workflow code. There is no manual editor." />
       <form class="composer hero-composer" onSubmit={(event) => {
         event.preventDefault();
         const form = event.currentTarget;
@@ -887,7 +963,7 @@ function WorkflowNew() {
         });
       }}>
         <textarea name="message" required rows="8" placeholder="Build a workflow that reviews a plan with three independent agents, synthesizes their findings, and returns the blocking issues first." />
-        <button class="button primary" disabled={action.pending()}>{action.pending() ? "Starting Codex…" : "Start collaborating"}</button>
+        <button class="button primary" disabled={action.pending()}>{action.pending() ? "Starting agent…" : "Start collaborating"}</button>
         <Show when={action.error()}><span class="form-error">{action.error()}</span></Show>
       </form>
     </div>
@@ -929,10 +1005,10 @@ function WorkflowView() {
               <section class="workflow-chat" aria-label="Workflow conversation">
                 <div class="conversation" role="log" aria-live="polite">
                   <For each={current().comments}>{(comment) => <article classList={{ message: true, agent: comment.author === "agent" }}>
-                    <header><strong>{comment.author === "agent" ? "Codex" : "You"}</strong><time>{date(comment.createdAt)}</time></header>
+                    <header><strong>{comment.author === "agent" ? "Agent" : "You"}</strong><time>{date(comment.createdAt)}</time></header>
                     <p>{comment.content}</p>
                   </article>}</For>
-                  <Show when={working()}><article class="message agent working"><header><strong>Codex</strong></header><p>Working on the workflow…</p></article></Show>
+                  <Show when={working()}><article class="message agent working"><header><strong>Agent</strong></header><p>Working on the workflow…</p></article></Show>
                 </div>
                 <form class="composer" onSubmit={(event) => {
                   event.preventDefault();
@@ -946,8 +1022,8 @@ function WorkflowView() {
                     await refetch();
                   });
                 }}>
-                  <textarea name="message" required rows="4" placeholder="Ask Codex to revise, explain, or extend the workflow…" />
-                  <button class="button primary" disabled={action.pending()}>Send to Codex</button>
+                  <textarea name="message" required rows="4" placeholder="Ask the agent to revise, explain, or extend the workflow…" />
+                  <button class="button primary" disabled={action.pending()}>Send</button>
                   <Show when={action.error()}><span class="form-error">{action.error()}</span></Show>
                 </form>
               </section>
@@ -956,7 +1032,7 @@ function WorkflowView() {
                   <div><span>Live source</span><strong>{fileName(current().workflow.path)}</strong></div>
                   <span classList={{ "source-status": true, working: working() }}>{working() ? "Updating" : "Current"}</span>
                 </header>
-                <pre tabIndex={0}><code>{current().source || "// Waiting for Codex to write the workflow file."}</code></pre>
+                <pre tabIndex={0}><code>{current().source || "// Waiting for the agent to write the workflow file."}</code></pre>
               </section>
             </div>
           </>;

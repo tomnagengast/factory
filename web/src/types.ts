@@ -64,7 +64,7 @@ export type Workflow = Record & {
 
 export type Health = {
   status: string;
-  agent: string;
+  harness: string;
   events: number;
   projects: number;
   tasks: number;
@@ -73,6 +73,25 @@ export type Health = {
   commit?: string;
 };
 
+export type Settings = {
+  harness: string;
+  model: string;
+  reasoning: string;
+};
+
+export type ModelOption = {
+  id: string;
+  reasoning: string[];
+  defaultReasoning: string;
+};
+
+export type HarnessOption = {
+  id: string;
+  name: string;
+  models: ModelOption[];
+};
+
+export type SettingsDetail = { settings: Settings; harnesses: HarnessOption[] };
 export type ProjectDetail = { project: Project; tasks: Task[] };
 export type TaskDetail = { task: Task; comments: Comment[]; artifacts: Artifact[] };
 export type CommentDetail = { comment: Comment; replies: Comment[]; artifacts: Artifact[] };

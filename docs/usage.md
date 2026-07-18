@@ -1,14 +1,14 @@
 # Factory usage
 
 Factory is a local, intentionally unsafe demonstrator for an event wire,
-resource and task intake, and one sequential Codex loop. It serves a Solid
+resource and task intake, and one sequential agent loop. It serves a Solid
 web application and a JSON API from one Go process. A separate `factory`
 binary provides the same resource operations to people and agents at the
 command line.
 
-Factory has no authentication or permission boundary. It invokes Codex
-without approvals or sandboxing. Run it only on a machine and with data you
-trust. Do not bind it to a public interface.
+Factory has no authentication or permission boundary. It invokes the selected
+Codex or Claude Code harness without approvals or sandboxing. Run it only on a
+machine and with data you trust. Do not bind it to a public interface.
 
 ## Getting started
 
@@ -23,18 +23,23 @@ Install these tools:
 - Git
 - Go compatible with the version in `go.mod` (currently Go 1.26.5)
 - Bun 1.3.11
-- the current [OpenAI Codex CLI](https://github.com/openai/codex)
+- at least one supported harness: [OpenAI Codex CLI](https://github.com/openai/codex)
+  or [Claude Code](https://docs.anthropic.com/en/docs/claude-code/getting-started)
 
-On macOS, install Codex and the workflow runner with Homebrew:
+Install the workflow runner and the harness you plan to select. For example:
 
 ```sh
-brew install --cask codex
 brew tap tomnagengast/tap
 brew install --cask workflow-cli
+
+# Codex
+brew install --cask codex
+
+# Claude Code, requiring Node.js 18 or newer
+npm install -g @anthropic-ai/claude-code
 ```
 
-The official Codex repository also documents standalone and npm installation
-options for macOS and Linux.
+The linked harness documentation covers other platforms and install methods.
 
 Clone Factory:
 
@@ -44,11 +49,15 @@ git clone git@github.com:tomnagengast/factory.git \
   "$HOME/repos/tomnagengast/factory"
 ```
 
-Authenticate Codex:
+Authenticate the installed harness:
 
 ```sh
+# Codex
 codex login
 codex login status
+
+# Claude Code
+claude
 ```
 
 Verify the complete toolchain:
@@ -56,15 +65,17 @@ Verify the complete toolchain:
 ```sh
 go version
 bun --version
-codex --version
 workflow --version
 workflow --help
+# Run one or both:
+codex --version
+claude --version
 ```
 
-Factory depends on the current Codex automation flags. If the server reports
-an unknown Codex option, update Codex and confirm that `codex exec --help`
-includes `--ephemeral`, `--dangerously-bypass-approvals-and-sandbox`,
-`--dangerously-bypass-hook-trust`, and `--ignore-rules`.
+Only the selected harness needs to be installed. Factory depends on its
+current automation flags. Confirm `codex exec --help` or `claude --help`
+includes the model, reasoning or effort, and unrestricted execution options
+documented in [workflows.md](workflows.md).
 
 ### 2. Build Factory
 
@@ -99,11 +110,11 @@ If the port is free:
 ./factory-api
 ```
 
-Leave that terminal open. Factory logs its listening address, wire path,
-workflow workspace, and backend at startup.
+Leave that terminal open. Factory logs its listening address, wire path, and
+workflow workspace at startup.
 
 Open [http://127.0.0.1:8092](http://127.0.0.1:8092) in a browser. The overview
-should load and the lower-left status should say `Codex connected`.
+should load and the lower-left status should say `Agent loop connected`.
 
 Verify the API from a second terminal:
 
@@ -111,7 +122,9 @@ Verify the API from a second terminal:
 curl -fsS http://127.0.0.1:8092/api/health
 ```
 
-The response should contain `"status":"ok"` and `"agent":"codex"`.
+The response should contain `"status":"ok"` and `"harness":"codex"`.
+If you want Claude Code, open **Settings** and select its model and reasoning
+level before starting workflow collaboration or publishing a triggered event.
 
 ### 4. Create the first resources
 
@@ -150,10 +163,10 @@ report with blocking findings first.
 ```
 
 Factory appends the request to the wire, assigns an untracked workflow file,
-and gives the conversation to Codex. The workflow page shows the conversation
-and live file contents side by side while Codex writes it.
+and gives the conversation to the selected harness. The workflow page shows
+the conversation and live file contents side by side while the agent writes.
 
-That Codex process runs in the workflow workspace. It receives the current
+That agent process runs in the workflow workspace. It receives the current
 server as `$FACTORY_URL` and the CLI as `$FACTORY_CLI`, so you can ask it to
 create or update a trigger alongside the workflow.
 
@@ -191,6 +204,8 @@ Common operations:
 ./factory event list
 ./factory workflow list
 ./factory workflow comment 24 '{"message":"Add a test-coverage reviewer."}'
+./factory settings get
+./factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high"}'
 ```
 
 Pass request JSON inline or from a file:
@@ -223,8 +238,9 @@ The defaults are:
 | Listen address | `127.0.0.1:$PORT`, or `127.0.0.1:8092` |
 | Event wire | `~/.local/share/factory/wire.jsonl` |
 | Workflow workspace | `~/.local/share/factory/workflow-workspace` |
-| Agent executable | `codex` |
-| Factory CLI exposed to Codex | `./factory` |
+| Codex executable | `codex` |
+| Claude Code executable | `claude` |
+| Factory CLI exposed to the authoring harness | `./factory` |
 | Workflow executable | `workflow` |
 
 Example with isolated state and a different port:
@@ -236,11 +252,13 @@ Example with isolated state and a different port:
   -workflow-workspace "$HOME/.local/share/factory-demo/workflows"
 ```
 
-Use `-agent`, `-factory`, and `-workflow` to supply explicit executables:
+Use `-codex`, `-claude`, `-factory`, and `-workflow` to supply explicit
+executables:
 
 ```sh
 ./factory-api \
-  -agent /path/to/codex \
+  -codex /path/to/codex \
+  -claude /path/to/claude \
   -factory /path/to/factory \
   -workflow /path/to/workflow
 ```
@@ -280,13 +298,14 @@ workflow --cwd "$HOME/.local/share/factory/workflow-workspace" list --json
 
 That command must print a JSON array, including `[]` when no workflows exist.
 
-### Codex authoring fails
+### Workflow authoring fails
 
-Check authentication and automation flags:
+Check the selected harness authentication and automation flags:
 
 ```sh
 codex login status
 codex exec --help
+claude --help
 ```
 
 The workflow conversation records the agent process error as an agent reply,

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tomnagengast/factory/api/internal/state"
 )
 
 func TestCLIListsAndRunsWorkflows(t *testing.T) {
@@ -23,7 +25,10 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 	if err := os.WriteFile(source, []byte("export const meta = { name: 'demo' }"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cli := CLI{Command: command, Workspace: directory}
+	cli := CLI{
+		Command: command, Workspace: directory,
+		CodexCommand: "custom-codex", ClaudeCommand: "custom-claude",
+	}
 	if err := cli.Prepare(); err != nil {
 		t.Fatal(err)
 	}
@@ -34,26 +39,32 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 	if len(definitions) != 1 || definitions[0].Name != "demo" {
 		t.Fatalf("unexpected definitions: %#v", definitions)
 	}
-	output, err := cli.Run(context.Background(), project, "demo", source, map[string]int{"id": 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if output != "complete" {
-		t.Fatalf("unexpected output: %q", output)
-	}
-	if entries, err := os.ReadDir(filepath.Join(project, ".claude", "workflows")); err != nil || len(entries) != 0 {
-		t.Fatalf("temporary project workflows remain: %#v, %v", entries, err)
-	}
-	args, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(args), "--backend") ||
-		!strings.Contains(string(args), "codex") ||
-		!strings.Contains(string(args), "--allow-mutating") ||
-		!strings.Contains(string(args), "--codex-yolo") ||
-		!strings.Contains(string(args), project) {
-		t.Fatalf("unrestricted flags missing: %s", args)
+	for _, settings := range []state.Settings{
+		{Harness: state.Codex, Model: "gpt-5.6-sol", Reasoning: "high"},
+		{Harness: state.Claude, Model: "sonnet", Reasoning: "medium"},
+	} {
+		output, err := cli.Run(context.Background(), project, "demo", source, settings, map[string]int{"id": 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if output != "complete" {
+			t.Fatalf("unexpected output: %q", output)
+		}
+		if entries, err := os.ReadDir(filepath.Join(project, ".claude", "workflows")); err != nil || len(entries) != 0 {
+			t.Fatalf("temporary project workflows remain: %#v, %v", entries, err)
+		}
+		args, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, expected := range []string{
+			"--backend", settings.Harness, settings.Model, settings.Reasoning,
+			"--allow-mutating", "--" + settings.Harness + "-yolo", project,
+		} {
+			if !strings.Contains(string(args), expected) {
+				t.Fatalf("%q missing from args: %s", expected, args)
+			}
+		}
 	}
 	if got := cli.LocalPath(42); !strings.HasSuffix(got, "workflow-42.js") {
 		t.Fatalf("unexpected local path: %s", got)

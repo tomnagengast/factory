@@ -207,10 +207,37 @@ func TestHealthIncludesNagsReleaseIdentity(t *testing.T) {
 	for key, expected := range map[string]string{
 		"status": "ok", "app": "factory", "commit": "commit-1", "tree": "tree-1",
 		"buildId": "build-1", "deploymentId": "deployment-1", "contractVersion": "1",
+		"harness": state.Codex,
 	} {
 		if health[key] != expected {
 			t.Errorf("%s = %#v, want %q", key, health[key], expected)
 		}
+	}
+}
+
+func TestSettingsAPIUpdatesHarnessSelection(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	response := requestJSON(t, handler, http.MethodGet, "/api/settings", "")
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"harness":"codex"`) ||
+		!strings.Contains(response.Body.String(), `"name":"Claude Code"`) {
+		t.Fatalf("default settings = %d %s", response.Code, response.Body)
+	}
+	response = requestJSON(t, handler, http.MethodPut, "/api/settings",
+		`{"harness":"claude","model":"sonnet","reasoning":"high"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("update settings = %d %s", response.Code, response.Body)
+	}
+	health := requestJSON(t, handler, http.MethodGet, "/api/health", "")
+	if !strings.Contains(health.Body.String(), `"harness":"claude"`) {
+		t.Fatalf("health = %s", health.Body)
+	}
+	response = requestJSON(t, handler, http.MethodPut, "/api/settings",
+		`{"harness":"claude","model":"gpt-5.6-sol","reasoning":"high"}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid settings = %d %s", response.Code, response.Body)
 	}
 }
 
@@ -277,7 +304,7 @@ func testServer(t *testing.T, wire *eventwire.Wire) *Server {
 		"assets/styles.css": &fstest.MapFile{Data: []byte("body {}")},
 	}
 	var filesystem fs.FS = assets
-	server, err := New(wire, filesystem, "codex")
+	server, err := New(wire, filesystem)
 	if err != nil {
 		t.Fatal(err)
 	}

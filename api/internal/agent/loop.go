@@ -107,7 +107,11 @@ func (l *Loop) authorWorkflow(ctx context.Context, view state.Snapshot, comment 
 	}); err != nil {
 		return err
 	}
-	output, runErr := l.agent.Run(ctx, authorPrompt(selected, view.CommentsFor("workflow", selected.ID), target))
+	output, runErr := l.agent.Run(
+		ctx,
+		view.Settings,
+		authorPrompt(selected, view.CommentsFor("workflow", selected.ID), target),
+	)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -159,9 +163,14 @@ func (l *Loop) runTrigger(
 		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
 		return err
 	}
-	output, runErr := l.workflows.Run(ctx, directory, selected.Name, stringValue(selected.Path), map[string]any{
-		"event": source, "trigger": trigger,
-	})
+	output, runErr := l.workflows.Run(
+		ctx,
+		directory,
+		selected.Name,
+		stringValue(selected.Path),
+		view.Settings,
+		map[string]any{"event": source, "trigger": trigger},
+	)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

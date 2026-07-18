@@ -13,26 +13,39 @@ import (
 )
 
 type fakeAgent struct {
-	prompts []string
-	output  string
+	prompts  []string
+	settings []state.Settings
+	output   string
 }
 
-func (f *fakeAgent) Run(_ context.Context, prompt string) (string, error) {
+func (f *fakeAgent) Run(_ context.Context, settings state.Settings, prompt string) (string, error) {
+	f.settings = append(f.settings, settings)
 	f.prompts = append(f.prompts, prompt)
 	return f.output, nil
 }
 
 type fakeWorkflows struct {
 	definitions []workflow.Definition
-	runs        []struct{ directory, name, source string }
+	runs        []struct {
+		directory, name, source string
+		settings                state.Settings
+	}
 }
 
 func (f *fakeWorkflows) List(context.Context) ([]workflow.Definition, error) {
 	return f.definitions, nil
 }
 
-func (f *fakeWorkflows) Run(_ context.Context, directory, name, source string, _ any) (string, error) {
-	f.runs = append(f.runs, struct{ directory, name, source string }{directory, name, source})
+func (f *fakeWorkflows) Run(
+	_ context.Context,
+	directory, name, source string,
+	settings state.Settings,
+	_ any,
+) (string, error) {
+	f.runs = append(f.runs, struct {
+		directory, name, source string
+		settings                state.Settings
+	}{directory, name, source, settings})
 	return "complete", nil
 }
 
@@ -52,6 +65,10 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	selected := state.Settings{Harness: state.Claude, Model: "sonnet", Reasoning: "high"}
+	if _, err := wire.Publish(state.SettingsUpdated, selected); err != nil {
+		t.Fatal(err)
+	}
 	runner := &fakeAgent{output: "Created the review panel."}
 	workflows := &fakeWorkflows{}
 	loop, err := NewLoop(wire, runner, workflows)
@@ -67,6 +84,9 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 		!strings.Contains(runner.prompts[0], "$FACTORY_CLI") ||
 		!strings.Contains(runner.prompts[0], "github.com/tomnagengast/workflow") {
 		t.Fatalf("workflow was not authored: %#v", runner.prompts)
+	}
+	if len(runner.settings) != 1 || runner.settings[0] != selected {
+		t.Fatalf("authoring settings = %#v", runner.settings)
 	}
 	view, err := state.ProjectEvents(wire.Events(0))
 	if err != nil {
@@ -99,6 +119,9 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	}
 	if !worked || len(workflows.runs) != 1 || workflows.runs[0].name != "review" || workflows.runs[0].directory != "" {
 		t.Fatalf("trigger did not run: %#v", workflows.runs)
+	}
+	if workflows.runs[0].settings != state.DefaultSettings {
+		t.Fatalf("trigger settings = %#v", workflows.runs[0].settings)
 	}
 	view, _ := state.ProjectEvents(wire.Events(0))
 	if !view.RunStarted(triggerEvent.ID, source.ID) {

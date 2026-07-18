@@ -9,44 +9,63 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/tomnagengast/factory/api/internal/state"
 )
 
 type Runner interface {
-	Run(context.Context, string) (string, error)
+	Run(context.Context, state.Settings, string) (string, error)
 }
 
-// CommandRunner invokes one unrestricted, ephemeral Codex process and returns
+// CommandRunner invokes one unrestricted, ephemeral agent process and returns
 // its final plain-text response for the workflow conversation.
 type CommandRunner struct {
-	Command        string
+	CodexCommand   string
+	ClaudeCommand  string
 	Workspace      string
 	FactoryCommand string
 	FactoryURL     string
 }
 
-func (r CommandRunner) Run(ctx context.Context, prompt string) (string, error) {
-	if r.Command == "" || r.Workspace == "" || r.FactoryCommand == "" || r.FactoryURL == "" {
-		return "", errors.New("agent command, workspace, Factory CLI, and URL are required")
+func (r CommandRunner) Run(ctx context.Context, settings state.Settings, prompt string) (string, error) {
+	if r.CodexCommand == "" || r.ClaudeCommand == "" || r.Workspace == "" ||
+		r.FactoryCommand == "" || r.FactoryURL == "" {
+		return "", errors.New("agent commands, workspace, Factory CLI, and URL are required")
 	}
 	factory, err := filepath.Abs(r.FactoryCommand)
 	if err != nil {
 		return "", fmt.Errorf("resolve Factory CLI: %w", err)
 	}
-	command := exec.CommandContext(
-		ctx,
-		r.Command,
-		"exec",
-		"--ephemeral",
-		"--dangerously-bypass-approvals-and-sandbox",
-		"--dangerously-bypass-hook-trust",
-		"--ignore-rules",
-		"--skip-git-repo-check",
-		"-C", r.Workspace,
-		"-",
-	)
+	var command *exec.Cmd
+	switch settings.Harness {
+	case state.Codex:
+		command = exec.CommandContext(ctx, r.CodexCommand,
+			"exec",
+			"--ephemeral",
+			"--dangerously-bypass-approvals-and-sandbox",
+			"--dangerously-bypass-hook-trust",
+			"--ignore-rules",
+			"--skip-git-repo-check",
+			"--model", settings.Model,
+			"--config", `model_reasoning_effort="`+settings.Reasoning+`"`,
+			"-C", r.Workspace,
+			"-",
+		)
+		command.Stdin = strings.NewReader(prompt)
+	case state.Claude:
+		command = exec.CommandContext(ctx, r.ClaudeCommand,
+			"--print", prompt,
+			"--output-format", "text",
+			"--model", settings.Model,
+			"--effort", settings.Reasoning,
+			"--dangerously-skip-permissions",
+			"--no-session-persistence",
+		)
+	default:
+		return "", fmt.Errorf("unknown harness %q", settings.Harness)
+	}
 	command.Dir = r.Workspace
 	command.Env = append(os.Environ(), "FACTORY_CLI="+factory, "FACTORY_URL="+r.FactoryURL)
-	command.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err = command.Run()

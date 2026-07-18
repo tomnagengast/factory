@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/tomnagengast/factory/api/internal/eventwire"
@@ -32,6 +33,12 @@ const (
 	WorkflowRunStarted   = "workflow.run.started"
 	WorkflowRunCompleted = "workflow.run.completed"
 	WorkflowRunFailed    = "workflow.run.failed"
+	SettingsUpdated      = "settings.updated"
+)
+
+const (
+	Codex  = "codex"
+	Claude = "claude"
 )
 
 type Record struct {
@@ -104,6 +111,59 @@ type Workflow struct {
 	Scope       *string  `json:"scope,omitempty"`
 	Phases      []string `json:"phases"`
 	Mutating    bool     `json:"mutating"`
+}
+
+type Settings struct {
+	Harness   string `json:"harness"`
+	Model     string `json:"model"`
+	Reasoning string `json:"reasoning"`
+}
+
+type ModelOption struct {
+	ID               string   `json:"id"`
+	Reasoning        []string `json:"reasoning"`
+	DefaultReasoning string   `json:"defaultReasoning"`
+}
+
+type HarnessOption struct {
+	ID     string        `json:"id"`
+	Name   string        `json:"name"`
+	Models []ModelOption `json:"models"`
+}
+
+var (
+	DefaultSettings = Settings{Harness: Codex, Model: "gpt-5.6-sol", Reasoning: "low"}
+	Harnesses       = []HarnessOption{
+		{ID: Codex, Name: "Codex", Models: []ModelOption{
+			{ID: "gpt-5.6-sol", Reasoning: []string{"low", "medium", "high", "xhigh", "max", "ultra"}, DefaultReasoning: "low"},
+			{ID: "gpt-5.6-terra", Reasoning: []string{"low", "medium", "high", "xhigh", "max", "ultra"}, DefaultReasoning: "medium"},
+			{ID: "gpt-5.6-luna", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "medium"},
+			{ID: "gpt-5.5", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "medium"},
+			{ID: "gpt-5.4", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "medium"},
+			{ID: "gpt-5.4-mini", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "medium"},
+			{ID: "gpt-5.3-codex-spark", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "high"},
+		}},
+		{ID: Claude, Name: "Claude Code", Models: []ModelOption{
+			{ID: "sonnet", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "high"},
+			{ID: "fable", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "high"},
+			{ID: "opus", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "high"},
+			{ID: "haiku", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "medium"},
+		}},
+	}
+)
+
+func ValidSettings(settings Settings) bool {
+	for _, harness := range Harnesses {
+		if harness.ID != settings.Harness {
+			continue
+		}
+		for _, model := range harness.Models {
+			if model.ID == settings.Model {
+				return slices.Contains(model.Reasoning, settings.Reasoning)
+			}
+		}
+	}
+	return false
 }
 
 type ProjectData struct {
@@ -182,6 +242,7 @@ type Snapshot struct {
 	Artifacts []Artifact
 	Triggers  []Trigger
 	Workflows []Workflow
+	Settings  Settings
 
 	startedRuns map[[2]int64]bool
 	lastCron    map[int64]time.Time
@@ -191,6 +252,7 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 	view := Snapshot{
 		startedRuns: make(map[[2]int64]bool),
 		lastCron:    make(map[int64]time.Time),
+		Settings:    DefaultSettings,
 	}
 	projectIndex := make(map[int64]int)
 	taskIndex := make(map[int64]int)
@@ -379,6 +441,11 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 			}
 			if index, found := workflowIndex[data.ID]; found {
 				deleteRecord(&view.Workflows[index].Record, event.At)
+			}
+
+		case SettingsUpdated:
+			if err := decode(event, &view.Settings); err != nil {
+				return Snapshot{}, err
 			}
 
 		case CronFired:

@@ -76,6 +76,17 @@ func parse(args []string) (command, error) {
 		return command{}, errors.New("resource and action are required")
 	}
 	resource, action := args[0], args[1]
+	if resource == "settings" {
+		switch {
+		case action == "get" && len(args) == 2:
+			return command{method: http.MethodGet, path: "/api/settings"}, nil
+		case action == "update":
+			body, err := argumentJSON(args, 2)
+			return command{method: http.MethodPut, path: "/api/settings", body: body}, err
+		default:
+			return command{}, errors.New("usage: factory settings get|update <json|@file>")
+		}
+	}
 	plural, found := map[string]string{
 		"project": "projects", "task": "tasks", "comment": "comments",
 		"artifact": "artifacts", "event": "events", "trigger": "triggers", "workflow": "workflows",
@@ -205,6 +216,7 @@ Resources:
   event     list, get, create
   trigger   list, get, create, update, delete
   workflow  list, get, create, update, delete, comment
+  settings  get, update
 
 Examples:
   factory project create '{"name":"Factory","path":"/path/to/factory"}'
@@ -212,5 +224,6 @@ Examples:
   factory task comment 12 '{"content":"The build passed."}'
   factory artifact get 18
   factory workflow create '{"message":"Build a review-panel workflow."}'
-  factory workflow update 24 '{"message":"Add a security reviewer."}'`)
+  factory workflow update 24 '{"message":"Add a security reviewer."}'
+  factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high"}'`)
 }

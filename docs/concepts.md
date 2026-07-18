@@ -20,7 +20,7 @@ CLI ────┘                              │
                                                │
                          ┌─────────────────────┴────────────────────┐
                          │                                          │
-                  Codex authoring                         workflow CLI run
+             selected harness authoring                  workflow CLI run
                          │                                          │
                          └──────────────> new events <──────────────┘
 ```
@@ -52,9 +52,13 @@ event page and detail views use that stream to update without a page reload.
 
 ## Projections and resources
 
-Projects, tasks, comments, artifacts, triggers, and workflow metadata are
-rebuilt by replaying the wire. The wire is the durable source of truth; the
-resource view is derived state.
+Projects, tasks, comments, artifacts, triggers, workflow metadata, and the
+singleton agent settings are rebuilt by replaying the wire. The wire is the
+durable source of truth; the resource view is derived state.
+
+Agent settings select a harness, model, and reasoning level. They default to
+Codex and change through one `settings.updated` event. New authoring sessions
+and trigger runs read the latest projection when they start.
 
 Every project has a required local path. The API creates that directory when
 the project is created or updated.
@@ -83,9 +87,9 @@ backlog, todo, in progress, done, canceled
 ```
 
 Tasks can have threaded comments and polymorphic artifacts. Creating or
-editing a task does not automatically invoke Codex. The task intake mechanism
-is simply the shared API and wire path through which humans and agents record
-work.
+editing a task does not automatically invoke an agent. The task intake
+mechanism is simply the shared API and wire path through which humans and
+agents record work.
 
 The CLI and web application are peers. Both call the same API, which means an
 agent can create a task or comment and a human sees the result immediately in
@@ -99,9 +103,9 @@ Factory owns one worker. It checks work in this order:
 2. an event trigger that has not started a run,
 3. a due cron trigger.
 
-Only one Codex authoring session or workflow CLI run executes at a time. A
-long run delays later work. This is the intentional sequential-loop
-demonstration, not an attempt at distributed scheduling.
+Only one authoring session or workflow CLI run executes at a time. A long run
+delays later work. This is the intentional sequential-loop demonstration, not
+an attempt at distributed scheduling.
 
 The loop records progress back on the same wire:
 
@@ -124,11 +128,11 @@ Factory-created files live in:
 ```
 
 When a user starts a workflow conversation, Factory assigns the local target
-before Codex begins. The workflow detail API reads the current file on every
-request, allowing the web application to show live source while Codex writes.
-Authoring Codex runs in the workflow workspace and receives `$FACTORY_CLI` and
-`$FACTORY_URL`, so the same conversation can inspect resources or configure a
-trigger when the user asks.
+before the selected harness begins. The workflow detail API reads the current
+file on every request, allowing the web application to show live source while
+the agent writes. The authoring harness runs in the workflow workspace and
+receives `$FACTORY_CLI` and `$FACTORY_URL`, so the same conversation can
+inspect resources or configure a trigger when the user asks.
 
 After authoring, Factory asks the workflow CLI to rediscover definitions and
 projects the resolved name, description, phases, scope, path, and mutating
@@ -172,8 +176,8 @@ working directory. A workflow can inspect `args.event.data`, such as a
 ## Deliberate trust model
 
 Factory has no authentication, authorization, approval prompts, sandbox, or
-policy engine. Codex authoring and workflow runs are launched with their
-unrestricted options.
+policy engine. Codex and Claude Code are launched with their unrestricted
+options.
 
 That is part of the demonstrator. Factory should remain bound to loopback and
 used only with trusted prompts, workflows, repositories, and local data.

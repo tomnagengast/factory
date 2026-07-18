@@ -14,21 +14,22 @@ import (
 )
 
 type Server struct {
-	wire      *eventwire.Wire
-	assets    fs.FS
-	agentName string
+	wire   *eventwire.Wire
+	assets fs.FS
 }
 
-func New(wire *eventwire.Wire, assets fs.FS, agentName string) (*Server, error) {
-	if wire == nil || assets == nil || agentName == "" {
-		return nil, errors.New("server requires a wire, frontend, and agent name")
+func New(wire *eventwire.Wire, assets fs.FS) (*Server, error) {
+	if wire == nil || assets == nil {
+		return nil, errors.New("server requires a wire and frontend")
 	}
-	return &Server{wire: wire, assets: assets, agentName: agentName}, nil
+	return &Server{wire: wire, assets: assets}, nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.health)
+	mux.HandleFunc("GET /api/settings", s.settings)
+	mux.HandleFunc("PUT /api/settings", s.settingsUpdate)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("POST /api/events", s.eventCreate)
 	mux.HandleFunc("GET /api/events/types", s.eventTypes)
@@ -100,7 +101,7 @@ func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 		"buildId":         os.Getenv("NAGS_BUILD_ID"),
 		"deploymentId":    os.Getenv("NAGS_DEPLOYMENT_ID"),
 		"contractVersion": os.Getenv("NAGS_CONTRACT_VERSION"),
-		"agent":           s.agentName,
+		"harness":         view.Settings.Harness,
 		"events":          s.wire.LastID(),
 		"tasks":           len(active(view.Tasks, func(value state.Task) bool { return value.DeletedAt == nil })),
 		"projects":        len(active(view.Projects, func(value state.Project) bool { return value.DeletedAt == nil })),

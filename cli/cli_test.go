@@ -44,6 +44,23 @@ func TestWorkflowUpdateIsAnAgentMessage(t *testing.T) {
 	}
 }
 
+func TestSettingsUseSingletonAPI(t *testing.T) {
+	getRequest, err := parse([]string{"settings", "get"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateRequest, err := parse([]string{
+		"settings", "update", `{"harness":"claude","model":"sonnet","reasoning":"high"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if getRequest.method != http.MethodGet || getRequest.path != "/api/settings" ||
+		updateRequest.method != http.MethodPut || updateRequest.path != "/api/settings" {
+		t.Fatalf("unexpected requests: %#v %#v", getRequest, updateRequest)
+	}
+}
+
 func TestRejectsInvalidIdentityAndJSON(t *testing.T) {
 	for _, args := range [][]string{
 		{"task", "get", "nope"},

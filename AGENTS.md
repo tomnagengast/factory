@@ -9,9 +9,9 @@
   lifecycle machinery without explicit product direction.
 - Prefer the least code that makes those mechanisms clear. Replace superseded
   designs completely instead of preserving compatibility paths.
-- Codex is the agent backend. The external `workflow` CLI owns workflow
-  discovery, loading, validation, and execution. Do not duplicate that runtime
-  inside Factory.
+- Codex is the default agent harness, and Claude Code is also supported. The
+  external `workflow` CLI owns workflow discovery, loading, validation, and
+  execution. Do not duplicate that runtime inside Factory.
 - Install and document that dependency from the public
   `tomnagengast/workflow` Homebrew cask. Do not introduce private repository
   dependencies.
@@ -24,14 +24,16 @@
 - A resource creation event ID is also its resource ID. All resources and
   events share one global integer sequence, so gaps in resource IDs are
   expected.
+- The singleton harness, model, and reasoning selection is projected from
+  `settings.updated` events and defaults to Codex.
 - The Solid app and Go CLI are peers over the same HTTP API. A resource change
   normally touches the state data/event shapes, API handlers, CLI command
   mapping, Solid types and views, and the matching reference documentation.
 - Keep workflow source outside the repository under the configured workflow
   workspace. The wire stores workflow metadata and conversation history, while
   the workflow detail endpoint reads live source from disk.
-- Workflow-authoring Codex runs in that workspace and receives the current
-  server and resource CLI as `FACTORY_URL` and `FACTORY_CLI`.
+- The selected workflow-authoring harness runs in that workspace and receives
+  the current server and resource CLI as `FACTORY_URL` and `FACTORY_CLI`.
 - Preserve one sequential worker and its priority: pending workflow
   conversations, matching event triggers, then due cron triggers. Do not add a
   queue or parallel worker pool unless the product direction changes.

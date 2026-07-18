@@ -30,7 +30,8 @@ type config struct {
 	Address           string
 	DataPath          string
 	WorkflowWorkspace string
-	AgentCommand      string
+	CodexCommand      string
+	ClaudeCommand     string
 	FactoryCommand    string
 	WorkflowCommand   string
 }
@@ -82,11 +83,12 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 		filepath.Join(home, ".local", "share", "factory", "workflow-workspace"),
 		"untracked dynamic workflow workspace",
 	)
-	flags.StringVar(&configuration.AgentCommand, "agent", "codex", "Codex executable")
-	flags.StringVar(&configuration.FactoryCommand, "factory", "./factory", "Factory CLI exposed to Codex")
+	flags.StringVar(&configuration.CodexCommand, "codex", "codex", "Codex executable")
+	flags.StringVar(&configuration.ClaudeCommand, "claude", "claude", "Claude Code executable")
+	flags.StringVar(&configuration.FactoryCommand, "factory", "./factory", "Factory CLI exposed to the authoring harness")
 	flags.StringVar(&configuration.WorkflowCommand, "workflow", "workflow", "workflow CLI executable")
 	flags.Usage = func() {
-		fmt.Fprintln(output, "Factory serves the event wire, resource API, Solid UI, and sequential Codex loop.")
+		fmt.Fprintln(output, "Factory serves the event wire, resource API, Solid UI, and sequential agent loop.")
 		fmt.Fprintln(output)
 		fmt.Fprintln(output, "Usage: factory-api [options]")
 		fmt.Fprintln(output)
@@ -99,7 +101,8 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 		return config{}, errors.New("factory-api accepts options only")
 	}
 	if configuration.Address == "" || configuration.DataPath == "" ||
-		configuration.WorkflowWorkspace == "" || configuration.AgentCommand == "" ||
+		configuration.WorkflowWorkspace == "" || configuration.CodexCommand == "" ||
+		configuration.ClaudeCommand == "" ||
 		configuration.FactoryCommand == "" || configuration.WorkflowCommand == "" {
 		return config{}, errors.New("all serve options require values")
 	}
@@ -115,12 +118,14 @@ func run(ctx context.Context, configuration config) error {
 
 	workflowCLI := workflow.CLI{
 		Command: configuration.WorkflowCommand, Workspace: configuration.WorkflowWorkspace,
+		CodexCommand: configuration.CodexCommand, ClaudeCommand: configuration.ClaudeCommand,
 	}
 	if err := workflowCLI.Prepare(); err != nil {
 		return err
 	}
 	loop, err := agent.NewLoop(wire, agent.CommandRunner{
-		Command: configuration.AgentCommand, Workspace: configuration.WorkflowWorkspace,
+		CodexCommand: configuration.CodexCommand, ClaudeCommand: configuration.ClaudeCommand,
+		Workspace:      configuration.WorkflowWorkspace,
 		FactoryCommand: configuration.FactoryCommand, FactoryURL: "http://" + configuration.Address,
 	}, workflowCLI)
 	if err != nil {
@@ -130,7 +135,7 @@ func run(ctx context.Context, configuration config) error {
 	if err != nil {
 		return fmt.Errorf("open embedded web bundle: %w", err)
 	}
-	app, err := server.New(wire, assets, "codex")
+	app, err := server.New(wire, assets)
 	if err != nil {
 		return err
 	}
@@ -152,7 +157,6 @@ func run(ctx context.Context, configuration config) error {
 		"address", "http://"+listener.Addr().String(),
 		"wire", configuration.DataPath,
 		"workflowWorkspace", configuration.WorkflowWorkspace,
-		"backend", "codex",
 	)
 
 	first := <-results
