@@ -78,6 +78,7 @@ main { min-width: 0; }
 .metric strong { display: block; margin-top: 16px; font: 500 38px var(--mono); }
 .metric:hover { background: #f0f3ea; }
 .split { display: grid; grid-template-columns: 1.1fr .9fr; gap: 42px; }
+.split > *, .comment { min-width: 0; }
 .split.lower { margin-top: 48px; align-items: start; }
 .section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; margin: 0 0 14px; }
 .section-title h2 { margin: 0; font-size: 18px; letter-spacing: -.025em; }
@@ -213,7 +214,7 @@ label small { color: var(--muted); font-weight: 400; }
   background: #171c18; color: #d9e6d6; font: 12px/1.65 var(--mono); tab-size: 2;
 }
 .markdown pre code, .markdown pre code.hljs { padding: 0; background: transparent; font: inherit; }
-.markdown table { width: 100%; display: block; overflow-x: auto; border-collapse: collapse; }
+.markdown table { width: 100%; display: block; overflow-x: auto; border-collapse: collapse; white-space: nowrap; }
 .markdown th, .markdown td { padding: 8px 10px; border: 1px solid var(--line); text-align: left; }
 .markdown th { background: #e4e8df; }
 .markdown img { max-width: 100%; height: auto; }
