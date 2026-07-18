@@ -348,8 +348,8 @@ update.
 GET /api/health
 ```
 
-The response includes status, active harness, event and resource
-counts, and Nags release identity when those environment variables are set.
+The response includes status, active harness, event and resource counts, and
+release identity when deployment environment variables are set.
 
 ## CLI command matrix
 

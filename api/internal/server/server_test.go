@@ -191,12 +191,12 @@ func TestArbitraryEventIntakeAndTypes(t *testing.T) {
 	}
 }
 
-func TestHealthIncludesNagsReleaseIdentity(t *testing.T) {
-	t.Setenv("NAGS_SOURCE_COMMIT", "commit-1")
-	t.Setenv("NAGS_SOURCE_TREE", "tree-1")
-	t.Setenv("NAGS_BUILD_ID", "build-1")
-	t.Setenv("NAGS_DEPLOYMENT_ID", "deployment-1")
-	t.Setenv("NAGS_CONTRACT_VERSION", "1")
+func TestHealthIncludesReleaseIdentity(t *testing.T) {
+	t.Setenv("FACTORY_RELEASE_COMMIT", "commit-1")
+	t.Setenv("FACTORY_RELEASE_TREE", "tree-1")
+	t.Setenv("FACTORY_RELEASE_BUILD", "build-1")
+	t.Setenv("FACTORY_RELEASE_DEPLOYMENT", "deployment-1")
+	t.Setenv("FACTORY_RELEASE_CONTRACT", "1")
 	wire := openWire(t)
 	defer wire.Close()
 	response := requestJSON(t, testServer(t, wire).Handler(), http.MethodGet, "/api/health", "")

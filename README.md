@@ -20,8 +20,7 @@ cli/    Go resource client
 web/    SolidJS application built with Bun and Vite
 ```
 
-The root holds repository orchestration such as `go.mod`, `nags.toml`, and
-this document.
+The root holds repository orchestration, module metadata, and this document.
 
 ## Documentation
 
@@ -207,5 +206,5 @@ bun run --cwd web typecheck
 bun run --cwd web build
 ```
 
-The Nags adapter builds both Go binaries, embeds the frozen Solid bundle in
-`factory-api`, and runs `factory-api`.
+The deployment manifest builds both Go binaries, embeds the frozen Solid
+bundle in `factory-api`, and runs `factory-api`.

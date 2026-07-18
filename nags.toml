@@ -11,7 +11,12 @@ go build -trimpath -ldflags="-s -w" -o factory-api ./api
 go build -trimpath -ldflags="-s -w" -o factory ./cli"""
 
 [run]
-command = "./factory-api"
+command = """FACTORY_RELEASE_COMMIT="$NAGS_SOURCE_COMMIT" \
+FACTORY_RELEASE_TREE="$NAGS_SOURCE_TREE" \
+FACTORY_RELEASE_BUILD="$NAGS_BUILD_ID" \
+FACTORY_RELEASE_DEPLOYMENT="$NAGS_DEPLOYMENT_ID" \
+FACTORY_RELEASE_CONTRACT="$NAGS_CONTRACT_VERSION" \
+./factory-api"""
 
 [health]
 path = "/api/health"

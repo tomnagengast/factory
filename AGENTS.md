@@ -47,8 +47,6 @@
 
 ## Working in the monorepo
 
-- Start with `nr "<question>" --json` when mapping a feature or change blast
-  radius, then use `rg` for exact symbols.
 - Read the relevant files under `docs/` before changing behavior, and update
   those references with the implementation.
 - `api/` contains the Go server and embedded frontend, `cli/` contains the Go
