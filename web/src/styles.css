@@ -204,21 +204,20 @@ label small { color: var(--muted); font-weight: 400; }
 }
 .run-phase h2 { margin: 0; font-size: 18px; }
 .run-phase > header span { color: var(--muted); font: 10px var(--mono); text-transform: uppercase; }
-.run-steps { display: grid; gap: 10px; }
-.run-step { border: 1px solid var(--line); background: var(--paper); }
-.run-step.pending { border-left: 3px solid #c6ae76; }
-.run-step > header { display: flex; align-items: center; gap: 9px; padding: 11px 13px; }
-.run-step > header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.run-step > header > span:not(.artifact-type), .run-step time {
+.run-events { display: grid; gap: 10px; }
+.run-event { border: 1px solid var(--line); background: var(--paper); }
+.run-event > header { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; padding: 11px 13px; }
+.run-event > header strong { min-width: 160px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.run-event > header > span:not(.artifact-type), .run-event time {
   color: var(--muted); font: 10px var(--mono);
 }
-.run-step time { margin-left: auto; }
-.run-step pre, .run-output pre {
+.run-event time { margin-left: auto; }
+.run-event-meta { margin: 0; padding: 0 13px 11px; color: var(--muted); font: 10px var(--mono); }
+.run-event pre, .run-output pre {
   margin: 0; padding: 14px; overflow: auto; border-top: 1px solid #354036;
   background: #171c18; color: #d9e6d6; font: 11px/1.6 var(--mono); white-space: pre-wrap;
 }
-.run-step .step-error, .run-output .step-error { color: #f3b6ad; }
-.step-pending { margin: 0; padding: 0 13px 13px; color: var(--muted); font-size: 12px; }
+.run-event .step-error, .run-output .step-error { color: #f3b6ad; }
 .run-output { margin-top: 36px; }
 
 .workflow-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: -18px 0 24px; color: var(--muted); font: 10px var(--mono); }
@@ -295,6 +294,7 @@ label small { color: var(--muted); font-weight: 400; }
   .trigger-row > span:nth-child(3) { display: none; }
   .history-row { grid-template-columns: 84px 1fr 42px; }
   .history-row time { display: none; }
+  .run-event time { width: 100%; margin-left: 0; }
   .event-row, .event-row.expanded { grid-template-columns: 42px 1fr 105px; }
   .event-row code { display: none; }
   .message { max-width: 94%; }

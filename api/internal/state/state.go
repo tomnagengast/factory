@@ -10,31 +10,31 @@ import (
 )
 
 const (
-	ProjectCreated          = "project.created"
-	ProjectUpdated          = "project.updated"
-	ProjectDeleted          = "project.deleted"
-	TaskCreated             = "task.created"
-	TaskUpdated             = "task.updated"
-	TaskDeleted             = "task.deleted"
-	CommentCreated          = "comment.created"
-	CommentUpdated          = "comment.updated"
-	CommentDeleted          = "comment.deleted"
-	ArtifactCreated         = "artifact.created"
-	ArtifactUpdated         = "artifact.updated"
-	ArtifactDeleted         = "artifact.deleted"
-	TriggerCreated          = "trigger.created"
-	TriggerUpdated          = "trigger.updated"
-	TriggerDeleted          = "trigger.deleted"
-	WorkflowCreated         = "workflow.created"
-	WorkflowDiscovered      = "workflow.discovered"
-	WorkflowUpdated         = "workflow.updated"
-	WorkflowDeleted         = "workflow.deleted"
-	CronFired               = "cron"
-	WorkflowRunStarted      = "workflow.run.started"
-	WorkflowRunStepRecorded = "workflow.run.step"
-	WorkflowRunCompleted    = "workflow.run.completed"
-	WorkflowRunFailed       = "workflow.run.failed"
-	SettingsUpdated         = "settings.updated"
+	ProjectCreated           = "project.created"
+	ProjectUpdated           = "project.updated"
+	ProjectDeleted           = "project.deleted"
+	TaskCreated              = "task.created"
+	TaskUpdated              = "task.updated"
+	TaskDeleted              = "task.deleted"
+	CommentCreated           = "comment.created"
+	CommentUpdated           = "comment.updated"
+	CommentDeleted           = "comment.deleted"
+	ArtifactCreated          = "artifact.created"
+	ArtifactUpdated          = "artifact.updated"
+	ArtifactDeleted          = "artifact.deleted"
+	TriggerCreated           = "trigger.created"
+	TriggerUpdated           = "trigger.updated"
+	TriggerDeleted           = "trigger.deleted"
+	WorkflowCreated          = "workflow.created"
+	WorkflowDiscovered       = "workflow.discovered"
+	WorkflowUpdated          = "workflow.updated"
+	WorkflowDeleted          = "workflow.deleted"
+	CronFired                = "cron"
+	WorkflowRunStarted       = "workflow.run.started"
+	WorkflowRunEventRecorded = "workflow.run.event"
+	WorkflowRunCompleted     = "workflow.run.completed"
+	WorkflowRunFailed        = "workflow.run.failed"
+	SettingsUpdated          = "settings.updated"
 )
 
 const (
@@ -128,19 +128,30 @@ type WorkflowRun struct {
 	Error          string    `json:"error,omitempty"`
 }
 
-type WorkflowRunStep struct {
-	ID        int64           `json:"id"`
-	RunID     int64           `json:"runId"`
-	CreatedAt time.Time       `json:"createdAt"`
-	UpdatedAt time.Time       `json:"updatedAt"`
-	Key       string          `json:"key,omitempty"`
-	Phase     string          `json:"phase,omitempty"`
-	Kind      string          `json:"kind"`
-	Backend   string          `json:"backend,omitempty"`
-	Message   string          `json:"message"`
-	Result    json.RawMessage `json:"result,omitempty"`
-	Error     string          `json:"error,omitempty"`
-	Done      bool            `json:"done"`
+type WorkflowRuntimeEvent struct {
+	Sequence    int64           `json:"sequence"`
+	At          time.Time       `json:"at"`
+	Type        string          `json:"type"`
+	Workflow    string          `json:"workflow"`
+	Phase       string          `json:"phase,omitempty"`
+	StepID      int64           `json:"stepId,omitempty"`
+	Key         string          `json:"key,omitempty"`
+	AgentID     string          `json:"agentId,omitempty"`
+	Backend     string          `json:"backend,omitempty"`
+	Kind        string          `json:"kind,omitempty"`
+	Message     string          `json:"message,omitempty"`
+	Result      json.RawMessage `json:"result,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	Tokens      int64           `json:"tokens,omitempty"`
+	Concurrency int             `json:"concurrency,omitempty"`
+	Budget      *int64          `json:"budget,omitempty"`
+}
+
+type WorkflowRunEvent struct {
+	ID         int64     `json:"id"`
+	RunID      int64     `json:"runId"`
+	RecordedAt time.Time `json:"recordedAt"`
+	WorkflowRuntimeEvent
 }
 
 type Settings struct {
@@ -267,16 +278,9 @@ type WorkflowRunData struct {
 	Error          string   `json:"error,omitempty"`
 }
 
-type WorkflowRunStepData struct {
-	RunID   int64           `json:"runId"`
-	Key     string          `json:"key,omitempty"`
-	Phase   string          `json:"phase,omitempty"`
-	Kind    string          `json:"kind"`
-	Backend string          `json:"backend,omitempty"`
-	Message string          `json:"message"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   string          `json:"error,omitempty"`
-	Done    bool            `json:"done"`
+type WorkflowRunEventData struct {
+	RunID int64           `json:"runId"`
+	Event json.RawMessage `json:"event"`
 }
 
 type Snapshot struct {
@@ -287,7 +291,7 @@ type Snapshot struct {
 	Triggers  []Trigger
 	Workflows []Workflow
 	Runs      []WorkflowRun
-	RunSteps  []WorkflowRunStep
+	RunEvents []WorkflowRunEvent
 	Settings  Settings
 
 	startedRuns map[[2]int64]bool
@@ -307,7 +311,7 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 	triggerIndex := make(map[int64]int)
 	workflowIndex := make(map[int64]int)
 	runIndex := make(map[[2]int64]int)
-	runStepIndex := make(map[[2]string]int)
+	runIDIndex := make(map[int64]int)
 
 	for _, event := range events {
 		switch event.Type {
@@ -516,39 +520,29 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 				}
 			}
 			runIndex[key] = len(view.Runs)
+			runIDIndex[event.ID] = len(view.Runs)
 			view.Runs = append(view.Runs, WorkflowRun{
 				ID: event.ID, CreatedAt: event.At, UpdatedAt: event.At,
 				TriggerID: data.TriggerID, WorkflowID: data.WorkflowID,
 				WorkflowName: data.WorkflowName, WorkflowPhases: stringSlice(data.WorkflowPhases),
 				SourceEventID: data.SourceEventID, Status: "running",
 			})
-		case WorkflowRunStepRecorded:
-			var data WorkflowRunStepData
+		case WorkflowRunEventRecorded:
+			var data WorkflowRunEventData
 			if err := decode(event, &data); err != nil {
 				return Snapshot{}, err
 			}
-			key := [2]string{fmt.Sprint(data.RunID), data.Key}
-			if index, found := runStepIndex[key]; found && data.Key != "" {
-				step := &view.RunSteps[index]
-				if data.Phase != "" {
-					step.Phase = data.Phase
-				}
-				step.Kind, step.Backend = data.Kind, data.Backend
-				step.Message, step.Result, step.Error = data.Message, data.Result, data.Error
-				step.Done, step.UpdatedAt = data.Done, event.At
-				continue
+			var runtimeEvent WorkflowRuntimeEvent
+			if err := json.Unmarshal(data.Event, &runtimeEvent); err != nil {
+				return Snapshot{}, fmt.Errorf("decode workflow event %d: %w", event.ID, err)
 			}
-			if data.Phase == "" {
-				data.Phase = "Run"
-			}
-			if data.Key != "" {
-				runStepIndex[key] = len(view.RunSteps)
-			}
-			view.RunSteps = append(view.RunSteps, WorkflowRunStep{
-				ID: event.ID, RunID: data.RunID, CreatedAt: event.At, UpdatedAt: event.At,
-				Key: data.Key, Phase: data.Phase, Kind: data.Kind, Backend: data.Backend,
-				Message: data.Message, Result: data.Result, Error: data.Error, Done: data.Done,
+			view.RunEvents = append(view.RunEvents, WorkflowRunEvent{
+				ID: event.ID, RunID: data.RunID, RecordedAt: event.At,
+				WorkflowRuntimeEvent: runtimeEvent,
 			})
+			if index, found := runIDIndex[data.RunID]; found {
+				view.Runs[index].UpdatedAt = event.At
+			}
 		case WorkflowRunCompleted, WorkflowRunFailed:
 			var data WorkflowRunData
 			if err := decode(event, &data); err != nil {
@@ -649,14 +643,14 @@ func (s Snapshot) Run(id int64) (WorkflowRun, bool) {
 	return WorkflowRun{}, false
 }
 
-func (s Snapshot) StepsFor(runID int64) []WorkflowRunStep {
-	steps := make([]WorkflowRunStep, 0)
-	for _, step := range s.RunSteps {
-		if step.RunID == runID {
-			steps = append(steps, step)
+func (s Snapshot) EventsFor(runID int64) []WorkflowRunEvent {
+	events := make([]WorkflowRunEvent, 0)
+	for _, event := range s.RunEvents {
+		if event.RunID == runID {
+			events = append(events, event)
 		}
 	}
-	return steps
+	return events
 }
 
 func (s Snapshot) CommentsFor(relationType string, relationID int64) []Comment {

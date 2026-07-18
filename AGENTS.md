@@ -37,6 +37,10 @@
 - Preserve one sequential worker and its priority: pending workflow
   conversations, matching event triggers, then due cron triggers. Do not add a
   queue or parallel worker pool unless the product direction changes.
+- Forward every workflow CLI semantic journal line as its own
+  `workflow.run.event`. Never derive history from human stdout/stderr, filter
+  journal fields, or collapse lifecycle pairs. Cancel the workflow if its next
+  event cannot be appended to the wire.
 - Event triggers only see matching events received after the trigger's latest
   update. Cron appends a targeted `cron` event and then uses the same trigger
   path.

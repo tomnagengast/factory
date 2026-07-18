@@ -191,16 +191,21 @@ recorded on the event wire:
 
 1. `workflow.run.started` creates the history item and captures the workflow
    name and phase list,
-2. the workflow CLI journal and `log()` output become `workflow.run.step`
-   events while the process is active,
+2. every workflow CLI journal line becomes one `workflow.run.event` while the
+   process is active,
 3. `workflow.run.completed` or `workflow.run.failed` closes the run.
 
-The CLI journal remains the runtime's record of agent and gate dispatches.
-Factory passes an explicit temporary `--journal` path, copies each start and
-result onto its durable wire, then removes the temporary file. `/history`
-lists every projected run and `/history/{id}` groups its chronological steps
-by workflow phase. Both views update from the same server-sent event stream
-as the event wire.
+The CLI journal is the complete semantic runtime stream: runtime lifecycle,
+phases, workflow logs, diagnostics, agent and gate prompts, cache hits, nested
+workflows, results, token counts, and failures. Factory passes an explicit
+temporary `--journal` path and durably forwards each event without parsing
+stderr, filtering fields, or collapsing lifecycle pairs. A wire write failure
+cancels the workflow. The temporary file is removed only after the follower
+finishes.
+
+`/history` lists every projected run and `/history/{id}` displays the distinct
+events chronologically in contiguous phase groups. Both views update from the
+same server-sent event stream as the event wire.
 
 ### Task event triggers
 

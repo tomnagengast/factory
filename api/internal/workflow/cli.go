@@ -6,13 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/tomnagengast/factory/api/internal/state"
@@ -27,20 +25,29 @@ type Definition struct {
 	Mutating    bool     `json:"mutating"`
 }
 
-type Log struct {
-	Key     string
-	Phase   string
-	Kind    string
-	Backend string
-	Message string
-	Result  json.RawMessage
-	Error   string
-	Done    bool
+type Event struct {
+	Raw         json.RawMessage `json:"-"`
+	Sequence    int64           `json:"sequence"`
+	At          time.Time       `json:"at"`
+	Type        string          `json:"type"`
+	Workflow    string          `json:"workflow"`
+	Phase       string          `json:"phase,omitempty"`
+	StepID      int64           `json:"stepId,omitempty"`
+	Key         string          `json:"key,omitempty"`
+	AgentID     string          `json:"agentId,omitempty"`
+	Backend     string          `json:"backend,omitempty"`
+	Kind        string          `json:"kind,omitempty"`
+	Message     string          `json:"message,omitempty"`
+	Result      json.RawMessage `json:"result,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	Tokens      int64           `json:"tokens,omitempty"`
+	Concurrency int             `json:"concurrency,omitempty"`
+	Budget      *int64          `json:"budget,omitempty"`
 }
 
 type Runner interface {
 	List(context.Context) ([]Definition, error)
-	Run(context.Context, string, string, string, state.Settings, any, func(Log)) (string, error)
+	Run(context.Context, string, string, string, state.Settings, any, func(Event) error) (string, error)
 	LocalPath(int64) string
 }
 
@@ -75,8 +82,11 @@ func (c CLI) Run(
 	directory, name, source string,
 	settings state.Settings,
 	args any,
-	emit func(Log),
+	emit func(Event) error,
 ) (string, error) {
+	if emit == nil {
+		return "", errors.New("workflow event sink is required")
+	}
 	encoded, err := json.Marshal(args)
 	if err != nil {
 		return "", fmt.Errorf("encode workflow arguments: %w", err)
@@ -134,21 +144,27 @@ func (c CLI) Run(
 	default:
 		return "", fmt.Errorf("unknown harness %q", settings.Harness)
 	}
-	command := exec.CommandContext(ctx, c.Command, commandArgs...)
+	commandContext, cancelCommand := context.WithCancel(ctx)
+	defer cancelCommand()
+	command := exec.CommandContext(commandContext, c.Command, commandArgs...)
 	var stdout, stderr bytes.Buffer
-	progress := &progressWriter{emit: emit}
-	command.Stdout, command.Stderr = &stdout, io.MultiWriter(&stderr, progress)
+	command.Stdout, command.Stderr = &stdout, &stderr
 	followContext, stopFollowing := context.WithCancel(ctx)
-	followed := make(chan struct{})
+	followed := make(chan error, 1)
 	go func() {
-		followJournal(followContext, journalPath, progress, emit)
-		close(followed)
+		err := followJournal(followContext, journalPath, emit)
+		if err != nil {
+			cancelCommand()
+		}
+		followed <- err
 	}()
 	err = command.Run()
 	stopFollowing()
-	<-followed
-	progress.Flush()
+	followErr := <-followed
 	output := strings.TrimSpace(stdout.String())
+	if followErr != nil {
+		return output, fmt.Errorf("record workflow event: %w", followErr)
+	}
 	if err != nil {
 		message := strings.TrimSpace(stderr.String())
 		if message != "" {
@@ -163,115 +179,49 @@ func (c CLI) LocalPath(id int64) string {
 	return filepath.Join(c.Workspace, ".claude", "workflows", "workflow-"+strconv.FormatInt(id, 10)+".js")
 }
 
-type progressWriter struct {
-	mu      sync.Mutex
-	phase   string
-	pending string
-	emit    func(Log)
-}
-
-func (w *progressWriter) Write(data []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.pending += string(data)
-	for {
-		index := strings.IndexByte(w.pending, '\n')
-		if index < 0 {
-			break
-		}
-		w.line(w.pending[:index])
-		w.pending = w.pending[index+1:]
-	}
-	return len(data), nil
-}
-
-func (w *progressWriter) Flush() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.pending != "" {
-		w.line(w.pending)
-		w.pending = ""
-	}
-}
-
-func (w *progressWriter) Phase() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.phase
-}
-
-func (w *progressWriter) line(line string) {
-	index := strings.Index(line, "] ")
-	if index < 0 {
-		return
-	}
-	message := strings.TrimSpace(line[index+2:])
-	if strings.HasPrefix(message, "phase: ") {
-		w.phase = strings.TrimPrefix(message, "phase: ")
-		return
-	}
-	if message == "" || strings.HasPrefix(message, "agent ") ||
-		strings.HasPrefix(message, "gate ") || strings.HasPrefix(message, "note: ") {
-		return
-	}
-	if w.emit != nil {
-		w.emit(Log{Phase: w.phase, Kind: "log", Message: message, Done: true})
-	}
-}
-
-func followJournal(ctx context.Context, path string, progress *progressWriter, emit func(Log)) {
-	if emit == nil {
-		return
-	}
+func followJournal(ctx context.Context, path string, emit func(Event) error) error {
 	var offset int
-	sequence := 0
-	pending := make(map[string][]Log)
-	read := func() {
+	var sequence int64
+	read := func() error {
 		data, err := os.ReadFile(path)
-		if err != nil || len(data) <= offset {
-			return
+		if err != nil {
+			return err
+		}
+		if len(data) <= offset {
+			return nil
 		}
 		chunk := data[offset:]
 		end := bytes.LastIndexByte(chunk, '\n')
 		if end < 0 {
-			return
+			return nil
 		}
 		offset += end + 1
 		for _, line := range bytes.Split(chunk[:end], []byte{'\n'}) {
-			var event struct {
-				Type, Key, AgentID, Backend, Kind, Error string
-				Result                                   json.RawMessage
+			var event Event
+			if err := json.Unmarshal(line, &event); err != nil {
+				return fmt.Errorf("decode sequence %d: %w", sequence+1, err)
 			}
-			if json.Unmarshal(line, &event) != nil {
-				continue
+			if event.Sequence != sequence+1 || event.Type == "" || event.Workflow == "" {
+				return fmt.Errorf("invalid workflow event after sequence %d", sequence)
 			}
-			log := Log{
-				Kind: event.Kind, Backend: event.Backend, Message: event.AgentID,
-				Result: event.Result, Error: event.Error, Done: event.Type == "result",
+			event.Raw = append(event.Raw, line...)
+			if err := emit(event); err != nil {
+				return err
 			}
-			if event.Type == "started" {
-				sequence++
-				log.Key = event.Key + ":" + strconv.Itoa(sequence)
-				log.Phase = progress.Phase()
-				pending[event.Key] = append(pending[event.Key], log)
-			} else if queued := pending[event.Key]; len(queued) > 0 {
-				log.Key, log.Phase = queued[0].Key, queued[0].Phase
-				pending[event.Key] = queued[1:]
-			} else {
-				log.Key = event.Key
-			}
-			emit(log)
+			sequence = event.Sequence
 		}
+		return nil
 	}
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			read()
-			return
+			return read()
 		case <-ticker.C:
-			read()
+			if err := read(); err != nil {
+				return err
+			}
 		}
 	}
 }

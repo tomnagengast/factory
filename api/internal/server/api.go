@@ -650,7 +650,7 @@ func (s *Server) historyItem(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusNotFound, errors.New("workflow run not found"))
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"run": run, "steps": view.StepsFor(id)})
+	writeJSON(writer, http.StatusOK, map[string]any{"run": run, "events": view.EventsFor(id)})
 }
 
 func messageBody(request *http.Request) (string, error) {

@@ -177,15 +177,17 @@ func TestWorkflowDetailIncludesLiveSource(t *testing.T) {
 	}
 }
 
-func TestWorkflowHistoryListsRunsAndSteps(t *testing.T) {
+func TestWorkflowHistoryListsRunsAndEvents(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
 	started, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
 		TriggerID: 2, WorkflowID: 1, WorkflowName: "review",
 		WorkflowPhases: []string{"Review"}, SourceEventID: 3,
 	})
-	wire.Publish(state.WorkflowRunStepRecorded, state.WorkflowRunStepData{
-		RunID: started.ID, Phase: "Review", Kind: "log", Message: "Inspecting the change", Done: true,
+	wire.Publish(state.WorkflowRunEventRecorded, state.WorkflowRunEventData{
+		RunID: started.ID, Event: json.RawMessage(
+			`{"sequence":1,"at":"2026-07-17T12:00:00Z","type":"log","workflow":"review","phase":"Review","message":"Inspecting the change"}`,
+		),
 	})
 	handler := testServer(t, wire).Handler()
 	list := requestJSON(t, handler, http.MethodGet, "/api/history", "")

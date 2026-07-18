@@ -112,13 +112,15 @@ The loop records progress back on the same wire:
 
 - workflow authoring started, completed, or failed,
 - agent replies as workflow comments,
-- workflow runs and their phase, agent, gate, and log steps,
+- every ordered runtime, phase, log, diagnostic, agent, gate, cache, nested
+  workflow, result, and failure event emitted by a workflow run,
 - workflow runs completed or failed,
 - cron ticks as targeted `cron` events.
 
 The event page therefore shows both user intake and the loop's response.
-The history pages project those run events into live and completed workflow
-runs without a separate log store.
+The history pages project those wire events into live and completed workflow
+runs without a separate log store. Each semantic runtime event remains one
+distinct wire record; the projection never collapses lifecycle pairs.
 
 ## Workflow source and metadata
 

@@ -330,9 +330,12 @@ ID is its `workflow.run.started` event ID.
 | `output` | string or omitted | Final workflow result |
 | `error` | string or omitted | Terminal error |
 
-Run detail includes chronological steps copied from the workflow CLI journal
-and workflow `log()` calls. Each step contains its phase, kind, label or
-message, backend, result or error, and whether it has finished.
+Run detail includes the complete chronological semantic event stream copied
+from the workflow CLI journal. Each event has its Factory wire ID, run ID,
+recorded time, workflow sequence and timestamp, type, and workflow name.
+Depending on the event, it also includes phase, step ID, cache key, agent ID,
+backend, kind, prompt or log message, result, error, tokens, concurrency, and
+budget. Starts, cache hits, completions, and failures remain distinct events.
 
 ```sh
 factory history list

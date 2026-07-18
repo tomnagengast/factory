@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,11 +21,14 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 		"if [ \"$3\" = \"list\" ]; then printf '[{\"name\":\"demo\",\"path\":\"/demo.js\",\"scope\":\"user\",\"description\":\"Demo\",\"phases\":[\"Run\"],\"mutating\":false}]'; " +
 		"else cwd=\"$2\"; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = \"--journal\" ]; then shift; journal=\"$1\"; fi; shift; done; " +
 		"set -- \"$cwd\"/.claude/workflows/~factory-*.js; [ -L \"$1\" ] || exit 9; " +
-		"printf '[workflow:demo] phase: Review\\n[workflow:demo] Checking inputs\\n' >&2; " +
-		"printf '%s\\n' '{\"type\":\"started\",\"key\":\"one\",\"agentId\":\"reviewer\",\"backend\":\"codex\",\"kind\":\"agent\"}' " +
-		"'{\"type\":\"started\",\"key\":\"one\",\"agentId\":\"reviewer\",\"backend\":\"codex\",\"kind\":\"agent\"}' " +
-		"'{\"type\":\"result\",\"key\":\"one\",\"agentId\":\"reviewer\",\"backend\":\"codex\",\"kind\":\"agent\",\"result\":\"done\"}' " +
-		"'{\"type\":\"result\",\"key\":\"one\",\"agentId\":\"reviewer\",\"backend\":\"codex\",\"kind\":\"agent\",\"result\":\"done\"}' > \"$journal\"; " +
+		"printf 'human presentation only\\n' >&2; " +
+		"printf '%s\\n' " +
+		"'{\"sequence\":1,\"at\":\"2026-07-17T12:00:00Z\",\"type\":\"runtime.started\",\"workflow\":\"demo\",\"backend\":\"codex\"}' " +
+		"'{\"sequence\":2,\"at\":\"2026-07-17T12:00:01Z\",\"type\":\"phase.started\",\"workflow\":\"demo\",\"phase\":\"Review\"}' " +
+		"'{\"sequence\":3,\"at\":\"2026-07-17T12:00:02Z\",\"type\":\"log\",\"workflow\":\"demo\",\"phase\":\"Review\",\"message\":\"Checking inputs\"}' " +
+		"'{\"sequence\":4,\"at\":\"2026-07-17T12:00:03Z\",\"type\":\"step.started\",\"workflow\":\"demo\",\"phase\":\"Review\",\"stepId\":1,\"key\":\"one\",\"agentId\":\"reviewer\",\"backend\":\"codex\",\"kind\":\"agent\",\"message\":\"Review it\"}' " +
+		"'{\"sequence\":5,\"at\":\"2026-07-17T12:00:04Z\",\"type\":\"step.completed\",\"workflow\":\"demo\",\"phase\":\"Review\",\"stepId\":1,\"key\":\"one\",\"agentId\":\"reviewer\",\"backend\":\"codex\",\"kind\":\"agent\",\"result\":\"done\"}' " +
+		"'{\"sequence\":6,\"at\":\"2026-07-17T12:00:05Z\",\"type\":\"runtime.completed\",\"workflow\":\"demo\",\"phase\":\"Review\",\"result\":\"complete\",\"extension\":{\"kept\":true}}' > \"$journal\"; " +
 		"printf 'complete'; fi\n"
 	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -50,19 +54,28 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 		{Harness: state.Codex, Model: "gpt-5.6-sol", Reasoning: "high"},
 		{Harness: state.Claude, Model: "sonnet", Reasoning: "medium"},
 	} {
-		var logs []Log
+		var events []Event
 		output, err := cli.Run(context.Background(), project, "demo", source, settings, map[string]int{"id": 1},
-			func(log Log) { logs = append(logs, log) })
+			func(event Event) error {
+				events = append(events, event)
+				return nil
+			})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if output != "complete" {
 			t.Fatalf("unexpected output: %q", output)
 		}
-		if len(logs) != 5 || logs[0].Kind != "log" || logs[0].Phase != "Review" ||
-			logs[1].Done || logs[2].Done || !logs[3].Done ||
-			logs[1].Key == logs[2].Key || string(logs[3].Result) != `"done"` {
-			t.Fatalf("unexpected workflow logs: %#v", logs)
+		if len(events) != 6 || events[0].Type != "runtime.started" ||
+			events[2].Message != "Checking inputs" || events[3].StepID != 1 ||
+			string(events[4].Result) != `"done"` || events[5].Type != "runtime.completed" ||
+			!strings.Contains(string(events[5].Raw), `"extension":{"kept":true}`) {
+			t.Fatalf("unexpected workflow events: %#v", events)
+		}
+		for index, event := range events {
+			if event.Sequence != int64(index+1) || len(event.Raw) == 0 {
+				t.Fatalf("event %d was not forwarded losslessly: %#v", index, event)
+			}
 		}
 		if entries, err := os.ReadDir(filepath.Join(project, ".claude", "workflows")); err != nil || len(entries) != 0 {
 			t.Fatalf("temporary project workflows remain: %#v, %v", entries, err)
@@ -82,5 +95,30 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 	}
 	if got := cli.LocalPath(42); !strings.HasSuffix(got, "workflow-42.js") {
 		t.Fatalf("unexpected local path: %s", got)
+	}
+}
+
+func TestCLICancelsWorkflowWhenEventCannotBeRecorded(t *testing.T) {
+	directory := t.TempDir()
+	command := filepath.Join(directory, "workflow")
+	script := "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do if [ \"$1\" = \"--journal\" ]; then shift; journal=\"$1\"; fi; shift; done\n" +
+		"printf '%s\\n' '{\"sequence\":1,\"at\":\"2026-07-17T12:00:00Z\",\"type\":\"runtime.started\",\"workflow\":\"demo\"}' > \"$journal\"\n" +
+		"while :; do :; done\n"
+	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cli := CLI{
+		Command: command, Workspace: directory,
+		CodexCommand: "codex", ClaudeCommand: "claude",
+	}
+	if err := cli.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := cli.Run(
+		context.Background(), "", "demo", "", state.DefaultSettings, nil,
+		func(Event) error { return errors.New("wire unavailable") },
+	)
+	if err == nil || !strings.Contains(err.Error(), "wire unavailable") {
+		t.Fatalf("run error = %v", err)
 	}
 }

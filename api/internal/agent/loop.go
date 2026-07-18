@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -168,8 +167,6 @@ func (l *Loop) runTrigger(
 		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
 		return err
 	}
-	var logMu sync.Mutex
-	var logErr error
 	output, runErr := l.workflows.Run(
 		ctx,
 		directory,
@@ -177,27 +174,16 @@ func (l *Loop) runTrigger(
 		stringValue(selected.Path),
 		view.Settings,
 		map[string]any{"event": source, "trigger": trigger},
-		func(log workflow.Log) {
-			logMu.Lock()
-			defer logMu.Unlock()
-			if logErr != nil {
-				return
-			}
-			_, logErr = l.wire.Publish(state.WorkflowRunStepRecorded, state.WorkflowRunStepData{
-				RunID: started.ID, Key: log.Key, Phase: log.Phase, Kind: log.Kind,
-				Backend: log.Backend, Message: log.Message, Result: log.Result,
-				Error: log.Error, Done: log.Done,
+		func(event workflow.Event) error {
+			_, err := l.wire.Publish(state.WorkflowRunEventRecorded, state.WorkflowRunEventData{
+				RunID: started.ID, Event: event.Raw,
 			})
+			return err
 		},
 	)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	logMu.Lock()
-	if runErr == nil {
-		runErr = logErr
-	}
-	logMu.Unlock()
 	run.Output = output
 	if runErr != nil {
 		run.Error = runErr.Error()

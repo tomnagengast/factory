@@ -42,18 +42,25 @@ func (f *fakeWorkflows) Run(
 	directory, name, source string,
 	settings state.Settings,
 	_ any,
-	emit func(workflow.Log),
+	emit func(workflow.Event) error,
 ) (string, error) {
 	f.runs = append(f.runs, struct {
 		directory, name, source string
 		settings                state.Settings
 	}{directory, name, source, settings})
 	if emit != nil {
-		emit(workflow.Log{Key: "review", Phase: "Review", Kind: "agent", Backend: settings.Harness, Message: "reviewer"})
-		emit(workflow.Log{
-			Key: "review", Phase: "Review", Kind: "agent", Backend: settings.Harness,
-			Message: "reviewer", Result: json.RawMessage(`"approved"`), Done: true,
-		})
+		events := []string{
+			`{"sequence":1,"at":"2026-07-17T12:00:00Z","type":"step.started","workflow":"review","phase":"Review","stepId":1,"kind":"agent","message":"Review it"}`,
+			`{"sequence":2,"at":"2026-07-17T12:00:01Z","type":"step.completed","workflow":"review","phase":"Review","stepId":1,"kind":"agent","result":"approved","extension":{"kept":true}}`,
+		}
+		for _, raw := range events {
+			var event workflow.Event
+			json.Unmarshal([]byte(raw), &event)
+			event.Raw = json.RawMessage(raw)
+			if err := emit(event); err != nil {
+				return "", err
+			}
+		}
 	}
 	return "complete", nil
 }
@@ -139,9 +146,22 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	if len(view.Runs) != 1 || view.Runs[0].Status != "completed" || view.Runs[0].WorkflowName != "review" {
 		t.Fatalf("run history missing: %#v", view.Runs)
 	}
-	steps := view.StepsFor(view.Runs[0].ID)
-	if len(steps) != 1 || !steps[0].Done || string(steps[0].Result) != `"approved"` {
-		t.Fatalf("run steps missing: %#v", steps)
+	events := view.EventsFor(view.Runs[0].ID)
+	if len(events) != 2 || events[0].Type != "step.started" ||
+		string(events[1].Result) != `"approved"` {
+		t.Fatalf("run events missing: %#v", events)
+	}
+	var recorded int
+	for _, event := range wire.Events(0) {
+		if event.Type == state.WorkflowRunEventRecorded {
+			recorded++
+			if recorded == 2 && !strings.Contains(string(event.Data), `"extension":{"kept":true}`) {
+				t.Fatalf("workflow event was filtered: %s", event.Data)
+			}
+		}
+	}
+	if recorded != 2 {
+		t.Fatalf("recorded workflow events = %d, want 2", recorded)
 	}
 }
 

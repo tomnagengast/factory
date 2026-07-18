@@ -76,19 +76,26 @@ export type WorkflowRun = {
   error?: string;
 };
 
-export type WorkflowRunStep = {
+export type WorkflowRunEvent = {
   id: number;
   runId: number;
-  createdAt: string;
-  updatedAt: string;
+  recordedAt: string;
+  sequence: number;
+  at: string;
+  type: string;
+  workflow: string;
+  stepId?: number;
   key?: string;
   phase?: string;
-  kind: string;
+  agentId?: string;
   backend?: string;
-  message: string;
+  kind?: string;
+  message?: string;
   result?: unknown;
   error?: string;
-  done: boolean;
+  tokens?: number;
+  concurrency?: number;
+  budget?: number;
 };
 
 export type Health = {
@@ -121,7 +128,7 @@ export type HarnessOption = {
 };
 
 export type SettingsDetail = { settings: Settings; harnesses: HarnessOption[] };
-export type HistoryDetail = { run: WorkflowRun; steps: WorkflowRunStep[] };
+export type HistoryDetail = { run: WorkflowRun; events: WorkflowRunEvent[] };
 export type ProjectDetail = { project: Project; tasks: Task[] };
 export type TaskDetail = { task: Task; comments: Comment[]; artifacts: Artifact[] };
 export type CommentDetail = { comment: Comment; replies: Comment[]; artifacts: Artifact[] };

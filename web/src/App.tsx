@@ -824,7 +824,7 @@ function EventView() {
 
 function History() {
   const [data, { refetch }] = createResource(() => get<{ history: WorkflowRun[] }>("/api/history"));
-  liveRefetch(["workflow.run.started", "workflow.run.completed", "workflow.run.failed"], refetch);
+  liveRefetch(["workflow.run.started", "workflow.run.event", "workflow.run.completed", "workflow.run.failed"], refetch);
   return (
     <div class="page">
       <PageHeader title="Workflow history"
@@ -849,7 +849,7 @@ function History() {
 function HistoryView() {
   const params = useParams();
   const [data, { refetch }] = createResource(() => get<HistoryDetail>(`/api/history/${params.item}`));
-  liveRefetch(["workflow.run.step", "workflow.run.completed", "workflow.run.failed"], refetch);
+  liveRefetch(["workflow.run.event", "workflow.run.completed", "workflow.run.failed"], refetch);
   return (
     <div class="page">
       <Load data={data} error={() => data.error}>
@@ -869,23 +869,24 @@ function HistoryView() {
               <time>Updated {date(current().run.updatedAt)}</time>
             </div>
             <Show when={phaseGroups(current()).length} fallback={<Empty>
-              {current().run.status === "running" ? "Waiting for the first workflow step…" : "No step logs were recorded for this run."}
+              {current().run.status === "running" ? "Waiting for the first workflow event…" : "No workflow events were recorded for this run."}
             </Empty>}>
               <div class="run-phases">
-                <For each={phaseGroups(current())}>{([phase, steps]) => <section class="run-phase">
-                  <header><h2>{phase}</h2><span>{steps.length} {steps.length === 1 ? "step" : "steps"}</span></header>
-                  <div class="run-steps">
-                    <For each={steps}>{(step) => <article classList={{ "run-step": true, pending: !step.done }}>
+                <For each={phaseGroups(current())}>{([phase, events]) => <section class="run-phase">
+                  <header><h2>{phase}</h2><span>{events.length} {events.length === 1 ? "event" : "events"}</span></header>
+                  <div class="run-events">
+                    <For each={events}>{(event) => <article class="run-event">
                       <header>
-                        <span class="artifact-type">{step.kind}</span>
-                        <strong>{step.message || step.kind}</strong>
-                        <Show when={step.backend}><span>{step.backend}</span></Show>
-                        <time>{date(step.createdAt)}</time>
+                        <span class="artifact-type">{event.type}</span>
+                        <strong>{workflowEventTitle(event)}</strong>
+                        <Show when={event.backend}><span>{event.backend}</span></Show>
+                        <span>seq {event.sequence}</span>
+                        <time>{date(event.at)}</time>
                       </header>
-                      <Show when={step.done} fallback={<p class="step-pending">Running…</p>}>
-                        <Show when={step.error}><pre class="step-error">{step.error}</pre></Show>
-                        <Show when={step.result != null}><pre>{formatResult(step.result)}</pre></Show>
-                      </Show>
+                      <Show when={workflowEventMeta(event)}>{(meta) => <p class="run-event-meta">{meta()}</p>}</Show>
+                      <Show when={event.message}><pre>{event.message}</pre></Show>
+                      <Show when={event.error}><pre class="step-error">{event.error}</pre></Show>
+                      <Show when={event.result != null}><pre>{formatResult(event.result)}</pre></Show>
                     </article>}</For>
                   </div>
                 </section>}</For>
@@ -1210,17 +1211,34 @@ function fileName(path: string | undefined) {
 }
 
 function phaseGroups(detail: HistoryDetail) {
-  const groups = new Map<string, HistoryDetail["steps"]>();
-  for (const step of detail.steps) {
-    const phase = step.phase || "Run";
-    groups.set(phase, [...(groups.get(phase) ?? []), step]);
+  const groups: Array<[string, HistoryDetail["events"]]> = [];
+  for (const event of detail.events) {
+    const phase = event.phase || "Run";
+    const group = groups.at(-1);
+    if (group?.[0] === phase) group[1].push(event);
+    else groups.push([phase, [event]]);
   }
-  const order = [...detail.run.workflowPhases, "Run"];
-  return [...groups.entries()].sort(([left], [right]) => {
-    const leftIndex = order.indexOf(left);
-    const rightIndex = order.indexOf(right);
-    return (leftIndex < 0 ? order.length : leftIndex) - (rightIndex < 0 ? order.length : rightIndex);
-  });
+  return groups;
+}
+
+function workflowEventTitle(event: HistoryDetail["events"][number]) {
+  if (event.type === "phase.started") return `Entered ${event.phase || "phase"}`;
+  if (event.type === "log") return "Workflow log";
+  if (event.type === "diagnostic") return "Runtime diagnostic";
+  if (event.type.startsWith("runtime.")) return event.type.replace(".", " ");
+  const name = event.agentId || event.kind || "Step";
+  return `${name} ${event.type.replace("step.", "")}`;
+}
+
+function workflowEventMeta(event: HistoryDetail["events"][number]) {
+  return [
+    event.workflow,
+    event.kind,
+    event.stepId ? `step ${event.stepId}` : "",
+    event.tokens != null ? `${event.tokens} tokens` : "",
+    event.concurrency ? `concurrency ${event.concurrency}` : "",
+    event.type === "runtime.started" ? `budget ${event.budget ?? "unlimited"}` : "",
+  ].filter(Boolean).join(" · ");
 }
 
 function formatResult(value: unknown) {

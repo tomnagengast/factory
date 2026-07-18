@@ -77,13 +77,15 @@ func TestRunAndCronMarkersAreProjected(t *testing.T) {
 			TriggerID: 8, WorkflowID: 7, WorkflowName: "review",
 			WorkflowPhases: []string{"Review"}, SourceEventID: 1,
 		}),
-		event(3, WorkflowRunStepRecorded, at.Add(time.Second), WorkflowRunStepData{
-			RunID: 2, Key: "reviewer", Phase: "Review", Kind: "agent",
-			Backend: Codex, Message: "reviewer",
+		event(3, WorkflowRunEventRecorded, at.Add(time.Second), WorkflowRunEventData{
+			RunID: 2, Event: json.RawMessage(
+				`{"sequence":1,"at":"2026-07-17T12:00:01Z","type":"step.started","workflow":"review","phase":"Review","stepId":1,"kind":"agent","message":"Review it"}`,
+			),
 		}),
-		event(4, WorkflowRunStepRecorded, at.Add(2*time.Second), WorkflowRunStepData{
-			RunID: 2, Key: "reviewer", Phase: "Review", Kind: "agent",
-			Backend: Codex, Message: "reviewer", Result: json.RawMessage(`"done"`), Done: true,
+		event(4, WorkflowRunEventRecorded, at.Add(2*time.Second), WorkflowRunEventData{
+			RunID: 2, Event: json.RawMessage(
+				`{"sequence":2,"at":"2026-07-17T12:00:02Z","type":"step.completed","workflow":"review","phase":"Review","stepId":1,"kind":"agent","result":"done"}`,
+			),
 		}),
 		event(5, WorkflowRunCompleted, at.Add(3*time.Second), WorkflowRunData{
 			TriggerID: 8, WorkflowID: 7, SourceEventID: 1, Output: "complete",
@@ -102,9 +104,10 @@ func TestRunAndCronMarkersAreProjected(t *testing.T) {
 	if len(view.Runs) != 1 || view.Runs[0].Status != "completed" || view.Runs[0].Output != "complete" {
 		t.Fatalf("run missing: %#v", view.Runs)
 	}
-	steps := view.StepsFor(2)
-	if len(steps) != 1 || !steps[0].Done || string(steps[0].Result) != `"done"` {
-		t.Fatalf("run steps missing: %#v", steps)
+	runEvents := view.EventsFor(2)
+	if len(runEvents) != 2 || runEvents[0].Type != "step.started" ||
+		runEvents[1].Sequence != 2 || string(runEvents[1].Result) != `"done"` {
+		t.Fatalf("run events missing: %#v", runEvents)
 	}
 }
 

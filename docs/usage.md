@@ -73,7 +73,8 @@ claude --version
 ```
 
 Only the selected harness needs to be installed. Factory depends on its
-current automation flags. Confirm `codex exec --help` or `claude --help`
+current automation flags and the semantic journal in `workflow` 0.0.2 or
+newer. Confirm `codex exec --help` or `claude --help`
 includes the model, reasoning or effort, and unrestricted execution options
 documented in [workflows.md](workflows.md).
 
@@ -273,6 +274,10 @@ sequential loop together.
 Restarting with the same `-data` and `-workflow-workspace` values preserves
 resources, comments, events, triggers, workflow run history, and generated
 workflow files.
+
+Every semantic workflow event is part of the same durable wire. Restarting
+does not depend on temporary journal files or terminal logs to rebuild run
+history.
 
 To begin with empty state, stop Factory and move both paths aside:
 
