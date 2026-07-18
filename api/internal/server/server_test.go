@@ -269,10 +269,18 @@ func TestSolidAppFallbackAndAssets(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
 	handler := testServer(t, wire).Handler()
-	for _, path := range []string{"/", "/tasks/12", "/assets/app-a1.js", "/assets/styles-b2.css"} {
+	for path, cacheControl := range map[string]string{
+		"/":                     "no-cache, must-revalidate",
+		"/tasks/12":             "no-cache, must-revalidate",
+		"/assets/app-a1.js":     "public, max-age=31536000, immutable",
+		"/assets/styles-b2.css": "public, max-age=31536000, immutable",
+	} {
 		response := requestJSON(t, handler, http.MethodGet, path, "")
 		if response.Code != http.StatusOK {
 			t.Fatalf("%s status = %d, body = %s", path, response.Code, response.Body)
+		}
+		if response.Header().Get("Cache-Control") != cacheControl {
+			t.Fatalf("%s cache control = %q", path, response.Header().Get("Cache-Control"))
 		}
 	}
 }

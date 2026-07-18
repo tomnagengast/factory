@@ -87,7 +87,9 @@ bun install --cwd web --frozen-lockfile
 bun run --cwd web typecheck
 bun run --cwd web build
 
-mkdir -p api/dist/assets
+rm -rf api/dist
+mkdir -p api/dist
+touch api/dist/.keep
 cp -R web/dist/. api/dist/
 
 go build -o factory-api ./api
@@ -321,10 +323,15 @@ and the event wire records `workflow.authoring.failed`.
 
 ### The browser shows an older UI
 
-Rebuild and re-embed the web bundle, then rebuild `factory-api`:
+HTML routes revalidate on every navigation, while fingerprinted JavaScript and
+CSS remain immutable. Rebuild into a clean embed directory, then rebuild
+`factory-api`:
 
 ```sh
 bun run --cwd web build
+rm -rf api/dist
+mkdir -p api/dist
+touch api/dist/.keep
 cp -R web/dist/. api/dist/
 go build -o factory-api ./api
 ```

@@ -70,7 +70,9 @@
   bun install --cwd web --frozen-lockfile
   bun run --cwd web typecheck
   bun run --cwd web build
-  mkdir -p api/dist/assets
+  rm -rf api/dist
+  mkdir -p api/dist
+  touch api/dist/.keep
   cp -R web/dist/. api/dist/
   go test ./...
   go test -race ./...

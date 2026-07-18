@@ -124,6 +124,11 @@ func (s *Server) asset(path, contentType string) http.HandlerFunc {
 			writeError(writer, http.StatusInternalServerError, errors.New("frontend asset is unavailable"))
 			return
 		}
+		cacheControl := "public, max-age=31536000, immutable"
+		if path == "index.html" {
+			cacheControl = "no-cache, must-revalidate"
+		}
+		writer.Header().Set("Cache-Control", cacheControl)
 		writer.Header().Set("Content-Type", contentType)
 		_, _ = writer.Write(data)
 	}
