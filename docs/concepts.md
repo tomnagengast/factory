@@ -137,6 +137,11 @@ The history pages project those wire events into live and completed workflow
 runs without a separate log store. Each semantic runtime event remains one
 distinct wire record; the projection never collapses lifecycle pairs.
 
+Graceful shutdown records active runs as failed after canceling their
+processes. At startup, the coordinator also closes any projected `running`
+run that lacks a terminal event. This keeps history honest after a crash or
+process replacement without rewriting the wire.
+
 ## Workflow source and metadata
 
 The wire stores workflow metadata and conversation events. Workflow source is
@@ -165,6 +170,11 @@ A trigger connects an event type to a workflow. It runs only for matching
 events received after the trigger's most recent update. Creating a trigger
 does not replay older matching events.
 
+A workflow never matches its own `workflow.run.completed` or
+`workflow.run.failed` event. Other workflows can still consume those terminal
+events. This coordinator safety rule prevents terminal-event triggers from
+recursively dispatching themselves.
+
 The run receives:
 
 ```json
@@ -187,6 +197,10 @@ The run receives:
 
 Cron uses the same path. A due schedule appends a targeted `cron` event, and
 the normal event-trigger logic runs its workflow.
+
+Every triggered workflow receives the current server as `$FACTORY_URL` and
+the absolute resource client path as `$FACTORY_CLI`. The workflow CLI and the
+agents it starts inherit both values.
 
 For `task.created`, `task.updated`, and `task.deleted`, Factory resolves the
 task and its required project before running the workflow. The workflow CLI

@@ -360,7 +360,7 @@ ID is its `workflow.run.started` event ID.
 | `workflowName` | string | Name captured when the run started |
 | `workflowPhases` | string array | Phases captured when the run started |
 | `sourceEventId` | integer | Event matched by the trigger |
-| `status` | string | `running`, `completed`, or `failed` |
+| `status` | string | `running`, `completed`, or `failed`; interrupted runs become `failed` |
 | `output` | string or omitted | Final workflow result |
 | `error` | string or omitted | Terminal error |
 
@@ -370,6 +370,8 @@ recorded time, workflow sequence and timestamp, type, and workflow name.
 Depending on the event, it also includes phase, step ID, cache key, agent ID,
 backend, kind, prompt or log message, result, error, tokens, concurrency, and
 budget. Starts, cache hits, completions, and failures remain distinct events.
+Graceful shutdown closes canceled runs as failed. On startup, Factory appends
+a failure for any prior run still projected as `running`.
 
 ```sh
 factory history list

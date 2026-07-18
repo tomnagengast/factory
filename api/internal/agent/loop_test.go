@@ -211,6 +211,81 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	}
 }
 
+func TestLoopSkipsAWorkflowOwnTerminalEvents(t *testing.T) {
+	for _, eventType := range []string{state.WorkflowRunCompleted, state.WorkflowRunFailed} {
+		t.Run(eventType, func(t *testing.T) {
+			wire := openWire(t)
+			defer wire.Close()
+			summary, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "summary"})
+			other, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "other"})
+			trigger, _ := wire.Publish(state.TriggerCreated, state.TriggerData{
+				EventType: eventType, WorkflowID: summary.ID,
+			})
+			wire.Publish(eventType, state.WorkflowRunData{
+				TriggerID: 10, WorkflowID: summary.ID, SourceEventID: 11,
+			})
+
+			events := wire.Events(0)
+			view, err := state.ProjectEvents(events)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, found := pendingTrigger(view, events); found {
+				t.Fatal("workflow matched its own terminal event")
+			}
+
+			source, _ := wire.Publish(eventType, state.WorkflowRunData{
+				TriggerID: 20, WorkflowID: other.ID, SourceEventID: 21,
+			})
+			events = wire.Events(0)
+			view, err = state.ProjectEvents(events)
+			if err != nil {
+				t.Fatal(err)
+			}
+			selected, matched, found := pendingTrigger(view, events)
+			if !found || selected.ID != trigger.ID || matched.ID != source.ID {
+				t.Fatalf("other workflow terminal event did not match: %#v, %#v, %v", selected, matched, found)
+			}
+		})
+	}
+}
+
+func TestLoopRecoversInterruptedRuns(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{
+		Name: "review", Phases: []string{"Review"},
+	})
+	triggerEvent, _ := wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: "release.ready", WorkflowID: workflowEvent.ID,
+	})
+	source, _ := wire.Publish("release.ready", map[string]string{"version": "1.0"})
+	started, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: triggerEvent.ID, WorkflowID: workflowEvent.ID,
+		WorkflowName: "review", WorkflowPhases: []string{"Review"}, SourceEventID: source.ID,
+	})
+
+	loop, _ := NewLoop(wire, &fakeAgent{}, newFakeWorkflows())
+	if err := loop.recoverInterruptedRuns(); err != nil {
+		t.Fatal(err)
+	}
+	view, err := state.ProjectEvents(wire.Events(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, found := view.Run(started.ID)
+	if !found || run.Status != "failed" || run.Error != interruptedRun {
+		t.Fatalf("interrupted run was not recovered: %#v, %v", run, found)
+	}
+	eventCount := len(wire.Events(0))
+	if err := loop.recoverInterruptedRuns(); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire.Events(0)) != eventCount {
+		t.Fatal("interrupted run recovery was not idempotent")
+	}
+}
+
 func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 	for _, eventType := range []string{state.TaskCreated, state.TaskUpdated, state.TaskDeleted} {
 		t.Run(eventType, func(t *testing.T) {
@@ -388,6 +463,18 @@ func TestLoopRunCancelsAndWaitsForActiveWorkflows(t *testing.T) {
 	waitForSignal(t, workflows.finished, "second canceled workflow")
 	if runs, _ := workflows.snapshot(); runs != 2 {
 		t.Fatalf("runs = %d, want two active workflows only", runs)
+	}
+	view, err := state.ProjectEvents(wire.Events(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Runs) != 2 {
+		t.Fatalf("run history = %#v", view.Runs)
+	}
+	for _, run := range view.Runs {
+		if run.Status != "failed" || !strings.Contains(run.Error, "workflow canceled before completion") {
+			t.Fatalf("canceled workflow remained active: %#v", run)
+		}
 	}
 }
 

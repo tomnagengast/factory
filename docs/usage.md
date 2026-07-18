@@ -270,7 +270,7 @@ The defaults are:
 | Workflow workspace | `~/.local/share/factory/workflow-workspace` |
 | Codex executable | `codex` |
 | Claude Code executable | `claude` |
-| Factory CLI exposed to the authoring harness | `./factory` |
+| Factory CLI exposed to workflow agents | `./factory` |
 | Workflow executable | `workflow` |
 
 Example with isolated state and a different port:
@@ -296,11 +296,14 @@ executables:
 ## Stopping, restarting, and preserving data
 
 Press `Ctrl-C` in the server terminal. Factory stops the HTTP server,
-coordinator, and active workflow processes together.
+coordinator, and active workflow processes together. Canceled workflow runs
+are recorded as failed before shutdown completes.
 
 Restarting with the same `-data` and `-workflow-workspace` values preserves
 resources, comments, events, triggers, workflow run history, and generated
-workflow files.
+workflow files. Startup appends a failure event for any earlier run still
+projected as `running`, such as a process interrupted by a crash or service
+replacement.
 
 Every semantic workflow event is part of the same durable wire. Restarting
 does not depend on temporary journal files or terminal logs to rebuild run

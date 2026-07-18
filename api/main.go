@@ -85,7 +85,7 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 	)
 	flags.StringVar(&configuration.CodexCommand, "codex", "codex", "Codex executable")
 	flags.StringVar(&configuration.ClaudeCommand, "claude", "claude", "Claude Code executable")
-	flags.StringVar(&configuration.FactoryCommand, "factory", "./factory", "Factory CLI exposed to the authoring harness")
+	flags.StringVar(&configuration.FactoryCommand, "factory", "./factory", "Factory CLI exposed to workflows")
 	flags.StringVar(&configuration.WorkflowCommand, "workflow", "workflow", "workflow CLI executable")
 	flags.Usage = func() {
 		fmt.Fprintln(output, "Factory serves the event wire, resource API, Solid UI, and workflow coordinator.")
@@ -119,6 +119,7 @@ func run(ctx context.Context, configuration config) error {
 	workflowCLI := workflow.CLI{
 		Command: configuration.WorkflowCommand, Workspace: configuration.WorkflowWorkspace,
 		CodexCommand: configuration.CodexCommand, ClaudeCommand: configuration.ClaudeCommand,
+		FactoryCommand: configuration.FactoryCommand, FactoryURL: "http://" + configuration.Address,
 	}
 	if err := workflowCLI.Prepare(); err != nil {
 		return err

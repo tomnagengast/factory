@@ -16,11 +16,13 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 	project := filepath.Join(directory, "project")
 	source := filepath.Join(directory, "demo.js")
 	logPath := filepath.Join(directory, "args")
+	envPath := filepath.Join(directory, "env")
 	command := filepath.Join(directory, "workflow")
 	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + logPath + "\n" +
 		"if [ \"$3\" = \"list\" ]; then printf '[{\"name\":\"demo\",\"path\":\"/demo.js\",\"scope\":\"user\",\"description\":\"Demo\",\"phases\":[\"Run\"],\"mutating\":false}]'; " +
 		"else cwd=\"$2\"; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = \"--journal\" ]; then shift; journal=\"$1\"; fi; shift; done; " +
 		"set -- \"$cwd\"/.claude/workflows/~factory-*.js; [ -L \"$1\" ] || exit 9; " +
+		"printf '%s\\n%s\\n' \"$FACTORY_CLI\" \"$FACTORY_URL\" > " + envPath + "; " +
 		"printf 'human presentation only\\n' >&2; " +
 		"printf '%s\\n' " +
 		"'{\"sequence\":1,\"at\":\"2026-07-17T12:00:00Z\",\"type\":\"runtime.started\",\"workflow\":\"demo\",\"backend\":\"codex\"}' " +
@@ -39,6 +41,7 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 	cli := CLI{
 		Command: command, Workspace: directory,
 		CodexCommand: "custom-codex", ClaudeCommand: "custom-claude",
+		FactoryCommand: filepath.Join(directory, "factory"), FactoryURL: "http://127.0.0.1:8092",
 	}
 	if err := cli.Prepare(); err != nil {
 		t.Fatal(err)
@@ -92,6 +95,13 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 				t.Fatalf("%q missing from args: %s", expected, args)
 			}
 		}
+		environment, err := os.ReadFile(envPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(environment) != filepath.Join(directory, "factory")+"\nhttp://127.0.0.1:8092\n" {
+			t.Fatalf("unexpected Factory environment: %s", environment)
+		}
 	}
 	if got := cli.LocalPath(42); !strings.HasSuffix(got, "workflow-42.js") {
 		t.Fatalf("unexpected local path: %s", got)
@@ -110,6 +120,7 @@ func TestCLICancelsWorkflowWhenEventCannotBeRecorded(t *testing.T) {
 	cli := CLI{
 		Command: command, Workspace: directory,
 		CodexCommand: "codex", ClaudeCommand: "claude",
+		FactoryCommand: filepath.Join(directory, "factory"), FactoryURL: "http://127.0.0.1:8092",
 	}
 	if err := cli.Prepare(); err != nil {
 		t.Fatal(err)

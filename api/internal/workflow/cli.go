@@ -52,15 +52,18 @@ type Runner interface {
 }
 
 type CLI struct {
-	Command       string
-	Workspace     string
-	CodexCommand  string
-	ClaudeCommand string
+	Command        string
+	Workspace      string
+	CodexCommand   string
+	ClaudeCommand  string
+	FactoryCommand string
+	FactoryURL     string
 }
 
 func (c CLI) Prepare() error {
-	if c.Command == "" || c.Workspace == "" || c.CodexCommand == "" || c.ClaudeCommand == "" {
-		return errors.New("workflow command, workspace, and agent commands are required")
+	if c.Command == "" || c.Workspace == "" || c.CodexCommand == "" || c.ClaudeCommand == "" ||
+		c.FactoryCommand == "" || c.FactoryURL == "" {
+		return errors.New("workflow command, workspace, agent commands, Factory CLI, and URL are required")
 	}
 	return os.MkdirAll(filepath.Join(c.Workspace, ".claude", "workflows"), 0o777)
 }
@@ -147,6 +150,11 @@ func (c CLI) Run(
 	commandContext, cancelCommand := context.WithCancel(ctx)
 	defer cancelCommand()
 	command := exec.CommandContext(commandContext, c.Command, commandArgs...)
+	factory, err := filepath.Abs(c.FactoryCommand)
+	if err != nil {
+		return "", fmt.Errorf("resolve Factory CLI: %w", err)
+	}
+	command.Env = append(os.Environ(), "FACTORY_CLI="+factory, "FACTORY_URL="+c.FactoryURL)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	followContext, stopFollowing := context.WithCancel(ctx)

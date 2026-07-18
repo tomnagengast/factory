@@ -186,7 +186,9 @@ For Codex it adds `--codex-yolo` and passes
 `model_reasoning_effort="<selected-reasoning>"` through `--codex-arg`. For
 Claude Code it adds `--claude-yolo` and passes
 `--effort <selected-reasoning>` through `--claude-arg`. Factory also supplies
-the executable path configured by `-codex` or `-claude`.
+the executable path configured by `-codex` or `-claude`. It exports the
+current server as `$FACTORY_URL` and the absolute resource client path as
+`$FACTORY_CLI` to the workflow CLI and every agent it starts.
 
 The workflow receives `args.event` and `args.trigger`. Run progress is
 recorded on the event wire:
@@ -224,6 +226,11 @@ if (args.event.type === 'task.updated' && args.event.data.status !== 'todo') {
   return 'Ignored task outside todo.'
 }
 ```
+
+The only built-in content condition is terminal self-trigger suppression. A
+workflow does not match its own `workflow.run.completed` or
+`workflow.run.failed` event, which prevents a terminal-event trigger from
+recursively starting the same workflow.
 
 Deleted tasks remain in the projection, so Factory can still resolve the
 project path for cleanup workflows triggered by `task.deleted`. Other event
@@ -271,6 +278,9 @@ Failures remain observable:
 
 - authoring errors become `workflow.authoring.failed` and an agent reply,
 - run errors become `workflow.run.failed`,
+- canceled runs become `workflow.run.failed` during graceful shutdown,
+- startup appends `workflow.run.failed` for a prior run left `running`
+  without a terminal event,
 - the history detail and event detail contain the recorded error,
 - the server terminal contains process-level diagnostics.
 

@@ -21,6 +21,7 @@ const (
 	authoringStarted   = "workflow.authoring.started"
 	authoringCompleted = "workflow.authoring.completed"
 	authoringFailed    = "workflow.authoring.failed"
+	interruptedRun     = "workflow interrupted by Factory restart before a terminal event was recorded"
 )
 
 type Loop struct {
@@ -49,6 +50,9 @@ func (l *Loop) Run(ctx context.Context) error {
 	if err := l.syncWorkflows(runContext); err != nil {
 		return err
 	}
+	if err := l.recoverInterruptedRuns(); err != nil {
+		return err
+	}
 	for {
 		after := l.wire.LastID()
 		worked, nextCron, err := l.step(runContext)
@@ -64,6 +68,26 @@ func (l *Loop) Run(ctx context.Context) error {
 			return l.stop(err)
 		}
 	}
+}
+
+func (l *Loop) recoverInterruptedRuns() error {
+	view, err := state.ProjectEvents(l.wire.Events(0))
+	if err != nil {
+		return err
+	}
+	for _, run := range view.Runs {
+		if run.Status != "running" {
+			continue
+		}
+		if _, err := l.wire.Publish(state.WorkflowRunFailed, state.WorkflowRunData{
+			TriggerID: run.TriggerID, WorkflowID: run.WorkflowID,
+			WorkflowName: run.WorkflowName, WorkflowPhases: slices.Clone(run.WorkflowPhases),
+			SourceEventID: run.SourceEventID, Output: run.Output, Error: interruptedRun,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (l *Loop) step(ctx context.Context) (bool, time.Time, error) {
@@ -262,10 +286,14 @@ func (l *Loop) executeTrigger(
 			return err
 		},
 	)
+	run.Output = output
 	if ctx.Err() != nil {
+		run.Error = "workflow canceled before completion: " + ctx.Err().Error()
+		if _, err := l.wire.Publish(state.WorkflowRunFailed, run); err != nil {
+			return err
+		}
 		return ctx.Err()
 	}
-	run.Output = output
 	if runErr != nil {
 		run.Error = runErr.Error()
 		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
@@ -342,6 +370,9 @@ func pendingTrigger(view state.Snapshot, events []eventwire.Event) (state.Trigge
 			if trigger.DeletedAt != nil || trigger.EventType != event.Type || !event.At.After(trigger.UpdatedAt) {
 				continue
 			}
+			if workflowID, found := terminalWorkflow(event); found && workflowID == trigger.WorkflowID {
+				continue
+			}
 			if event.Type == state.CronFired {
 				var cronEvent state.CronData
 				if json.Unmarshal(event.Data, &cronEvent) != nil || cronEvent.TriggerID != trigger.ID {
@@ -354,6 +385,17 @@ func pendingTrigger(view state.Snapshot, events []eventwire.Event) (state.Trigge
 		}
 	}
 	return state.Trigger{}, eventwire.Event{}, false
+}
+
+func terminalWorkflow(event eventwire.Event) (int64, bool) {
+	if event.Type != state.WorkflowRunCompleted && event.Type != state.WorkflowRunFailed {
+		return 0, false
+	}
+	var run state.WorkflowRunData
+	if json.Unmarshal(event.Data, &run) != nil {
+		return 0, false
+	}
+	return run.WorkflowID, true
 }
 
 func nextCron(view state.Snapshot, now time.Time) (*state.Trigger, time.Time) {
