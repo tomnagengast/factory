@@ -30,7 +30,7 @@ Every projected resource includes:
 | `name` | string | yes |
 | `description` | string or null | no |
 | `repo` | string or null | no |
-| `path` | string or null | no |
+| `path` | string | yes |
 | `url` | string or null | no |
 
 ```sh
@@ -54,6 +54,7 @@ DELETE /api/projects/{id}
 ```
 
 Project detail includes the project's active tasks.
+Creating or updating a project creates its local `path` if needed.
 
 ## Tasks
 
@@ -63,7 +64,7 @@ Project detail includes the project's active tasks.
 | `description` | string or null | no |
 | `parentTaskId` | integer or null | no |
 | `status` | string | no, defaults to `backlog` |
-| `projectId` | integer or null | no |
+| `projectId` | integer | yes |
 
 Allowed status values:
 
@@ -96,7 +97,8 @@ POST   /api/tasks/{id}/comments
 ```
 
 The API task list is sorted by ID descending. The web application can re-sort
-or group it by any task field. Task detail includes comments and artifacts.
+or group it by any task field. The project must exist and not be deleted. Task
+detail includes comments and artifacts.
 
 ## Comments
 
@@ -260,6 +262,9 @@ The event selector in the web application is derived from observed wire
 types. Publish one event of a new type to make it available, create the
 trigger, then publish a second event to run it. Older events are not replayed
 into a newly created trigger.
+
+Triggers for `task.created`, `task.updated`, or `task.deleted` run from the
+task project's configured `path`.
 
 ## Workflows
 

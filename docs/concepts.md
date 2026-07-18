@@ -56,6 +56,9 @@ Projects, tasks, comments, artifacts, triggers, and workflow metadata are
 rebuilt by replaying the wire. The wire is the durable source of truth; the
 resource view is derived state.
 
+Every project has a required local path. The API creates that directory when
+the project is created or updated.
+
 This gives Factory a deliberately simple write path:
 
 1. validate the request,
@@ -72,8 +75,8 @@ events consume IDs too.
 
 ## Task intake
 
-A task is a domain record, not an agent job. It carries a title, optional
-description and project, optional parent task, and one of five statuses:
+A task is a domain record, not an agent job. It carries a title, required
+project, optional description and parent task, and one of five statuses:
 
 ```text
 backlog, todo, in progress, done, canceled
@@ -123,6 +126,9 @@ Factory-created files live in:
 When a user starts a workflow conversation, Factory assigns the local target
 before Codex begins. The workflow detail API reads the current file on every
 request, allowing the web application to show live source while Codex writes.
+Authoring Codex runs in the workflow workspace and receives `$FACTORY_CLI` and
+`$FACTORY_URL`, so the same conversation can inspect resources or configure a
+trigger when the user asks.
 
 After authoring, Factory asks the workflow CLI to rediscover definitions and
 projects the resolved name, description, phases, scope, path, and mutating
@@ -156,6 +162,12 @@ The run receives:
 
 Cron uses the same path. A due schedule appends a targeted `cron` event, and
 the normal event-trigger logic runs its workflow.
+
+For `task.created`, `task.updated`, and `task.deleted`, Factory resolves the
+task and its required project before running the workflow. The workflow CLI
+and every agent it starts use the project's configured local `path` as their
+working directory. A workflow can inspect `args.event.data`, such as a
+`task.updated` status, and return without acting when its condition is not met.
 
 ## Deliberate trust model
 

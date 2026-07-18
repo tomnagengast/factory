@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -20,8 +21,10 @@ func TestProjectTaskCommentAndArtifactAPI(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
 	handler := testServer(t, wire).Handler()
+	projectPath := filepath.Join(t.TempDir(), "factory")
 
-	project := requestJSON(t, handler, http.MethodPost, "/api/projects", `{"name":"Factory"}`)
+	project := requestJSON(t, handler, http.MethodPost, "/api/projects",
+		fmt.Sprintf(`{"name":"Factory","path":%q}`, projectPath))
 	if project.Code != http.StatusCreated {
 		t.Fatalf("project status = %d, body = %s", project.Code, project.Body)
 	}
@@ -60,8 +63,11 @@ func TestTaskListDefaultsToDescendingIDs(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
 	handler := testServer(t, wire).Handler()
-	requestJSON(t, handler, http.MethodPost, "/api/tasks", `{"title":"First","status":"backlog"}`)
-	requestJSON(t, handler, http.MethodPost, "/api/tasks", `{"title":"Second","status":"backlog"}`)
+	projectPath := filepath.Join(t.TempDir(), "factory")
+	requestJSON(t, handler, http.MethodPost, "/api/projects",
+		fmt.Sprintf(`{"name":"Factory","path":%q}`, projectPath))
+	requestJSON(t, handler, http.MethodPost, "/api/tasks", `{"title":"First","status":"backlog","projectId":1}`)
+	requestJSON(t, handler, http.MethodPost, "/api/tasks", `{"title":"Second","status":"backlog","projectId":1}`)
 	response := requestJSON(t, handler, http.MethodGet, "/api/tasks", "")
 	var result struct {
 		Tasks []state.Task `json:"tasks"`
@@ -71,6 +77,48 @@ func TestTaskListDefaultsToDescendingIDs(t *testing.T) {
 	}
 	if len(result.Tasks) != 2 || result.Tasks[0].ID < result.Tasks[1].ID {
 		t.Fatalf("tasks are not descending: %#v", result.Tasks)
+	}
+}
+
+func TestProjectRequiresAndCreatesPath(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	if response := requestJSON(t, handler, http.MethodPost, "/api/projects", `{"name":"Missing"}`); response.Code != http.StatusBadRequest {
+		t.Fatalf("missing path status = %d", response.Code)
+	}
+	path := filepath.Join(t.TempDir(), "created")
+	response := requestJSON(t, handler, http.MethodPost, "/api/projects",
+		fmt.Sprintf(`{"name":"Created","path":%q}`, path))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", response.Code, response.Body)
+	}
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		t.Fatalf("project path was not created: %v", err)
+	}
+	updatedPath := filepath.Join(t.TempDir(), "updated")
+	response = requestJSON(t, handler, http.MethodPut, "/api/projects/1",
+		fmt.Sprintf(`{"name":"Updated","path":%q}`, updatedPath))
+	if response.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body = %s", response.Code, response.Body)
+	}
+	if info, err := os.Stat(updatedPath); err != nil || !info.IsDir() {
+		t.Fatalf("updated project path was not created: %v", err)
+	}
+}
+
+func TestTaskRequiresExistingProject(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	for _, body := range []string{
+		`{"title":"Missing"}`,
+		`{"title":"Unknown","projectId":99}`,
+	} {
+		response := requestJSON(t, handler, http.MethodPost, "/api/tasks", body)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body)
+		}
 	}
 }
 

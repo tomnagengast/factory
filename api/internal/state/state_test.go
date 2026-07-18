@@ -11,12 +11,12 @@ import (
 func TestProjectEventsBuildsDomainState(t *testing.T) {
 	at := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	events := []eventwire.Event{
-		event(1, ProjectCreated, at, ProjectData{Name: "Factory"}),
+		event(1, ProjectCreated, at, ProjectData{Name: "Factory", Path: "/factory"}),
 		event(2, TaskCreated, at.Add(time.Minute), TaskData{
-			Title: "Build routes", Status: Todo, ProjectID: intPointer(1),
+			Title: "Build routes", Status: Todo, ProjectID: 1,
 		}),
 		event(3, TaskUpdated, at.Add(2*time.Minute), TaskData{
-			ID: 2, Title: "Build every route", Status: InProgress, ProjectID: intPointer(1),
+			ID: 2, Title: "Build every route", Status: InProgress, ProjectID: 1,
 		}),
 		event(4, CommentCreated, at.Add(3*time.Minute), CommentData{
 			RelationType: "task", RelationID: 2, Author: "user", Content: "Keep it small.",
@@ -93,8 +93,4 @@ func event(id int64, eventType string, at time.Time, data any) eventwire.Event {
 		panic(err)
 	}
 	return eventwire.Event{ID: id, Type: eventType, At: at, Data: encoded}
-}
-
-func intPointer(value int64) *int64 {
-	return &value
 }

@@ -253,7 +253,8 @@ function ProjectNew() {
   const action = mutation();
   return (
     <div class="page narrow">
-      <PageHeader eyebrow="Projects" title="Create a project" description="Only a name is required." />
+      <PageHeader eyebrow="Projects" title="Create a project"
+        description="The local path becomes the working directory for task workflows." />
       <ProjectForm
         pending={action.pending()}
         error={action.error()}
@@ -322,7 +323,7 @@ function ProjectForm(props: {
         name: String(data.get("name") ?? "").trim(),
         description: optional(data.get("description")),
         repo: optional(data.get("repo")),
-        path: optional(data.get("path")),
+        path: String(data.get("path") ?? "").trim(),
         url: optional(data.get("url")),
       });
     }}>
@@ -330,7 +331,7 @@ function ProjectForm(props: {
       <label>Description<textarea name="description" rows="4">{props.project?.description ?? ""}</textarea></label>
       <div class="field-pair">
         <label>Repository<input name="repo" value={props.project?.repo ?? ""} /></label>
-        <label>Local path<input name="path" value={props.project?.path ?? ""} /></label>
+        <label>Local path<input name="path" required value={props.project?.path ?? ""} /></label>
       </div>
       <label>URL<input name="url" type="url" value={props.project?.url ?? ""} /></label>
       <FormFooter pending={props.pending} error={props.error} label={props.project ? "Save project" : "Create project"} />
@@ -504,7 +505,7 @@ function TaskForm(props: {
         description: optional(data.get("description")),
         parentTaskId: optionalID(data.get("parentTaskId")),
         status: data.get("status") as TaskStatus,
-        projectId: optionalID(data.get("projectId")),
+        projectId: Number(data.get("projectId")),
       });
     }}>
       <label>Title<input name="title" required value={props.task?.title ?? ""} /></label>
@@ -513,8 +514,8 @@ function TaskForm(props: {
         <label>Status<select name="status" value={props.task?.status ?? "backlog"}>
           <For each={taskStatuses}>{(status) => <option value={status}>{status}</option>}</For>
         </select></label>
-        <label>Project<select name="projectId" value={props.task?.projectId ?? ""}>
-          <option value="">No project</option>
+        <label>Project<select name="projectId" required value={props.task?.projectId ?? ""}>
+          <option value="" disabled>Select a project</option>
           <For each={props.projects}>{(project) => <option value={project.id}>{project.name}</option>}</For>
         </select></label>
       </div>
@@ -1011,7 +1012,7 @@ function taskValue(task: Task, field: string): string | number {
   return ({
     id: task.id, createdAt: task.createdAt, updatedAt: task.updatedAt,
     deletedAt: task.deletedAt ?? "", title: task.title, description: task.description ?? "",
-    parentTaskId: task.parentTaskId ?? 0, status: task.status, projectId: task.projectId ?? 0,
+    parentTaskId: task.parentTaskId ?? 0, status: task.status, projectId: task.projectId,
   })[field] ?? "";
 }
 
@@ -1027,8 +1028,7 @@ function compare(left: string | number, right: string | number) {
   return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
 }
 
-function projectName(id: number | undefined, projects: Project[]) {
-  if (!id) return "No project";
+function projectName(id: number, projects: Project[]) {
   return projects.find((project) => project.id === id)?.name ?? `Project ${id}`;
 }
 

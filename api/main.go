@@ -31,6 +31,7 @@ type config struct {
 	DataPath          string
 	WorkflowWorkspace string
 	AgentCommand      string
+	FactoryCommand    string
 	WorkflowCommand   string
 }
 
@@ -82,6 +83,7 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 		"untracked dynamic workflow workspace",
 	)
 	flags.StringVar(&configuration.AgentCommand, "agent", "codex", "Codex executable")
+	flags.StringVar(&configuration.FactoryCommand, "factory", "./factory", "Factory CLI exposed to Codex")
 	flags.StringVar(&configuration.WorkflowCommand, "workflow", "workflow", "workflow CLI executable")
 	flags.Usage = func() {
 		fmt.Fprintln(output, "Factory serves the event wire, resource API, Solid UI, and sequential Codex loop.")
@@ -98,7 +100,7 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 	}
 	if configuration.Address == "" || configuration.DataPath == "" ||
 		configuration.WorkflowWorkspace == "" || configuration.AgentCommand == "" ||
-		configuration.WorkflowCommand == "" {
+		configuration.FactoryCommand == "" || configuration.WorkflowCommand == "" {
 		return config{}, errors.New("all serve options require values")
 	}
 	return configuration, nil
@@ -119,6 +121,7 @@ func run(ctx context.Context, configuration config) error {
 	}
 	loop, err := agent.NewLoop(wire, agent.CommandRunner{
 		Command: configuration.AgentCommand, Workspace: configuration.WorkflowWorkspace,
+		FactoryCommand: configuration.FactoryCommand, FactoryURL: "http://" + configuration.Address,
 	}, workflowCLI)
 	if err != nil {
 		return err

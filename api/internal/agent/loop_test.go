@@ -24,15 +24,15 @@ func (f *fakeAgent) Run(_ context.Context, prompt string) (string, error) {
 
 type fakeWorkflows struct {
 	definitions []workflow.Definition
-	runs        []string
+	runs        []struct{ directory, name, source string }
 }
 
 func (f *fakeWorkflows) List(context.Context) ([]workflow.Definition, error) {
 	return f.definitions, nil
 }
 
-func (f *fakeWorkflows) Run(_ context.Context, name string, _ any) (string, error) {
-	f.runs = append(f.runs, name)
+func (f *fakeWorkflows) Run(_ context.Context, directory, name, source string, _ any) (string, error) {
+	f.runs = append(f.runs, struct{ directory, name, source string }{directory, name, source})
 	return "complete", nil
 }
 
@@ -62,7 +62,9 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !worked || len(runner.prompts) != 1 || !strings.Contains(runner.prompts[0], "Build a review panel") {
+	if !worked || len(runner.prompts) != 1 ||
+		!strings.Contains(runner.prompts[0], "Build a review panel") ||
+		!strings.Contains(runner.prompts[0], "$FACTORY_CLI") {
 		t.Fatalf("workflow was not authored: %#v", runner.prompts)
 	}
 	view, err := state.ProjectEvents(wire.Events(0))
@@ -94,12 +96,46 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !worked || len(workflows.runs) != 1 || workflows.runs[0] != "review" {
+	if !worked || len(workflows.runs) != 1 || workflows.runs[0].name != "review" || workflows.runs[0].directory != "" {
 		t.Fatalf("trigger did not run: %#v", workflows.runs)
 	}
 	view, _ := state.ProjectEvents(wire.Events(0))
 	if !view.RunStarted(triggerEvent.ID, source.ID) {
 		t.Fatal("run marker missing")
+	}
+}
+
+func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
+	for _, eventType := range []string{state.TaskCreated, state.TaskUpdated, state.TaskDeleted} {
+		t.Run(eventType, func(t *testing.T) {
+			wire := openWire(t)
+			defer wire.Close()
+			path := t.TempDir()
+			project, _ := wire.Publish(state.ProjectCreated, state.ProjectData{Name: "Factory", Path: path})
+			workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+			wire.Publish(state.TriggerCreated, state.TriggerData{EventType: eventType, WorkflowID: workflowEvent.ID})
+			task, _ := wire.Publish(state.TaskCreated, state.TaskData{
+				Title: "Ship it", Status: state.Backlog, ProjectID: project.ID,
+			})
+			switch eventType {
+			case state.TaskUpdated:
+				wire.Publish(eventType, state.TaskData{
+					ID: task.ID, Title: "Ship it", Status: state.Todo, ProjectID: project.ID,
+				})
+			case state.TaskDeleted:
+				wire.Publish(eventType, state.IDData{ID: task.ID})
+			}
+
+			workflows := &fakeWorkflows{}
+			loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+			worked, _, err := loop.step(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !worked || len(workflows.runs) != 1 || workflows.runs[0].directory != path {
+				t.Fatalf("runs = %#v, want project path %q", workflows.runs, path)
+			}
+		})
 	}
 }
 

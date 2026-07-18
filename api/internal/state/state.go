@@ -46,7 +46,7 @@ type Project struct {
 	Name        string  `json:"name"`
 	Description *string `json:"description,omitempty"`
 	Repo        *string `json:"repo,omitempty"`
-	Path        *string `json:"path,omitempty"`
+	Path        string  `json:"path"`
 	URL         *string `json:"url,omitempty"`
 }
 
@@ -68,7 +68,7 @@ type Task struct {
 	Description  *string    `json:"description,omitempty"`
 	ParentTaskID *int64     `json:"parentTaskId,omitempty"`
 	Status       TaskStatus `json:"status"`
-	ProjectID    *int64     `json:"projectId,omitempty"`
+	ProjectID    int64      `json:"projectId"`
 }
 
 type Comment struct {
@@ -111,7 +111,7 @@ type ProjectData struct {
 	Name        string  `json:"name"`
 	Description *string `json:"description,omitempty"`
 	Repo        *string `json:"repo,omitempty"`
-	Path        *string `json:"path,omitempty"`
+	Path        string  `json:"path"`
 	URL         *string `json:"url,omitempty"`
 }
 
@@ -121,7 +121,7 @@ type TaskData struct {
 	Description  *string    `json:"description,omitempty"`
 	ParentTaskID *int64     `json:"parentTaskId,omitempty"`
 	Status       TaskStatus `json:"status"`
-	ProjectID    *int64     `json:"projectId,omitempty"`
+	ProjectID    int64      `json:"projectId"`
 }
 
 type CommentData struct {

@@ -6,7 +6,7 @@ not embed the workflow loader, DSL, or subagent runtime.
 
 ## Required commands
 
-Both executables must be on `PATH` when `factory-api` starts:
+Codex and the workflow runner must be on `PATH` when `factory-api` starts:
 
 ```sh
 codex --version
@@ -14,8 +14,9 @@ workflow --help
 codex login status
 ```
 
-Use `-agent` or `-workflow` to supply explicit paths. See
-[usage.md](usage.md) for installation.
+The built `factory` resource CLI defaults to `./factory`. Use `-agent`,
+`-factory`, or `-workflow` to supply explicit paths. See [usage.md](usage.md)
+for installation.
 
 ## Discovery
 
@@ -55,6 +56,15 @@ The sequential loop:
 5. asks the workflow CLI to rediscover the written file,
 6. appends a completed or failed event,
 7. appends Codex's response as an agent comment.
+
+Codex runs with the workflow workspace as its working directory. Factory
+exposes the resource client as `$FACTORY_CLI` and the current server as
+`$FACTORY_URL`. A user can therefore ask the same authoring conversation to
+create or update the trigger that will run the workflow:
+
+```sh
+"$FACTORY_CLI" trigger create '{"eventType":"task.updated","workflowId":24}'
+```
 
 The workflow detail page polls the current file once per second while a user
 message awaits an agent reply. Chat and source scroll independently on wide
@@ -145,7 +155,7 @@ created afterward.
 Factory calls:
 
 ```text
-workflow --cwd <workflow-workspace> run <name> \
+workflow --cwd <event-working-directory> run <name> \
   --args <event-and-trigger-json> \
   --backend codex \
   --allow-mutating \
@@ -156,6 +166,26 @@ workflow --cwd <workflow-workspace> run <name> \
 The workflow receives `args.event` and `args.trigger`. Run progress is
 recorded as `workflow.run.started`, `workflow.run.completed`, or
 `workflow.run.failed`.
+
+### Task event triggers
+
+For `task.created`, `task.updated`, and `task.deleted`, the event working
+directory is the task project's configured local `path`. This also becomes
+the working directory of agents started by the workflow. Project saves create
+the required path. Factory temporarily links the selected untracked workflow
+into the project's workflow catalog for the run, then removes the link.
+
+A trigger matches the event type only. Put finer conditions in the workflow:
+
+```js
+if (args.event.type === 'task.updated' && args.event.data.status !== 'todo') {
+  return 'Ignored task outside todo.'
+}
+```
+
+Deleted tasks remain in the projection, so Factory can still resolve the
+project path for cleanup workflows triggered by `task.deleted`. Other event
+types run from the configured workflow workspace.
 
 ## Cron triggers
 

@@ -49,6 +49,7 @@ cp -R web/dist/. api/dist/
 Then run the API:
 
 ```sh
+go build -o factory ./cli
 go run ./api
 ```
 
@@ -63,6 +64,8 @@ Usage: factory-api [options]
         Codex executable
   -data string
         append-only event wire path
+  -factory string
+        Factory CLI exposed to Codex
   -workflow string
         workflow CLI executable
   -workflow-workspace string
@@ -142,8 +145,8 @@ factory [--url URL] <resource> <action> [id] [json|@file]
 Examples:
 
 ```sh
-factory project list
-factory task create '{"title":"Review the PR","status":"todo"}'
+factory project create '{"name":"Factory","path":"/path/to/factory"}'
+factory task create '{"title":"Review the PR","status":"todo","projectId":1}'
 factory task comment 12 '{"content":"The build passed."}'
 factory artifact get 18
 factory workflow create '{"message":"Build a review-panel workflow."}'
@@ -166,11 +169,12 @@ Factory-created workflow files live outside git at:
 
 Creating or updating a workflow appends a user chat comment. The sequential
 loop sends that conversation to unrestricted Codex, Codex writes the workflow
-file, and Factory appends the agent reply. Trigger execution is also explicit
-Codex:
+file, and Factory appends the agent reply. Authoring Codex runs from the
+workflow workspace and can use `$FACTORY_CLI` against `$FACTORY_URL` to inspect
+resources or create a trigger when asked. Trigger execution is also explicit Codex:
 
 ```text
-workflow --cwd <workspace> run <name> \
+workflow --cwd <task.project.path-or-workspace> run <name> \
   --backend codex \
   --allow-mutating \
   --no-validate \
@@ -180,6 +184,8 @@ workflow --cwd <workspace> run <name> \
 
 Event triggers match events received after the trigger's latest update. Cron
 triggers append a targeted `cron` event and follow the same execution path.
+Task events resolve their required project and run from its configured local
+path, so workflow agents operate in the task's repository.
 Workflow conversations and trigger runs share one sequential worker.
 
 ## Verify
