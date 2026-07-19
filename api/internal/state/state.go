@@ -33,6 +33,8 @@ const (
 	CronFired                = "cron"
 	WorkflowRunStarted       = "workflow.run.started"
 	WorkflowRunEventRecorded = "workflow.run.event"
+	WorkflowRunWaiting       = "workflow.run.waiting"
+	WorkflowRunResumed       = "workflow.run.resumed"
 	WorkflowRunCompleted     = "workflow.run.completed"
 	WorkflowRunFailed        = "workflow.run.failed"
 	SettingsUpdated          = "settings.updated"
@@ -132,17 +134,35 @@ type Workflow struct {
 }
 
 type WorkflowRun struct {
-	ID             int64     `json:"id"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
-	TriggerID      int64     `json:"triggerId"`
-	WorkflowID     int64     `json:"workflowId"`
-	WorkflowName   string    `json:"workflowName"`
-	WorkflowPhases []string  `json:"workflowPhases"`
-	SourceEventID  int64     `json:"sourceEventId"`
-	Status         string    `json:"status"`
-	Output         string    `json:"output,omitempty"`
-	Error          string    `json:"error,omitempty"`
+	ID                int64           `json:"id"`
+	CreatedAt         time.Time       `json:"createdAt"`
+	UpdatedAt         time.Time       `json:"updatedAt"`
+	TriggerID         int64           `json:"triggerId"`
+	WorkflowID        int64           `json:"workflowId"`
+	WorkflowName      string          `json:"workflowName"`
+	WorkflowPhases    []string        `json:"workflowPhases"`
+	SourceEventID     int64           `json:"sourceEventId"`
+	TaskID            int64           `json:"taskId,omitempty"`
+	Status            string          `json:"status"`
+	WaitingGate       *WorkflowGate   `json:"waitingGate,omitempty"`
+	GateCommentID     int64           `json:"gateCommentId,omitempty"`
+	ResponseCommentID int64           `json:"responseCommentId,omitempty"`
+	Output            string          `json:"output,omitempty"`
+	Error             string          `json:"error,omitempty"`
+	Directory         string          `json:"-"`
+	Source            string          `json:"-"`
+	Settings          *Settings       `json:"-"`
+	Arguments         json.RawMessage `json:"-"`
+}
+
+type WorkflowGate struct {
+	Workflow string          `json:"workflow"`
+	Phase    string          `json:"phase,omitempty"`
+	StepID   int64           `json:"stepId"`
+	Key      string          `json:"key"`
+	AgentID  string          `json:"agentId,omitempty"`
+	Message  string          `json:"message"`
+	Schema   json.RawMessage `json:"schema,omitempty"`
 }
 
 type WorkflowRuntimeEvent struct {
@@ -157,6 +177,7 @@ type WorkflowRuntimeEvent struct {
 	Backend     string          `json:"backend,omitempty"`
 	Kind        string          `json:"kind,omitempty"`
 	Message     string          `json:"message,omitempty"`
+	Schema      json.RawMessage `json:"schema,omitempty"`
 	Result      json.RawMessage `json:"result,omitempty"`
 	Error       string          `json:"error,omitempty"`
 	Tokens      int64           `json:"tokens,omitempty"`
@@ -165,9 +186,10 @@ type WorkflowRuntimeEvent struct {
 }
 
 type WorkflowRunEvent struct {
-	ID         int64     `json:"id"`
-	RunID      int64     `json:"runId"`
-	RecordedAt time.Time `json:"recordedAt"`
+	Raw        json.RawMessage `json:"-"`
+	ID         int64           `json:"id"`
+	RunID      int64           `json:"runId"`
+	RecordedAt time.Time       `json:"recordedAt"`
 	WorkflowRuntimeEvent
 }
 
@@ -302,13 +324,25 @@ type CronData struct {
 }
 
 type WorkflowRunData struct {
-	TriggerID      int64    `json:"triggerId"`
-	WorkflowID     int64    `json:"workflowId"`
-	WorkflowName   string   `json:"workflowName,omitempty"`
-	WorkflowPhases []string `json:"workflowPhases,omitempty"`
-	SourceEventID  int64    `json:"sourceEventId"`
-	Output         string   `json:"output,omitempty"`
-	Error          string   `json:"error,omitempty"`
+	TriggerID      int64           `json:"triggerId"`
+	WorkflowID     int64           `json:"workflowId"`
+	WorkflowName   string          `json:"workflowName,omitempty"`
+	WorkflowPhases []string        `json:"workflowPhases,omitempty"`
+	SourceEventID  int64           `json:"sourceEventId"`
+	TaskID         int64           `json:"taskId,omitempty"`
+	Directory      string          `json:"directory,omitempty"`
+	Source         string          `json:"source,omitempty"`
+	Settings       *Settings       `json:"settings,omitempty"`
+	Arguments      json.RawMessage `json:"arguments,omitempty"`
+	Output         string          `json:"output,omitempty"`
+	Error          string          `json:"error,omitempty"`
+}
+
+type WorkflowRunStateData struct {
+	RunID             int64         `json:"runId"`
+	Gate              *WorkflowGate `json:"gate,omitempty"`
+	GateCommentID     int64         `json:"gateCommentId,omitempty"`
+	ResponseCommentID int64         `json:"responseCommentId,omitempty"`
 }
 
 type WorkflowRunEventData struct {
@@ -328,15 +362,17 @@ type Snapshot struct {
 	RunEvents  []WorkflowRunEvent
 	Settings   Settings
 
-	startedRuns map[[2]int64]bool
-	lastCron    map[int64]time.Time
+	startedRuns    map[[2]int64]bool
+	lastCron       map[int64]time.Time
+	humanResponses map[int64]bool
 }
 
 func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 	view := Snapshot{
-		startedRuns: make(map[[2]int64]bool),
-		lastCron:    make(map[int64]time.Time),
-		Settings:    DefaultSettings,
+		startedRuns:    make(map[[2]int64]bool),
+		lastCron:       make(map[int64]time.Time),
+		humanResponses: make(map[int64]bool),
+		Settings:       DefaultSettings,
 	}
 	projectIndex := make(map[int64]int)
 	taskIndex := make(map[int64]int)
@@ -575,7 +611,9 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 				ID: event.ID, CreatedAt: event.At, UpdatedAt: event.At,
 				TriggerID: data.TriggerID, WorkflowID: data.WorkflowID,
 				WorkflowName: data.WorkflowName, WorkflowPhases: stringSlice(data.WorkflowPhases),
-				SourceEventID: data.SourceEventID, Status: "running",
+				SourceEventID: data.SourceEventID, TaskID: data.TaskID, Status: "running",
+				Directory: data.Directory, Source: data.Source, Settings: data.Settings,
+				Arguments: append(json.RawMessage(nil), data.Arguments...),
 			})
 		case WorkflowRunEventRecorded:
 			var data WorkflowRunEventData
@@ -587,12 +625,36 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 				return Snapshot{}, fmt.Errorf("decode workflow event %d: %w", event.ID, err)
 			}
 			view.RunEvents = append(view.RunEvents, WorkflowRunEvent{
-				ID: event.ID, RunID: data.RunID, RecordedAt: event.At,
+				Raw: append(json.RawMessage(nil), data.Event...),
+				ID:  event.ID, RunID: data.RunID, RecordedAt: event.At,
 				WorkflowRuntimeEvent: runtimeEvent,
 			})
 			if index, found := runIDIndex[data.RunID]; found {
 				view.Runs[index].UpdatedAt = event.At
 			}
+		case WorkflowRunWaiting:
+			var data WorkflowRunStateData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := runIDIndex[data.RunID]; found {
+				run := &view.Runs[index]
+				run.UpdatedAt, run.Status = event.At, "waiting"
+				run.WaitingGate, run.GateCommentID = data.Gate, data.GateCommentID
+				run.ResponseCommentID = 0
+			}
+		case WorkflowRunResumed:
+			var data WorkflowRunStateData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := runIDIndex[data.RunID]; found {
+				run := &view.Runs[index]
+				run.UpdatedAt, run.Status = event.At, "running"
+				run.WaitingGate = nil
+				run.ResponseCommentID = data.ResponseCommentID
+			}
+			view.humanResponses[data.ResponseCommentID] = true
 		case WorkflowRunCompleted, WorkflowRunFailed:
 			var data WorkflowRunData
 			if err := decode(event, &data); err != nil {
@@ -752,6 +814,33 @@ func (s Snapshot) PendingWorkflowComment() (Comment, bool) {
 
 func (s Snapshot) RunStarted(triggerID, sourceEventID int64) bool {
 	return s.startedRuns[[2]int64{triggerID, sourceEventID}]
+}
+
+func (s Snapshot) PendingHumanResponse() (WorkflowRun, Comment, bool) {
+	answered := make(map[int64]bool)
+	for _, comment := range s.Comments {
+		if comment.Author == "agent" && comment.ParentCommentID != nil {
+			answered[*comment.ParentCommentID] = true
+		}
+	}
+	for _, run := range s.Runs {
+		if run.Status != "waiting" || run.WaitingGate == nil ||
+			run.TaskID < 1 || run.GateCommentID < 1 {
+			continue
+		}
+		for _, comment := range s.Comments {
+			if comment.ID <= run.GateCommentID || comment.DeletedAt != nil ||
+				comment.Author != "user" || comment.RelationType != "task" ||
+				comment.RelationID != run.TaskID || answered[comment.ID] ||
+				s.humanResponses[comment.ID] {
+				continue
+			}
+			if comment.ParentCommentID == nil || *comment.ParentCommentID == run.GateCommentID {
+				return run, comment, true
+			}
+		}
+	}
+	return WorkflowRun{}, Comment{}, false
 }
 
 func (s Snapshot) LastCron(triggerID int64) (time.Time, bool) {

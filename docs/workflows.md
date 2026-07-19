@@ -25,8 +25,9 @@ claude --version
 
 The workflow CLI and its documentation are public at
 [`tomnagengast/workflow`](https://github.com/tomnagengast/workflow).
-Factory requires workflow CLI v0.0.4 or newer so a workflow source file and
-agent working directory can be selected independently.
+Factory requires workflow CLI v0.0.6 or newer so a workflow source file and
+agent working directory can be selected independently and human gates can
+suspend and resume through task comments.
 The built `factory` resource CLI defaults to `./factory`. Use `-codex`,
 `-claude`, `-factory`, or `-workflow` to supply explicit paths. See
 [usage.md](usage.md) for installation.
@@ -117,7 +118,7 @@ The standalone runtime provides:
 | --- | --- |
 | `args` | Input supplied to the run |
 | `agent(prompt, options?)` | Run one subagent |
-| `gate(prompt, options?)` | Run a cross-model verdict |
+| `gate(prompt, options?)` | Review with the default agent route, a pinned backend, or a human |
 | `parallel(thunks)` | Run independent thunks concurrently |
 | `pipeline(items, ...stages)` | Process items through stages |
 | `workflow(name, args?)` | Dispatch another workflow |
@@ -220,10 +221,12 @@ The workflow receives `args.event`, `args.trigger`, and its integer
 `args.runId`. Run progress is recorded on the event wire:
 
 1. `workflow.run.started` creates the history item and captures the workflow
-   name and phase list,
+   name, phase list, exact run settings, arguments, source, and working directory,
 2. every workflow CLI journal line becomes one `workflow.run.event` while the
    process is active,
-3. `workflow.run.completed` or `workflow.run.failed` closes the run.
+3. `workflow.run.waiting` and `workflow.run.resumed` preserve human review
+   pauses without holding a process or capacity slot,
+4. `workflow.run.completed` or `workflow.run.failed` closes the run.
 
 The CLI journal is the complete semantic runtime stream: runtime lifecycle,
 phases, workflow logs, diagnostics, agent and gate prompts, cache hits, nested
@@ -232,6 +235,39 @@ temporary `--journal` path and durably forwards each event without parsing
 stderr, filtering fields, or collapsing lifecycle pairs. A wire write failure
 cancels the workflow. The temporary file is removed only after the follower
 finishes.
+
+### Human review gates
+
+Gate routing stays within the existing signature:
+
+```js
+const review = await gate("Review this task before deployment.", {
+  reviewer: "human",
+})
+```
+
+Omitting `reviewer`, or setting it to `agent`, keeps the default
+opposite-backend gate. `codex` and `claude` pin the reviewer backend.
+
+A human gate works only in a workflow triggered by `task.created`,
+`task.updated`, or `task.deleted`. When the runtime suspends, Factory:
+
+1. records every journal event through `runtime.suspended`,
+2. posts the gate prompt as an agent comment on the task,
+3. projects the same run as `waiting`,
+4. lets the workflow process exit and frees its capacity slot.
+
+The next root user comment added to that task, or a direct reply to the gate
+comment, resumes the run. Factory records the comment as the human
+`step.completed` result, rebuilds the exact journal, and starts the same
+workflow with that journal as both `--resume` and `--journal`. Earlier agent
+steps replay as cache hits, the human gate returns the comment, and execution
+continues after the gate under the original settings and arguments.
+
+Without a gate `schema`, the workflow receives the comment text as a string.
+With a schema, the comment must contain matching JSON. Factory replies with a
+validation error and keeps the run waiting when the JSON is invalid. Unrelated
+thread replies do not resume the run.
 
 `/history` lists every projected run and `/history/{id}` displays the distinct
 events chronologically in contiguous phase groups. Run content renders as
@@ -296,11 +332,11 @@ Only cron triggers need a schedule. Non-cron triggers ignore it operationally.
 
 ## Ordering and failures
 
-One coordinator prioritizes pending workflow conversations, then event
-triggers, then due cron ticks. Authoring remains sequential. When no
-conversation is pending, the coordinator claims matching trigger and source
-event pairs in wire order and starts workflow processes until it reaches the
-configured capacity.
+One coordinator prioritizes pending workflow conversations, answered human
+gates, event triggers, then due cron ticks. Authoring remains sequential. When
+neither a conversation nor a human response is pending, the coordinator claims
+matching trigger and source event pairs in wire order and starts workflow
+processes until it reaches the configured capacity.
 
 Trigger disable changes future admission only and does not cancel a run that
 already has a `workflow.run.started` event. Conditional wire appends resolve a
@@ -319,6 +355,7 @@ Failures remain observable:
 - canceled runs become `workflow.run.failed` during graceful shutdown,
 - startup appends `workflow.run.failed` for a prior run left `running`
   without a terminal event,
+- waiting human gates survive restart because they have no active process,
 - the history detail and event detail contain the recorded error,
 - the server terminal contains process-level diagnostics.
 

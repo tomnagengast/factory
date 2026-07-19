@@ -129,6 +129,69 @@ func TestRunAndCronMarkersAreProjected(t *testing.T) {
 	}
 }
 
+func TestWaitingRunFindsAUserTaskCommentAndResumes(t *testing.T) {
+	at := time.Now().UTC()
+	settings := DefaultSettings
+	events := []eventwire.Event{
+		event(1, ProjectCreated, at, ProjectData{Name: "Factory", Path: "/factory"}),
+		event(2, TaskCreated, at, TaskData{
+			Title: "Review it", Status: InReview, ProjectID: 1,
+		}),
+		event(3, WorkflowRunStarted, at, WorkflowRunData{
+			TriggerID: 8, WorkflowID: 7, WorkflowName: "review",
+			SourceEventID: 2, TaskID: 2, Directory: "/factory", Source: "/review.js",
+			Settings: &settings, Arguments: json.RawMessage(`{"runId":3}`),
+		}),
+		event(4, WorkflowRunEventRecorded, at, WorkflowRunEventData{
+			RunID: 3, Event: json.RawMessage(
+				`{"sequence":1,"at":"2026-07-19T12:00:00Z","type":"runtime.suspended","workflow":"review","phase":"Review","stepId":1,"key":"gate-key","backend":"human","kind":"gate","message":"Approve it?"}`,
+			),
+		}),
+		event(5, CommentCreated, at, CommentData{
+			RelationType: "task", RelationID: 2, Author: "agent", Content: "Approve it?",
+		}),
+		event(6, WorkflowRunWaiting, at, WorkflowRunStateData{
+			RunID: 3, GateCommentID: 5, Gate: &WorkflowGate{
+				Workflow: "review", Phase: "Review", StepID: 1,
+				Key: "gate-key", Message: "Approve it?",
+			},
+		}),
+		event(7, CommentCreated, at, CommentData{
+			RelationType: "task", RelationID: 2, Author: "user", Content: "Approved.",
+		}),
+	}
+	view, err := ProjectEvents(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, found := view.Run(3)
+	if !found || run.Status != "waiting" || run.TaskID != 2 ||
+		run.WaitingGate == nil || run.WaitingGate.Key != "gate-key" ||
+		run.Settings == nil || run.Settings.Harness != Codex ||
+		string(run.Arguments) != `{"runId":3}` {
+		t.Fatalf("waiting run = %#v, found = %v", run, found)
+	}
+	selected, response, found := view.PendingHumanResponse()
+	if !found || selected.ID != 3 || response.ID != 7 || response.Content != "Approved." {
+		t.Fatalf("pending response = %#v, %#v, %v", selected, response, found)
+	}
+
+	events = append(events, event(8, WorkflowRunResumed, at, WorkflowRunStateData{
+		RunID: 3, ResponseCommentID: 7,
+	}))
+	view, err = ProjectEvents(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _ = view.Run(3)
+	if run.Status != "running" || run.WaitingGate != nil || run.ResponseCommentID != 7 {
+		t.Fatalf("resumed run = %#v", run)
+	}
+	if _, _, found := view.PendingHumanResponse(); found {
+		t.Fatal("resumed response remained pending")
+	}
+}
+
 func TestSettingsDefaultAndReplay(t *testing.T) {
 	view, err := ProjectEvents(nil)
 	if err != nil {

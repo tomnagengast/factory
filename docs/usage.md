@@ -73,8 +73,8 @@ claude --version
 ```
 
 Only the selected harness needs to be installed. Factory depends on its
-current automation flags and the semantic journal in `workflow` 0.0.2 or
-newer. Confirm `codex exec --help` or `claude --help`
+current automation flags, semantic journal, and durable human-gate lifecycle
+in `workflow` 0.0.6 or newer. Confirm `codex exec --help` or `claude --help`
 includes the model, reasoning or effort, and unrestricted execution options
 documented in [workflows.md](workflows.md).
 

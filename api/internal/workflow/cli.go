@@ -38,6 +38,7 @@ type Event struct {
 	Backend     string          `json:"backend,omitempty"`
 	Kind        string          `json:"kind,omitempty"`
 	Message     string          `json:"message,omitempty"`
+	Schema      json.RawMessage `json:"schema,omitempty"`
 	Result      json.RawMessage `json:"result,omitempty"`
 	Error       string          `json:"error,omitempty"`
 	Tokens      int64           `json:"tokens,omitempty"`
@@ -45,10 +46,22 @@ type Event struct {
 	Budget      *int64          `json:"budget,omitempty"`
 }
 
+const HumanReviewExitCode = 75
+
+var ErrHumanReview = errors.New("workflow suspended for human review")
+
+type RunRequest struct {
+	Directory string
+	Source    string
+	Settings  state.Settings
+	Arguments any
+	Resume    []json.RawMessage
+}
+
 type Runner interface {
 	List(context.Context) ([]Definition, error)
 	Validate(context.Context, string) error
-	Run(context.Context, string, string, state.Settings, any, func(Event) error) (string, error)
+	Run(context.Context, RunRequest, func(Event) error) (string, error)
 	LocalPath(int64) string
 }
 
@@ -100,18 +113,16 @@ func (c CLI) Validate(ctx context.Context, source string) error {
 
 func (c CLI) Run(
 	ctx context.Context,
-	directory, source string,
-	settings state.Settings,
-	args any,
+	request RunRequest,
 	emit func(Event) error,
 ) (string, error) {
 	if emit == nil {
 		return "", errors.New("workflow event sink is required")
 	}
-	if strings.TrimSpace(source) == "" {
+	if strings.TrimSpace(request.Source) == "" {
 		return "", errors.New("workflow source path is required")
 	}
-	encoded, err := json.Marshal(args)
+	encoded, err := json.Marshal(request.Arguments)
 	if err != nil {
 		return "", fmt.Errorf("encode workflow arguments: %w", err)
 	}
@@ -120,38 +131,50 @@ func (c CLI) Run(
 		return "", fmt.Errorf("prepare workflow journal: %w", err)
 	}
 	journalPath := journal.Name()
-	journal.Close()
+	offset, sequence, err := seedJournal(journal, request.Resume)
+	if err != nil {
+		journal.Close()
+		os.Remove(journalPath)
+		return "", err
+	}
+	if err := journal.Close(); err != nil {
+		os.Remove(journalPath)
+		return "", fmt.Errorf("close workflow journal: %w", err)
+	}
 	defer os.Remove(journalPath)
-	if directory == "" {
-		directory = c.Workspace
+	if request.Directory == "" {
+		request.Directory = c.Workspace
 	}
 	commandArgs := []string{
-		"--cwd", directory,
-		"run", source,
+		"--cwd", request.Directory,
+		"run", request.Source,
 		"--args", string(encoded),
-		"--backend", settings.Harness,
-		"--model", settings.Model,
+		"--backend", request.Settings.Harness,
+		"--model", request.Settings.Model,
 		"--allow-mutating",
 		"--no-validate",
 		"--journal", journalPath,
 	}
-	switch settings.Harness {
+	if len(request.Resume) > 0 {
+		commandArgs = append(commandArgs, "--resume", journalPath)
+	}
+	switch request.Settings.Harness {
 	case state.Codex:
 		commandArgs = append(commandArgs,
 			"--codex-bin", c.CodexCommand,
 			"--codex-yolo",
 			"--codex-arg", "-c",
-			"--codex-arg", `model_reasoning_effort="`+settings.Reasoning+`"`,
+			"--codex-arg", `model_reasoning_effort="`+request.Settings.Reasoning+`"`,
 		)
 	case state.Claude:
 		commandArgs = append(commandArgs,
 			"--claude-bin", c.ClaudeCommand,
 			"--claude-yolo",
 			"--claude-arg", "--effort",
-			"--claude-arg", settings.Reasoning,
+			"--claude-arg", request.Settings.Reasoning,
 		)
 	default:
-		return "", fmt.Errorf("unknown harness %q", settings.Harness)
+		return "", fmt.Errorf("unknown harness %q", request.Settings.Harness)
 	}
 	commandContext, cancelCommand := context.WithCancel(ctx)
 	defer cancelCommand()
@@ -166,7 +189,7 @@ func (c CLI) Run(
 	followContext, stopFollowing := context.WithCancel(ctx)
 	followed := make(chan error, 1)
 	go func() {
-		err := followJournal(followContext, journalPath, emit)
+		err := followJournal(followContext, journalPath, offset, sequence, emit)
 		if err != nil {
 			cancelCommand()
 		}
@@ -180,6 +203,10 @@ func (c CLI) Run(
 		return output, fmt.Errorf("record workflow event: %w", followErr)
 	}
 	if err != nil {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) && exitError.ExitCode() == HumanReviewExitCode {
+			return output, ErrHumanReview
+		}
 		message := strings.TrimSpace(stderr.String())
 		if message != "" {
 			return output, fmt.Errorf("run workflow: %w: %s", err, message)
@@ -189,13 +216,39 @@ func (c CLI) Run(
 	return output, nil
 }
 
+func seedJournal(file *os.File, events []json.RawMessage) (int, int64, error) {
+	var offset int
+	var sequence int64
+	for _, raw := range events {
+		var event Event
+		if err := json.Unmarshal(raw, &event); err != nil {
+			return 0, 0, fmt.Errorf("decode resumed workflow event after sequence %d: %w", sequence, err)
+		}
+		if event.Sequence != sequence+1 || event.Type == "" || event.Workflow == "" {
+			return 0, 0, fmt.Errorf("invalid resumed workflow event after sequence %d", sequence)
+		}
+		line := append(append([]byte(nil), raw...), '\n')
+		written, err := file.Write(line)
+		if err != nil {
+			return 0, 0, fmt.Errorf("seed workflow journal: %w", err)
+		}
+		offset += written
+		sequence = event.Sequence
+	}
+	return offset, sequence, nil
+}
+
 func (c CLI) LocalPath(id int64) string {
 	return filepath.Join(c.Workspace, ".claude", "workflows", "workflow-"+strconv.FormatInt(id, 10)+".js")
 }
 
-func followJournal(ctx context.Context, path string, emit func(Event) error) error {
-	var offset int
-	var sequence int64
+func followJournal(
+	ctx context.Context,
+	path string,
+	offset int,
+	sequence int64,
+	emit func(Event) error,
+) error {
 	read := func() error {
 		data, err := os.ReadFile(path)
 		if err != nil {
