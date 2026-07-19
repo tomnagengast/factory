@@ -118,6 +118,9 @@ media directory, and workflow workspace at startup.
 
 Open [http://127.0.0.1:8092](http://127.0.0.1:8092) in a browser. The overview
 should load and the lower-left status should say `Coordinator connected`.
+Factory follows the operating system or browser light or dark appearance and
+updates when that preference changes. There is no manual appearance setting
+in Factory.
 
 Verify the API from a second terminal:
 
