@@ -32,8 +32,8 @@ type fakeWorkflows struct {
 	definitions []workflow.Definition
 	mu          sync.Mutex
 	runs        []struct {
-		directory, name, source string
-		settings                state.Settings
+		directory, source string
+		settings          state.Settings
 	}
 	active, maxActive int
 	started, finished chan struct{}
@@ -53,16 +53,16 @@ func (f *fakeWorkflows) List(context.Context) ([]workflow.Definition, error) {
 
 func (f *fakeWorkflows) Run(
 	ctx context.Context,
-	directory, name, source string,
+	directory, source string,
 	settings state.Settings,
 	_ any,
 	emit func(workflow.Event) error,
 ) (string, error) {
 	f.mu.Lock()
 	f.runs = append(f.runs, struct {
-		directory, name, source string
-		settings                state.Settings
-	}{directory, name, source, settings})
+		directory, source string
+		settings          state.Settings
+	}{directory, source, settings})
 	f.active++
 	f.maxActive = max(f.maxActive, f.active)
 	f.mu.Unlock()
@@ -159,7 +159,10 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
-	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	sourcePath := "/workflows/review.js"
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{
+		Name: "review", Path: &sourcePath,
+	})
 	triggerEvent, _ := wire.Publish(state.TriggerCreated, state.TriggerData{
 		EventType: "release.ready", WorkflowID: workflowEvent.ID,
 	})
@@ -178,7 +181,7 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 		t.Fatal("trigger was not dispatched")
 	}
 	workflows.mu.Lock()
-	if len(workflows.runs) != 1 || workflows.runs[0].name != "review" || workflows.runs[0].directory != "" {
+	if len(workflows.runs) != 1 || workflows.runs[0].source != sourcePath || workflows.runs[0].directory != "" {
 		t.Fatalf("trigger did not run: %#v", workflows.runs)
 	}
 	if workflows.runs[0].settings != state.DefaultSettings {
@@ -293,7 +296,10 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 			defer wire.Close()
 			path := t.TempDir()
 			project, _ := wire.Publish(state.ProjectCreated, state.ProjectData{Name: "Factory", Path: path})
-			workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+			sourcePath := "/workflows/review.js"
+			workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{
+				Name: "review", Path: &sourcePath,
+			})
 			wire.Publish(state.TriggerCreated, state.TriggerData{EventType: eventType, WorkflowID: workflowEvent.ID})
 			task, _ := wire.Publish(state.TaskCreated, state.TaskData{
 				Title: "Ship it", Status: state.Backlog, ProjectID: project.ID,
@@ -318,8 +324,9 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 			waitForActiveCount(t, loop, 0)
 			workflows.mu.Lock()
 			defer workflows.mu.Unlock()
-			if !worked || len(workflows.runs) != 1 || workflows.runs[0].directory != path {
-				t.Fatalf("runs = %#v, want project path %q", workflows.runs, path)
+			if !worked || len(workflows.runs) != 1 ||
+				workflows.runs[0].directory != path || workflows.runs[0].source != sourcePath {
+				t.Fatalf("runs = %#v, want project path %q and source %q", workflows.runs, path, sourcePath)
 			}
 		})
 	}

@@ -20,8 +20,7 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 	command := filepath.Join(directory, "workflow")
 	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + logPath + "\n" +
 		"if [ \"$3\" = \"list\" ]; then printf '[{\"name\":\"demo\",\"path\":\"/demo.js\",\"scope\":\"user\",\"description\":\"Demo\",\"phases\":[\"Run\"],\"mutating\":false}]'; " +
-		"else cwd=\"$2\"; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = \"--journal\" ]; then shift; journal=\"$1\"; fi; shift; done; " +
-		"set -- \"$cwd\"/.claude/workflows/~factory-*.js; [ -L \"$1\" ] || exit 9; " +
+		"else while [ \"$#\" -gt 0 ]; do if [ \"$1\" = \"--journal\" ]; then shift; journal=\"$1\"; fi; shift; done; " +
 		"printf '%s\\n%s\\n' \"$FACTORY_CLI\" \"$FACTORY_URL\" > " + envPath + "; " +
 		"printf 'human presentation only\\n' >&2; " +
 		"printf '%s\\n' " +
@@ -36,6 +35,9 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(source, []byte("export const meta = { name: 'demo' }"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(project, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cli := CLI{
@@ -58,7 +60,7 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 		{Harness: state.Claude, Model: "sonnet", Reasoning: "medium"},
 	} {
 		var events []Event
-		output, err := cli.Run(context.Background(), project, "demo", source, settings, map[string]int{"id": 1},
+		output, err := cli.Run(context.Background(), project, source, settings, map[string]int{"id": 1},
 			func(event Event) error {
 				events = append(events, event)
 				return nil
@@ -80,12 +82,15 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 				t.Fatalf("event %d was not forwarded losslessly: %#v", index, event)
 			}
 		}
-		if entries, err := os.ReadDir(filepath.Join(project, ".claude", "workflows")); err != nil || len(entries) != 0 {
-			t.Fatalf("temporary project workflows remain: %#v, %v", entries, err)
+		if _, err := os.Stat(filepath.Join(project, ".claude")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("workflow run created project discovery files: %v", err)
 		}
 		args, err := os.ReadFile(logPath)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if !strings.HasPrefix(string(args), "--cwd\n"+project+"\nrun\n"+source+"\n") {
+			t.Fatalf("workflow source and working directory are not independent: %s", args)
 		}
 		for _, expected := range []string{
 			"--backend", settings.Harness, settings.Model, settings.Reasoning,
@@ -126,7 +131,7 @@ func TestCLICancelsWorkflowWhenEventCannotBeRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := cli.Run(
-		context.Background(), "", "demo", "", state.DefaultSettings, nil,
+		context.Background(), "", filepath.Join(directory, "demo.js"), state.DefaultSettings, nil,
 		func(Event) error { return errors.New("wire unavailable") },
 	)
 	if err == nil || !strings.Contains(err.Error(), "wire unavailable") {

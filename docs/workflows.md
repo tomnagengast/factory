@@ -25,6 +25,8 @@ claude --version
 
 The workflow CLI and its documentation are public at
 [`tomnagengast/workflow`](https://github.com/tomnagengast/workflow).
+Factory requires workflow CLI v0.0.4 or newer so a workflow source file and
+agent working directory can be selected independently.
 The built `factory` resource CLI defaults to `./factory`. Use `-codex`,
 `-claude`, `-factory`, or `-workflow` to supply explicit paths. See
 [usage.md](usage.md) for installation.
@@ -174,7 +176,7 @@ created afterward.
 Factory passes the current settings to the public workflow CLI:
 
 ```text
-workflow --cwd <event-working-directory> run <name> \
+workflow --cwd <event-working-directory> run <workflow-source-path> \
   --args <event-and-trigger-json> \
   --backend <selected-harness> \
   --model <selected-model> \
@@ -218,8 +220,8 @@ event wire.
 For `task.created`, `task.updated`, and `task.deleted`, the event working
 directory is the task project's configured local `path`. This also becomes
 the working directory of agents started by the workflow. Project saves create
-the required path. Factory temporarily links the selected untracked workflow
-into the project's workflow catalog for the run, then removes the link.
+the required path. Factory passes the selected untracked workflow to the CLI
+by its explicit source path and does not create discovery files in the project.
 
 A trigger matches the event type only. Put finer conditions in the workflow:
 

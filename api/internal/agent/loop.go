@@ -275,7 +275,6 @@ func (l *Loop) executeTrigger(
 	output, runErr := l.workflows.Run(
 		ctx,
 		directory,
-		selected.Name,
 		stringValue(selected.Path),
 		settings,
 		map[string]any{"event": source, "trigger": trigger},

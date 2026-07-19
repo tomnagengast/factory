@@ -47,7 +47,7 @@ type Event struct {
 
 type Runner interface {
 	List(context.Context) ([]Definition, error)
-	Run(context.Context, string, string, string, state.Settings, any, func(Event) error) (string, error)
+	Run(context.Context, string, string, state.Settings, any, func(Event) error) (string, error)
 	LocalPath(int64) string
 }
 
@@ -82,13 +82,16 @@ func (c CLI) List(ctx context.Context) ([]Definition, error) {
 
 func (c CLI) Run(
 	ctx context.Context,
-	directory, name, source string,
+	directory, source string,
 	settings state.Settings,
 	args any,
 	emit func(Event) error,
 ) (string, error) {
 	if emit == nil {
 		return "", errors.New("workflow event sink is required")
+	}
+	if strings.TrimSpace(source) == "" {
+		return "", errors.New("workflow source path is required")
 	}
 	encoded, err := json.Marshal(args)
 	if err != nil {
@@ -103,25 +106,10 @@ func (c CLI) Run(
 	defer os.Remove(journalPath)
 	if directory == "" {
 		directory = c.Workspace
-	} else {
-		workflowDirectory := filepath.Join(directory, ".claude", "workflows")
-		if err := os.MkdirAll(workflowDirectory, 0o777); err != nil {
-			return "", fmt.Errorf("prepare project workflows: %w", err)
-		}
-		link, err := os.CreateTemp(workflowDirectory, "~factory-*.js")
-		if err != nil {
-			return "", fmt.Errorf("prepare project workflow: %w", err)
-		}
-		link.Close()
-		os.Remove(link.Name())
-		if err := os.Symlink(source, link.Name()); err != nil {
-			return "", fmt.Errorf("link project workflow: %w", err)
-		}
-		defer os.Remove(link.Name())
 	}
 	commandArgs := []string{
 		"--cwd", directory,
-		"run", name,
+		"run", source,
 		"--args", string(encoded),
 		"--backend", settings.Harness,
 		"--model", settings.Model,

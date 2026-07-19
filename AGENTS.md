@@ -54,7 +54,9 @@
 - Every project requires a local path, which the API creates on save. Every
   task requires a project. Workflows triggered by `task.created`,
   `task.updated`, or `task.deleted` run from that project's configured local
-  path; finer conditions such as status checks belong in workflow code.
+  path while the workflow CLI receives the source as an explicit file path.
+  Do not copy or link workflow source into the project. Finer conditions such
+  as status checks belong in workflow code.
 
 ## Working in the monorepo
 

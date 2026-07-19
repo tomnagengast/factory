@@ -192,7 +192,7 @@ harness runs from the workflow workspace and can use `$FACTORY_CLI` against
 execution uses the same selected harness, model, and reasoning:
 
 ```text
-workflow --cwd <task.project.path-or-workspace> run <name> \
+workflow --cwd <task.project.path-or-workspace> run <workflow-source-path> \
   --backend <codex-or-claude> \
   --model <selected-model> \
   --allow-mutating \
@@ -204,7 +204,8 @@ workflow --cwd <task.project.path-or-workspace> run <name> \
 Event triggers match events received after the trigger's latest update. Cron
 triggers append a targeted `cron` event and follow the same execution path.
 Task events resolve their required project and run from its configured local
-path, so workflow agents operate in the task's repository.
+path, so workflow agents operate in the task's repository without copying or
+linking the workflow source into it.
 Workflow runs stream every ordered semantic journal event onto the durable
 wire for the live and historical views. Workflow conversations remain
 sequential. Triggered workflows run in parallel up to the configured capacity,
