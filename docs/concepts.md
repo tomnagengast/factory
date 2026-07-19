@@ -101,10 +101,10 @@ events consume IDs too.
 ## Task intake
 
 A task is a domain record, not an agent job. It carries a title, required
-project, optional description and parent task, and one of five statuses:
+project, optional description and parent task, and one of six statuses:
 
 ```text
-backlog, todo, in progress, done, canceled
+backlog, todo, in progress, in review, done, canceled
 ```
 
 Tasks can have threaded comments and polymorphic artifacts. Creating or

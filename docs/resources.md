@@ -72,6 +72,7 @@ Allowed status values:
 backlog
 todo
 in progress
+in review
 done
 canceled
 ```
