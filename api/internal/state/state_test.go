@@ -129,6 +129,96 @@ func TestRunAndCronMarkersAreProjected(t *testing.T) {
 	}
 }
 
+func TestWorkflowRunTaskIDReplay(t *testing.T) {
+	at := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		events      []eventwire.Event
+		wantTaskID  int64
+		wantDeleted bool
+	}{
+		{
+			name: "task creation",
+			events: []eventwire.Event{
+				event(1, ProjectCreated, at, ProjectData{Name: "Factory", Path: "/factory"}),
+				event(2, TaskCreated, at, TaskData{Title: "Create", Status: Todo, ProjectID: 1}),
+				event(3, WorkflowRunStarted, at, WorkflowRunData{TriggerID: 8, WorkflowID: 7, SourceEventID: 2}),
+			},
+			wantTaskID: 2,
+		},
+		{
+			name: "task update",
+			events: []eventwire.Event{
+				event(1, ProjectCreated, at, ProjectData{Name: "Factory", Path: "/factory"}),
+				event(2, TaskCreated, at, TaskData{Title: "Update", Status: Todo, ProjectID: 1}),
+				event(3, TaskUpdated, at, TaskData{ID: 2, Title: "Updated", Status: InReview, ProjectID: 1}),
+				event(4, WorkflowRunStarted, at, WorkflowRunData{TriggerID: 8, WorkflowID: 7, SourceEventID: 3}),
+			},
+			wantTaskID: 2,
+		},
+		{
+			name: "task deletion",
+			events: []eventwire.Event{
+				event(1, ProjectCreated, at, ProjectData{Name: "Factory", Path: "/factory"}),
+				event(2, TaskCreated, at, TaskData{Title: "Delete", Status: Todo, ProjectID: 1}),
+				event(3, TaskDeleted, at, IDData{ID: 2}),
+				event(4, WorkflowRunStarted, at, WorkflowRunData{TriggerID: 8, WorkflowID: 7, SourceEventID: 3}),
+			},
+			wantTaskID:  2,
+			wantDeleted: true,
+		},
+		{
+			name: "explicit task ID",
+			events: []eventwire.Event{
+				event(1, ProjectCreated, at, ProjectData{Name: "Factory", Path: "/factory"}),
+				event(2, TaskCreated, at, TaskData{Title: "Explicit", Status: Todo, ProjectID: 1}),
+				event(3, "release.ready", at, map[string]int64{"id": 99}),
+				event(4, WorkflowRunStarted, at, WorkflowRunData{TriggerID: 8, WorkflowID: 7, SourceEventID: 3, TaskID: 2}),
+			},
+			wantTaskID: 2,
+		},
+		{
+			name: "cron event",
+			events: []eventwire.Event{
+				event(1, CronFired, at, CronData{TriggerID: 8}),
+				event(2, WorkflowRunStarted, at, WorkflowRunData{TriggerID: 8, WorkflowID: 7, SourceEventID: 1}),
+			},
+		},
+		{
+			name: "custom event",
+			events: []eventwire.Event{
+				event(1, "release.ready", at, map[string]int64{"id": 2}),
+				event(2, WorkflowRunStarted, at, WorkflowRunData{TriggerID: 8, WorkflowID: 7, SourceEventID: 1}),
+			},
+		},
+		{
+			name: "missing task",
+			events: []eventwire.Event{
+				event(1, TaskUpdated, at, TaskData{ID: 99, Title: "Missing", Status: Todo, ProjectID: 1}),
+				event(2, WorkflowRunStarted, at, WorkflowRunData{TriggerID: 8, WorkflowID: 7, SourceEventID: 1}),
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			view, err := ProjectEvents(test.events)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(view.Runs) != 1 || view.Runs[0].TaskID != test.wantTaskID {
+				t.Fatalf("runs = %#v, want task ID %d", view.Runs, test.wantTaskID)
+			}
+			if test.wantDeleted {
+				task, found := view.Task(test.wantTaskID)
+				if !found || task.DeletedAt == nil {
+					t.Fatalf("deleted task = %#v, found = %v", task, found)
+				}
+			}
+		})
+	}
+}
+
 func TestWaitingRunFindsAUserTaskCommentAndResumes(t *testing.T) {
 	at := time.Now().UTC()
 	settings := DefaultSettings

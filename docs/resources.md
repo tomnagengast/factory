@@ -486,7 +486,7 @@ ID is its `workflow.run.started` event ID.
 | `workflowName` | string | Name captured when the run started |
 | `workflowPhases` | string array | Phases captured when the run started |
 | `sourceEventId` | integer | Event matched by the trigger |
-| `taskId` | integer or omitted | Task that can answer a human gate |
+| `taskId` | integer or omitted | Task associated with a task-triggered run; omitted for other runs |
 | `status` | string | `running`, `waiting`, `completed`, or `failed`; interrupted running runs become `failed` |
 | `waitingGate` | object or omitted | Current human gate prompt and journal identity |
 | `gateCommentId` | integer or omitted | Agent task comment that requested review |
@@ -501,6 +501,9 @@ Depending on the event, it also includes phase, step ID, cache key, agent ID,
 backend, kind, prompt or log message, schema, result, error, tokens,
 concurrency, and budget. Starts, cache hits, suspensions, resumes, completions,
 and failures remain distinct events.
+The web run detail links `taskId` back to the task. Replay recovers the task
+association for older task-triggered runs that did not record `taskId` on the
+run start event.
 Graceful shutdown closes canceled runs as failed. On startup, Factory appends
 a failure for any prior run still projected as `running`; `waiting` runs remain
 open for a task comment.

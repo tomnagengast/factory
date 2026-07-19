@@ -382,8 +382,10 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 	workflowIndex := make(map[int64]int)
 	runIndex := make(map[[2]int64]int)
 	runIDIndex := make(map[int64]int)
+	eventIndex := make(map[int64]eventwire.Event)
 
 	for _, event := range events {
+		eventIndex[event.ID] = event
 		switch event.Type {
 		case ProjectCreated:
 			var data ProjectData
@@ -597,6 +599,19 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 			if err := decode(event, &data); err != nil {
 				return Snapshot{}, err
 			}
+			taskID := data.TaskID
+			if taskID == 0 {
+				source, found := eventIndex[data.SourceEventID]
+				if found {
+					inferred, err := taskIDForEvent(source)
+					if err != nil {
+						return Snapshot{}, err
+					}
+					if _, found := taskIndex[inferred]; found {
+						taskID = inferred
+					}
+				}
+			}
 			key := [2]int64{data.TriggerID, data.SourceEventID}
 			view.startedRuns[key] = true
 			if data.WorkflowName == "" {
@@ -611,7 +626,7 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 				ID: event.ID, CreatedAt: event.At, UpdatedAt: event.At,
 				TriggerID: data.TriggerID, WorkflowID: data.WorkflowID,
 				WorkflowName: data.WorkflowName, WorkflowPhases: stringSlice(data.WorkflowPhases),
-				SourceEventID: data.SourceEventID, TaskID: data.TaskID, Status: "running",
+				SourceEventID: data.SourceEventID, TaskID: taskID, Status: "running",
 				Directory: data.Directory, Source: data.Source, Settings: data.Settings,
 				Arguments: append(json.RawMessage(nil), data.Arguments...),
 			})
@@ -862,6 +877,24 @@ func decode(event eventwire.Event, target any) error {
 		return fmt.Errorf("decode %s event %d: %w", event.Type, event.ID, err)
 	}
 	return nil
+}
+
+func taskIDForEvent(event eventwire.Event) (int64, error) {
+	switch event.Type {
+	case TaskCreated:
+		if event.ID > 0 {
+			return event.ID, nil
+		}
+	case TaskUpdated, TaskDeleted:
+		var data IDData
+		if err := decode(event, &data); err != nil {
+			return 0, err
+		}
+		if data.ID > 0 {
+			return data.ID, nil
+		}
+	}
+	return 0, nil
 }
 
 func stringSlice(values []string) []string {

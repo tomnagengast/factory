@@ -272,8 +272,9 @@ thread replies do not resume the run.
 `/history` lists every projected run and `/history/{id}` displays the distinct
 events chronologically in contiguous phase groups. Run content renders as
 Markdown: prose wraps within the page, while code blocks and tables scroll
-horizontally. Both views update from the same server-sent event stream as the
-event wire.
+horizontally. A task-triggered run links back to its task, including a
+`task.deleted` run because the task remains replayable after soft deletion.
+Both views update from the same server-sent event stream as the event wire.
 
 ### Task event triggers
 
