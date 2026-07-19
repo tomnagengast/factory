@@ -16,6 +16,12 @@ import "highlight.js/styles/github-dark.css";
 import { get, optional, optionalID, post, put, remove, uploadMedia } from "./api";
 import { insertMediaMarkup, mediaAccept, mediaFiles, mediaKind, mediaMarkup } from "./media";
 import {
+  loadTaskViewPreferences,
+  saveTaskViewPreferences,
+  taskFields,
+  type TaskField,
+} from "./task-view-preferences";
+import {
   taskStatuses,
   type Artifact,
   type Comment,
@@ -449,12 +455,6 @@ function ProjectForm(props: {
   );
 }
 
-const taskFields = [
-  ["id", "ID"], ["createdAt", "Created at"], ["updatedAt", "Updated at"],
-  ["deletedAt", "Deleted at"], ["title", "Title"], ["description", "Description"],
-  ["parentTaskId", "Parent task"], ["status", "Status"], ["projectId", "Project"],
-] as const;
-
 function Tasks() {
   const [data] = createResource(async () => {
     const [tasks, projects] = await Promise.all([
@@ -462,9 +462,15 @@ function Tasks() {
     ]);
     return { tasks: tasks.tasks, projects: projects.projects };
   });
-  const [sortField, setSortField] = createSignal("id");
-  const [direction, setDirection] = createSignal<"asc" | "desc">("desc");
-  const [groupField, setGroupField] = createSignal("");
+  const initial = loadTaskViewPreferences();
+  const [sortField, setSortField] = createSignal(initial.sortField);
+  const [direction, setDirection] = createSignal(initial.direction);
+  const [groupField, setGroupField] = createSignal(initial.groupField);
+  createEffect(() => saveTaskViewPreferences({
+    sortField: sortField(),
+    direction: direction(),
+    groupField: groupField(),
+  }));
   const groups = createMemo(() => {
     const value = data();
     if (!value) return [] as Array<[string, Task[]]>;
@@ -472,10 +478,11 @@ function Tasks() {
       const result = compare(taskValue(left, sortField()), taskValue(right, sortField()));
       return direction() === "desc" ? -result : result;
     });
-    if (!groupField()) return [["", sorted]] as Array<[string, Task[]]>;
+    const field = groupField();
+    if (!field) return [["", sorted]] as Array<[string, Task[]]>;
     const grouped = new Map<string, Task[]>();
     for (const task of sorted) {
-      const key = displayTaskValue(task, groupField(), value.projects);
+      const key = displayTaskValue(task, field, value.projects);
       grouped.set(key, [...(grouped.get(key) ?? []), task]);
     }
     return [...grouped.entries()];
@@ -488,13 +495,13 @@ function Tasks() {
         actions={<A class="button primary" href="/tasks/new">New task</A>}
       />
       <div class="controls">
-        <label>Sort by<select value={sortField()} onChange={(event) => setSortField(event.currentTarget.value)}>
+        <label>Sort by<select value={sortField()} onChange={(event) => setSortField(event.currentTarget.value as TaskField)}>
           <For each={taskFields}>{(field) => <option value={field[0]}>{field[1]}</option>}</For>
         </select></label>
         <label>Direction<select value={direction()} onChange={(event) => setDirection(event.currentTarget.value as "asc" | "desc")}>
           <option value="desc">Descending</option><option value="asc">Ascending</option>
         </select></label>
-        <label>Group by<select value={groupField()} onChange={(event) => setGroupField(event.currentTarget.value)}>
+        <label>Group by<select value={groupField()} onChange={(event) => setGroupField(event.currentTarget.value as TaskField | "")}>
           <option value="">No grouping</option>
           <For each={taskFields}>{(field) => <option value={field[0]}>{field[1]}</option>}</For>
         </select></label>
@@ -1387,7 +1394,7 @@ function liveRefetch(types: string[], refetch: () => unknown) {
   onCleanup(() => source?.close());
 }
 
-function taskValue(task: Task, field: string): string | number {
+function taskValue(task: Task, field: TaskField): string | number {
   return ({
     id: task.id, createdAt: task.createdAt, updatedAt: task.updatedAt,
     deletedAt: task.deletedAt ?? "", title: task.title, description: task.description ?? "",
@@ -1395,7 +1402,7 @@ function taskValue(task: Task, field: string): string | number {
   })[field] ?? "";
 }
 
-function displayTaskValue(task: Task, field: string, projects: Project[]) {
+function displayTaskValue(task: Task, field: TaskField, projects: Project[]) {
   if (field === "projectId") return projectName(task.projectId, projects);
   if (field === "parentTaskId") return task.parentTaskId ? `Task ${task.parentTaskId}` : "No parent";
   if (field.endsWith("At")) return taskValue(task, field) ? date(String(taskValue(task, field))) : "Never";

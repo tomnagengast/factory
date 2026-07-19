@@ -98,10 +98,13 @@ POST   /api/tasks/{id}/comments
 ```
 
 The API task list is sorted by ID descending. The web application can re-sort
-or group it by any task field. The project must exist and not be deleted. Task
-detail includes comments and artifacts. Task resource responses always include
-`description` and `parentTaskId`; unset values are `null`, so a client can use
-a fetched task as the basis for a full `PUT`.
+or group it by any task field. It stores the selected sort field, direction,
+and group field in the browser and restores them on later visits. A missing or
+invalid saved preference uses ID descending with no grouping. The project must
+exist and not be deleted. Task detail includes comments and artifacts. Task
+resource responses always include `description` and `parentTaskId`; unset
+values are `null`, so a client can use a fetched task as the basis for a full
+`PUT`.
 
 The web task detail is rendered by default and enters its form only after
 selecting **Edit task**. Save persists the task; cancel discards the form.
