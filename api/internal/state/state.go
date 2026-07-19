@@ -80,8 +80,8 @@ var TaskStatuses = []TaskStatus{Backlog, Todo, InProgress, Done, Canceled}
 type Task struct {
 	Record
 	Title        string     `json:"title"`
-	Description  *string    `json:"description,omitempty"`
-	ParentTaskID *int64     `json:"parentTaskId,omitempty"`
+	Description  *string    `json:"description"`
+	ParentTaskID *int64     `json:"parentTaskId"`
 	Status       TaskStatus `json:"status"`
 	ProjectID    int64      `json:"projectId"`
 }

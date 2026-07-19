@@ -61,6 +61,34 @@ func TestProjectTaskCommentAndArtifactAPI(t *testing.T) {
 	}
 }
 
+func TestTaskDetailIncludesNullOptionalFields(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	projectPath := filepath.Join(t.TempDir(), "factory")
+	requestJSON(t, handler, http.MethodPost, "/api/projects",
+		fmt.Sprintf(`{"name":"Factory","path":%q}`, projectPath))
+	requestJSON(t, handler, http.MethodPost, "/api/tasks",
+		`{"title":"Root task","status":"todo","projectId":1}`)
+
+	detail := requestJSON(t, handler, http.MethodGet, "/api/tasks/2", "")
+	if detail.Code != http.StatusOK {
+		t.Fatalf("task detail status = %d, body = %s", detail.Code, detail.Body)
+	}
+	var result struct {
+		Task map[string]any `json:"task"`
+	}
+	if err := json.Unmarshal(detail.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"description", "parentTaskId"} {
+		value, found := result.Task[field]
+		if !found || value != nil {
+			t.Errorf("task %s = %#v, present = %v; want explicit null", field, value, found)
+		}
+	}
+}
+
 func TestTaskListDefaultsToDescendingIDs(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
