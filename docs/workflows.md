@@ -76,7 +76,7 @@ exposes the resource client as `$FACTORY_CLI` and the current server as
 create or update the trigger that will run the workflow:
 
 ```sh
-"$FACTORY_CLI" trigger create '{"eventType":"task.updated","workflowId":24}'
+"$FACTORY_CLI" trigger create '{"eventType":"task.updated","workflowId":24,"enabled":true}'
 ```
 
 The workflow detail page polls the current file once per second while a user
@@ -156,7 +156,8 @@ Create the trigger using the workflow's integer ID:
 ```sh
 factory trigger create '{
   "eventType":"release.ready",
-  "workflowId":24
+  "workflowId":24,
+  "enabled":true
 }'
 ```
 
@@ -172,6 +173,16 @@ factory event create '{
 Only events received after the trigger's latest update are eligible. The
 first event above makes the type selectable; it does not run the trigger
 created afterward.
+
+Set `enabled` to `false` with a full trigger update to keep the definition
+visible without admitting new runs. Full updates require an explicit boolean.
+Events received while disabled are discarded because re-enabling advances the
+trigger's eligibility boundary:
+
+```sh
+factory trigger update 41 '{"eventType":"release.ready","workflowId":24,"enabled":false}'
+factory trigger update 41 '{"eventType":"release.ready","workflowId":24,"enabled":true}'
+```
 
 Factory passes the current settings to the public workflow CLI:
 
@@ -248,7 +259,8 @@ Cron is represented as the event type `cron`:
 {
   "eventType": "cron",
   "schedule": "0 9 * * 1-5",
-  "workflowId": 24
+  "workflowId": 24,
+  "enabled": true
 }
 ```
 
@@ -263,6 +275,10 @@ coordinator ignores an invalid schedule. When a valid schedule is due and
 dispatch capacity is available, Factory appends a targeted `cron` event and
 lets the normal event-trigger path run the workflow.
 
+A disabled cron trigger has no due time. Re-enabling anchors its schedule at
+the update time, so missed ticks do not run immediately and the first later
+scheduled tick resumes normal dispatch.
+
 Only cron triggers need a schedule. Non-cron triggers ignore it operationally.
 
 ## Ordering and failures
@@ -272,6 +288,11 @@ triggers, then due cron ticks. Authoring remains sequential. When no
 conversation is pending, the coordinator claims matching trigger and source
 event pairs in wire order and starts workflow processes until it reaches the
 configured capacity.
+
+Trigger disable changes future admission only and does not cancel a run that
+already has a `workflow.run.started` event. Conditional wire appends resolve a
+concurrent disable and dispatch by durable order: disable first blocks the
+stale start, while start first allows that active run to finish.
 
 Capacity zero pauses new event and cron dispatch while leaving authoring
 available. Lowering capacity does not cancel active runs; new runs wait until

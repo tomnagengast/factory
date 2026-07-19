@@ -167,6 +167,51 @@ func TestSettingsReplayDefaultsMissingWorkflowCapacity(t *testing.T) {
 	}
 }
 
+func TestTriggerEnabledStateReplaysUpdates(t *testing.T) {
+	at := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	schedule := "0 9 * * 1-5"
+	view, err := ProjectEvents([]eventwire.Event{
+		event(1, TriggerCreated, at, TriggerData{
+			EventType: CronFired, Schedule: &schedule, WorkflowID: 8, Enabled: true,
+		}),
+		event(2, TriggerUpdated, at.Add(time.Minute), TriggerData{
+			ID: 1, EventType: CronFired, Schedule: &schedule, WorkflowID: 8, Enabled: false,
+		}),
+		event(3, TriggerUpdated, at.Add(2*time.Minute), TriggerData{
+			ID: 1, EventType: CronFired, Schedule: &schedule, WorkflowID: 8, Enabled: true,
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger, found := view.Trigger(1)
+	if !found || !trigger.Enabled || trigger.UpdatedAt != at.Add(2*time.Minute) ||
+		trigger.EventType != CronFired || trigger.Schedule == nil || *trigger.Schedule != schedule {
+		t.Fatalf("replayed trigger = %#v, found = %v", trigger, found)
+	}
+}
+
+func TestTriggerReplayDefaultsHistoricalEventsToEnabled(t *testing.T) {
+	at := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	view, err := ProjectEvents([]eventwire.Event{
+		{
+			ID: 1, Type: TriggerCreated, At: at,
+			Data: json.RawMessage(`{"eventType":"release.ready","workflowId":8}`),
+		},
+		{
+			ID: 2, Type: TriggerUpdated, At: at.Add(time.Minute),
+			Data: json.RawMessage(`{"id":1,"eventType":"release.shipped","workflowId":8}`),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger, found := view.Trigger(1)
+	if !found || !trigger.Enabled || trigger.EventType != "release.shipped" {
+		t.Fatalf("historical trigger = %#v, found = %v", trigger, found)
+	}
+}
+
 func event(id int64, eventType string, at time.Time, data any) eventwire.Event {
 	encoded, err := json.Marshal(data)
 	if err != nil {

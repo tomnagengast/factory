@@ -44,6 +44,32 @@ func TestWorkflowUpdateIsAnAgentMessage(t *testing.T) {
 	}
 }
 
+func TestTriggerUpdateForwardsEnabledState(t *testing.T) {
+	var method, path, body string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method, path = request.Method, request.URL.Path
+		data, _ := io.ReadAll(request.Body)
+		body = string(data)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":7,"eventType":"release.ready","workflowId":2,"enabled":false}`))
+	}))
+	defer server.Close()
+
+	requestBody := `{"eventType":"release.ready","workflowId":2,"enabled":false}`
+	var output bytes.Buffer
+	if err := Run([]string{
+		"--url", server.URL, "trigger", "update", "7", requestBody,
+	}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPut || path != "/api/triggers/7" || body != requestBody {
+		t.Fatalf("unexpected request: %s %s %s", method, path, body)
+	}
+	if !strings.Contains(output.String(), `"enabled": false`) {
+		t.Fatalf("unexpected output: %s", output.String())
+	}
+}
+
 func TestSettingsUseSingletonAPI(t *testing.T) {
 	getRequest, err := parse([]string{"settings", "get"})
 	if err != nil {

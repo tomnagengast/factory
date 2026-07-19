@@ -95,6 +95,10 @@ func (l *Loop) step(ctx context.Context) (bool, time.Time, error) {
 		return false, time.Time{}, err
 	}
 	events := l.wire.Events(0)
+	snapshotID := int64(0)
+	if len(events) > 0 {
+		snapshotID = events[len(events)-1].ID
+	}
 	view, err := state.ProjectEvents(events)
 	if err != nil {
 		return false, time.Time{}, err
@@ -104,11 +108,14 @@ func (l *Loop) step(ctx context.Context) (bool, time.Time, error) {
 	}
 	if l.active < view.Settings.WorkflowCapacity {
 		if trigger, source, found := pendingTrigger(view, events); found {
-			return true, time.Time{}, l.startTrigger(ctx, view, trigger, source)
+			_, err := l.startTrigger(ctx, view, trigger, source, snapshotID)
+			return true, time.Time{}, err
 		}
 		due, next := nextCron(view, time.Now().UTC())
 		if due != nil {
-			_, err := l.wire.Publish(state.CronFired, state.CronData{TriggerID: due.ID})
+			_, _, err := l.wire.PublishIfCurrent(
+				snapshotID, state.CronFired, state.CronData{TriggerID: due.ID},
+			)
 			return true, time.Time{}, err
 		}
 		return false, next, nil
@@ -230,7 +237,8 @@ func (l *Loop) startTrigger(
 	view state.Snapshot,
 	trigger state.Trigger,
 	source eventwire.Event,
-) error {
+	expectedLastID int64,
+) (bool, error) {
 	selected, found := view.Workflow(trigger.WorkflowID)
 	run := state.WorkflowRunData{
 		TriggerID: trigger.ID, WorkflowID: trigger.WorkflowID, SourceEventID: source.ID,
@@ -238,20 +246,23 @@ func (l *Loop) startTrigger(
 	if found {
 		run.WorkflowName, run.WorkflowPhases = selected.Name, slices.Clone(selected.Phases)
 	}
-	started, err := l.wire.Publish(state.WorkflowRunStarted, run)
+	started, published, err := l.wire.PublishIfCurrent(expectedLastID, state.WorkflowRunStarted, run)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if !published {
+		return false, nil
 	}
 	if !found || selected.DeletedAt != nil {
 		run.Error = "workflow not found"
 		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
-		return err
+		return true, err
 	}
 	directory, directoryErr := taskDirectory(view, source)
 	if directoryErr != nil {
 		run.Error = directoryErr.Error()
 		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
-		return err
+		return true, err
 	}
 	l.active++
 	go func() {
@@ -259,7 +270,7 @@ func (l *Loop) startTrigger(
 			ctx, selected, trigger, source, started.ID, directory, view.Settings, run,
 		)
 	}()
-	return nil
+	return true, nil
 }
 
 func (l *Loop) executeTrigger(
@@ -366,7 +377,8 @@ func (l *Loop) syncWorkflows(ctx context.Context) error {
 func pendingTrigger(view state.Snapshot, events []eventwire.Event) (state.Trigger, eventwire.Event, bool) {
 	for _, event := range events {
 		for _, trigger := range view.Triggers {
-			if trigger.DeletedAt != nil || trigger.EventType != event.Type || !event.At.After(trigger.UpdatedAt) {
+			if !trigger.Enabled || trigger.DeletedAt != nil ||
+				trigger.EventType != event.Type || !event.At.After(trigger.UpdatedAt) {
 				continue
 			}
 			if workflowID, found := terminalWorkflow(event); found && workflowID == trigger.WorkflowID {
@@ -401,15 +413,16 @@ func nextCron(view state.Snapshot, now time.Time) (*state.Trigger, time.Time) {
 	var next time.Time
 	for index := range view.Triggers {
 		trigger := &view.Triggers[index]
-		if trigger.DeletedAt != nil || trigger.EventType != state.CronFired || trigger.Schedule == nil {
+		if !trigger.Enabled || trigger.DeletedAt != nil ||
+			trigger.EventType != state.CronFired || trigger.Schedule == nil {
 			continue
 		}
 		schedule, err := cron.ParseStandard(*trigger.Schedule)
 		if err != nil {
 			continue
 		}
-		anchor := trigger.CreatedAt
-		if last, found := view.LastCron(trigger.ID); found {
+		anchor := trigger.UpdatedAt
+		if last, found := view.LastCron(trigger.ID); found && last.After(anchor) {
 			anchor = last
 		}
 		due := schedule.Next(anchor)

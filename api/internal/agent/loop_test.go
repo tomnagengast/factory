@@ -34,6 +34,7 @@ type fakeWorkflows struct {
 	runs        []struct {
 		directory, source string
 		settings          state.Settings
+		args              any
 	}
 	active, maxActive int
 	started, finished chan struct{}
@@ -55,14 +56,15 @@ func (f *fakeWorkflows) Run(
 	ctx context.Context,
 	directory, source string,
 	settings state.Settings,
-	_ any,
+	args any,
 	emit func(workflow.Event) error,
 ) (string, error) {
 	f.mu.Lock()
 	f.runs = append(f.runs, struct {
 		directory, source string
 		settings          state.Settings
-	}{directory, source, settings})
+		args              any
+	}{directory, source, settings, args})
 	f.active++
 	f.maxActive = max(f.maxActive, f.active)
 	f.mu.Unlock()
@@ -164,7 +166,7 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 		Name: "review", Path: &sourcePath,
 	})
 	triggerEvent, _ := wire.Publish(state.TriggerCreated, state.TriggerData{
-		EventType: "release.ready", WorkflowID: workflowEvent.ID,
+		EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: true,
 	})
 	source, _ := wire.Publish("release.ready", map[string]string{"version": "1.0"})
 
@@ -186,6 +188,11 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	}
 	if workflows.runs[0].settings != state.DefaultSettings {
 		t.Fatalf("trigger settings = %#v", workflows.runs[0].settings)
+	}
+	args, ok := workflows.runs[0].args.(map[string]any)
+	triggerArg, triggerOK := args["trigger"].(state.Trigger)
+	if !ok || !triggerOK || !triggerArg.Enabled {
+		t.Fatalf("trigger args = %#v", workflows.runs[0].args)
 	}
 	workflows.mu.Unlock()
 	view, _ := state.ProjectEvents(wire.Events(0))
@@ -222,7 +229,7 @@ func TestLoopSkipsAWorkflowOwnTerminalEvents(t *testing.T) {
 			summary, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "summary"})
 			other, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "other"})
 			trigger, _ := wire.Publish(state.TriggerCreated, state.TriggerData{
-				EventType: eventType, WorkflowID: summary.ID,
+				EventType: eventType, WorkflowID: summary.ID, Enabled: true,
 			})
 			wire.Publish(eventType, state.WorkflowRunData{
 				TriggerID: 10, WorkflowID: summary.ID, SourceEventID: 11,
@@ -260,7 +267,7 @@ func TestLoopRecoversInterruptedRuns(t *testing.T) {
 		Name: "review", Phases: []string{"Review"},
 	})
 	triggerEvent, _ := wire.Publish(state.TriggerCreated, state.TriggerData{
-		EventType: "release.ready", WorkflowID: workflowEvent.ID,
+		EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: true,
 	})
 	source, _ := wire.Publish("release.ready", map[string]string{"version": "1.0"})
 	started, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
@@ -300,7 +307,9 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 			workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{
 				Name: "review", Path: &sourcePath,
 			})
-			wire.Publish(state.TriggerCreated, state.TriggerData{EventType: eventType, WorkflowID: workflowEvent.ID})
+			wire.Publish(state.TriggerCreated, state.TriggerData{
+				EventType: eventType, WorkflowID: workflowEvent.ID, Enabled: true,
+			})
 			task, _ := wire.Publish(state.TaskCreated, state.TaskData{
 				Title: "Ship it", Status: state.Backlog, ProjectID: project.ID,
 			})
@@ -340,7 +349,7 @@ func TestLoopRunsTriggersUpToWorkflowCapacity(t *testing.T) {
 	wire.Publish(state.SettingsUpdated, settings)
 	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
 	wire.Publish(state.TriggerCreated, state.TriggerData{
-		EventType: "release.ready", WorkflowID: workflowEvent.ID,
+		EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: true,
 	})
 	for version := 1; version <= 3; version++ {
 		wire.Publish("release.ready", map[string]int{"version": version})
@@ -408,7 +417,7 @@ func TestLoopPausesTriggerDispatchAtZeroCapacity(t *testing.T) {
 	wire.Publish(state.SettingsUpdated, settings)
 	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
 	wire.Publish(state.TriggerCreated, state.TriggerData{
-		EventType: "release.ready", WorkflowID: workflowEvent.ID,
+		EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: true,
 	})
 	wire.Publish("release.ready", map[string]int{"version": 1})
 
@@ -435,6 +444,187 @@ func TestLoopPausesTriggerDispatchAtZeroCapacity(t *testing.T) {
 	waitForActiveCount(t, loop, 0)
 }
 
+func TestLoopDiscardsDisabledEventsAndRunsNewEventAfterEnable(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	triggerEvent, _ := wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: false,
+	})
+	wire.Publish("release.ready", map[string]int{"version": 1})
+
+	workflows := newFakeWorkflows()
+	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	worked, _, err := loop.step(context.Background())
+	if err != nil || worked || eventTypeCount(wire.Events(0), state.WorkflowRunStarted) != 0 {
+		t.Fatalf("disabled dispatch = %v, %v, events = %#v", worked, err, wire.Events(0))
+	}
+
+	wire.Publish(state.TriggerUpdated, state.TriggerData{
+		ID: triggerEvent.ID, EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: true,
+	})
+	worked, _, err = loop.step(context.Background())
+	if err != nil || worked {
+		t.Fatalf("disabled-interval event was replayed: %v, %v", worked, err)
+	}
+	newSource, _ := wire.Publish("release.ready", map[string]int{"version": 2})
+	worked, _, err = loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("new event was not dispatched: %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "enabled workflow start")
+	waitForSignal(t, workflows.finished, "enabled workflow finish")
+	waitForActiveCount(t, loop, 0)
+	view, err := state.ProjectEvents(wire.Events(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Runs) != 1 || view.Runs[0].SourceEventID != newSource.ID {
+		t.Fatalf("runs = %#v", view.Runs)
+	}
+}
+
+func TestDisabledCronIsNeitherScheduledNorDispatched(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	schedule := "* * * * *"
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	triggerEvent, _ := wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: state.CronFired, Schedule: &schedule,
+		WorkflowID: workflowEvent.ID, Enabled: false,
+	})
+	events := wire.Events(0)
+	view, err := state.ProjectEvents(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if due, next := nextCron(view, time.Now().UTC().Add(time.Hour)); due != nil || !next.IsZero() {
+		t.Fatalf("disabled cron = %#v, %v", due, next)
+	}
+	wire.Publish(state.CronFired, state.CronData{TriggerID: triggerEvent.ID})
+	events = wire.Events(0)
+	view, err = state.ProjectEvents(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, found := pendingTrigger(view, events); found {
+		t.Fatal("targeted cron event matched a disabled trigger")
+	}
+}
+
+func TestCronResumesAfterEnableWithoutCatchUp(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	schedule := "* * * * *"
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	triggerEvent, _ := wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: state.CronFired, Schedule: &schedule,
+		WorkflowID: workflowEvent.ID, Enabled: true,
+	})
+	wire.Publish(state.TriggerUpdated, state.TriggerData{
+		ID: triggerEvent.ID, EventType: state.CronFired, Schedule: &schedule,
+		WorkflowID: workflowEvent.ID, Enabled: false,
+	})
+	wire.Publish(state.TriggerUpdated, state.TriggerData{
+		ID: triggerEvent.ID, EventType: state.CronFired, Schedule: &schedule,
+		WorkflowID: workflowEvent.ID, Enabled: true,
+	})
+	view, err := state.ProjectEvents(wire.Events(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reenabled, _ := view.Trigger(triggerEvent.ID)
+	if due, next := nextCron(view, reenabled.UpdatedAt); due != nil || next.IsZero() || !next.After(reenabled.UpdatedAt) {
+		t.Fatalf("cron catch-up = %#v, next = %v, update = %v", due, next, reenabled.UpdatedAt)
+	} else if dueAtTick, _ := nextCron(view, next); dueAtTick == nil || dueAtTick.ID != triggerEvent.ID {
+		t.Fatalf("first post-enable tick was not due: %#v", dueAtTick)
+	}
+
+	wire.Publish(state.CronFired, state.CronData{TriggerID: triggerEvent.ID})
+	workflows := newFakeWorkflows()
+	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	worked, _, err := loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("post-enable cron dispatch = %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "cron workflow start")
+	waitForSignal(t, workflows.finished, "cron workflow finish")
+	waitForActiveCount(t, loop, 0)
+}
+
+func TestDisablingTriggerDoesNotCancelActiveRun(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	triggerEvent, _ := wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: true,
+	})
+	wire.Publish("release.ready", map[string]int{"version": 1})
+
+	workflows := newFakeWorkflows()
+	workflows.release = make(chan struct{})
+	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	worked, _, err := loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("initial dispatch = %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "active workflow start")
+	wire.Publish(state.TriggerUpdated, state.TriggerData{
+		ID: triggerEvent.ID, EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: false,
+	})
+	workflows.release <- struct{}{}
+	waitForSignal(t, workflows.finished, "active workflow finish")
+	waitForActiveCount(t, loop, 0)
+	view, err := state.ProjectEvents(wire.Events(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Runs) != 1 || view.Runs[0].Status != "completed" {
+		t.Fatalf("active run = %#v", view.Runs)
+	}
+	wire.Publish("release.ready", map[string]int{"version": 2})
+	worked, _, err = loop.step(context.Background())
+	if err != nil || worked || eventTypeCount(wire.Events(0), state.WorkflowRunStarted) != 1 {
+		t.Fatalf("disabled trigger admitted later event: %v, %v", worked, err)
+	}
+}
+
+func TestDisableWinsAgainstStaleTriggerAdmission(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	triggerEvent, _ := wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: true,
+	})
+	wire.Publish("release.ready", map[string]int{"version": 1})
+	events := wire.Events(0)
+	view, err := state.ProjectEvents(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger, source, found := pendingTrigger(view, events)
+	if !found {
+		t.Fatal("trigger was not selected")
+	}
+	snapshotID := events[len(events)-1].ID
+	wire.Publish(state.TriggerUpdated, state.TriggerData{
+		ID: triggerEvent.ID, EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: false,
+	})
+
+	workflows := newFakeWorkflows()
+	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	published, err := loop.startTrigger(context.Background(), view, trigger, source, snapshotID)
+	if err != nil || published || loop.active != 0 ||
+		eventTypeCount(wire.Events(0), state.WorkflowRunStarted) != 0 {
+		t.Fatalf("stale admission = %v, %v, events = %#v", published, err, wire.Events(0))
+	}
+	select {
+	case <-workflows.started:
+		t.Fatal("stale workflow process started")
+	default:
+	}
+}
+
 func TestLoopRunCancelsAndWaitsForActiveWorkflows(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
@@ -443,7 +633,7 @@ func TestLoopRunCancelsAndWaitsForActiveWorkflows(t *testing.T) {
 	wire.Publish(state.SettingsUpdated, settings)
 	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
 	wire.Publish(state.TriggerCreated, state.TriggerData{
-		EventType: "release.ready", WorkflowID: workflowEvent.ID,
+		EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: true,
 	})
 	for version := 1; version <= 3; version++ {
 		wire.Publish("release.ready", map[string]int{"version": version})
@@ -510,6 +700,16 @@ func waitForActiveCount(t *testing.T, loop *Loop, want int) {
 	if loop.active != want {
 		t.Fatalf("active workflows = %d, want %d", loop.active, want)
 	}
+}
+
+func eventTypeCount(events []eventwire.Event, eventType string) int {
+	count := 0
+	for _, event := range events {
+		if event.Type == eventType {
+			count++
+		}
+	}
+	return count
 }
 
 func openWire(t *testing.T) *eventwire.Wire {
