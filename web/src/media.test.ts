@@ -1,5 +1,43 @@
 import { describe, expect, test } from "bun:test";
-import { insertMediaMarkup, mediaKind, mediaMarkup } from "./media";
+import { insertMediaMarkup, mediaAccept, mediaFiles, mediaKind, mediaMarkup } from "./media";
+
+test("mediaAccept exposes every supported browser picker type", () => {
+  expect(mediaAccept.split(",")).toEqual([
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "video/mp4",
+    "video/webm",
+    "video/quicktime",
+  ]);
+});
+
+describe("mediaFiles", () => {
+  const clipboardImage = new File(["image"], "clipboard.png", { type: "image/png" });
+  const fallbackImage = new File(["fallback"], "fallback.jpg", { type: "image/jpeg" });
+
+  test("reads file items exposed by Safari clipboard events", () => {
+    expect(mediaFiles({
+      files: [],
+      items: [
+        { kind: "string", getAsFile: () => null },
+        { kind: "file", getAsFile: () => clipboardImage },
+      ],
+    })).toEqual([clipboardImage]);
+  });
+
+  test("falls back to the transfer file list", () => {
+    expect(mediaFiles({ files: [fallbackImage], items: [] })).toEqual([fallbackImage]);
+  });
+
+  test("uses item files without duplicating the file list", () => {
+    expect(mediaFiles({
+      files: [fallbackImage],
+      items: [{ kind: "file", getAsFile: () => clipboardImage }],
+    })).toEqual([clipboardImage]);
+  });
+});
 
 describe("mediaKind", () => {
   test.each(["image/png", "image/jpeg", "image/gif", "image/webp"])("classifies %s as an image", (type) => {

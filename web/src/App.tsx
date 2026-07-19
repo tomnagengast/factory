@@ -14,7 +14,7 @@ import hljs from "highlight.js/lib/common";
 import { marked } from "marked";
 import "highlight.js/styles/github-dark.css";
 import { get, optional, optionalID, post, put, remove, uploadMedia } from "./api";
-import { insertMediaMarkup, mediaKind, mediaMarkup } from "./media";
+import { insertMediaMarkup, mediaAccept, mediaFiles, mediaKind, mediaMarkup } from "./media";
 import {
   taskStatuses,
   type Artifact,
@@ -651,8 +651,11 @@ function TaskForm(props: {
       });
     }}>
       <label>Title<input name="title" required disabled={uploading()} value={props.task?.title ?? ""} /></label>
-      <label>Description<MediaTextarea name="description" rows={5} disabled={props.pending}
-        initialValue={props.task?.description ?? ""} onUploadingChange={setUploading} /></label>
+      <div class="form-field">
+        <label for="task-description">Description</label>
+        <MediaTextarea id="task-description" name="description" rows={5} disabled={props.pending}
+          initialValue={props.task?.description ?? ""} onUploadingChange={setUploading} />
+      </div>
       <div class="field-pair">
         <label>Status<select name="status" disabled={uploading()} value={props.task?.status ?? "backlog"}>
           <For each={taskStatuses}>{(status) => <option value={status}>{status}</option>}</For>
@@ -751,6 +754,7 @@ function CommentForm(props: {
 }
 
 function MediaTextarea(props: {
+  id?: string;
   name: string;
   initialValue?: string;
   rows: number;
@@ -767,11 +771,22 @@ function MediaTextarea(props: {
   const [error, setError] = createSignal<string>();
   const [dragging, setDragging] = createSignal(false);
   let textarea: HTMLTextAreaElement | undefined;
+  let fileInput: HTMLInputElement | undefined;
+  let selectionStart = (props.initialValue ?? "").length;
+  let selectionEnd = selectionStart;
 
   createEffect(() => {
     props.reset;
-    setValue(props.initialValue ?? "");
+    const initialValue = props.initialValue ?? "";
+    setValue(initialValue);
+    selectionStart = initialValue.length;
+    selectionEnd = initialValue.length;
   });
+
+  const rememberSelection = (target: HTMLTextAreaElement) => {
+    selectionStart = target.selectionStart;
+    selectionEnd = target.selectionEnd;
+  };
 
   const filesAtSelection = async (files: File[], start: number, end: number) => {
     if (!files.length || uploading()) return;
@@ -793,6 +808,8 @@ function MediaTextarea(props: {
       }
       const inserted = insertMediaMarkup(value(), start, end, markups);
       setValue(inserted.value);
+      selectionStart = inserted.caret;
+      selectionEnd = inserted.caret;
       queueMicrotask(() => {
         textarea?.focus();
         textarea?.setSelectionRange(inserted.caret, inserted.caret);
@@ -807,11 +824,16 @@ function MediaTextarea(props: {
 
   return (
     <div classList={{ "media-textarea": true, dragging: dragging(), uploading: uploading() }}>
-      <textarea ref={textarea} name={props.name} value={value()} rows={props.rows}
+      <textarea ref={textarea} id={props.id} name={props.name} value={value()} rows={props.rows}
         required={props.required} placeholder={props.placeholder} disabled={props.disabled || uploading()}
-        onInput={(event) => setValue(event.currentTarget.value)}
+        onInput={(event) => {
+          setValue(event.currentTarget.value);
+          rememberSelection(event.currentTarget);
+        }}
+        onSelect={(event) => rememberSelection(event.currentTarget)}
+        onBlur={(event) => rememberSelection(event.currentTarget)}
         onPaste={(event) => {
-          const files = Array.from(event.clipboardData?.files ?? []);
+          const files = mediaFiles(event.clipboardData);
           if (!files.length) return;
           event.preventDefault();
           void filesAtSelection(files, event.currentTarget.selectionStart, event.currentTarget.selectionEnd);
@@ -826,14 +848,30 @@ function MediaTextarea(props: {
         onDragLeave={() => setDragging(false)}
         onDrop={(event) => {
           setDragging(false);
-          const files = Array.from(event.dataTransfer?.files ?? []);
+          const files = mediaFiles(event.dataTransfer);
           if (!files.length) return;
           event.preventDefault();
           void filesAtSelection(files, event.currentTarget.selectionStart, event.currentTarget.selectionEnd);
         }} />
-      <Show when={uploading()}>
-        <small class="upload-status" aria-live="polite">Uploading {progress()} of {total()}…</small>
-      </Show>
+      <div class="media-toolbar">
+        <input ref={fileInput} class="media-file-input" type="file" accept={mediaAccept} multiple
+          disabled={props.disabled || uploading()} onChange={(event) => {
+            const files = Array.from(event.currentTarget.files ?? []);
+            event.currentTarget.value = "";
+            void filesAtSelection(files, selectionStart, selectionEnd);
+          }} />
+        <button type="button" class="media-picker" aria-label="Add image or video" title="Add image or video"
+          disabled={props.disabled || uploading()} onClick={() => fileInput?.click()}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <circle cx="8.5" cy="9" r="1.5" />
+            <path d="m4 17 5-5 4 4 2-2 5 5" />
+          </svg>
+        </button>
+        <Show when={uploading()}>
+          <small class="upload-status" aria-live="polite">Uploading {progress()} of {total()}…</small>
+        </Show>
+      </div>
       <Show when={error()}><small class="form-error" role="alert">{error()}</small></Show>
     </div>
   );

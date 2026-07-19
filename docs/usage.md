@@ -140,12 +140,17 @@ The shortest path is through the web application:
 3. Open the task to add a comment or artifact.
 4. Open **Event wire** to see the creation events.
 
-Task descriptions, root comments, and replies accept pasted or dropped local
-PNG, JPEG, GIF, WebP, MP4, WebM, and QuickTime files. Factory uploads each
-file, then inserts editable Markdown or video HTML at the current text
-selection. Multiple files keep their order. There is no rendered preview
+Use the image button below a task description, root comment, or reply to open
+the device's native photo or file chooser. The same editors accept pasted or
+dropped local PNG, JPEG, GIF, WebP, MP4, WebM, and QuickTime files. Factory
+uploads each file, then inserts editable Markdown or video HTML at the current
+text selection. Multiple files keep their order. There is no rendered preview
 before save. Each file may be at most 25 MiB, and browser playback still
 depends on codec support.
+
+On mobile Safari, copy an image, focus the text editor, and select **Paste**
+from the text menu. The visible image button remains available when the
+clipboard does not expose the copied image as a file.
 
 The CLI performs the same operations:
 

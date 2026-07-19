@@ -1,9 +1,28 @@
 import type { MediaUpload } from "./types";
 
-const imageTypes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-const videoTypes = new Set(["video/mp4", "video/webm", "video/quicktime"]);
+const acceptedImageTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const acceptedVideoTypes = ["video/mp4", "video/webm", "video/quicktime"];
+const imageTypes = new Set(acceptedImageTypes);
+const videoTypes = new Set(acceptedVideoTypes);
+
+export const mediaAccept = [...acceptedImageTypes, ...acceptedVideoTypes].join(",");
 
 export type MediaKind = "image" | "video";
+
+type MediaFileTransfer = {
+  files?: ArrayLike<File> | Iterable<File>;
+  items?: ArrayLike<Pick<DataTransferItem, "kind" | "getAsFile">>
+    | Iterable<Pick<DataTransferItem, "kind" | "getAsFile">>;
+};
+
+export function mediaFiles(transfer?: MediaFileTransfer | null): File[] {
+  if (!transfer) return [];
+  const itemFiles = Array.from(transfer.items ?? [])
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+  return itemFiles.length ? itemFiles : Array.from(transfer.files ?? []);
+}
 
 export function mediaKind(contentType: string): MediaKind | undefined {
   if (imageTypes.has(contentType)) return "image";

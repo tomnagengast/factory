@@ -105,10 +105,16 @@ selecting **Edit task**. Save persists the task; cancel discards the form.
 Task titles use inline Markdown, while descriptions and comments use full
 trusted Markdown or HTML with syntax-highlighted code blocks.
 
-The web task form accepts pasted or dropped local media files. It uploads
-them before task creation or update and inserts editable Markdown or video
-HTML at the current selection. It does not show a rendered preview before
-save. See [Media](#media) for the supported formats and limits.
+The web task form accepts local media selected through the image button below
+the description, pasted from the clipboard, or dropped onto the editor. It
+uploads files before task creation or update and inserts editable Markdown or
+video HTML at the current selection. The picker accepts multiple files and
+uses the device's native photo or file chooser. The form does not show a
+rendered preview before save. See [Media](#media) for the supported formats
+and limits.
+On mobile Safari, copy an image, focus the editor, and select **Paste** from
+the text menu. Factory accepts Safari clipboard file items as well as the
+standard clipboard file list.
 Task events contain those short references, not uploaded bytes, so existing
 task triggers keep their normal JSON payload size and shape.
 
@@ -153,9 +159,9 @@ DELETE /api/comments/{id}
 Task comment bodies use `content`; workflow conversation bodies use
 `message`.
 
-Root task comments and replies use the same paste and drop behavior as task
-descriptions. Media-only comments remain valid because the generated markup
-is nonblank content.
+Root task comments and replies use the same media button, paste, and drop
+behavior as task descriptions. Media-only comments remain valid because the
+generated markup is nonblank content.
 
 ## Media
 
