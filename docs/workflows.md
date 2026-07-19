@@ -203,8 +203,8 @@ the executable path configured by `-codex` or `-claude`. It exports the
 current server as `$FACTORY_URL` and the absolute resource client path as
 `$FACTORY_CLI` to the workflow CLI and every agent it starts.
 
-The workflow receives `args.event` and `args.trigger`. Run progress is
-recorded on the event wire:
+The workflow receives `args.event`, `args.trigger`, and its integer
+`args.runId`. Run progress is recorded on the event wire:
 
 1. `workflow.run.started` creates the history item and captures the workflow
    name and phase list,

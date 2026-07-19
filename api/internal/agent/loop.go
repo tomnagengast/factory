@@ -288,7 +288,7 @@ func (l *Loop) executeTrigger(
 		directory,
 		stringValue(selected.Path),
 		settings,
-		map[string]any{"event": source, "trigger": trigger},
+		map[string]any{"event": source, "trigger": trigger, "runId": runID},
 		func(event workflow.Event) error {
 			_, err := l.wire.Publish(state.WorkflowRunEventRecorded, state.WorkflowRunEventData{
 				RunID: runID, Event: event.Raw,

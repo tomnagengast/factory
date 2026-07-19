@@ -41,6 +41,8 @@ type componentResult struct {
 	err  error
 }
 
+const httpShutdownTimeout = 3 * time.Second
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -146,9 +148,9 @@ func run(ctx context.Context, configuration config) error {
 	}
 	defer listener.Close()
 
-	httpServer := &http.Server{Handler: app.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
+	httpServer := newHTTPServer(app.Handler(), runContext)
 	results := make(chan componentResult, 2)
 	go func() { results <- componentResult{name: "workflow coordinator", err: loop.Run(runContext)} }()
 	go func() { results <- componentResult{name: "HTTP server", err: httpServer.Serve(listener)} }()
@@ -162,7 +164,7 @@ func run(ctx context.Context, configuration config) error {
 
 	first := <-results
 	cancel()
-	shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 	shutdownErr := httpServer.Shutdown(shutdownContext)
 	shutdownCancel()
 	second := <-results
@@ -176,6 +178,16 @@ func run(ctx context.Context, configuration config) error {
 		return fmt.Errorf("stop HTTP server: %w", shutdownErr)
 	}
 	return nil
+}
+
+func newHTTPServer(handler http.Handler, baseContext context.Context) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		BaseContext: func(net.Listener) context.Context {
+			return baseContext
+		},
+	}
 }
 
 func operationalError(result componentResult) error {

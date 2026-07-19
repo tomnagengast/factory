@@ -191,7 +191,8 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	}
 	args, ok := workflows.runs[0].args.(map[string]any)
 	triggerArg, triggerOK := args["trigger"].(state.Trigger)
-	if !ok || !triggerOK || !triggerArg.Enabled {
+	runID, runOK := args["runId"].(int64)
+	if !ok || !triggerOK || !triggerArg.Enabled || !runOK || runID < 1 {
 		t.Fatalf("trigger args = %#v", workflows.runs[0].args)
 	}
 	workflows.mu.Unlock()
@@ -201,6 +202,9 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	}
 	if len(view.Runs) != 1 || view.Runs[0].Status != "completed" || view.Runs[0].WorkflowName != "review" {
 		t.Fatalf("run history missing: %#v", view.Runs)
+	}
+	if runID != view.Runs[0].ID {
+		t.Fatalf("workflow runId = %d, history ID = %d", runID, view.Runs[0].ID)
 	}
 	events := view.EventsFor(view.Runs[0].ID)
 	if len(events) != 2 || events[0].Type != "step.started" ||
