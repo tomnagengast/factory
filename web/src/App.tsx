@@ -943,9 +943,15 @@ function HistoryView() {
                         <time>{date(event.at)}</time>
                       </header>
                       <Show when={workflowEventMeta(event)}>{(meta) => <p class="run-event-meta">{meta()}</p>}</Show>
-                      <Show when={event.message}><pre>{event.message}</pre></Show>
-                      <Show when={event.error}><pre class="step-error">{event.error}</pre></Show>
-                      <Show when={event.result != null}><pre>{formatResult(event.result)}</pre></Show>
+                      <Show when={event.message}>{(message) =>
+                        <div class="run-event-content"><Markdown content={message()} /></div>}
+                      </Show>
+                      <Show when={event.error}>{(error) =>
+                        <div class="run-event-content step-error"><Markdown content={error()} /></div>}
+                      </Show>
+                      <Show when={event.result != null}>
+                        <div class="run-event-content"><Markdown content={formatResult(event.result)} /></div>
+                      </Show>
                     </article>}</For>
                   </div>
                 </section>}</For>
@@ -953,9 +959,9 @@ function HistoryView() {
             </Show>
             <Show when={current().run.output || current().run.error}>
               <section class="run-output"><SectionTitle title={current().run.error ? "Run error" : "Final result"} />
-                <pre classList={{ "step-error": Boolean(current().run.error) }}>
-                  {current().run.error || current().run.output}
-                </pre>
+                <div classList={{ "run-event-content": true, "step-error": Boolean(current().run.error) }}>
+                  <Markdown content={current().run.error || current().run.output} />
+                </div>
               </section>
             </Show>
           </>;
@@ -1304,7 +1310,7 @@ function workflowEventMeta(event: HistoryDetail["events"][number]) {
 }
 
 function formatResult(value: unknown) {
-  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return typeof value === "string" ? value : `\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``;
 }
 
 function date(value: string) {

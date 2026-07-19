@@ -208,8 +208,10 @@ cancels the workflow. The temporary file is removed only after the follower
 finishes.
 
 `/history` lists every projected run and `/history/{id}` displays the distinct
-events chronologically in contiguous phase groups. Both views update from the
-same server-sent event stream as the event wire.
+events chronologically in contiguous phase groups. Run content renders as
+Markdown: prose wraps within the page, while code blocks and tables scroll
+horizontally. Both views update from the same server-sent event stream as the
+event wire.
 
 ### Task event triggers
 
