@@ -127,8 +127,9 @@ the web application.
 Factory owns one coordinator. It checks work in this order:
 
 1. the oldest workflow conversation awaiting an agent reply,
-2. an event trigger that has not started a run,
-3. a due cron trigger.
+2. a waiting human gate whose task has a new user response,
+3. an event trigger that has not started a run,
+4. a due cron trigger.
 
 Workflow authoring remains sequential. Triggered workflow CLI runs execute in
 parallel until they reach the capacity projected from settings. The
@@ -148,18 +149,20 @@ The coordinator records progress back on the same wire:
 - agent replies as workflow comments,
 - every ordered runtime, phase, log, diagnostic, agent, gate, cache, nested
   workflow, result, and failure event emitted by a workflow run,
-- workflow runs completed or failed,
+- workflow runs waiting for human review, resumed, completed, or failed,
 - cron ticks as targeted `cron` events.
 
 The event page therefore shows both user intake and the coordinator's response.
-The history pages project those wire events into live and completed workflow
-runs without a separate log store. Each semantic runtime event remains one
-distinct wire record; the projection never collapses lifecycle pairs.
+The history pages project those wire events into live, waiting, and completed
+workflow runs without a separate log store. Each semantic runtime event
+remains one distinct wire record; the projection never collapses lifecycle
+pairs.
 
 Graceful shutdown records active runs as failed after canceling their
 processes. At startup, the coordinator also closes any projected `running`
 run that lacks a terminal event. This keeps history honest after a crash or
-process replacement without rewriting the wire.
+process replacement without rewriting the wire. Waiting runs have no live
+workflow process and survive restart until a user responds on the task.
 
 ## Workflow source and metadata
 

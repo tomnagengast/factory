@@ -37,7 +37,11 @@ type fakeWorkflows struct {
 		directory, source string
 		settings          state.Settings
 		args              any
+		resume            []json.RawMessage
 	}
+	runEvents         [][]string
+	runErrors         []error
+	outputs           []string
 	active, maxActive int
 	started, finished chan struct{}
 	release           chan struct{}
@@ -61,17 +65,20 @@ func (f *fakeWorkflows) Validate(_ context.Context, source string) error {
 
 func (f *fakeWorkflows) Run(
 	ctx context.Context,
-	directory, source string,
-	settings state.Settings,
-	args any,
+	request workflow.RunRequest,
 	emit func(workflow.Event) error,
 ) (string, error) {
 	f.mu.Lock()
+	runIndex := len(f.runs)
 	f.runs = append(f.runs, struct {
 		directory, source string
 		settings          state.Settings
 		args              any
-	}{directory, source, settings, args})
+		resume            []json.RawMessage
+	}{
+		request.Directory, request.Source, request.Settings, request.Arguments,
+		request.Resume,
+	})
 	f.active++
 	f.maxActive = max(f.maxActive, f.active)
 	f.mu.Unlock()
@@ -94,6 +101,9 @@ func (f *fakeWorkflows) Run(
 			`{"sequence":1,"at":"2026-07-17T12:00:00Z","type":"step.started","workflow":"review","phase":"Review","stepId":1,"kind":"agent","message":"Review it"}`,
 			`{"sequence":2,"at":"2026-07-17T12:00:01Z","type":"step.completed","workflow":"review","phase":"Review","stepId":1,"kind":"agent","result":"approved","extension":{"kept":true}}`,
 		}
+		if runIndex < len(f.runEvents) {
+			events = f.runEvents[runIndex]
+		}
 		for _, raw := range events {
 			var event workflow.Event
 			json.Unmarshal([]byte(raw), &event)
@@ -102,6 +112,12 @@ func (f *fakeWorkflows) Run(
 				return "", err
 			}
 		}
+	}
+	if runIndex < len(f.runErrors) && f.runErrors[runIndex] != nil {
+		return "", f.runErrors[runIndex]
+	}
+	if runIndex < len(f.outputs) {
+		return f.outputs[runIndex], nil
 	}
 	return "complete", nil
 }
@@ -237,12 +253,16 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	if workflows.runs[0].settings != state.DefaultSettings {
 		t.Fatalf("trigger settings = %#v", workflows.runs[0].settings)
 	}
-	args, ok := workflows.runs[0].args.(map[string]any)
-	triggerArg, triggerOK := args["trigger"].(state.Trigger)
-	runID, runOK := args["runId"].(int64)
-	if !ok || !triggerOK || !triggerArg.Enabled || !runOK || runID < 1 {
+	var args struct {
+		Trigger state.Trigger `json:"trigger"`
+		RunID   int64         `json:"runId"`
+	}
+	rawArgs, ok := workflows.runs[0].args.(json.RawMessage)
+	if !ok || json.Unmarshal(rawArgs, &args) != nil ||
+		!args.Trigger.Enabled || args.RunID < 1 {
 		t.Fatalf("trigger args = %#v", workflows.runs[0].args)
 	}
+	runID := args.RunID
 	workflows.mu.Unlock()
 	view, _ := state.ProjectEvents(wire.Events(0))
 	if !view.RunStarted(triggerEvent.ID, source.ID) {
@@ -270,6 +290,101 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	}
 	if recorded != 2 {
 		t.Fatalf("recorded workflow events = %d, want 2", recorded)
+	}
+}
+
+func TestLoopWaitsForHumanTaskCommentAndResumesTheSameRun(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	projectPath := t.TempDir()
+	project, _ := wire.Publish(state.ProjectCreated, state.ProjectData{
+		Name: "Factory", Path: projectPath,
+	})
+	sourcePath := "/workflows/review.js"
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{
+		Name: "review", Path: &sourcePath, Phases: []string{"Review"},
+	})
+	wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: state.TaskCreated, WorkflowID: workflowEvent.ID, Enabled: true,
+	})
+	task, _ := wire.Publish(state.TaskCreated, state.TaskData{
+		Title: "Ship it", Status: state.InReview, ProjectID: project.ID,
+	})
+
+	workflows := newFakeWorkflows()
+	workflows.runEvents = [][]string{
+		{
+			`{"sequence":1,"at":"2026-07-19T12:00:00Z","type":"runtime.started","workflow":"review","backend":"codex"}`,
+			`{"sequence":2,"at":"2026-07-19T12:00:01Z","type":"phase.started","workflow":"review","phase":"Review"}`,
+			`{"sequence":3,"at":"2026-07-19T12:00:02Z","type":"step.started","workflow":"review","phase":"Review","stepId":1,"key":"human-key","agentId":"gate","backend":"human","kind":"gate","message":"Should this ship?"}`,
+			`{"sequence":4,"at":"2026-07-19T12:00:03Z","type":"runtime.suspended","workflow":"review","phase":"Review","stepId":1,"key":"human-key","agentId":"gate","backend":"human","kind":"gate","message":"Should this ship?"}`,
+		},
+		{
+			`{"sequence":6,"at":"2026-07-19T12:01:00Z","type":"runtime.resumed","workflow":"review","backend":"codex"}`,
+			`{"sequence":7,"at":"2026-07-19T12:01:01Z","type":"step.cached","workflow":"review","phase":"Review","stepId":1,"key":"human-key","agentId":"gate","backend":"human","kind":"gate","result":"Yes, ship it."}`,
+			`{"sequence":8,"at":"2026-07-19T12:01:02Z","type":"runtime.completed","workflow":"review","result":"complete"}`,
+		},
+	}
+	workflows.runErrors = []error{workflow.ErrHumanReview, nil}
+	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+
+	worked, _, err := loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("initial dispatch = %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "waiting workflow start")
+	waitForSignal(t, workflows.finished, "waiting workflow finish")
+	waitForActiveCount(t, loop, 0)
+
+	view, err := state.ProjectEvents(wire.Events(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Runs) != 1 || view.Runs[0].Status != "waiting" ||
+		view.Runs[0].TaskID != task.ID || view.Runs[0].WaitingGate == nil {
+		t.Fatalf("waiting run = %#v", view.Runs)
+	}
+	comments := view.CommentsFor("task", task.ID)
+	if len(comments) != 1 || comments[0].Author != "agent" ||
+		comments[0].Content != "Should this ship?" {
+		t.Fatalf("gate comment = %#v", comments)
+	}
+	response, err := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, Author: "user", Content: "Yes, ship it.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	worked, _, err = loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("resume dispatch = %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "resumed workflow start")
+	waitForSignal(t, workflows.finished, "resumed workflow finish")
+	waitForActiveCount(t, loop, 0)
+
+	view, err = state.ProjectEvents(wire.Events(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := view.Runs[0]
+	if run.Status != "completed" || run.ID < 1 || run.ResponseCommentID != response.ID {
+		t.Fatalf("completed resumed run = %#v", run)
+	}
+	workflows.mu.Lock()
+	defer workflows.mu.Unlock()
+	if len(workflows.runs) != 2 || len(workflows.runs[1].resume) != 5 ||
+		workflows.runs[1].directory != projectPath ||
+		workflows.runs[1].source != sourcePath ||
+		string(workflows.runs[1].resume[4]) == "" {
+		t.Fatalf("resumed workflow request = %#v", workflows.runs)
+	}
+	var human workflow.Event
+	if err := json.Unmarshal(workflows.runs[1].resume[4], &human); err != nil ||
+		human.Type != "step.completed" || human.Sequence != 5 ||
+		string(human.Result) != `"Yes, ship it."` {
+		t.Fatalf("human journal result = %#v, %v", human, err)
 	}
 }
 
@@ -348,6 +463,38 @@ func TestLoopRecoversInterruptedRuns(t *testing.T) {
 	}
 }
 
+func TestLoopPreservesWaitingRunsAcrossRestart(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	started, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 2, WorkflowID: 1, WorkflowName: "review",
+		SourceEventID: 3, TaskID: 3,
+	})
+	comment, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: 3, Author: "agent", Content: "Review it?",
+	})
+	wire.Publish(state.WorkflowRunWaiting, state.WorkflowRunStateData{
+		RunID: started.ID, GateCommentID: comment.ID,
+		Gate: &state.WorkflowGate{
+			Workflow: "review", StepID: 1, Key: "human-key", Message: "Review it?",
+		},
+	})
+
+	loop, _ := NewLoop(wire, &fakeAgent{}, newFakeWorkflows())
+	if err := loop.recoverInterruptedRuns(); err != nil {
+		t.Fatal(err)
+	}
+	view, err := state.ProjectEvents(wire.Events(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, found := view.Run(started.ID)
+	if !found || run.Status != "waiting" ||
+		eventTypeCount(wire.Events(0), state.WorkflowRunFailed) != 0 {
+		t.Fatalf("waiting run after recovery = %#v, %v", run, found)
+	}
+}
+
 func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 	for _, eventType := range []string{state.TaskCreated, state.TaskUpdated, state.TaskDeleted} {
 		t.Run(eventType, func(t *testing.T) {
@@ -390,10 +537,13 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 				t.Fatalf("runs = %#v, want project path %q and source %q", workflows.runs, path, sourcePath)
 			}
 			if eventType == state.TaskUpdated {
-				args, ok := workflows.runs[0].args.(map[string]any)
-				event, eventOK := args["event"].(eventwire.Event)
+				var args struct {
+					Event eventwire.Event `json:"event"`
+				}
+				rawArgs, ok := workflows.runs[0].args.(json.RawMessage)
 				var data state.TaskData
-				if !ok || !eventOK || json.Unmarshal(event.Data, &data) != nil || data.Status != state.InReview {
+				if !ok || json.Unmarshal(rawArgs, &args) != nil ||
+					json.Unmarshal(args.Event.Data, &data) != nil || data.Status != state.InReview {
 					t.Fatalf("task update args = %#v", workflows.runs[0].args)
 				}
 			}

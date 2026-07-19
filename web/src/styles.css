@@ -214,7 +214,7 @@ main { min-width: 0; }
   background: var(--status-neutral-surface); color: var(--status-neutral-text);
   font: 10px var(--mono); text-transform: uppercase;
 }
-.status.todo { color: var(--status-info-text); border-color: var(--status-info-border); background: var(--status-info-surface); }
+.status.todo, .run-status.waiting { color: var(--status-info-text); border-color: var(--status-info-border); background: var(--status-info-surface); }
 .status.in-progress, .run-status.running { color: var(--status-warning-text); border-color: var(--status-warning-border); background: var(--status-warning-surface); }
 .status.done, .trigger-state.enabled, .run-status.completed { color: var(--status-success-text); border-color: var(--status-success-border); background: var(--status-success-surface); }
 .status.canceled, .run-status.failed { color: var(--status-danger-text); border-color: var(--status-danger-border); background: var(--status-danger-surface); }

@@ -562,6 +562,7 @@ function TaskView() {
   const params = useParams();
   const navigate = useNavigate();
   const [data, { refetch }] = createResource(() => get<TaskDetail>(`/api/tasks/${params.task}`));
+  liveRefetch(["comment.created"], refetch);
   const [options] = createResource(async () => {
     const [projects, tasks] = await Promise.all([
       get<{ projects: Project[] }>("/api/projects"), get<{ tasks: Task[] }>("/api/tasks"),
@@ -1026,11 +1027,14 @@ function EventView() {
 
 function History() {
   const [data, { refetch }] = createResource(() => get<{ history: WorkflowRun[] }>("/api/history"));
-  liveRefetch(["workflow.run.started", "workflow.run.event", "workflow.run.completed", "workflow.run.failed"], refetch);
+  liveRefetch([
+    "workflow.run.started", "workflow.run.event", "workflow.run.waiting",
+    "workflow.run.resumed", "workflow.run.completed", "workflow.run.failed",
+  ], refetch);
   return (
     <div class="page">
       <PageHeader title="Workflow history"
-        description="Live and completed workflow runs, newest first." />
+        description="Live, waiting, and completed workflow runs, newest first." />
       <Load data={data} error={() => data.error}>
         {(value) => <Show when={value.history.length} fallback={<Empty>No workflows have run yet.</Empty>}>
           <div class="rows">
@@ -1051,7 +1055,10 @@ function History() {
 function HistoryView() {
   const params = useParams();
   const [data, { refetch }] = createResource(() => get<HistoryDetail>(`/api/history/${params.item}`));
-  liveRefetch(["workflow.run.event", "workflow.run.completed", "workflow.run.failed"], refetch);
+  liveRefetch([
+    "workflow.run.event", "workflow.run.waiting", "workflow.run.resumed",
+    "workflow.run.completed", "workflow.run.failed",
+  ], refetch);
   return (
     <div class="page">
       <Load data={data} error={() => data.error}>
@@ -1066,12 +1073,19 @@ function HistoryView() {
               <span class={`run-status ${current().run.status}`}>{current().run.status}</span>
               <A href={`/workflows/${value.run.workflowId}`}>Workflow #{value.run.workflowId}</A>
               <A href={`/events/${value.run.sourceEventId}`}>Event #{value.run.sourceEventId}</A>
+              <Show when={current().run.taskId}>{(taskId) =>
+                <A href={`/tasks/${taskId()}`}>Task #{taskId()}</A>}
+              </Show>
               <span>Trigger #{value.run.triggerId}</span>
               <time>Started {date(value.run.createdAt)}</time>
               <time>Updated {date(current().run.updatedAt)}</time>
             </div>
             <Show when={phaseGroups(current()).length} fallback={<Empty>
-              {current().run.status === "running" ? "Waiting for the first workflow event…" : "No workflow events were recorded for this run."}
+              {current().run.status === "running"
+                ? "Waiting for the first workflow event…"
+                : current().run.status === "waiting"
+                  ? "Waiting for a human response on the task…"
+                  : "No workflow events were recorded for this run."}
             </Empty>}>
               <div class="run-phases">
                 <For each={phaseGroups(current())}>{([phase, events]) => <section class="run-phase">

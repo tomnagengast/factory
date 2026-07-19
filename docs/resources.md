@@ -486,7 +486,11 @@ ID is its `workflow.run.started` event ID.
 | `workflowName` | string | Name captured when the run started |
 | `workflowPhases` | string array | Phases captured when the run started |
 | `sourceEventId` | integer | Event matched by the trigger |
-| `status` | string | `running`, `completed`, or `failed`; interrupted runs become `failed` |
+| `taskId` | integer or omitted | Task that can answer a human gate |
+| `status` | string | `running`, `waiting`, `completed`, or `failed`; interrupted running runs become `failed` |
+| `waitingGate` | object or omitted | Current human gate prompt and journal identity |
+| `gateCommentId` | integer or omitted | Agent task comment that requested review |
+| `responseCommentId` | integer or omitted | User comment used for the latest resume |
 | `output` | string or omitted | Final workflow result |
 | `error` | string or omitted | Terminal error |
 
@@ -494,10 +498,12 @@ Run detail includes the complete chronological semantic event stream copied
 from the workflow CLI journal. Each event has its Factory wire ID, run ID,
 recorded time, workflow sequence and timestamp, type, and workflow name.
 Depending on the event, it also includes phase, step ID, cache key, agent ID,
-backend, kind, prompt or log message, result, error, tokens, concurrency, and
-budget. Starts, cache hits, completions, and failures remain distinct events.
+backend, kind, prompt or log message, schema, result, error, tokens,
+concurrency, and budget. Starts, cache hits, suspensions, resumes, completions,
+and failures remain distinct events.
 Graceful shutdown closes canceled runs as failed. On startup, Factory appends
-a failure for any prior run still projected as `running`.
+a failure for any prior run still projected as `running`; `waiting` runs remain
+open for a task comment.
 
 ```sh
 factory history list

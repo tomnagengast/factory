@@ -80,7 +80,19 @@ export type WorkflowRun = {
   workflowName: string;
   workflowPhases: string[];
   sourceEventId: number;
-  status: "running" | "completed" | "failed";
+  taskId?: number;
+  status: "running" | "waiting" | "completed" | "failed";
+  waitingGate?: {
+    workflow: string;
+    phase?: string;
+    stepId: number;
+    key: string;
+    agentId?: string;
+    message: string;
+    schema?: unknown;
+  };
+  gateCommentId?: number;
+  responseCommentId?: number;
   output?: string;
   error?: string;
 };
@@ -100,6 +112,7 @@ export type WorkflowRunEvent = {
   backend?: string;
   kind?: string;
   message?: string;
+  schema?: unknown;
   result?: unknown;
   error?: string;
   tokens?: number;

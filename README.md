@@ -104,7 +104,7 @@ Immutable media blobs default to `~/.local/share/factory/media`.
 /workflows                             discovered workflow list
 /workflows/new                         create through agent chat
 /workflows/:workflow                   chat beside the live workflow source
-/history                               live and completed workflow runs
+/history                               live, waiting, and completed workflow runs
 /history/:item                         phase-grouped semantic event timeline
 /settings                              select harness, model, reasoning, and run capacity
 ```
@@ -223,9 +223,12 @@ Task events resolve their required project and run from its configured local
 path, so workflow agents operate in the task's repository without copying or
 linking the workflow source into it.
 Workflow runs stream every ordered semantic journal event onto the durable
-wire for the live and historical views. Workflow conversations remain
-sequential. Triggered workflows run in parallel up to the configured capacity,
-which defaults to six and can be set from zero through ten in `/settings`.
+wire for the live and historical views. A task-triggered human gate posts its
+prompt as a task comment, leaves the run waiting without a live process, and
+resumes that same journal from the next root comment or direct reply.
+Workflow conversations remain sequential. Triggered workflows run in parallel
+up to the configured capacity, which defaults to six and can be set from zero
+through ten in `/settings`.
 
 ## Verify
 

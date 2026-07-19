@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -60,7 +61,10 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 		{Harness: state.Claude, Model: "sonnet", Reasoning: "medium"},
 	} {
 		var events []Event
-		output, err := cli.Run(context.Background(), project, source, settings, map[string]int{"id": 1},
+		output, err := cli.Run(context.Background(), RunRequest{
+			Directory: project, Source: source, Settings: settings,
+			Arguments: map[string]int{"id": 1},
+		},
 			func(event Event) error {
 				events = append(events, event)
 				return nil
@@ -156,10 +160,89 @@ func TestCLICancelsWorkflowWhenEventCannotBeRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := cli.Run(
-		context.Background(), "", filepath.Join(directory, "demo.js"), state.DefaultSettings, nil,
+		context.Background(), RunRequest{
+			Source: filepath.Join(directory, "demo.js"), Settings: state.DefaultSettings,
+		},
 		func(Event) error { return errors.New("wire unavailable") },
 	)
 	if err == nil || !strings.Contains(err.Error(), "wire unavailable") {
 		t.Fatalf("run error = %v", err)
+	}
+}
+
+func TestCLIResumesFromPriorJournalWithoutForwardingItAgain(t *testing.T) {
+	directory := t.TempDir()
+	command := filepath.Join(directory, "workflow")
+	argsPath := filepath.Join(directory, "args")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsPath + "\n" +
+		"while [ \"$#\" -gt 0 ]; do if [ \"$1\" = \"--journal\" ]; then shift; journal=\"$1\"; fi; shift; done\n" +
+		"printf '%s\\n' '{\"sequence\":3,\"at\":\"2026-07-19T12:00:02Z\",\"type\":\"runtime.resumed\",\"workflow\":\"demo\"}' >> \"$journal\"\n" +
+		"printf 'complete'\n"
+	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cli := CLI{
+		Command: command, Workspace: directory,
+		CodexCommand: "codex", ClaudeCommand: "claude",
+		FactoryCommand: filepath.Join(directory, "factory"), FactoryURL: "http://127.0.0.1:8092",
+	}
+	if err := cli.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	prior := []json.RawMessage{
+		json.RawMessage(`{"sequence":1,"at":"2026-07-19T12:00:00Z","type":"runtime.started","workflow":"demo"}`),
+		json.RawMessage(`{"sequence":2,"at":"2026-07-19T12:00:01Z","type":"runtime.suspended","workflow":"demo"}`),
+	}
+	var events []Event
+	output, err := cli.Run(context.Background(), RunRequest{
+		Source: filepath.Join(directory, "demo.js"), Settings: state.DefaultSettings,
+		Resume: prior,
+	}, func(event Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil || output != "complete" {
+		t.Fatalf("resume = %q, %v", output, err)
+	}
+	if len(events) != 1 || events[0].Sequence != 3 || events[0].Type != "runtime.resumed" {
+		t.Fatalf("forwarded events = %#v", events)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "--resume") {
+		t.Fatalf("resume flag missing: %s", args)
+	}
+}
+
+func TestCLIReturnsHumanReviewSentinelForExit75(t *testing.T) {
+	directory := t.TempDir()
+	command := filepath.Join(directory, "workflow")
+	script := "#!/bin/sh\n" +
+		"while [ \"$#\" -gt 0 ]; do if [ \"$1\" = \"--journal\" ]; then shift; journal=\"$1\"; fi; shift; done\n" +
+		"printf '%s\\n' '{\"sequence\":1,\"at\":\"2026-07-19T12:00:00Z\",\"type\":\"runtime.suspended\",\"workflow\":\"demo\",\"backend\":\"human\"}' >> \"$journal\"\n" +
+		"exit 75\n"
+	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cli := CLI{
+		Command: command, Workspace: directory,
+		CodexCommand: "codex", ClaudeCommand: "claude",
+		FactoryCommand: filepath.Join(directory, "factory"), FactoryURL: "http://127.0.0.1:8092",
+	}
+	if err := cli.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	var events []Event
+	_, err := cli.Run(context.Background(), RunRequest{
+		Source: filepath.Join(directory, "demo.js"), Settings: state.DefaultSettings,
+	}, func(event Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if !errors.Is(err, ErrHumanReview) || len(events) != 1 ||
+		events[0].Type != "runtime.suspended" {
+		t.Fatalf("human suspension = %#v, %v", events, err)
 	}
 }
