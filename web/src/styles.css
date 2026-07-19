@@ -430,6 +430,7 @@ label small { color: var(--color-text-muted); font-weight: 400; }
 .source-status.working::before { background: #b9e379; box-shadow: 0 0 0 4px #b9e37917; }
 .source-panel pre { min-height: 0; margin: 0; padding: 18px; overflow: auto; overscroll-behavior: contain; tab-size: 2; }
 .source-panel code { font: 11px/1.65 var(--mono); white-space: pre; }
+.source-panel code.hljs { padding: 0; overflow: visible; background: transparent; color: inherit; }
 
 @media (max-width: 900px) {
   .shell { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }

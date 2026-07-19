@@ -22,6 +22,7 @@ import {
   taskFields,
   type TaskField,
 } from "./task-view-preferences";
+import { highlightWorkflowSource } from "./workflow-source";
 import {
   taskStatuses,
   type Artifact,
@@ -1312,6 +1313,8 @@ function WorkflowView() {
         {(value) => {
           const current = () => data() ?? value;
           const working = () => current().comments.at(-1)?.author === "user";
+          const source = createMemo(() => current().source);
+          const highlightedSource = createMemo(() => highlightWorkflowSource(source()).value);
           return <>
             <PageHeader eyebrow={`Workflow ${value.workflow.id}`} title={value.workflow.name}
               description={value.workflow.description}
@@ -1355,7 +1358,9 @@ function WorkflowView() {
                   <div><span>Live source</span><strong>{fileName(current().workflow.path)}</strong></div>
                   <span classList={{ "source-status": true, working: working() }}>{working() ? "Updating" : "Current"}</span>
                 </header>
-                <pre tabIndex={0}><code>{current().source || "// Waiting for the agent to write the workflow file."}</code></pre>
+                <pre tabIndex={0}>
+                  <code class="hljs language-javascript" innerHTML={highlightedSource()} />
+                </pre>
               </section>
             </div>
           </>;

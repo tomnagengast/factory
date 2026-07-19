@@ -81,9 +81,10 @@ create or update the trigger that will run the workflow:
 "$FACTORY_CLI" trigger create '{"eventType":"task.updated","workflowId":24,"enabled":true}'
 ```
 
-The workflow detail page polls the current file once per second while a user
-message awaits an agent reply. Chat and source scroll independently on wide
-screens and stack on narrow screens.
+The workflow detail page highlights the live source as plain JavaScript. It
+polls the current file once per second while a user message awaits an agent
+reply and highlights each changed response. Chat and source scroll
+independently on wide screens and stack on narrow screens.
 
 Use `/settings` or `factory settings update` to select the harness, model,
 reasoning level, and workflow capacity. The API supplies the supported option
