@@ -268,7 +268,8 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	if !view.RunStarted(triggerEvent.ID, source.ID) {
 		t.Fatal("run marker missing")
 	}
-	if len(view.Runs) != 1 || view.Runs[0].Status != "completed" || view.Runs[0].WorkflowName != "review" {
+	if len(view.Runs) != 1 || view.Runs[0].Status != "completed" ||
+		view.Runs[0].WorkflowName != "review" || view.Runs[0].TaskID != 0 {
 		t.Fatalf("run history missing: %#v", view.Runs)
 	}
 	if runID != view.Runs[0].ID {
@@ -531,9 +532,9 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 			waitForSignal(t, workflows.finished, "workflow finish")
 			waitForActiveCount(t, loop, 0)
 			workflows.mu.Lock()
-			defer workflows.mu.Unlock()
 			if !worked || len(workflows.runs) != 1 ||
 				workflows.runs[0].directory != path || workflows.runs[0].source != sourcePath {
+				workflows.mu.Unlock()
 				t.Fatalf("runs = %#v, want project path %q and source %q", workflows.runs, path, sourcePath)
 			}
 			if eventType == state.TaskUpdated {
@@ -544,8 +545,17 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 				var data state.TaskData
 				if !ok || json.Unmarshal(rawArgs, &args) != nil ||
 					json.Unmarshal(args.Event.Data, &data) != nil || data.Status != state.InReview {
+					workflows.mu.Unlock()
 					t.Fatalf("task update args = %#v", workflows.runs[0].args)
 				}
+			}
+			workflows.mu.Unlock()
+			view, err := state.ProjectEvents(wire.Events(0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(view.Runs) != 1 || view.Runs[0].TaskID != task.ID {
+				t.Fatalf("task-triggered run = %#v, want task ID %d", view.Runs, task.ID)
 			}
 		})
 	}

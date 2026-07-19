@@ -14,6 +14,7 @@ import hljs from "highlight.js/lib/common";
 import { marked } from "marked";
 import "highlight.js/styles/github-dark.css";
 import { get, optional, optionalID, post, put, remove, uploadMedia } from "./api";
+import { historyResourceLink } from "./history";
 import { insertMediaMarkup, mediaAccept, mediaFiles, mediaKind, mediaMarkup } from "./media";
 import {
   loadTaskViewPreferences,
@@ -1064,6 +1065,7 @@ function HistoryView() {
       <Load data={data} error={() => data.error}>
         {(value) => {
           const current = () => data() ?? value;
+          const resource = () => historyResourceLink(current().run);
           return <>
             <PageHeader eyebrow={`Run ${value.run.id}`}
               title={value.run.workflowName || `Workflow ${value.run.workflowId}`}
@@ -1073,8 +1075,8 @@ function HistoryView() {
               <span class={`run-status ${current().run.status}`}>{current().run.status}</span>
               <A href={`/workflows/${value.run.workflowId}`}>Workflow #{value.run.workflowId}</A>
               <A href={`/events/${value.run.sourceEventId}`}>Event #{value.run.sourceEventId}</A>
-              <Show when={current().run.taskId}>{(taskId) =>
-                <A href={`/tasks/${taskId()}`}>Task #{taskId()}</A>}
+              <Show when={resource()}>{(link) =>
+                <A href={link().href}>{link().label}</A>}
               </Show>
               <span>Trigger #{value.run.triggerId}</span>
               <time>Started {date(value.run.createdAt)}</time>

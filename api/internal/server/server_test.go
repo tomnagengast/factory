@@ -277,24 +277,62 @@ func TestWorkflowDetailIncludesLiveSource(t *testing.T) {
 func TestWorkflowHistoryListsRunsAndEvents(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
+	project, _ := wire.Publish(state.ProjectCreated, state.ProjectData{Name: "Factory", Path: t.TempDir()})
+	task, _ := wire.Publish(state.TaskCreated, state.TaskData{
+		Title: "Review history", Status: state.InReview, ProjectID: project.ID,
+	})
+	source, _ := wire.Publish(state.TaskUpdated, state.TaskData{
+		ID: task.ID, Title: "Review history", Status: state.InReview, ProjectID: project.ID,
+	})
 	started, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
 		TriggerID: 2, WorkflowID: 1, WorkflowName: "review",
-		WorkflowPhases: []string{"Review"}, SourceEventID: 3,
+		WorkflowPhases: []string{"Review"}, SourceEventID: source.ID,
 	})
 	wire.Publish(state.WorkflowRunEventRecorded, state.WorkflowRunEventData{
 		RunID: started.ID, Event: json.RawMessage(
 			`{"sequence":1,"at":"2026-07-17T12:00:00Z","type":"log","workflow":"review","phase":"Review","message":"Inspecting the change"}`,
 		),
 	})
+	custom, _ := wire.Publish("release.ready", map[string]int64{"id": task.ID})
+	nonTask, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 3, WorkflowID: 1, WorkflowName: "review", SourceEventID: custom.ID,
+	})
 	handler := testServer(t, wire).Handler()
 	list := requestJSON(t, handler, http.MethodGet, "/api/history", "")
-	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"workflowName":"review"`) {
+	var listed struct {
+		History []state.WorkflowRun `json:"history"`
+	}
+	if list.Code != http.StatusOK || json.Unmarshal(list.Body.Bytes(), &listed) != nil {
 		t.Fatalf("history = %d %s", list.Code, list.Body)
 	}
+	var listedTaskID int64
+	for _, run := range listed.History {
+		if run.ID == started.ID {
+			listedTaskID = run.TaskID
+		}
+	}
+	if listedTaskID != task.ID {
+		t.Fatalf("history = %#v, want task ID %d", listed.History, task.ID)
+	}
 	detail := requestJSON(t, handler, http.MethodGet, fmt.Sprintf("/api/history/%d", started.ID), "")
-	if detail.Code != http.StatusOK ||
-		!strings.Contains(detail.Body.String(), `"message":"Inspecting the change"`) {
+	var decoded struct {
+		Run    state.WorkflowRun        `json:"run"`
+		Events []state.WorkflowRunEvent `json:"events"`
+	}
+	if detail.Code != http.StatusOK || json.Unmarshal(detail.Body.Bytes(), &decoded) != nil ||
+		decoded.Run.TaskID != task.ID || len(decoded.Events) != 1 ||
+		decoded.Events[0].Message != "Inspecting the change" {
 		t.Fatalf("history detail = %d %s", detail.Code, detail.Body)
+	}
+	nonTaskDetail := requestJSON(t, handler, http.MethodGet, fmt.Sprintf("/api/history/%d", nonTask.ID), "")
+	var nonTaskDecoded struct {
+		Run map[string]json.RawMessage `json:"run"`
+	}
+	if nonTaskDetail.Code != http.StatusOK || json.Unmarshal(nonTaskDetail.Body.Bytes(), &nonTaskDecoded) != nil {
+		t.Fatalf("non-task history detail = %d %s", nonTaskDetail.Code, nonTaskDetail.Body)
+	}
+	if _, found := nonTaskDecoded.Run["taskId"]; found {
+		t.Fatalf("non-task history includes taskId: %s", nonTaskDetail.Body)
 	}
 }
 
