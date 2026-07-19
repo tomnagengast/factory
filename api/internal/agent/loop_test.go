@@ -30,6 +30,8 @@ func (f *fakeAgent) Run(_ context.Context, settings state.Settings, prompt strin
 
 type fakeWorkflows struct {
 	definitions []workflow.Definition
+	validateErr error
+	validations []string
 	mu          sync.Mutex
 	runs        []struct {
 		directory, source string
@@ -50,6 +52,11 @@ func newFakeWorkflows() *fakeWorkflows {
 
 func (f *fakeWorkflows) List(context.Context) ([]workflow.Definition, error) {
 	return f.definitions, nil
+}
+
+func (f *fakeWorkflows) Validate(_ context.Context, source string) error {
+	f.validations = append(f.validations, source)
+	return f.validateErr
 }
 
 func (f *fakeWorkflows) Run(
@@ -138,8 +145,12 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	if !worked || len(runner.prompts) != 1 ||
 		!strings.Contains(runner.prompts[0], "Build a review panel") ||
 		!strings.Contains(runner.prompts[0], "$FACTORY_CLI") ||
-		!strings.Contains(runner.prompts[0], "github.com/tomnagengast/workflow") {
+		!strings.Contains(runner.prompts[0], "github.com/tomnagengast/workflow") ||
+		!strings.Contains(runner.prompts[0], `workflow validate "/workflows/workflow-1.js"`) {
 		t.Fatalf("workflow was not authored: %#v", runner.prompts)
+	}
+	if len(workflows.validations) != 1 || workflows.validations[0] != workflows.LocalPath(created.ID) {
+		t.Fatalf("workflow validations = %#v", workflows.validations)
 	}
 	if len(runner.settings) != 1 || runner.settings[0] != selected {
 		t.Fatalf("authoring settings = %#v", runner.settings)
@@ -155,6 +166,43 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	authored, _ := view.Workflow(created.ID)
 	if authored.Path == nil || *authored.Path != workflows.LocalPath(created.ID) {
 		t.Fatalf("workflow path = %v, want live authoring target", authored.Path)
+	}
+}
+
+func TestLoopRejectsInvalidAuthoredWorkflow(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	created, err := wire.Publish(state.WorkflowCreated, state.WorkflowData{Name: "Draft"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "workflow", RelationID: created.ID, Author: "user", Content: "Build it",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	workflows := newFakeWorkflows()
+	workflows.validateErr = errors.New("parse error near mktemp")
+	loop, err := NewLoop(wire, &fakeAgent{output: "Updated and validated."}, workflows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worked, _, err := loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("authoring step = %v, %v", worked, err)
+	}
+	if eventTypeCount(wire.Events(0), authoringCompleted) != 0 ||
+		eventTypeCount(wire.Events(0), authoringFailed) != 1 {
+		t.Fatalf("authoring events = %#v", wire.Events(0))
+	}
+	view, err := state.ProjectEvents(wire.Events(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments := view.CommentsFor("workflow", created.ID)
+	if len(comments) != 2 ||
+		!strings.Contains(comments[1].Content, "parse error near mktemp") {
+		t.Fatalf("authoring failure comment = %#v", comments)
 	}
 }
 

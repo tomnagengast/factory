@@ -113,6 +113,31 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 	}
 }
 
+func TestCLIValidatesWorkflow(t *testing.T) {
+	directory := t.TempDir()
+	source := filepath.Join(directory, "demo.js")
+	command := filepath.Join(directory, "workflow")
+	script := "#!/bin/sh\n" +
+		"if [ \"$3\" = \"validate\" ] && [ \"$4\" = \"" + source + "\" ]; then exit 0; fi\n" +
+		"printf 'parse error near demo.js\\n' >&2\n" +
+		"exit 1\n"
+	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cli := CLI{Command: command, Workspace: directory}
+	if err := cli.Validate(context.Background(), source); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.Validate(context.Background(), filepath.Join(directory, "bad.js")); err == nil ||
+		!strings.Contains(err.Error(), "parse error near demo.js") {
+		t.Fatalf("validation error = %v", err)
+	}
+	if err := cli.Validate(context.Background(), " "); err == nil ||
+		!strings.Contains(err.Error(), "source path is required") {
+		t.Fatalf("empty source error = %v", err)
+	}
+}
+
 func TestCLICancelsWorkflowWhenEventCannotBeRecorded(t *testing.T) {
 	directory := t.TempDir()
 	command := filepath.Join(directory, "workflow")

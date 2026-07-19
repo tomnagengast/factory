@@ -66,9 +66,10 @@ The coordinator's sequential authoring path:
 2. assigns `<workflow-workspace>/.claude/workflows/workflow-<id>.js`,
 3. appends `workflow.authoring.started`,
 4. runs the selected unrestricted harness with its model and reasoning level,
-5. asks the workflow CLI to rediscover the written file,
-6. appends a completed or failed event,
-7. appends the harness response as an agent comment.
+5. asks the workflow CLI to validate the complete written file,
+6. asks the workflow CLI to rediscover the validated file,
+7. appends a completed or failed event,
+8. appends the harness response as an agent comment.
 
 The harness runs with the workflow workspace as its working directory. Factory
 exposes the resource client as `$FACTORY_CLI` and the current server as
@@ -136,6 +137,18 @@ The workflow loader expects deterministic source:
 - no `Math.random()`,
 - no argument-free `new Date()`,
 - source no larger than 512 KiB.
+
+The authoring prompt requires the harness to validate the exact target before
+replying:
+
+```sh
+workflow validate /absolute/path/to/workflow.js
+```
+
+Factory runs the same read-only command before it records
+`workflow.authoring.completed`. The command parses the complete workflow and
+checks the loader contract without executing the body. `workflow list` and
+`workflow show` read metadata and do not validate source.
 
 Factory-triggered runs currently pass `--no-validate`, but generated
 workflows should still follow the portable contract.

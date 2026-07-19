@@ -47,6 +47,7 @@ type Event struct {
 
 type Runner interface {
 	List(context.Context) ([]Definition, error)
+	Validate(context.Context, string) error
 	Run(context.Context, string, string, state.Settings, any, func(Event) error) (string, error)
 	LocalPath(int64) string
 }
@@ -78,6 +79,23 @@ func (c CLI) List(ctx context.Context) ([]Definition, error) {
 		return nil, fmt.Errorf("decode workflows: %w", err)
 	}
 	return definitions, nil
+}
+
+func (c CLI) Validate(ctx context.Context, source string) error {
+	if strings.TrimSpace(source) == "" {
+		return errors.New("workflow source path is required")
+	}
+	output, err := exec.CommandContext(
+		ctx, c.Command, "--cwd", c.Workspace, "validate", source,
+	).CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message != "" {
+			return fmt.Errorf("validate workflow: %w: %s", err, message)
+		}
+		return fmt.Errorf("validate workflow: %w", err)
+	}
+	return nil
 }
 
 func (c CLI) Run(

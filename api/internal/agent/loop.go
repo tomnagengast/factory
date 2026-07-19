@@ -209,6 +209,9 @@ func (l *Loop) authorWorkflow(ctx context.Context, view state.Snapshot, comment 
 		return ctx.Err()
 	}
 	if runErr == nil {
+		runErr = l.workflows.Validate(ctx, target)
+	}
+	if runErr == nil {
 		runErr = l.syncWorkflows(ctx)
 	}
 	response := strings.TrimSpace(output)
@@ -474,10 +477,11 @@ You may use $FACTORY_CLI to inspect Factory resources and create or update a tri
 The first statement must export const meta with name, description, and phases.
 Use the workflow runtime globals such as phase, agent, parallel, workflow, gate, and log.
 If an existing workflow is being edited, its resolved source is %s. Preserve its name unless the user asks to change it.
+Before replying, run workflow validate %q and fix every error until it exits zero. workflow list and workflow show do not validate source.
 Edit no other file. Return a concise, useful response to the user after writing the workflow.
 
 Conversation:
-%s`, target, source, conversation.String())
+%s`, target, source, target, conversation.String())
 }
 
 func stringPointer(value string) *string {
