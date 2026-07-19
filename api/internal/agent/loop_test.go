@@ -320,7 +320,7 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 			switch eventType {
 			case state.TaskUpdated:
 				wire.Publish(eventType, state.TaskData{
-					ID: task.ID, Title: "Ship it", Status: state.Todo, ProjectID: project.ID,
+					ID: task.ID, Title: "Ship it", Status: state.InReview, ProjectID: project.ID,
 				})
 			case state.TaskDeleted:
 				wire.Publish(eventType, state.IDData{ID: task.ID})
@@ -340,6 +340,14 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 			if !worked || len(workflows.runs) != 1 ||
 				workflows.runs[0].directory != path || workflows.runs[0].source != sourcePath {
 				t.Fatalf("runs = %#v, want project path %q and source %q", workflows.runs, path, sourcePath)
+			}
+			if eventType == state.TaskUpdated {
+				args, ok := workflows.runs[0].args.(map[string]any)
+				event, eventOK := args["event"].(eventwire.Event)
+				var data state.TaskData
+				if !ok || !eventOK || json.Unmarshal(event.Data, &data) != nil || data.Status != state.InReview {
+					t.Fatalf("task update args = %#v", workflows.runs[0].args)
+				}
 			}
 		})
 	}

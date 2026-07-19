@@ -152,6 +152,73 @@ func TestTaskRequiresExistingProject(t *testing.T) {
 	}
 }
 
+func TestTaskInReviewStatusPersistsAcrossCreateUpdateAndReplay(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	projectPath := filepath.Join(t.TempDir(), "factory")
+	requestJSON(t, handler, http.MethodPost, "/api/projects",
+		fmt.Sprintf(`{"name":"Factory","path":%q}`, projectPath))
+
+	created := requestJSON(t, handler, http.MethodPost, "/api/tasks",
+		`{"title":"Review the change","status":"in review","projectId":1}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", created.Code, created.Body)
+	}
+	var createdTask state.Task
+	if err := json.Unmarshal(created.Body.Bytes(), &createdTask); err != nil {
+		t.Fatal(err)
+	}
+	if createdTask.Status != state.InReview {
+		t.Fatalf("created task status = %q", createdTask.Status)
+	}
+
+	updated := requestJSON(t, handler, http.MethodPut, "/api/tasks/2",
+		`{"title":"Review the finished change","status":"in review","projectId":1}`)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body = %s", updated.Code, updated.Body)
+	}
+	var updatedTask state.Task
+	if err := json.Unmarshal(updated.Body.Bytes(), &updatedTask); err != nil {
+		t.Fatal(err)
+	}
+	if updatedTask.Title != "Review the finished change" || updatedTask.Status != state.InReview {
+		t.Fatalf("updated task = %#v", updatedTask)
+	}
+
+	var taskEvents []state.TaskData
+	for _, event := range wire.Events(0) {
+		if event.Type != state.TaskCreated && event.Type != state.TaskUpdated {
+			continue
+		}
+		var data state.TaskData
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		taskEvents = append(taskEvents, data)
+	}
+	if len(taskEvents) != 2 || taskEvents[0].Status != state.InReview ||
+		taskEvents[1].Status != state.InReview {
+		t.Fatalf("task events = %#v", taskEvents)
+	}
+
+	detail := requestJSON(t, handler, http.MethodGet, "/api/tasks/2", "")
+	var result struct {
+		Task state.Task `json:"task"`
+	}
+	if detail.Code != http.StatusOK || json.Unmarshal(detail.Body.Bytes(), &result) != nil ||
+		result.Task.Status != state.InReview {
+		t.Fatalf("task detail = %d %s", detail.Code, detail.Body)
+	}
+
+	lastID := wire.LastID()
+	rejected := requestJSON(t, handler, http.MethodPost, "/api/tasks",
+		`{"title":"Use an alias","status":"review","projectId":1}`)
+	if rejected.Code != http.StatusBadRequest || wire.LastID() != lastID {
+		t.Fatalf("alias status = %d, body = %s, last ID = %d", rejected.Code, rejected.Body, wire.LastID())
+	}
+}
+
 func TestWorkflowCreationIsAConversation(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()

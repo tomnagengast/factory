@@ -16,7 +16,7 @@ func TestProjectEventsBuildsDomainState(t *testing.T) {
 			Title: "Build routes", Status: Todo, ProjectID: 1,
 		}),
 		event(3, TaskUpdated, at.Add(2*time.Minute), TaskData{
-			ID: 2, Title: "Build every route", Status: InProgress, ProjectID: 1,
+			ID: 2, Title: "Build every route", Status: InReview, ProjectID: 1,
 		}),
 		event(4, CommentCreated, at.Add(3*time.Minute), CommentData{
 			RelationType: "task", RelationID: 2, Author: "user", Content: "Keep it small.",
@@ -32,7 +32,7 @@ func TestProjectEventsBuildsDomainState(t *testing.T) {
 	if len(view.Projects) != 1 || view.Projects[0].ID != 1 {
 		t.Fatalf("unexpected projects: %#v", view.Projects)
 	}
-	if len(view.Tasks) != 1 || view.Tasks[0].Title != "Build every route" || view.Tasks[0].Status != InProgress {
+	if len(view.Tasks) != 1 || view.Tasks[0].Title != "Build every route" || view.Tasks[0].Status != InReview {
 		t.Fatalf("unexpected tasks: %#v", view.Tasks)
 	}
 	if view.Tasks[0].UpdatedAt != events[2].At {

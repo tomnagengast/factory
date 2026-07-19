@@ -13,7 +13,7 @@ export type Project = Record & {
   url?: string;
 };
 
-export const taskStatuses = ["backlog", "todo", "in progress", "done", "canceled"] as const;
+export const taskStatuses = ["backlog", "todo", "in progress", "in review", "done", "canceled"] as const;
 export type TaskStatus = (typeof taskStatuses)[number];
 
 export type Task = Record & {

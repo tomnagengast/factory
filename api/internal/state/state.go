@@ -71,11 +71,12 @@ const (
 	Backlog    TaskStatus = "backlog"
 	Todo       TaskStatus = "todo"
 	InProgress TaskStatus = "in progress"
+	InReview   TaskStatus = "in review"
 	Done       TaskStatus = "done"
 	Canceled   TaskStatus = "canceled"
 )
 
-var TaskStatuses = []TaskStatus{Backlog, Todo, InProgress, Done, Canceled}
+var TaskStatuses = []TaskStatus{Backlog, Todo, InProgress, InReview, Done, Canceled}
 
 type Task struct {
 	Record
