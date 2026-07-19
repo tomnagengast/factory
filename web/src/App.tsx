@@ -13,7 +13,8 @@ import {
 import hljs from "highlight.js/lib/common";
 import { marked } from "marked";
 import "highlight.js/styles/github-dark.css";
-import { get, optional, optionalID, post, put, remove } from "./api";
+import { get, optional, optionalID, post, put, remove, uploadMedia } from "./api";
+import { insertMediaMarkup, mediaKind, mediaMarkup } from "./media";
 import {
   taskStatuses,
   type Artifact,
@@ -635,9 +636,11 @@ function TaskForm(props: {
   onCancel?: () => void;
   onSave: (body: unknown) => void;
 }) {
+  const [uploading, setUploading] = createSignal(false);
   return (
     <form class="form-panel" onSubmit={(event) => {
       event.preventDefault();
+      if (uploading()) return;
       const data = new FormData(event.currentTarget);
       props.onSave({
         title: String(data.get("title") ?? "").trim(),
@@ -647,24 +650,25 @@ function TaskForm(props: {
         projectId: Number(data.get("projectId")),
       });
     }}>
-      <label>Title<input name="title" required value={props.task?.title ?? ""} /></label>
-      <label>Description<textarea name="description" rows="5">{props.task?.description ?? ""}</textarea></label>
+      <label>Title<input name="title" required disabled={uploading()} value={props.task?.title ?? ""} /></label>
+      <label>Description<MediaTextarea name="description" rows={5} disabled={props.pending}
+        initialValue={props.task?.description ?? ""} onUploadingChange={setUploading} /></label>
       <div class="field-pair">
-        <label>Status<select name="status" value={props.task?.status ?? "backlog"}>
+        <label>Status<select name="status" disabled={uploading()} value={props.task?.status ?? "backlog"}>
           <For each={taskStatuses}>{(status) => <option value={status}>{status}</option>}</For>
         </select></label>
-        <label>Project<select name="projectId" required value={props.task?.projectId ?? ""}>
+        <label>Project<select name="projectId" required disabled={uploading()} value={props.task?.projectId ?? ""}>
           <option value="" disabled>Select a project</option>
           <For each={props.projects}>{(project) => <option value={project.id}>{project.name}</option>}</For>
         </select></label>
       </div>
-      <label>Parent task<select name="parentTaskId" value={props.task?.parentTaskId ?? ""}>
+      <label>Parent task<select name="parentTaskId" disabled={uploading()} value={props.task?.parentTaskId ?? ""}>
         <option value="">No parent</option>
         <For each={props.tasks.filter((task) => task.id !== props.task?.id)}>
           {(task) => <option value={task.id}>#{task.id} {task.title}</option>}
         </For>
       </select></label>
-      <FormFooter pending={props.pending} error={props.error} onCancel={props.onCancel}
+      <FormFooter pending={props.pending || uploading()} error={props.error} onCancel={props.onCancel}
         label={props.task ? "Save task" : "Create task"} />
     </form>
   );
@@ -720,9 +724,12 @@ function CommentForm(props: {
   onChange: () => void;
 }) {
   const action = mutation();
+  const [uploading, setUploading] = createSignal(false);
+  const [reset, setReset] = createSignal(0);
   return (
     <form classList={{ "comment-form": true, compact: props.compact }} onSubmit={(event) => {
       event.preventDefault();
+      if (uploading()) return;
       const form = event.currentTarget;
       const data = new FormData(form);
       action.run(async () => {
@@ -730,14 +737,105 @@ function CommentForm(props: {
           content: String(data.get("content") ?? "").trim(),
           parentCommentId: props.parentCommentID,
         });
-        form.reset();
+        setReset((value) => value + 1);
         props.onChange();
       });
     }}>
-      <textarea name="content" required rows={props.compact ? 1 : 3} placeholder={props.compact ? "Reply…" : "Add a comment…"} />
-      <button class="button quiet" disabled={action.pending()}>{props.compact ? "Reply" : "Comment"}</button>
+      <MediaTextarea name="content" required rows={props.compact ? 1 : 3}
+        placeholder={props.compact ? "Reply…" : "Add a comment…"} disabled={action.pending()}
+        reset={reset()} onUploadingChange={setUploading} />
+      <button class="button quiet" disabled={action.pending() || uploading()}>{props.compact ? "Reply" : "Comment"}</button>
       <Show when={action.error()}><span class="form-error">{action.error()}</span></Show>
     </form>
+  );
+}
+
+function MediaTextarea(props: {
+  name: string;
+  initialValue?: string;
+  rows: number;
+  required?: boolean;
+  placeholder?: string;
+  disabled?: boolean;
+  reset?: number;
+  onUploadingChange?: (uploading: boolean) => void;
+}) {
+  const [value, setValue] = createSignal(props.initialValue ?? "");
+  const [uploading, setUploading] = createSignal(false);
+  const [progress, setProgress] = createSignal(0);
+  const [total, setTotal] = createSignal(0);
+  const [error, setError] = createSignal<string>();
+  const [dragging, setDragging] = createSignal(false);
+  let textarea: HTMLTextAreaElement | undefined;
+
+  createEffect(() => {
+    props.reset;
+    setValue(props.initialValue ?? "");
+  });
+
+  const filesAtSelection = async (files: File[], start: number, end: number) => {
+    if (!files.length || uploading()) return;
+    setError();
+    setTotal(files.length);
+    setProgress(0);
+    setUploading(true);
+    props.onUploadingChange?.(true);
+    try {
+      for (const file of files) {
+        if (file.type && file.type !== "application/octet-stream" && !mediaKind(file.type)) {
+          throw new Error(`Unsupported media type: ${file.type}`);
+        }
+      }
+      const markups: string[] = [];
+      for (const [index, file] of files.entries()) {
+        setProgress(index + 1);
+        markups.push(mediaMarkup(await uploadMedia(file)));
+      }
+      const inserted = insertMediaMarkup(value(), start, end, markups);
+      setValue(inserted.value);
+      queueMicrotask(() => {
+        textarea?.focus();
+        textarea?.setSelectionRange(inserted.caret, inserted.caret);
+      });
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setUploading(false);
+      props.onUploadingChange?.(false);
+    }
+  };
+
+  return (
+    <div classList={{ "media-textarea": true, dragging: dragging(), uploading: uploading() }}>
+      <textarea ref={textarea} name={props.name} value={value()} rows={props.rows}
+        required={props.required} placeholder={props.placeholder} disabled={props.disabled || uploading()}
+        onInput={(event) => setValue(event.currentTarget.value)}
+        onPaste={(event) => {
+          const files = Array.from(event.clipboardData?.files ?? []);
+          if (!files.length) return;
+          event.preventDefault();
+          void filesAtSelection(files, event.currentTarget.selectionStart, event.currentTarget.selectionEnd);
+        }}
+        onDragOver={(event) => {
+          const transfer = event.dataTransfer;
+          if (!transfer || !Array.from(transfer.types).includes("Files")) return;
+          event.preventDefault();
+          transfer.dropEffect = "copy";
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(event) => {
+          setDragging(false);
+          const files = Array.from(event.dataTransfer?.files ?? []);
+          if (!files.length) return;
+          event.preventDefault();
+          void filesAtSelection(files, event.currentTarget.selectionStart, event.currentTarget.selectionEnd);
+        }} />
+      <Show when={uploading()}>
+        <small class="upload-status" aria-live="polite">Uploading {progress()} of {total()}…</small>
+      </Show>
+      <Show when={error()}><small class="form-error" role="alert">{error()}</small></Show>
+    </div>
   );
 }
 

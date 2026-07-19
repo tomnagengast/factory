@@ -29,6 +29,7 @@ var frontend embed.FS
 type config struct {
 	Address           string
 	DataPath          string
+	MediaPath         string
 	WorkflowWorkspace string
 	CodexCommand      string
 	ClaudeCommand     string
@@ -80,6 +81,12 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 		"append-only event wire path",
 	)
 	flags.StringVar(
+		&configuration.MediaPath,
+		"media",
+		filepath.Join(home, ".local", "share", "factory", "media"),
+		"immutable media blob directory",
+	)
+	flags.StringVar(
 		&configuration.WorkflowWorkspace,
 		"workflow-workspace",
 		filepath.Join(home, ".local", "share", "factory", "workflow-workspace"),
@@ -102,7 +109,7 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 	if flags.NArg() != 0 {
 		return config{}, errors.New("factory-api accepts options only")
 	}
-	if configuration.Address == "" || configuration.DataPath == "" ||
+	if configuration.Address == "" || configuration.DataPath == "" || configuration.MediaPath == "" ||
 		configuration.WorkflowWorkspace == "" || configuration.CodexCommand == "" ||
 		configuration.ClaudeCommand == "" ||
 		configuration.FactoryCommand == "" || configuration.WorkflowCommand == "" {
@@ -138,7 +145,7 @@ func run(ctx context.Context, configuration config) error {
 	if err != nil {
 		return fmt.Errorf("open embedded web bundle: %w", err)
 	}
-	app, err := server.New(wire, assets)
+	app, err := server.New(wire, assets, configuration.MediaPath)
 	if err != nil {
 		return err
 	}
@@ -159,6 +166,7 @@ func run(ctx context.Context, configuration config) error {
 		"factory listening",
 		"address", "http://"+listener.Addr().String(),
 		"wire", configuration.DataPath,
+		"media", configuration.MediaPath,
 		"workflowWorkspace", configuration.WorkflowWorkspace,
 	)
 

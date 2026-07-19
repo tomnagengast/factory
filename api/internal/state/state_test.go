@@ -43,6 +43,24 @@ func TestProjectEventsBuildsDomainState(t *testing.T) {
 	}
 }
 
+func TestProjectEventsBuildsImmutableMedia(t *testing.T) {
+	at := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	view, err := ProjectEvents([]eventwire.Event{
+		event(7, MediaCreated, at, MediaData{
+			Name: "screen.png", ContentType: "image/png", Size: 4,
+			SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	media, found := view.Media(7)
+	if !found || len(view.MediaFiles) != 1 || media.ID != 7 || media.Name != "screen.png" ||
+		media.ContentType != "image/png" || media.Size != 4 || media.CreatedAt != at || media.UpdatedAt != at {
+		t.Fatalf("projected media = %#v, found = %v, files = %#v", media, found, view.MediaFiles)
+	}
+}
+
 func TestPendingWorkflowCommentSkipsAnsweredMessages(t *testing.T) {
 	at := time.Now().UTC()
 	parent := int64(2)
