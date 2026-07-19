@@ -193,6 +193,10 @@ main { min-width: 0; }
 .project-card small { margin-top: auto; color: var(--color-text-muted); }
 .id { color: var(--color-text-muted); font: 11px var(--mono); }
 .workflows .project-card { min-height: 230px; }
+.workflow-usage { display: flex; align-items: center; gap: 18px; margin-top: auto; color: var(--color-text-muted); }
+.workflow-usage-item { display: inline-flex; align-items: center; gap: 6px; font: 500 12px var(--mono); font-variant-numeric: tabular-nums; }
+.workflow-usage-item svg { width: 16px; height: 16px; stroke-width: 1.8; }
+.workflows .phases { margin-top: 10px; }
 .phases { display: flex; flex-wrap: wrap; gap: 4px; margin-top: auto; }
 .phases span, .event-chip, .artifact-type {
   padding: 4px 7px; border: 1px solid var(--color-chip-border); background: var(--color-chip-surface); color: var(--color-chip-text);

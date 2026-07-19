@@ -11,6 +11,7 @@ import {
   type JSX,
 } from "solid-js";
 import hljs from "highlight.js/lib/common";
+import { ListTodo, Play } from "lucide-solid";
 import { marked } from "marked";
 import "highlight.js/styles/github-dark.css";
 import { get, optional, optionalID, post, put, remove, uploadMedia } from "./api";
@@ -42,6 +43,7 @@ import {
   type WorkflowDetail,
   type WorkflowRun,
 } from "./types";
+import { sortWorkflowsByUsage } from "./workflows";
 
 export function App() {
   return (
@@ -1252,16 +1254,30 @@ function TriggerForm(props: {
 }
 
 function Workflows() {
-  const [data] = createResource(() => get<{ workflows: Workflow[] }>("/api/workflows"));
+  const [data, { refetch }] = createResource(() => get<{ workflows: Workflow[] }>("/api/workflows"));
+  const workflows = createMemo(() => sortWorkflowsByUsage(data()?.workflows ?? []));
+  liveRefetch(["workflow.run.started"], refetch);
   return (
     <div class="page">
       <PageHeader title="Workflows" description="Discovered by the workflow CLI. Factory-authored files live outside git."
         actions={<A class="button primary" href="/workflows/new">New workflow</A>} />
       <Load data={data} error={() => data.error}>
         {(value) => <Show when={value.workflows.length} fallback={<Empty>No workflows discovered.</Empty>}>
-          <div class="card-grid workflows"><For each={value.workflows}>{(workflow) => <A class="project-card" href={`/workflows/${workflow.id}`}>
+          <div class="card-grid workflows"><For each={workflows()}>{(workflow) => <A class="project-card" href={`/workflows/${workflow.id}`}>
             <span class="id">#{workflow.id} · {workflow.scope || "factory"}</span>
             <h2>{workflow.name}</h2><p>{workflow.description || "No description"}</p>
+            <div class="workflow-usage">
+              <span class="workflow-usage-item" role="group" title={`Total workflow runs: ${workflow.runCount}`}
+                aria-label={`Total workflow runs: ${workflow.runCount}`}>
+                <Play aria-hidden="true" />
+                <span>{workflow.runCount}</span>
+              </span>
+              <span class="workflow-usage-item" role="group" title={`Distinct tasks: ${workflow.taskCount}`}
+                aria-label={`Distinct tasks: ${workflow.taskCount}`}>
+                <ListTodo aria-hidden="true" />
+                <span>{workflow.taskCount}</span>
+              </span>
+            </div>
             <div class="phases"><For each={workflow.phases}>{(phase) => <span>{phase}</span>}</For></div>
           </A>}</For></div>
         </Show>}

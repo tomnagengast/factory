@@ -69,6 +69,8 @@ export type Workflow = Record & {
   scope?: string;
   phases: string[];
   mutating: boolean;
+  runCount: number;
+  taskCount: number;
 };
 
 export type WorkflowRun = {

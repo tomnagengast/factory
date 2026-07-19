@@ -131,6 +131,8 @@ type Workflow struct {
 	Scope       *string  `json:"scope,omitempty"`
 	Phases      []string `json:"phases"`
 	Mutating    bool     `json:"mutating"`
+	RunCount    int      `json:"runCount"`
+	TaskCount   int      `json:"taskCount"`
 }
 
 type WorkflowRun struct {
@@ -383,6 +385,8 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 	runIndex := make(map[[2]int64]int)
 	runIDIndex := make(map[int64]int)
 	eventIndex := make(map[int64]eventwire.Event)
+	workflowRunCount := make(map[int64]int)
+	workflowTasks := make(map[int64]map[int64]struct{})
 
 	for _, event := range events {
 		eventIndex[event.ID] = event
@@ -599,6 +603,7 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 			if err := decode(event, &data); err != nil {
 				return Snapshot{}, err
 			}
+			workflowRunCount[data.WorkflowID]++
 			taskID := data.TaskID
 			if taskID == 0 {
 				source, found := eventIndex[data.SourceEventID]
@@ -611,6 +616,12 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 						taskID = inferred
 					}
 				}
+			}
+			if taskID > 0 {
+				if workflowTasks[data.WorkflowID] == nil {
+					workflowTasks[data.WorkflowID] = make(map[int64]struct{})
+				}
+				workflowTasks[data.WorkflowID][taskID] = struct{}{}
 			}
 			key := [2]int64{data.TriggerID, data.SourceEventID}
 			view.startedRuns[key] = true
@@ -685,6 +696,11 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 				}
 			}
 		}
+	}
+	for index := range view.Workflows {
+		workflow := &view.Workflows[index]
+		workflow.RunCount = workflowRunCount[workflow.ID]
+		workflow.TaskCount = len(workflowTasks[workflow.ID])
 	}
 	return view, nil
 }

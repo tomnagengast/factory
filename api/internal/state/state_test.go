@@ -219,6 +219,71 @@ func TestWorkflowRunTaskIDReplay(t *testing.T) {
 	}
 }
 
+func TestWorkflowUsageIsProjectedFromRunStarts(t *testing.T) {
+	at := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	events := []eventwire.Event{
+		event(1, WorkflowDiscovered, at, WorkflowData{Name: "active"}),
+		event(2, WorkflowDiscovered, at, WorkflowData{Name: "less-used"}),
+		event(3, WorkflowDiscovered, at, WorkflowData{Name: "unused"}),
+		event(4, TaskCreated, at, TaskData{Title: "First", Status: Todo, ProjectID: 99}),
+		event(5, TaskUpdated, at, TaskData{ID: 4, Title: "First revised", Status: Todo, ProjectID: 99}),
+		event(6, TaskCreated, at, TaskData{Title: "Second", Status: Todo, ProjectID: 99}),
+		event(7, TaskDeleted, at, IDData{ID: 6}),
+		event(8, WorkflowRunStarted, at, WorkflowRunData{
+			TriggerID: 20, WorkflowID: 1, SourceEventID: 4, TaskID: 4,
+		}),
+		event(9, WorkflowRunStarted, at, WorkflowRunData{
+			TriggerID: 20, WorkflowID: 1, SourceEventID: 5,
+		}),
+		event(10, WorkflowRunStarted, at, WorkflowRunData{
+			TriggerID: 20, WorkflowID: 1, SourceEventID: 6, TaskID: 6,
+		}),
+		event(11, WorkflowRunStarted, at, WorkflowRunData{
+			TriggerID: 20, WorkflowID: 1, SourceEventID: 7,
+		}),
+		event(12, WorkflowRunStarted, at, WorkflowRunData{
+			TriggerID: 21, WorkflowID: 1, SourceEventID: 100,
+		}),
+		event(13, WorkflowRunStarted, at, WorkflowRunData{
+			TriggerID: 22, WorkflowID: 2, SourceEventID: 101,
+		}),
+		event(14, WorkflowRunWaiting, at.Add(time.Second), WorkflowRunStateData{RunID: 9}),
+		event(15, WorkflowRunCompleted, at.Add(2*time.Second), WorkflowRunData{
+			TriggerID: 20, WorkflowID: 1, SourceEventID: 6,
+		}),
+		event(16, WorkflowRunFailed, at.Add(3*time.Second), WorkflowRunData{
+			TriggerID: 20, WorkflowID: 1, SourceEventID: 7, Error: "failed",
+		}),
+	}
+
+	view, err := ProjectEvents(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[int64]struct {
+		runs  int
+		tasks int
+	}{
+		1: {runs: 5, tasks: 2},
+		2: {runs: 1, tasks: 0},
+		3: {runs: 0, tasks: 0},
+	}
+	for _, workflow := range view.Workflows {
+		expected := want[workflow.ID]
+		if workflow.RunCount != expected.runs || workflow.TaskCount != expected.tasks {
+			t.Errorf("workflow %d usage = %d runs, %d tasks; want %d runs, %d tasks",
+				workflow.ID, workflow.RunCount, workflow.TaskCount, expected.runs, expected.tasks)
+		}
+	}
+	for runID, status := range map[int64]string{8: "running", 9: "waiting", 10: "completed", 11: "failed", 12: "running"} {
+		run, found := view.Run(runID)
+		if !found || run.Status != status {
+			t.Errorf("run %d = %#v, found = %v; want status %q", runID, run, found, status)
+		}
+	}
+}
+
 func TestWaitingRunFindsAUserTaskCommentAndResumes(t *testing.T) {
 	at := time.Now().UTC()
 	settings := DefaultSettings

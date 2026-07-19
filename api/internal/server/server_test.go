@@ -236,6 +236,63 @@ func TestWorkflowCreationIsAConversation(t *testing.T) {
 	}
 }
 
+func TestWorkflowListIncludesProjectedUsage(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	for _, name := range []string{"Alpha", "Charlie", "Zulu"} {
+		if _, err := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task, err := wire.Publish(state.TaskCreated, state.TaskData{
+		Title: "Used twice", Status: state.Todo, ProjectID: 99,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	starts := []state.WorkflowRunData{
+		{TriggerID: 10, WorkflowID: 1, SourceEventID: 100},
+		{TriggerID: 11, WorkflowID: 3, SourceEventID: task.ID, TaskID: task.ID},
+		{TriggerID: 12, WorkflowID: 3, SourceEventID: task.ID, TaskID: task.ID},
+	}
+	for _, start := range starts {
+		if _, err := wire.Publish(state.WorkflowRunStarted, start); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	response := requestJSON(t, testServer(t, wire).Handler(), http.MethodGet, "/api/workflows", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body)
+	}
+	var result struct {
+		Workflows []map[string]any `json:"workflows"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Workflows) != 3 {
+		t.Fatalf("workflows = %#v", result.Workflows)
+	}
+	want := []struct {
+		name  string
+		runs  float64
+		tasks float64
+	}{
+		{name: "Alpha", runs: 1, tasks: 0},
+		{name: "Charlie", runs: 0, tasks: 0},
+		{name: "Zulu", runs: 2, tasks: 1},
+	}
+	for index, expected := range want {
+		workflow := result.Workflows[index]
+		if workflow["name"] != expected.name || workflow["runCount"] != expected.runs ||
+			workflow["taskCount"] != expected.tasks {
+			t.Errorf("workflow %d = %#v, want %s with %v runs and %v tasks",
+				index, workflow, expected.name, expected.runs, expected.tasks)
+		}
+	}
+}
+
 func TestWorkflowDetailIncludesLiveSource(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
