@@ -317,7 +317,7 @@ label small { color: var(--muted); font-weight: 400; }
 .source-panel code { font: 11px/1.65 var(--mono); white-space: pre; }
 
 @media (max-width: 900px) {
-  .shell { grid-template-columns: 1fr; }
+  .shell { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .rail { position: static; height: auto; padding: 14px 18px; flex-direction: row; align-items: center; gap: 18px; overflow-x: auto; }
   .brand { padding: 0; flex: none; }
   .brand small, .rail-status { display: none; }
