@@ -264,11 +264,13 @@ support OTLP/gRPC or provider-specific challenge responses.
 | `eventType` | string | yes |
 | `schedule` | string or null | no |
 | `workflowId` | integer | yes |
+| `enabled` | boolean | yes on PUT; creation defaults to `true` |
 
 ```sh
 factory trigger create '{
   "eventType":"release.ready",
-  "workflowId":24
+  "workflowId":24,
+  "enabled":true
 }'
 ```
 
@@ -278,7 +280,8 @@ Cron trigger:
 factory trigger create '{
   "eventType":"cron",
   "schedule":"0 9 * * 1-5",
-  "workflowId":24
+  "workflowId":24,
+  "enabled":true
 }'
 ```
 
@@ -292,10 +295,34 @@ PUT    /api/triggers/{id}
 DELETE /api/triggers/{id}
 ```
 
+Trigger updates replace the full definition and require an explicit boolean
+`enabled`; omitting it or sending `null` returns `400 Bad Request`. Disable or
+re-enable a trigger with the existing update command:
+
+```sh
+factory trigger update 41 '{
+  "eventType":"release.ready",
+  "workflowId":24,
+  "enabled":false
+}'
+
+factory trigger update 41 '{
+  "eventType":"release.ready",
+  "workflowId":24,
+  "enabled":true
+}'
+```
+
+Disabled triggers retain their definitions and remain in list and detail
+responses. They also remain part of the configured trigger count returned by
+`GET /api/health`; only deletion removes a trigger from those views.
+
 The event selector in the web application is derived from observed wire
 types. Publish one event of a new type to make it available, create the
 trigger, then publish a second event to run it. Older events are not replayed
-into a newly created trigger.
+into a newly created trigger. Events received while a trigger is disabled are
+not replayed after it is re-enabled. Cron resumes at the first scheduled time
+after the enabling update instead of running a missed tick.
 
 Triggers for `task.created`, `task.updated`, or `task.deleted` run from the
 task project's configured `path`.

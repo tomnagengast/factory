@@ -3,6 +3,7 @@ package eventwire
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -95,5 +96,37 @@ func TestTypesAreDistinctAndSorted(t *testing.T) {
 	types := wire.Types()
 	if len(types) != 2 || types[0] != "a" || types[1] != "z" {
 		t.Fatalf("unexpected types: %#v", types)
+	}
+}
+
+func TestPublishIfCurrentRejectsStaleSnapshotWithoutChangingWire(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wire.jsonl")
+	wire, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wire.Close()
+
+	first, published, err := wire.PublishIfCurrent(0, "trigger.created", map[string]bool{"enabled": true})
+	if err != nil || !published || first.ID != 1 {
+		t.Fatalf("conditional publish = %#v, %v, %v", first, published, err)
+	}
+	if _, err := wire.Publish("trigger.updated", map[string]bool{"enabled": false}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected, published, err := wire.PublishIfCurrent(1, "workflow.run.started", struct{}{})
+	if err != nil || published || rejected.ID != 0 {
+		t.Fatalf("stale publish = %#v, %v, %v", rejected, published, err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wire.LastID() != 2 || string(after) != string(before) || len(wire.Events(0)) != 2 {
+		t.Fatalf("stale publish changed wire: last ID %d, before %q, after %q", wire.LastID(), before, after)
 	}
 }

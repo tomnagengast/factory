@@ -76,18 +76,30 @@ func decode(data []byte) ([]Event, error) {
 }
 
 func (w *Wire) Publish(eventType string, payload any) (Event, error) {
+	event, _, err := w.publish(0, false, eventType, payload)
+	return event, err
+}
+
+func (w *Wire) PublishIfCurrent(expectedLastID int64, eventType string, payload any) (Event, bool, error) {
+	return w.publish(expectedLastID, true, eventType, payload)
+}
+
+func (w *Wire) publish(expectedLastID int64, conditional bool, eventType string, payload any) (Event, bool, error) {
 	if eventType == "" {
-		return Event{}, errors.New("event type is required")
+		return Event{}, false, errors.New("event type is required")
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return Event{}, fmt.Errorf("encode event payload: %w", err)
+		return Event{}, false, fmt.Errorf("encode event payload: %w", err)
 	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed {
-		return Event{}, ErrClosed
+		return Event{}, false, ErrClosed
+	}
+	if conditional && expectedLastID != int64(len(w.events)) {
+		return Event{}, false, nil
 	}
 	event := Event{
 		ID:   int64(len(w.events) + 1),
@@ -97,15 +109,15 @@ func (w *Wire) Publish(eventType string, payload any) (Event, error) {
 	}
 	encoded, err := json.Marshal(event)
 	if err != nil {
-		return Event{}, fmt.Errorf("encode event: %w", err)
+		return Event{}, false, fmt.Errorf("encode event: %w", err)
 	}
 	if _, err := w.file.Write(append(encoded, '\n')); err != nil {
-		return Event{}, fmt.Errorf("append event: %w", err)
+		return Event{}, false, fmt.Errorf("append event: %w", err)
 	}
 	w.events = append(w.events, event)
 	close(w.changed)
 	w.changed = make(chan struct{})
-	return clone(event), nil
+	return clone(event), true, nil
 }
 
 func (w *Wire) Events(after int64) []Event {

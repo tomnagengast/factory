@@ -502,17 +502,36 @@ func (s *Server) trigger(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, trigger)
 }
 
+type triggerInput struct {
+	EventType  string  `json:"eventType"`
+	Schedule   *string `json:"schedule"`
+	WorkflowID int64   `json:"workflowId"`
+	Enabled    *bool   `json:"enabled"`
+}
+
+func (input triggerInput) data(id int64, defaultEnabled bool) state.TriggerData {
+	enabled := defaultEnabled
+	if input.Enabled != nil {
+		enabled = *input.Enabled
+	}
+	return state.TriggerData{
+		ID: id, EventType: input.EventType, Schedule: input.Schedule,
+		WorkflowID: input.WorkflowID, Enabled: enabled,
+	}
+}
+
 func (s *Server) triggerCreate(writer http.ResponseWriter, request *http.Request) {
-	var input state.TriggerData
+	var input triggerInput
 	if err := decodeJSON(request, &input); err != nil {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if err := validateTrigger(input); err != nil {
+	data := input.data(0, true)
+	if err := validateTrigger(data); err != nil {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	event, err := s.wire.Publish(state.TriggerCreated, input)
+	event, err := s.wire.Publish(state.TriggerCreated, data)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
@@ -528,17 +547,21 @@ func (s *Server) triggerUpdate(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	var input state.TriggerData
+	var input triggerInput
 	if err := decodeJSON(request, &input); err != nil {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	input.ID = id
-	if err := validateTrigger(input); err != nil {
+	if input.Enabled == nil {
+		writeError(writer, http.StatusBadRequest, errors.New("trigger enabled is required"))
+		return
+	}
+	data := input.data(id, false)
+	if err := validateTrigger(data); err != nil {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if _, err := s.wire.Publish(state.TriggerUpdated, input); err != nil {
+	if _, err := s.wire.Publish(state.TriggerUpdated, data); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}

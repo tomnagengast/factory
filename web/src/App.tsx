@@ -980,14 +980,19 @@ function Triggers() {
   });
   return (
     <div class="page">
-      <PageHeader title="Triggers" description="Match an event on the wire or a cron tick, then enqueue one workflow."
+      <PageHeader title="Triggers" description="Match an event on the wire or a cron tick, then run one workflow when enabled."
         actions={<A class="button primary" href="/triggers/new">New trigger</A>} />
       <Load data={data} error={() => data.error}>
         {(value) => <Show when={value.triggers.length} fallback={<Empty>No triggers configured.</Empty>}>
-          <div class="rows"><For each={value.triggers}>{(trigger) => <A class="trigger-row" href={`/triggers/${trigger.id}`}>
+          <div class="rows"><For each={value.triggers}>{(trigger) => <A
+            classList={{ "trigger-row": true, disabled: !trigger.enabled }} href={`/triggers/${trigger.id}`}>
             <span class="event-chip">{trigger.eventType}</span>
             <strong>{workflowName(trigger.workflowId, value.workflows)}</strong>
-            <span>{trigger.schedule || "On event"}</span><span class="id">#{trigger.id}</span>
+            <span class="trigger-schedule">{trigger.schedule || "On event"}</span>
+            <span class={`trigger-state ${trigger.enabled ? "enabled" : "disabled"}`}>
+              {trigger.enabled ? "Enabled" : "Disabled"}
+            </span>
+            <span class="id">#{trigger.id}</span>
           </A>}</For></div>
         </Show>}
       </Load>
@@ -1064,6 +1069,7 @@ function TriggerForm(props: {
         eventType: data.get("eventType"),
         schedule: optional(data.get("schedule")),
         workflowId: Number(data.get("workflowId")),
+        enabled: data.has("enabled"),
       });
     }}>
       <label>Event type<select name="eventType" required value={props.trigger?.eventType ?? ""}>
@@ -1076,6 +1082,10 @@ function TriggerForm(props: {
       </select></label>
       <label>Cron schedule<input name="schedule" placeholder="0 9 * * 1-5" value={props.trigger?.schedule ?? ""} />
         <small>Used only when the event type is cron.</small></label>
+      <label class="checkbox-field">
+        <input name="enabled" type="checkbox" checked={props.trigger?.enabled ?? true} />
+        <span>Enabled<small>Disabled triggers stay visible but admit no new workflow runs.</small></span>
+      </label>
       <FormFooter pending={props.pending} error={props.error} label={props.trigger ? "Save trigger" : "Create trigger"} />
     </form>
   );

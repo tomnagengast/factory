@@ -51,6 +51,7 @@ export type Trigger = Record & {
   eventType: string;
   schedule?: string;
   workflowId: number;
+  enabled: boolean;
 };
 
 export type Workflow = Record & {

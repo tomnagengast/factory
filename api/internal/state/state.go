@@ -108,6 +108,7 @@ type Trigger struct {
 	EventType  string  `json:"eventType"`
 	Schedule   *string `json:"schedule,omitempty"`
 	WorkflowID int64   `json:"workflowId"`
+	Enabled    bool    `json:"enabled"`
 }
 
 type Workflow struct {
@@ -262,6 +263,7 @@ type TriggerData struct {
 	EventType  string  `json:"eventType"`
 	Schedule   *string `json:"schedule,omitempty"`
 	WorkflowID int64   `json:"workflowId"`
+	Enabled    bool    `json:"enabled"`
 }
 
 type WorkflowData struct {
@@ -447,24 +449,25 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 			}
 
 		case TriggerCreated:
-			var data TriggerData
+			data := TriggerData{Enabled: true}
 			if err := decode(event, &data); err != nil {
 				return Snapshot{}, err
 			}
 			triggerIndex[event.ID] = len(view.Triggers)
 			view.Triggers = append(view.Triggers, Trigger{
 				Record: newRecord(event), EventType: data.EventType,
-				Schedule: data.Schedule, WorkflowID: data.WorkflowID,
+				Schedule: data.Schedule, WorkflowID: data.WorkflowID, Enabled: data.Enabled,
 			})
 		case TriggerUpdated:
-			var data TriggerData
+			data := TriggerData{Enabled: true}
 			if err := decode(event, &data); err != nil {
 				return Snapshot{}, err
 			}
 			if index, found := triggerIndex[data.ID]; found {
 				trigger := &view.Triggers[index]
 				trigger.EventType, trigger.Schedule = data.EventType, data.Schedule
-				trigger.WorkflowID, trigger.UpdatedAt = data.WorkflowID, event.At
+				trigger.WorkflowID, trigger.Enabled = data.WorkflowID, data.Enabled
+				trigger.UpdatedAt = event.At
 			}
 		case TriggerDeleted:
 			var data IDData

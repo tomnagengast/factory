@@ -380,8 +380,11 @@ port with `-addr`.
 ### A trigger did not run
 
 The event must be received after the trigger was created or last updated.
-Check `/settings` too: workflow capacity zero pauses new trigger runs, and a
-full capacity makes later runs wait for an active run to finish.
+Check the trigger detail first: a disabled trigger stays visible but admits no
+new runs, and work received while disabled is not replayed after re-enable.
+Check `/settings` separately: workflow capacity zero pauses all trigger runs,
+and a full capacity makes later runs wait for an active run to finish.
 For cron triggers, use a valid standard five-field cron expression. Invalid
-cron schedules are ignored. See [workflows.md](workflows.md) for trigger
-semantics.
+cron schedules are ignored. A re-enabled cron resumes at its first later
+scheduled tick rather than catching up. See [workflows.md](workflows.md) for
+trigger semantics.

@@ -92,7 +92,7 @@ The new domain wire defaults to
 /tasks/:task/comments/:comment         directly address a comment
 /events                                live event wire
 /events/:event                         directly address an event
-/triggers                              trigger list
+/triggers                              trigger list with enabled state
 /triggers/new                          create trigger
 /triggers/:trigger                     view and edit trigger
 /workflows                             discovered workflow list
@@ -135,7 +135,9 @@ ingress      ANY request at /api/ingest or a path beneath it
 ```
 
 Every accepted event type appears in the trigger event selector. `cron` is
-always included.
+always included. Disabled triggers remain visible through the list and detail
+routes. Trigger PUT bodies must include their complete definition and an
+explicit `enabled` boolean.
 
 `/api/ingest?source=<name>` accepts any HTTP payload and records it as
 `ingress.<name>` without a provider adapter. The event preserves the method,
@@ -166,6 +168,7 @@ factory artifact get 18
 factory workflow create '{"message":"Build a review-panel workflow."}'
 factory workflow update 24 '{"message":"Add a security reviewer."}'
 factory event create '{"type":"release.ready","data":{"version":"1.0"}}'
+factory trigger update 41 '{"eventType":"release.ready","workflowId":24,"enabled":false}'
 factory history get 30
 factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6}'
 ```
@@ -201,8 +204,12 @@ workflow --cwd <task.project.path-or-workspace> run <workflow-source-path> \
   --args <source-event-and-trigger>
 ```
 
-Event triggers match events received after the trigger's latest update. Cron
-triggers append a targeted `cron` event and follow the same execution path.
+Enabled event triggers match events received after the trigger's latest
+update. Disabled triggers retain their definitions without admitting work;
+events and cron ticks missed while disabled are not replayed after re-enable.
+Cron resumes at the first schedule after that update. Cron triggers append a
+targeted `cron` event and follow the same execution path. Disabling does not
+cancel a run that already started.
 Task events resolve their required project and run from its configured local
 path, so workflow agents operate in the task's repository without copying or
 linking the workflow source into it.

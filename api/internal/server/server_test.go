@@ -322,6 +322,100 @@ func TestHealthIncludesReleaseIdentity(t *testing.T) {
 	}
 }
 
+func TestTriggerEnabledStateDefaultsPersistsAndRequiresExplicitUpdate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wire.jsonl")
+	wire, err := eventwire.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := testServer(t, wire).Handler()
+
+	created := requestJSON(t, handler, http.MethodPost, "/api/triggers",
+		`{"eventType":"release.ready","workflowId":24}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", created.Code, created.Body)
+	}
+	var trigger state.Trigger
+	if err := json.Unmarshal(created.Body.Bytes(), &trigger); err != nil {
+		t.Fatal(err)
+	}
+	if !trigger.Enabled {
+		t.Fatalf("created trigger = %#v", trigger)
+	}
+	var createdData map[string]any
+	if err := json.Unmarshal(wire.Events(0)[0].Data, &createdData); err != nil {
+		t.Fatal(err)
+	}
+	if enabled, found := createdData["enabled"]; !found || enabled != true {
+		t.Fatalf("creation event = %#v", createdData)
+	}
+
+	disabled := requestJSON(t, handler, http.MethodPut, "/api/triggers/1",
+		`{"eventType":"release.ready","workflowId":24,"enabled":false}`)
+	if disabled.Code != http.StatusOK || json.Unmarshal(disabled.Body.Bytes(), &trigger) != nil || trigger.Enabled {
+		t.Fatalf("disable = %d %s", disabled.Code, disabled.Body)
+	}
+	list := requestJSON(t, handler, http.MethodGet, "/api/triggers", "")
+	var triggers struct {
+		Triggers []state.Trigger `json:"triggers"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &triggers); err != nil {
+		t.Fatal(err)
+	}
+	if len(triggers.Triggers) != 1 || triggers.Triggers[0].Enabled {
+		t.Fatalf("disabled trigger list = %#v", triggers.Triggers)
+	}
+
+	lastID := wire.LastID()
+	omitted := requestJSON(t, handler, http.MethodPut, "/api/triggers/1",
+		`{"eventType":"release.changed","workflowId":24}`)
+	if omitted.Code != http.StatusBadRequest ||
+		!strings.Contains(omitted.Body.String(), "trigger enabled is required") {
+		t.Fatalf("omitted enabled = %d %s", omitted.Code, omitted.Body)
+	}
+	if wire.LastID() != lastID {
+		t.Fatalf("omitted enabled appended event: %d -> %d", lastID, wire.LastID())
+	}
+	detail := requestJSON(t, handler, http.MethodGet, "/api/triggers/1", "")
+	if err := json.Unmarshal(detail.Body.Bytes(), &trigger); err != nil {
+		t.Fatal(err)
+	}
+	if trigger.Enabled || trigger.EventType != "release.ready" {
+		t.Fatalf("rejected update changed trigger = %#v", trigger)
+	}
+	health := requestJSON(t, handler, http.MethodGet, "/api/health", "")
+	var healthData map[string]any
+	if err := json.Unmarshal(health.Body.Bytes(), &healthData); err != nil {
+		t.Fatal(err)
+	}
+	if healthData["triggers"] != float64(1) {
+		t.Fatalf("health = %#v", healthData)
+	}
+
+	if err := wire.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := eventwire.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	handler = testServer(t, reopened).Handler()
+	detail = requestJSON(t, handler, http.MethodGet, "/api/triggers/1", "")
+	if err := json.Unmarshal(detail.Body.Bytes(), &trigger); err != nil {
+		t.Fatal(err)
+	}
+	if trigger.Enabled {
+		t.Fatalf("restarted trigger = %#v", trigger)
+	}
+
+	enabled := requestJSON(t, handler, http.MethodPut, "/api/triggers/1",
+		`{"eventType":"release.ready","workflowId":24,"enabled":true}`)
+	if enabled.Code != http.StatusOK || json.Unmarshal(enabled.Body.Bytes(), &trigger) != nil || !trigger.Enabled {
+		t.Fatalf("enable = %d %s", enabled.Code, enabled.Body)
+	}
+}
+
 func TestSettingsAPIUpdatesHarnessSelection(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()

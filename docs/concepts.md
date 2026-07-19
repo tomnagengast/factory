@@ -166,9 +166,12 @@ flag onto the wire.
 
 ## Triggers
 
-A trigger connects an event type to a workflow. It runs only for matching
-events received after the trigger's most recent update. Creating a trigger
-does not replay older matching events.
+A trigger connects an event type to a workflow and projects an `enabled`
+state from the wire. New and historical triggers default to enabled. A
+disabled trigger retains its definition and remains visible, but admits no
+new event or cron runs. An enabled trigger runs only for matching events
+received after its most recent update. Creating or re-enabling a trigger does
+not replay older matching events.
 
 A workflow never matches its own `workflow.run.completed` or
 `workflow.run.failed` event. Other workflows can still consume those terminal
@@ -190,13 +193,21 @@ The run receives:
   "trigger": {
     "id": 41,
     "eventType": "release.ready",
-    "workflowId": 12
+    "workflowId": 12,
+    "enabled": true
   }
 }
 ```
 
 Cron uses the same path. A due schedule appends a targeted `cron` event, and
-the normal event-trigger logic runs its workflow.
+the normal event-trigger logic runs its workflow. Disabled-interval ticks are
+discarded; cron resumes at the first scheduled time after re-enable.
+
+Disabling affects admission, not cancellation. A run whose
+`workflow.run.started` event precedes the disable update continues. Factory
+orders concurrent disable and dispatch attempts through the wire: if the
+disable event lands first, a stale coordinator snapshot cannot append the run
+start; if the run start lands first, that run is active and may finish.
 
 Every triggered workflow receives the current server as `$FACTORY_URL` and
 the absolute resource client path as `$FACTORY_CLI`. The workflow CLI and the
