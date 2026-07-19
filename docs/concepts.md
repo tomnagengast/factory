@@ -12,8 +12,9 @@ Everything else exists to make those mechanisms visible and usable.
 
 ```text
 Web UI ─┐
-        ├─> JSON resource API ─> append-only JSONL wire
-CLI ────┘                              │
+        ├─> resource API ───────> append-only JSONL wire
+CLI ────┘        │                     │
+                 └─> immutable blobs   │
                                       ├─> projected resources
                                       ├─> live event stream
                                       └─> one coordinator
@@ -58,10 +59,22 @@ event page and detail views use that stream to update without a page reload.
 
 ## Projections and resources
 
-Projects, tasks, comments, artifacts, triggers, workflow metadata, workflow
-run history, and the singleton agent settings are rebuilt by replaying the
-wire. The wire is the durable source of truth; the resource view is derived
-state.
+Projects, tasks, comments, artifacts, media metadata, triggers, workflow
+metadata, workflow run history, and the singleton agent settings are rebuilt
+by replaying the wire. The wire is the durable source of truth; the resource
+view is derived state.
+
+Media is the one split resource. A `media.created` event stores its name,
+allowed content type, size, and SHA-256 storage key. The immutable bytes live
+under the configured media directory, not in JSONL. Task and comment events
+contain short `/api/media/{id}` references instead of repeated binary data.
+Factory keeps finalized blobs even when no task or comment refers to them and
+after a related record is deleted.
+
+Generic event intake can also append a `media.created` event, so projected
+media metadata is not trusted for file access or response headers. Retrieval
+rechecks the hash, direct-child path, regular-file status, content type, size,
+and safe inline filename before serving a blob.
 
 Agent settings select a harness, model, reasoning level, and workflow
 capacity. They default to Codex and six concurrent workflow runs, and change
@@ -98,6 +111,12 @@ Tasks can have threaded comments and polymorphic artifacts. Creating or
 editing a task does not automatically invoke an agent. The task intake
 mechanism is simply the shared API and wire path through which humans and
 agents record work.
+
+In the web application, local images, animated GIFs, and browser-playable
+videos can be pasted or dropped into task descriptions and task comments.
+The upload happens first, then the editor inserts Markdown or trusted video
+HTML at the current selection. Saving the task or comment remains a separate
+resource write.
 
 The CLI and web application are peers. Both call the same API, which means an
 agent can create a task or comment and a human sees the result immediately in

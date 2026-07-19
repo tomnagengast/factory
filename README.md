@@ -7,10 +7,13 @@ mechanisms:
 2. resource and task intake,
 3. one capacity-limited workflow coordinator.
 
-Projects, tasks, comments, artifacts, triggers, and workflow metadata are
+Projects, tasks, comments, artifacts, media metadata, triggers, and workflow metadata are
 projections of a JSONL event log. The Solid web app and `factory` CLI use the
 same HTTP API. No authentication, permissions, policy engine, migration
 framework, or deployment lifecycle lives in the application.
+
+Immutable media bytes live beside the wire in a configured local directory.
+Task descriptions and task comments refer to them through `/api/media/{id}`.
 
 ## Monorepo
 
@@ -69,6 +72,8 @@ Usage: factory-api [options]
         append-only event wire path
   -factory string
         Factory CLI exposed to the authoring harness
+  -media string
+        immutable media blob directory
   -workflow string
         workflow CLI executable
   -workflow-workspace string
@@ -78,6 +83,7 @@ Usage: factory-api [options]
 The new domain wire defaults to
 `~/.local/share/factory/wire.jsonl`. The prior demonstrator's
 `events.jsonl` is left untouched as an archive.
+Immutable media blobs default to `~/.local/share/factory/media`.
 
 ## Web routes
 
@@ -108,13 +114,15 @@ records.
 
 ## Resource API
 
-The API exposes JSON CRUD routes under `/api`:
+The API exposes resource routes under `/api`; media creation uses multipart
+form data and the other mutations use JSON:
 
 ```text
 projects     GET / POST, GET / PUT / DELETE by ID
 tasks        GET / POST, GET / PUT / DELETE by ID
 comments     POST under a task or workflow, GET / PUT / DELETE by ID
 artifacts    GET / POST, GET / PUT / DELETE by ID
+media        POST one multipart file, GET immutable bytes by ID
 events       GET / POST, GET by ID, GET types, SSE stream
 triggers     GET / POST, GET / PUT / DELETE by ID
 workflows    GET / POST, GET / PUT / DELETE by ID
@@ -164,6 +172,7 @@ Examples:
 factory project create '{"name":"Factory","path":"/path/to/factory"}'
 factory task create '{"title":"Review the PR","status":"todo","projectId":1}'
 factory task comment 12 '{"content":"The build passed."}'
+factory media create ./screen.png
 factory artifact get 18
 factory workflow create '{"message":"Build a review-panel workflow."}'
 factory workflow update 24 '{"message":"Add a security reviewer."}'

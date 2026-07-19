@@ -529,7 +529,7 @@ func testServer(t *testing.T, wire *eventwire.Wire) *Server {
 		"assets/styles-b2.css": &fstest.MapFile{Data: []byte("body {}")},
 	}
 	var filesystem fs.FS = assets
-	server, err := New(wire, filesystem)
+	server, err := New(wire, filesystem, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

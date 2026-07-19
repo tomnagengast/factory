@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 
 	"github.com/tomnagengast/factory/api/internal/eventwire"
@@ -16,15 +17,31 @@ import (
 )
 
 type Server struct {
-	wire   *eventwire.Wire
-	assets fs.FS
+	wire      *eventwire.Wire
+	assets    fs.FS
+	mediaRoot string
 }
 
-func New(wire *eventwire.Wire, assets fs.FS) (*Server, error) {
-	if wire == nil || assets == nil {
-		return nil, errors.New("server requires a wire and frontend")
+func New(wire *eventwire.Wire, assets fs.FS, mediaRoot string) (*Server, error) {
+	if wire == nil || assets == nil || mediaRoot == "" {
+		return nil, errors.New("server requires a wire, frontend, and media path")
 	}
-	return &Server{wire: wire, assets: assets}, nil
+	if err := os.MkdirAll(mediaRoot, 0o777); err != nil {
+		return nil, fmt.Errorf("create media directory: %w", err)
+	}
+	absolute, err := filepath.Abs(mediaRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve media directory: %w", err)
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return nil, fmt.Errorf("resolve media directory links: %w", err)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil || !info.IsDir() {
+		return nil, errors.New("media path must be a directory")
+	}
+	return &Server{wire: wire, assets: assets, mediaRoot: canonical}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -56,6 +73,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/comments/{comment}", s.comment)
 	mux.HandleFunc("PUT /api/comments/{comment}", s.commentUpdate)
 	mux.HandleFunc("DELETE /api/comments/{comment}", s.commentDelete)
+
+	mux.HandleFunc("POST /api/media", s.mediaCreate)
+	mux.HandleFunc("GET /api/media/{media}", s.media)
 
 	mux.HandleFunc("GET /api/artifacts", s.artifacts)
 	mux.HandleFunc("POST /api/artifacts", s.artifactCreate)

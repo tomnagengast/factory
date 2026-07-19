@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -9,6 +10,27 @@ import (
 	"testing"
 	"time"
 )
+
+func TestParseConfigAcceptsExplicitMediaPath(t *testing.T) {
+	var output bytes.Buffer
+	configuration, err := parseConfig([]string{
+		"-data", "/tmp/factory-wire.jsonl",
+		"-media", "/tmp/factory-media",
+		"-workflow-workspace", "/tmp/factory-workflows",
+	}, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.MediaPath != "/tmp/factory-media" {
+		t.Fatalf("media path = %q", configuration.MediaPath)
+	}
+}
+
+func TestParseConfigRejectsEmptyMediaPath(t *testing.T) {
+	if _, err := parseConfig([]string{"-media", ""}, io.Discard); err == nil {
+		t.Fatal("empty media path was accepted")
+	}
+}
 
 func TestHTTPServerCancelsStreamingRequestsBeforeShutdown(t *testing.T) {
 	baseContext, cancel := context.WithCancel(context.Background())

@@ -1,3 +1,5 @@
+import type { MediaUpload } from "./types";
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -17,6 +19,17 @@ export const post = <T,>(path: string, body: unknown) =>
 export const put = <T,>(path: string, body: unknown) =>
   request<T>(path, { method: "PUT", body: JSON.stringify(body) });
 export const remove = (path: string) => request<void>(path, { method: "DELETE" });
+
+export async function uploadMedia(file: File): Promise<MediaUpload> {
+  const body = new FormData();
+  body.append("file", file, file.name);
+  const response = await fetch("/api/media", { method: "POST", body });
+  if (!response.ok) {
+    const error = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(error?.error ?? `${response.status} ${response.statusText}`);
+  }
+  return response.json() as Promise<MediaUpload>;
+}
 
 export function optional(value: FormDataEntryValue | null) {
   const text = String(value ?? "").trim();

@@ -3,11 +3,58 @@ package main
 import (
 	"bytes"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestMediaCreateUsesMultipartResourceAPI(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.gif")
+	want := []byte("GIF89a")
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var method, requestPath, filename, contentType string
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method, requestPath = request.Method, request.URL.Path
+		_, parameters, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+		if err != nil {
+			t.Error(err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		reader := multipart.NewReader(request.Body, parameters["boundary"])
+		part, err := reader.NextPart()
+		if err != nil {
+			t.Error(err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		filename, contentType = part.FileName(), part.Header.Get("Content-Type")
+		uploaded, _ = io.ReadAll(part)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":3,"name":"sample.gif","url":"/api/media/3"}`))
+	}))
+	defer server.Close()
+
+	var output bytes.Buffer
+	if err := Run([]string{"--url", server.URL, "media", "create", path}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPost || requestPath != "/api/media" || filename != "sample.gif" ||
+		contentType != "image/gif" || !bytes.Equal(uploaded, want) {
+		t.Fatalf("request = %s %s %q %q %q", method, requestPath, filename, contentType, uploaded)
+	}
+	if !strings.Contains(output.String(), `"url": "/api/media/3"`) {
+		t.Fatalf("output = %s", output.String())
+	}
+}
 
 func TestTaskCommentUsesResourceAPI(t *testing.T) {
 	var method, path, body string

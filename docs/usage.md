@@ -113,8 +113,8 @@ If the port is free:
 ./factory-api
 ```
 
-Leave that terminal open. Factory logs its listening address, wire path, and
-workflow workspace at startup.
+Leave that terminal open. Factory logs its listening address, wire path,
+media directory, and workflow workspace at startup.
 
 Open [http://127.0.0.1:8092](http://127.0.0.1:8092) in a browser. The overview
 should load and the lower-left status should say `Coordinator connected`.
@@ -139,6 +139,13 @@ The shortest path is through the web application:
 2. Open **Tasks** and create a task assigned to that project.
 3. Open the task to add a comment or artifact.
 4. Open **Event wire** to see the creation events.
+
+Task descriptions, root comments, and replies accept pasted or dropped local
+PNG, JPEG, GIF, WebP, MP4, WebM, and QuickTime files. Factory uploads each
+file, then inserts editable Markdown or video HTML at the current text
+selection. Multiple files keep their order. There is no rendered preview
+before save. Each file may be at most 25 MiB, and browser playback still
+depends on codec support.
 
 The CLI performs the same operations:
 
@@ -228,6 +235,7 @@ Common operations:
 ./factory task list
 ./factory task get 12
 ./factory task comment 12 '{"content":"The local build passed."}'
+./factory media create ./screen.gif
 ./factory artifact list
 ./factory event list
 ./factory workflow list
@@ -267,6 +275,7 @@ The defaults are:
 | --- | --- |
 | Listen address | `127.0.0.1:$PORT`, or `127.0.0.1:8092` |
 | Event wire | `~/.local/share/factory/wire.jsonl` |
+| Media blobs | `~/.local/share/factory/media` |
 | Workflow workspace | `~/.local/share/factory/workflow-workspace` |
 | Codex executable | `codex` |
 | Claude Code executable | `claude` |
@@ -279,6 +288,7 @@ Example with isolated state and a different port:
 ./factory-api \
   -addr 127.0.0.1:9090 \
   -data "$HOME/.local/share/factory-demo/wire.jsonl" \
+  -media "$HOME/.local/share/factory-demo/media" \
   -workflow-workspace "$HOME/.local/share/factory-demo/workflows"
 ```
 
@@ -299,27 +309,33 @@ Press `Ctrl-C` in the server terminal. Factory stops the HTTP server,
 coordinator, and active workflow processes together. Canceled workflow runs
 are recorded as failed before shutdown completes.
 
-Restarting with the same `-data` and `-workflow-workspace` values preserves
-resources, comments, events, triggers, workflow run history, and generated
-workflow files. Startup appends a failure event for any earlier run still
-projected as `running`, such as a process interrupted by a crash or service
-replacement.
+Restarting with the same `-data`, `-media`, and `-workflow-workspace` values
+preserves resources, comments, media, events, triggers, workflow run history,
+and generated workflow files. Startup appends a failure event for any earlier
+run still projected as `running`, such as a process interrupted by a crash or
+service replacement.
 
 Every semantic workflow event is part of the same durable wire. Restarting
 does not depend on temporary journal files or terminal logs to rebuild run
 history.
 
-To begin with empty state, stop Factory and move both paths aside:
+Back up or restore the wire and media directory together. The wire identifies
+each media blob, while the blob bytes live only under `-media`. To begin with
+empty state, stop Factory and move all three paths aside:
 
 ```sh
 mv "$HOME/.local/share/factory/wire.jsonl" \
   "$HOME/.local/share/factory/wire.backup.jsonl"
+mv "$HOME/.local/share/factory/media" \
+  "$HOME/.local/share/factory/media.backup"
 mv "$HOME/.local/share/factory/workflow-workspace" \
   "$HOME/.local/share/factory/workflow-workspace.backup"
 ```
 
 Factory recreates the paths on the next start. Resource deletion in the UI
 or API is soft deletion and does not remove historical wire entries.
+Finalized media is never deleted, including uploads left unreferenced by a
+canceled editor, failed task or comment save, or event publication failure.
 
 ## Troubleshooting
 

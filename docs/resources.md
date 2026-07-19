@@ -4,7 +4,7 @@ The web application and `factory` CLI are clients of the same JSON API.
 Unless noted otherwise:
 
 - IDs are positive integers.
-- request and response bodies are JSON.
+- request and response bodies are JSON, except media uploads,
 - unknown request fields are rejected,
 - `createdAt`, `updatedAt`, and `deletedAt` are server-managed,
 - deletion is soft,
@@ -105,6 +105,13 @@ selecting **Edit task**. Save persists the task; cancel discards the form.
 Task titles use inline Markdown, while descriptions and comments use full
 trusted Markdown or HTML with syntax-highlighted code blocks.
 
+The web task form accepts pasted or dropped local media files. It uploads
+them before task creation or update and inserts editable Markdown or video
+HTML at the current selection. It does not show a rendered preview before
+save. See [Media](#media) for the supported formats and limits.
+Task events contain those short references, not uploaded bytes, so existing
+task triggers keep their normal JSON payload size and shape.
+
 ## Comments
 
 Comments are polymorphic records related to a task or workflow. Task comments
@@ -145,6 +152,86 @@ DELETE /api/comments/{id}
 
 Task comment bodies use `content`; workflow conversation bodies use
 `message`.
+
+Root task comments and replies use the same paste and drop behavior as task
+descriptions. Media-only comments remain valid because the generated markup
+is nonblank content.
+
+## Media
+
+Media records are immutable. Their creation event ID is also the media ID.
+The wire stores metadata only; bytes are stored under the server's configured
+`-media` directory with their SHA-256 value as the filename.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `name` | string | Original local filename |
+| `contentType` | string | Revalidated allowed MIME type |
+| `size` | integer | Byte count, at most 25 MiB |
+| `sha256` | string | Lowercase content-addressed blob key |
+| `url` | string | Relative retrieval URL, returned on upload |
+
+Allowed content types:
+
+```text
+image/png
+image/jpeg
+image/gif
+image/webp
+video/mp4
+video/webm
+video/quicktime
+```
+
+Upload through the CLI:
+
+```sh
+factory media create ./screen.gif
+```
+
+Upload through HTTP:
+
+```sh
+curl -fsS -F file=@./clip.mp4 http://127.0.0.1:8092/api/media
+```
+
+Example response:
+
+```json
+{
+  "id": 17,
+  "createdAt": "2026-07-19T12:00:00Z",
+  "updatedAt": "2026-07-19T12:00:00Z",
+  "name": "clip.mp4",
+  "contentType": "video/mp4",
+  "size": 1024,
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "url": "/api/media/17"
+}
+```
+
+Routes:
+
+```text
+POST /api/media
+GET  /api/media/{id}
+```
+
+Retrieval supports HTTP ranges for video seeking and returns immutable cache
+headers. Factory does not transcode media or guarantee that every browser can
+play every codec inside an allowed video container.
+
+Upload and later task or comment save are separate operations. Canceling the
+editor or failing the later save leaves an unreferenced immutable blob. Media
+has no update or delete route, and soft-deleting a task or comment does not
+remove bytes. A publication failure after blob finalization also keeps the
+unreferenced blob so a concurrent upload cannot delete shared content.
+
+`POST /api/events` can append arbitrary `media.created` metadata. Before
+retrieval, Factory revalidates the SHA-256 key, direct-child blob path,
+regular-file status, allowed MIME type, declared and actual size, and safe
+inline filename. A crafted event cannot select a path outside the media root
+or inject response headers.
 
 ## Artifacts
 
@@ -463,6 +550,7 @@ project   list, get, create, update, delete
 task      list, get, create, update, delete, comment
 comment   get, update, delete
 artifact  list, get, create, update, delete
+media     create <file>
 event     list, get, create
 trigger   list, get, create, update, delete
 workflow  list, get, create, update, delete, comment
@@ -475,6 +563,8 @@ General form:
 ```text
 factory [--url URL] <resource> <action> [id] [json|@file]
 ```
+
+`media create` takes a local file path instead of JSON.
 
 Successful responses are pretty-printed JSON. A successful delete prints
 nothing. API errors are returned on stderr with the HTTP status and server

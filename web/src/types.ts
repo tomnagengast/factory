@@ -40,6 +40,14 @@ export type Artifact = Record & {
   relationId: number;
 };
 
+export type MediaUpload = Record & {
+  name: string;
+  contentType: string;
+  size: number;
+  sha256: string;
+  url: string;
+};
+
 export type Event = {
   id: number;
   type: string;

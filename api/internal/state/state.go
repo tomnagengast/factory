@@ -22,6 +22,7 @@ const (
 	ArtifactCreated          = "artifact.created"
 	ArtifactUpdated          = "artifact.updated"
 	ArtifactDeleted          = "artifact.deleted"
+	MediaCreated             = "media.created"
 	TriggerCreated           = "trigger.created"
 	TriggerUpdated           = "trigger.updated"
 	TriggerDeleted           = "trigger.deleted"
@@ -101,6 +102,14 @@ type Artifact struct {
 	Content      string  `json:"content"`
 	RelationType string  `json:"relationType"`
 	RelationID   int64   `json:"relationId"`
+}
+
+type Media struct {
+	Record
+	Name        string `json:"name"`
+	ContentType string `json:"contentType"`
+	Size        int64  `json:"size"`
+	SHA256      string `json:"sha256"`
 }
 
 type Trigger struct {
@@ -258,6 +267,13 @@ type ArtifactData struct {
 	RelationID   int64   `json:"relationId"`
 }
 
+type MediaData struct {
+	Name        string `json:"name"`
+	ContentType string `json:"contentType"`
+	Size        int64  `json:"size"`
+	SHA256      string `json:"sha256"`
+}
+
 type TriggerData struct {
 	ID         int64   `json:"id,omitempty"`
 	EventType  string  `json:"eventType"`
@@ -300,15 +316,16 @@ type WorkflowRunEventData struct {
 }
 
 type Snapshot struct {
-	Projects  []Project
-	Tasks     []Task
-	Comments  []Comment
-	Artifacts []Artifact
-	Triggers  []Trigger
-	Workflows []Workflow
-	Runs      []WorkflowRun
-	RunEvents []WorkflowRunEvent
-	Settings  Settings
+	Projects   []Project
+	Tasks      []Task
+	Comments   []Comment
+	Artifacts  []Artifact
+	MediaFiles []Media
+	Triggers   []Trigger
+	Workflows  []Workflow
+	Runs       []WorkflowRun
+	RunEvents  []WorkflowRunEvent
+	Settings   Settings
 
 	startedRuns map[[2]int64]bool
 	lastCron    map[int64]time.Time
@@ -447,6 +464,16 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 			if index, found := artifactIndex[data.ID]; found {
 				deleteRecord(&view.Artifacts[index].Record, event.At)
 			}
+
+		case MediaCreated:
+			var data MediaData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			view.MediaFiles = append(view.MediaFiles, Media{
+				Record: newRecord(event), Name: data.Name, ContentType: data.ContentType,
+				Size: data.Size, SHA256: data.SHA256,
+			})
 
 		case TriggerCreated:
 			data := TriggerData{Enabled: true}
@@ -627,6 +654,15 @@ func (s Snapshot) Artifact(id int64) (Artifact, bool) {
 		}
 	}
 	return Artifact{}, false
+}
+
+func (s Snapshot) Media(id int64) (Media, bool) {
+	for _, media := range s.MediaFiles {
+		if media.ID == id {
+			return media, true
+		}
+	}
+	return Media{}, false
 }
 
 func (s Snapshot) Workflow(id int64) (Workflow, bool) {

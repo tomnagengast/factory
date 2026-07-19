@@ -7,17 +7,22 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
 
 type command struct {
-	method string
-	path   string
-	body   []byte
+	method      string
+	path        string
+	body        []byte
+	contentType string
 }
 
 func Run(arguments []string, output, errorOutput io.Writer) error {
@@ -46,7 +51,7 @@ func Run(arguments []string, output, errorOutput io.Writer) error {
 		return fmt.Errorf("create request: %w", err)
 	}
 	if len(request.body) > 0 {
-		httpRequest.Header.Set("Content-Type", "application/json")
+		httpRequest.Header.Set("Content-Type", request.contentType)
 	}
 	response, err := http.DefaultClient.Do(httpRequest)
 	if err != nil {
@@ -76,6 +81,12 @@ func parse(args []string) (command, error) {
 		return command{}, errors.New("resource and action are required")
 	}
 	resource, action := args[0], args[1]
+	if resource == "media" {
+		if action != "create" || len(args) != 3 {
+			return command{}, errors.New("usage: factory media create <file>")
+		}
+		return mediaCreateCommand(args[2])
+	}
 	if resource == "history" && action != "list" && action != "get" {
 		return command{}, errors.New("history supports list and get")
 	}
@@ -85,7 +96,7 @@ func parse(args []string) (command, error) {
 			return command{method: http.MethodGet, path: "/api/settings"}, nil
 		case action == "update":
 			body, err := argumentJSON(args, 2)
-			return command{method: http.MethodPut, path: "/api/settings", body: body}, err
+			return command{method: http.MethodPut, path: "/api/settings", body: body, contentType: "application/json"}, err
 		default:
 			return command{}, errors.New("usage: factory settings get|update <json|@file>")
 		}
@@ -121,7 +132,7 @@ func parse(args []string) (command, error) {
 		if err != nil {
 			return command{}, err
 		}
-		return command{method: http.MethodPost, path: "/api/" + plural, body: body}, nil
+		return command{method: http.MethodPost, path: "/api/" + plural, body: body, contentType: "application/json"}, nil
 	case "update":
 		if resource == "event" || len(args) != 4 {
 			return command{}, fmt.Errorf("usage: factory %s update <id> <json|@file>", resource)
@@ -134,7 +145,7 @@ func parse(args []string) (command, error) {
 		if err != nil {
 			return command{}, err
 		}
-		return command{method: http.MethodPut, path: "/api/" + plural + "/" + id, body: body}, nil
+		return command{method: http.MethodPut, path: "/api/" + plural + "/" + id, body: body, contentType: "application/json"}, nil
 	case "delete":
 		if resource == "event" || len(args) != 3 {
 			return command{}, fmt.Errorf("usage: factory %s delete <id>", resource)
@@ -161,10 +172,47 @@ func parse(args []string) (command, error) {
 		}
 		return command{
 			method: http.MethodPost, path: "/api/" + plural + "/" + id + "/comments", body: body,
+			contentType: "application/json",
 		}, nil
 	default:
 		return command{}, fmt.Errorf("unknown %s action %q", resource, action)
 	}
+}
+
+func mediaCreateCommand(path string) (command, error) {
+	contentType := map[string]string{
+		".gif": "image/gif", ".jpeg": "image/jpeg", ".jpg": "image/jpeg",
+		".mp4": "video/mp4", ".mov": "video/quicktime", ".png": "image/png",
+		".webm": "video/webm", ".webp": "image/webp",
+	}[strings.ToLower(filepath.Ext(path))]
+	if contentType == "" {
+		return command{}, errors.New("file extension must be png, jpg, jpeg, gif, webp, mp4, webm, or mov")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return command{}, fmt.Errorf("read media file: %w", err)
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+		"name": "file", "filename": filepath.Base(path),
+	}))
+	header.Set("Content-Type", contentType)
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		return command{}, fmt.Errorf("create media form: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return command{}, fmt.Errorf("write media form: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return command{}, fmt.Errorf("finish media form: %w", err)
+	}
+	return command{
+		method: http.MethodPost, path: "/api/media", body: body.Bytes(),
+		contentType: writer.FormDataContentType(),
+	}, nil
 }
 
 func argumentID(args []string, position int) (string, error) {
@@ -217,6 +265,7 @@ Resources:
   task      list, get, create, update, delete, comment
   comment   get, update, delete
   artifact  list, get, create, update, delete
+  media     create <file>
   event     list, get, create
   trigger   list, get, create, update, delete
   workflow  list, get, create, update, delete, comment
@@ -227,6 +276,7 @@ Examples:
   factory project create '{"name":"Factory","path":"/path/to/factory"}'
   factory task create '{"title":"Review the PR","status":"todo","projectId":1}'
   factory task comment 12 '{"content":"The build passed."}'
+  factory media create ./screen.png
   factory artifact get 18
   factory workflow create '{"message":"Build a review-panel workflow."}'
   factory workflow update 24 '{"message":"Add a security reviewer."}'
