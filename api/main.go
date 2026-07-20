@@ -125,20 +125,6 @@ func run(ctx context.Context, configuration config) error {
 		return err
 	}
 	defer eventStore.Close()
-	legacyPath := filepath.Join(filepath.Dir(configuration.DataPath), "wire.jsonl")
-	if filepath.Clean(legacyPath) != filepath.Clean(configuration.DataPath) {
-		lastID, err := eventStore.LastID()
-		if err != nil {
-			return err
-		}
-		if _, statErr := os.Stat(legacyPath); lastID == 0 && statErr == nil {
-			imported, err := eventStore.ImportJSONL(ctx, legacyPath)
-			if err != nil {
-				return err
-			}
-			slog.Info("imported legacy event wire", "events", imported, "source", legacyPath)
-		}
-	}
 
 	workflowCLI := workflow.CLI{
 		Command: configuration.WorkflowCommand, Workspace: configuration.WorkflowWorkspace,

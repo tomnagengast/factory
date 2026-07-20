@@ -212,7 +212,7 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	if len(runner.settings) != 1 || runner.settings[0] != selected {
 		t.Fatalf("authoring settings = %#v", runner.settings)
 	}
-	view, err := state.ProjectEvents(wire.Events(0))
+	view, _, err := wire.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestLoopPersistsProgressBeforeAuthoringCompletes(t *testing.T) {
 	}
 	waitForSignal(t, runner.streamed, "agent progress")
 
-	view, err := state.ProjectEvents(wire.Events(0))
+	view, _, err := wire.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,8 +297,8 @@ func TestLoopPersistsProgressBeforeAuthoringCompletes(t *testing.T) {
 			t.Fatalf("live progress comment = %#v", comment)
 		}
 	}
-	pending, found := view.PendingWorkflowComment()
-	if !found || pending.ID != user.ID {
+	pending, found, err := wire.PendingWorkflowComment()
+	if err != nil || !found || pending.ID != user.ID {
 		t.Fatalf("pending authoring request = %#v, %v", pending, found)
 	}
 	if len(workflows.validations) != 0 || eventTypeCount(wire.Events(0), authoringCompleted) != 0 {
@@ -309,7 +309,7 @@ func TestLoopPersistsProgressBeforeAuthoringCompletes(t *testing.T) {
 	if err := finishAuthoring(t, loop); err != nil {
 		t.Fatal(err)
 	}
-	view, err = state.ProjectEvents(wire.Events(0))
+	view, _, err = wire.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestLoopPersistsProgressBeforeAuthoringCompletes(t *testing.T) {
 		comments[5].Kind != "message" || !comments[5].Final {
 		t.Fatalf("completed comments = %#v", comments)
 	}
-	if _, found := view.PendingWorkflowComment(); found {
+	if _, found, err := wire.PendingWorkflowComment(); err != nil || found {
 		t.Fatal("final response did not answer the request")
 	}
 	events := wire.Events(0)
@@ -432,7 +432,7 @@ func TestLoopRejectsInvalidAuthoredWorkflow(t *testing.T) {
 		eventTypeCount(wire.Events(0), authoringFailed) != 1 {
 		t.Fatalf("authoring events = %#v", wire.Events(0))
 	}
-	view, err := state.ProjectEvents(wire.Events(0))
+	view, _, err := wire.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +478,7 @@ func TestLoopRecordsRunnerAndDiscoveryFailuresAfterProgress(t *testing.T) {
 				eventTypeCount(wire.Events(0), authoringFailed) != 1 {
 				t.Fatalf("authoring events = %#v", wire.Events(0))
 			}
-			view, err := state.ProjectEvents(wire.Events(0))
+			view, _, err := wire.Snapshot()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -543,19 +543,20 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	}
 	runID := args.RunID
 	workflows.mu.Unlock()
-	view, _ := state.ProjectEvents(wire.Events(0))
-	if !view.RunStarted(triggerEvent.ID, source.ID) {
-		t.Fatal("run marker missing")
+	view, _, err := wire.Snapshot()
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(view.Runs) != 1 || view.Runs[0].Status != "completed" ||
+		view.Runs[0].TriggerID != triggerEvent.ID || view.Runs[0].SourceEventID != source.ID ||
 		view.Runs[0].WorkflowName != "review" || view.Runs[0].TaskID != 0 {
 		t.Fatalf("run history missing: %#v", view.Runs)
 	}
 	if runID != view.Runs[0].ID {
 		t.Fatalf("workflow runId = %d, history ID = %d", runID, view.Runs[0].ID)
 	}
-	events := view.EventsFor(view.Runs[0].ID)
-	if len(events) != 2 || events[0].Type != "step.started" ||
+	events, err := wire.RunEvents(view.Runs[0].ID, 0, 200)
+	if err != nil || len(events) != 2 || events[0].Type != "step.started" ||
 		string(events[1].Result) != `"approved"` {
 		t.Fatalf("run events missing: %#v", events)
 	}
@@ -606,7 +607,7 @@ func TestReactionTriggerHasNoTaskContext(t *testing.T) {
 		t.Fatalf("reaction workflow runs = %#v", workflows.runs)
 	}
 	workflows.mu.Unlock()
-	view, err := state.ProjectEvents(wire.Events(0))
+	view, _, err := wire.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +659,7 @@ func TestLoopWaitsForHumanTaskCommentAndResumesTheSameRun(t *testing.T) {
 	waitForSignal(t, workflows.finished, "waiting workflow finish")
 	waitForActiveCount(t, loop, 0)
 
-	view, err := state.ProjectEvents(wire.Events(0))
+	view, _, err := wire.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +687,7 @@ func TestLoopWaitsForHumanTaskCommentAndResumesTheSameRun(t *testing.T) {
 	waitForSignal(t, workflows.finished, "resumed workflow finish")
 	waitForActiveCount(t, loop, 0)
 
-	view, err = state.ProjectEvents(wire.Events(0))
+	view, _, err = wire.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,7 +759,7 @@ func TestLoopRecoversInterruptedRuns(t *testing.T) {
 	if err := loop.recoverInterruptedRuns(); err != nil {
 		t.Fatal(err)
 	}
-	view, err := state.ProjectEvents(wire.Events(0))
+	view, _, err := wire.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -796,7 +797,7 @@ func TestLoopPreservesWaitingRunsAcrossRestart(t *testing.T) {
 	if err := loop.recoverInterruptedRuns(); err != nil {
 		t.Fatal(err)
 	}
-	view, err := state.ProjectEvents(wire.Events(0))
+	view, _, err := wire.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -861,7 +862,7 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 				}
 			}
 			workflows.mu.Unlock()
-			view, err := state.ProjectEvents(wire.Events(0))
+			view, _, err := wire.Snapshot()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1164,7 +1165,7 @@ func TestLoopDiscardsDisabledEventsAndRunsNewEventAfterEnable(t *testing.T) {
 	waitForSignal(t, workflows.started, "enabled workflow start")
 	waitForSignal(t, workflows.finished, "enabled workflow finish")
 	waitForActiveCount(t, loop, 0)
-	view, err := state.ProjectEvents(wire.Events(0))
+	view, _, err := wire.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1264,7 +1265,7 @@ func TestDisablingTriggerDoesNotCancelActiveRun(t *testing.T) {
 	workflows.release <- struct{}{}
 	waitForSignal(t, workflows.finished, "active workflow finish")
 	waitForActiveCount(t, loop, 0)
-	view, err := state.ProjectEvents(wire.Events(0))
+	view, _, err := wire.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1345,7 +1346,7 @@ func TestLoopRunCancelsAndWaitsForActiveWorkflows(t *testing.T) {
 	if runs, _ := workflows.snapshot(); runs != 2 {
 		t.Fatalf("runs = %d, want two active workflows only", runs)
 	}
-	view, err := state.ProjectEvents(wire.Events(0))
+	view, _, err := wire.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}

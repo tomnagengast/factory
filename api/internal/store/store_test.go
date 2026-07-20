@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 
@@ -89,69 +87,6 @@ func TestWaitWakesAndCloseStopsWaiters(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("close did not wake waiter")
-	}
-}
-
-func TestImportJSONLMatchesLegacyProjection(t *testing.T) {
-	at := time.Date(2026, 7, 20, 12, 0, 0, 123456789, time.UTC)
-	settings := state.DefaultSettings
-	events := []eventwire.Event{
-		testEvent(1, state.ProjectCreated, at, state.ProjectData{Name: "Factory", Path: "/factory"}),
-		testEvent(2, state.TaskCreated, at.Add(time.Second), state.TaskData{Title: "Cut over", Status: state.Todo, ProjectID: 1}),
-		testEvent(3, state.WorkflowDiscovered, at.Add(2*time.Second), state.WorkflowData{Name: "review", Path: stringPointer("/review.js")}),
-		testEvent(4, state.TriggerCreated, at.Add(3*time.Second), state.TriggerData{EventType: state.TaskCreated, WorkflowID: 3, Enabled: true}),
-		testEvent(5, state.WorkflowRunStarted, at.Add(4*time.Second), state.WorkflowRunData{
-			TriggerID: 4, WorkflowID: 3, SourceEventID: 2, Directory: "/factory",
-			Source: "/review.js", Settings: &settings, Arguments: json.RawMessage(`{"runId":5}`),
-		}),
-		testEvent(6, state.WorkflowRunEventRecorded, at.Add(5*time.Second), state.WorkflowRunEventData{
-			RunID: 5, Event: json.RawMessage(`{"sequence":1,"at":"2026-07-20T12:00:05Z","type":"runtime.started","workflow":"review"}`),
-		}),
-		testEvent(7, state.WorkflowRunCompleted, at.Add(6*time.Second), state.WorkflowRunData{TriggerID: 4, WorkflowID: 3, SourceEventID: 2, Output: "done"}),
-	}
-	path := filepath.Join(t.TempDir(), "wire.jsonl")
-	file, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, event := range events {
-		if err := json.NewEncoder(file).Encode(event); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	store := openTestStore(t)
-	count, err := store.ImportJSONL(context.Background(), path)
-	if err != nil || count != int64(len(events)) {
-		t.Fatalf("import = %d, %v", count, err)
-	}
-	legacy, err := state.ProjectEvents(events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	view, checkpoint, err := store.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if checkpoint != int64(len(events)) {
-		t.Fatalf("checkpoint = %d", checkpoint)
-	}
-	if !reflect.DeepEqual(view.Projects, legacy.Projects) ||
-		!reflect.DeepEqual(view.Tasks, legacy.Tasks) ||
-		!reflect.DeepEqual(view.Triggers, legacy.Triggers) ||
-		!reflect.DeepEqual(view.Workflows, legacy.Workflows) ||
-		!reflect.DeepEqual(view.Runs, legacy.Runs) || view.Settings != legacy.Settings {
-		t.Fatalf("projection mismatch:\nstore=%#v\nlegacy=%#v", view, legacy)
-	}
-	runEvents, err := store.RunEvents(5, 0, 200)
-	if err != nil || len(runEvents) != 1 || runEvents[0].Sequence != 1 {
-		t.Fatalf("run events = %#v, %v", runEvents, err)
-	}
-	if _, err := store.ImportJSONL(context.Background(), path); err == nil {
-		t.Fatal("second import into non-empty database succeeded")
 	}
 }
 

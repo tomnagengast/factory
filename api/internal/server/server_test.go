@@ -706,7 +706,7 @@ func TestWorkflowCreationIsAConversation(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body)
 	}
-	view, err := state.ProjectEvents(wire.Events(0))
+	view, _, err := wire.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
