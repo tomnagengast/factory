@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/json"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -42,6 +43,70 @@ func TestProjectEventsBuildsDomainState(t *testing.T) {
 	}
 	if len(view.CommentsFor("task", 2)) != 1 || len(view.ArtifactsFor("task", 2)) != 1 {
 		t.Fatal("relations were not projected")
+	}
+}
+
+func TestCommentDeletionCascadesThroughDescendants(t *testing.T) {
+	at := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	ancestorID, selectedID := int64(2), int64(3)
+	childID, siblingID := int64(4), int64(7)
+	deletedAt := at.Add(9 * time.Minute)
+	events := []eventwire.Event{
+		event(1, TaskCreated, at, TaskData{Title: "Task", Status: Todo, ProjectID: 99}),
+		event(2, CommentCreated, at.Add(time.Minute), CommentData{
+			RelationType: "task", RelationID: 1, Author: "user", Content: "Ancestor",
+		}),
+		event(3, CommentCreated, at.Add(2*time.Minute), CommentData{
+			RelationType: "task", RelationID: 1, ParentCommentID: &ancestorID, Author: "user", Content: "Selected",
+		}),
+		event(4, CommentCreated, at.Add(3*time.Minute), CommentData{
+			RelationType: "task", RelationID: 1, ParentCommentID: &selectedID, Author: "agent", Content: "Child",
+		}),
+		event(5, CommentDeleted, at.Add(4*time.Minute), IDData{ID: childID}),
+		event(6, CommentCreated, at.Add(5*time.Minute), CommentData{
+			RelationType: "task", RelationID: 1, ParentCommentID: &childID, Author: "user", Content: "Grandchild",
+		}),
+		event(7, CommentCreated, at.Add(6*time.Minute), CommentData{
+			RelationType: "task", RelationID: 1, ParentCommentID: &ancestorID, Author: "user", Content: "Sibling",
+		}),
+		event(8, CommentCreated, at.Add(7*time.Minute), CommentData{
+			RelationType: "task", RelationID: 1, ParentCommentID: &siblingID, Author: "agent", Content: "Sibling child",
+		}),
+		event(9, CommentCreated, at.Add(8*time.Minute), CommentData{
+			RelationType: "task", RelationID: 1, Author: "user", Content: "Unrelated",
+		}),
+		event(10, CommentDeleted, deletedAt, IDData{ID: selectedID}),
+	}
+
+	view, err := ProjectEvents(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{selectedID, childID, 6} {
+		comment, found := view.Comment(id)
+		if !found || comment.DeletedAt == nil || *comment.DeletedAt != deletedAt || comment.UpdatedAt != deletedAt {
+			t.Errorf("deleted comment %d = %#v, found = %v", id, comment, found)
+		}
+	}
+	for _, id := range []int64{ancestorID, siblingID, 8, 9} {
+		comment, found := view.Comment(id)
+		if !found || comment.DeletedAt != nil {
+			t.Errorf("active comment %d = %#v, found = %v", id, comment, found)
+		}
+	}
+	active := view.CommentsFor("task", 1)
+	if len(active) != 4 {
+		t.Fatalf("active comments = %#v", active)
+	}
+	if ids := []int64{active[0].ID, active[1].ID, active[2].ID, active[3].ID}; !slices.Equal(ids, []int64{2, 7, 8, 9}) {
+		t.Fatalf("active comment IDs = %v", ids)
+	}
+	replayed, err := ProjectEvents(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(view, replayed) {
+		t.Fatalf("replayed snapshot changed:\nfirst: %#v\nsecond: %#v", view, replayed)
 	}
 }
 
@@ -148,8 +213,7 @@ func TestTaskCommentReactionsIgnoreRelationsButRespectCommentState(t *testing.T)
 		event(12, ReactionUpdated, at.Add(11*time.Minute), ReactionUpdatedData{
 			TargetType: "comment", TargetID: 5, Emoji: "😂", Active: true,
 		}),
-		event(13, CommentDeleted, at.Add(12*time.Minute), IDData{ID: 3}),
-		event(14, ReactionUpdated, at.Add(13*time.Minute), ReactionUpdatedData{
+		event(13, ReactionUpdated, at.Add(12*time.Minute), ReactionUpdatedData{
 			TargetType: "comment", TargetID: 3, Emoji: "😂", Active: true,
 		}),
 	}
@@ -162,13 +226,16 @@ func TestTaskCommentReactionsIgnoreRelationsButRespectCommentState(t *testing.T)
 	reply, _ := view.Comment(3)
 	nested, _ := view.Comment(4)
 	workflow, _ := view.Comment(5)
-	if !slices.Equal(root.Reactions, []string{"❤️"}) || root.UpdatedAt != events[7].At {
+	if !slices.Equal(root.Reactions, []string{"❤️"}) || root.DeletedAt == nil ||
+		*root.DeletedAt != events[7].At || root.UpdatedAt != events[7].At {
 		t.Fatalf("root comment = %#v", root)
 	}
-	if !slices.Equal(reply.Reactions, []string{"👍", "👀"}) || reply.UpdatedAt != events[12].At {
+	if !slices.Equal(reply.Reactions, []string{"👍"}) || reply.DeletedAt == nil ||
+		*reply.DeletedAt != events[7].At || reply.UpdatedAt != events[7].At {
 		t.Fatalf("reply comment = %#v", reply)
 	}
-	if !slices.Equal(nested.Reactions, []string{"🎉"}) || nested.UpdatedAt != events[8].At {
+	if nested.Reactions == nil || len(nested.Reactions) != 0 || nested.DeletedAt == nil ||
+		*nested.DeletedAt != events[7].At || nested.UpdatedAt != events[7].At {
 		t.Fatalf("nested comment = %#v", nested)
 	}
 	if workflow.Reactions == nil || len(workflow.Reactions) != 0 || workflow.UpdatedAt != workflow.CreatedAt {
@@ -263,6 +330,65 @@ func TestHistoricalAgentCommentStillAnswersWorkflowMessage(t *testing.T) {
 		comment.ParentCommentID == nil || *comment.ParentCommentID != parent {
 		t.Fatalf("historical agent comment = %#v, found = %v", comment, found)
 	}
+}
+
+func TestDeletedAgentRepliesDoNotAnswerComments(t *testing.T) {
+	t.Run("workflow conversation", func(t *testing.T) {
+		at := time.Now().UTC()
+		parentID := int64(2)
+		view, err := ProjectEvents([]eventwire.Event{
+			event(1, WorkflowCreated, at, WorkflowData{Name: "Draft"}),
+			event(2, CommentCreated, at, CommentData{
+				RelationType: "workflow", RelationID: 1, Author: "user", Content: "Build it",
+			}),
+			event(3, CommentCreated, at, CommentData{
+				RelationType: "workflow", RelationID: 1, ParentCommentID: &parentID,
+				Author: "agent", Content: "Done",
+			}),
+			event(4, CommentDeleted, at, IDData{ID: 3}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		comment, found := view.PendingWorkflowComment()
+		if !found || comment.ID != parentID {
+			t.Fatalf("pending workflow comment = %#v, found = %v", comment, found)
+		}
+	})
+
+	t.Run("waiting workflow run", func(t *testing.T) {
+		at := time.Now().UTC()
+		gateID, responseID := int64(4), int64(6)
+		view, err := ProjectEvents([]eventwire.Event{
+			event(1, ProjectCreated, at, ProjectData{Name: "Factory", Path: "/factory"}),
+			event(2, TaskCreated, at, TaskData{Title: "Review it", Status: InReview, ProjectID: 1}),
+			event(3, WorkflowRunStarted, at, WorkflowRunData{
+				TriggerID: 8, WorkflowID: 7, SourceEventID: 2, TaskID: 2,
+			}),
+			event(4, CommentCreated, at, CommentData{
+				RelationType: "task", RelationID: 2, Author: "agent", Content: "Approve it?",
+			}),
+			event(5, WorkflowRunWaiting, at, WorkflowRunStateData{
+				RunID: 3, GateCommentID: gateID, Gate: &WorkflowGate{Key: "gate", Message: "Approve it?"},
+			}),
+			event(6, CommentCreated, at, CommentData{
+				RelationType: "task", RelationID: 2, ParentCommentID: &gateID,
+				Author: "user", Content: "Approved",
+			}),
+			event(7, CommentCreated, at, CommentData{
+				RelationType: "task", RelationID: 2, ParentCommentID: &responseID,
+				Author: "agent", Content: "Acknowledged",
+			}),
+			event(8, CommentDeleted, at, IDData{ID: 7}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, comment, found := view.PendingHumanResponse()
+		if !found || run.ID != 3 || comment.ID != responseID {
+			t.Fatalf("pending human response = %#v, %#v, found = %v", run, comment, found)
+		}
+	})
 }
 
 func TestHistoricalAgentCommentFinalityIsLimitedToWorkflowReplies(t *testing.T) {
