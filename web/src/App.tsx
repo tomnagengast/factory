@@ -44,6 +44,7 @@ import {
   type WorkflowRun,
 } from "./types";
 import { sortWorkflowsByUsage } from "./workflows";
+import { workflowCommentPresentation, workflowConversationWorking } from "./workflow-conversation";
 
 export function App() {
   return (
@@ -1321,7 +1322,7 @@ function WorkflowView() {
   let sourcePolling: number | undefined;
   onMount(() => {
     sourcePolling = window.setInterval(() => {
-      if (data()?.comments.at(-1)?.author === "user") void refetch();
+      if (workflowConversationWorking(data()?.comments ?? [])) void refetch();
     }, 1000);
   });
   onCleanup(() => window.clearInterval(sourcePolling));
@@ -1330,7 +1331,7 @@ function WorkflowView() {
       <Load data={data} error={() => data.error}>
         {(value) => {
           const current = () => data() ?? value;
-          const working = () => current().comments.at(-1)?.author === "user";
+          const working = () => workflowConversationWorking(current().comments);
           const source = createMemo(() => current().source);
           const highlightedSource = createMemo(() => highlightWorkflowSource(source()).value);
           return <>
@@ -1348,10 +1349,25 @@ function WorkflowView() {
             <div class="workflow-studio">
               <section class="workflow-chat" aria-label="Workflow conversation">
                 <div class="conversation" role="log" aria-live="polite">
-                  <For each={current().comments}>{(comment) => <article classList={{ message: true, agent: comment.author === "agent" }}>
-                    <header><strong>{comment.author === "agent" ? "Agent" : "You"}</strong><time>{date(comment.createdAt)}</time></header>
-                    <p>{comment.content}</p>
-                  </article>}</For>
+                  <For each={current().comments}>{(comment) => {
+                    const presentation = workflowCommentPresentation(comment);
+                    return <article classList={{
+                      message: true,
+                      agent: comment.author === "agent",
+                      step: presentation.intermediate,
+                      error: presentation.error,
+                      reasoning: presentation.reasoning,
+                    }}>
+                      <header>
+                        <strong>{presentation.title}</strong>
+                        <Show when={presentation.kindLabel}>{(label) => <span>{label()}</span>}</Show>
+                        <time>{date(comment.createdAt)}</time>
+                      </header>
+                      <Show when={presentation.preformatted} fallback={<p>{comment.content}</p>}>
+                        <pre>{comment.content}</pre>
+                      </Show>
+                    </article>;
+                  }}</For>
                   <Show when={working()}><article class="message agent working"><header><strong>Agent</strong></header><p>Working on the workflow…</p></article></Show>
                 </div>
                 <form class="composer" onSubmit={(event) => {

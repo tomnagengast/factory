@@ -64,6 +64,8 @@ func TestProjectEventsBuildsImmutableMedia(t *testing.T) {
 func TestPendingWorkflowCommentSkipsAnsweredMessages(t *testing.T) {
 	at := time.Now().UTC()
 	parent := int64(2)
+	intermediate := false
+	final := true
 	events := []eventwire.Event{
 		event(1, WorkflowCreated, at, WorkflowData{Name: "Draft"}),
 		event(2, CommentCreated, at, CommentData{
@@ -71,9 +73,18 @@ func TestPendingWorkflowCommentSkipsAnsweredMessages(t *testing.T) {
 		}),
 		event(3, CommentCreated, at, CommentData{
 			RelationType: "workflow", RelationID: 1, ParentCommentID: &parent,
-			Author: "agent", Content: "Done",
+			Author: "agent", Kind: "reasoning", Final: &intermediate, Content: "Inspecting it",
 		}),
 		event(4, CommentCreated, at, CommentData{
+			RelationType: "workflow", RelationID: 1, ParentCommentID: &parent,
+			Author: "agent", Kind: "tool-use", Label: "shell", Final: &intermediate,
+			Content: "workflow validate /workflows/workflow-1.js",
+		}),
+		event(5, CommentCreated, at, CommentData{
+			RelationType: "workflow", RelationID: 1, ParentCommentID: &parent,
+			Author: "agent", Kind: "message", Final: &final, Content: "Done",
+		}),
+		event(6, CommentCreated, at, CommentData{
 			RelationType: "workflow", RelationID: 1, Author: "user", Content: "Revise it",
 		}),
 	}
@@ -82,8 +93,68 @@ func TestPendingWorkflowCommentSkipsAnsweredMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	comment, found := view.PendingWorkflowComment()
-	if !found || comment.ID != 4 {
+	if !found || comment.ID != 6 {
 		t.Fatalf("unexpected pending comment: %#v, %v", comment, found)
+	}
+	comments := view.CommentsFor("workflow", 1)
+	if len(comments) != 5 || comments[0].Kind != "message" || comments[0].Final ||
+		comments[1].Kind != "reasoning" || comments[1].Final ||
+		comments[2].Kind != "tool-use" || comments[2].Label != "shell" || comments[2].Final ||
+		comments[3].Kind != "message" || !comments[3].Final ||
+		comments[4].ID != 6 {
+		t.Fatalf("ordered comments = %#v", comments)
+	}
+}
+
+func TestHistoricalAgentCommentStillAnswersWorkflowMessage(t *testing.T) {
+	at := time.Now().UTC()
+	parent := int64(2)
+	view, err := ProjectEvents([]eventwire.Event{
+		event(1, WorkflowCreated, at, WorkflowData{Name: "Draft"}),
+		event(2, CommentCreated, at, CommentData{
+			RelationType: "workflow", RelationID: 1, Author: "user", Content: "Build it",
+		}),
+		{
+			ID: 3, Type: CommentCreated, At: at,
+			Data: json.RawMessage(`{"relationType":"workflow","relationId":1,"parentCommentId":2,"author":"agent","content":"Done"}`),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := view.PendingWorkflowComment(); found {
+		t.Fatal("historical agent response did not answer its parent")
+	}
+	comment, found := view.Comment(3)
+	if !found || comment.Kind != "message" || !comment.Final ||
+		comment.ParentCommentID == nil || *comment.ParentCommentID != parent {
+		t.Fatalf("historical agent comment = %#v, found = %v", comment, found)
+	}
+}
+
+func TestHistoricalAgentCommentFinalityIsLimitedToWorkflowReplies(t *testing.T) {
+	at := time.Now().UTC()
+	parent := int64(1)
+	view, err := ProjectEvents([]eventwire.Event{
+		event(1, CommentCreated, at, CommentData{
+			RelationType: "task", RelationID: 9, Author: "user", Content: "Review it",
+		}),
+		event(2, CommentCreated, at, CommentData{
+			RelationType: "task", RelationID: 9, ParentCommentID: &parent,
+			Author: "agent", Content: "Reviewed",
+		}),
+		event(3, CommentCreated, at, CommentData{
+			RelationType: "workflow", RelationID: 8, Author: "agent", Content: "Unparented",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{2, 3} {
+		comment, found := view.Comment(id)
+		if !found || comment.Final {
+			t.Fatalf("historical comment %d = %#v, found = %v", id, comment, found)
+		}
 	}
 }
 

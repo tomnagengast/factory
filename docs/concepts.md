@@ -146,7 +146,8 @@ worker pool.
 The coordinator records progress back on the same wire:
 
 - workflow authoring started, completed, or failed,
-- agent replies as workflow comments,
+- each exposed authoring step as its own typed workflow comment,
+- one final workflow comment that answers each user request,
 - every ordered runtime, phase, log, diagnostic, agent, gate, cache, nested
   workflow, result, and failure event emitted by a workflow run,
 - workflow runs waiting for human review, resumed, completed, or failed,
@@ -157,6 +158,13 @@ The history pages project those wire events into live, waiting, and completed
 workflow runs without a separate log store. Each semantic runtime event
 remains one distinct wire record; the projection never collapses lifecycle
 pairs.
+
+Authoring comments use the same rule. Reasoning, tool use, tool output, agent
+messages, errors, and unknown semantic harness events remain distinct and in
+wire order. Intermediate agent comments do not answer the parent request. Only
+the comment marked final does, and only user and final agent comments enter a
+later authoring prompt. Historical workflow agent replies with a parent that
+predate the final marker replay as final responses.
 
 Graceful shutdown records active runs as failed after canceling their
 processes. At startup, the coordinator also closes any projected `running`
@@ -178,7 +186,9 @@ Factory-created files live in:
 When a user starts a workflow conversation, Factory assigns the local target
 before the selected harness begins. The workflow detail API reads the current
 file on every request, allowing the web application to show live source while
-the agent writes. The authoring harness runs in the workflow workspace and
+the agent writes. The same page shows each durable semantic harness step as it
+arrives and keeps its updating state until a final response exists. The
+authoring harness runs in the workflow workspace and
 receives `$FACTORY_CLI` and `$FACTORY_URL`, so the same conversation can
 inspect resources or configure a trigger when the user asks.
 

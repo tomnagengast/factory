@@ -402,6 +402,21 @@ label small { color: var(--color-text-muted); font-weight: 400; }
 .conversation { display: grid; gap: 12px; margin-bottom: 16px; }
 .message { max-width: 82%; margin-left: auto; padding: 16px 18px; border: 1px solid var(--color-message-border); background: var(--color-message); }
 .message.agent { margin: 0 auto 0 0; border-color: var(--color-border); background: var(--color-surface); }
+.message.step { max-width: 94%; padding: 12px 14px; background: var(--color-surface-muted); }
+.message.step header strong { font: 500 11px var(--mono); text-transform: none; }
+.message.step header span {
+  padding: 2px 5px; border: 1px solid var(--color-chip-border); background: var(--color-chip-surface);
+  color: var(--color-chip-text); font: 9px var(--mono); text-transform: uppercase;
+}
+.message.step p { color: var(--color-text-muted); font-size: 13px; }
+.message.step pre {
+  max-width: 100%; margin: 10px 0 0; padding: 11px 12px; overflow: auto;
+  border: 1px solid var(--color-border); background: var(--color-surface-raised); color: var(--color-text);
+  font: 11px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.message.reasoning { border-left: 3px solid var(--color-quote-border); }
+.message.error { border-color: var(--color-danger-border); background: var(--color-danger-surface); color: var(--color-danger-text); }
+.message.error header strong, .message.error p { color: var(--color-danger-text); }
 .message.working { color: var(--color-text-muted); }
 .message.working p::after { content: ""; animation: dots 1.2s infinite steps(4); }
 @keyframes dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75%, 100% { content: "..."; } }

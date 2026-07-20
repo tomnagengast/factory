@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -328,6 +329,72 @@ func TestWorkflowDetailIncludesLiveSource(t *testing.T) {
 	}
 	if detail.Source != source {
 		t.Fatalf("refreshed source = %q, want %q", detail.Source, source)
+	}
+}
+
+func TestWorkflowDetailReplaysOrderedAuthoringSteps(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	workflowEvent, _ := wire.Publish(state.WorkflowCreated, state.WorkflowData{Name: "Draft"})
+	user, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "workflow", RelationID: workflowEvent.ID, Author: "user", Content: "Build it",
+	})
+	intermediate := false
+	final := true
+	for _, data := range []state.CommentData{
+		{
+			RelationType: "workflow", RelationID: workflowEvent.ID, ParentCommentID: &user.ID,
+			Author: "agent", Kind: "reasoning", Label: "codex", Final: &intermediate,
+			Content: "Inspecting the request.",
+		},
+		{
+			RelationType: "workflow", RelationID: workflowEvent.ID, ParentCommentID: &user.ID,
+			Author: "agent", Kind: "tool-use", Label: "command", Final: &intermediate,
+			Content: "workflow validate review.js",
+		},
+		{
+			RelationType: "workflow", RelationID: workflowEvent.ID, ParentCommentID: &user.ID,
+			Author: "agent", Kind: "tool-output", Label: "command", Final: &intermediate,
+			Content: "valid\n",
+		},
+		{
+			RelationType: "workflow", RelationID: workflowEvent.ID, ParentCommentID: &user.ID,
+			Author: "agent", Kind: "message", Final: &final, Content: "Created the workflow.",
+		},
+	} {
+		if _, err := wire.Publish(state.CommentCreated, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := testServer(t, wire).Handler()
+	var details [2]struct {
+		Comments []state.Comment `json:"comments"`
+	}
+	for index := range details {
+		response := requestJSON(t, handler, http.MethodGet,
+			fmt.Sprintf("/api/workflows/%d", workflowEvent.ID), "")
+		if response.Code != http.StatusOK {
+			t.Fatalf("detail status = %d, body = %s", response.Code, response.Body)
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &details[index]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !reflect.DeepEqual(details[0].Comments, details[1].Comments) {
+		t.Fatalf("workflow replay changed: %#v != %#v", details[0].Comments, details[1].Comments)
+	}
+	comments := details[0].Comments
+	if len(comments) != 5 || comments[0].ID != user.ID || comments[0].Final ||
+		comments[1].Kind != "reasoning" || comments[1].Label != "codex" || comments[1].Final ||
+		comments[2].Kind != "tool-use" || comments[2].Label != "command" || comments[2].Final ||
+		comments[3].Kind != "tool-output" || comments[3].Content != "valid\n" || comments[3].Final ||
+		comments[4].Kind != "message" || !comments[4].Final {
+		t.Fatalf("workflow comments = %#v", comments)
+	}
+	for _, comment := range comments[1:] {
+		if comment.ParentCommentID == nil || *comment.ParentCommentID != user.ID {
+			t.Fatalf("step parent = %#v", comment)
+		}
 	}
 }
 

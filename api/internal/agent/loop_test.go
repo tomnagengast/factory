@@ -20,16 +20,37 @@ type fakeAgent struct {
 	prompts  []string
 	settings []state.Settings
 	output   string
+	steps    []AgentStep
+	err      error
+	streamed chan struct{}
+	release  chan struct{}
 }
 
-func (f *fakeAgent) Run(_ context.Context, settings state.Settings, prompt string) (string, error) {
+func (f *fakeAgent) Run(
+	_ context.Context,
+	settings state.Settings,
+	prompt string,
+	emit func(AgentStep) error,
+) (string, error) {
 	f.settings = append(f.settings, settings)
 	f.prompts = append(f.prompts, prompt)
-	return f.output, nil
+	for _, step := range f.steps {
+		if err := emit(step); err != nil {
+			return "", err
+		}
+	}
+	if f.streamed != nil {
+		f.streamed <- struct{}{}
+	}
+	if f.release != nil {
+		<-f.release
+	}
+	return f.output, f.err
 }
 
 type fakeWorkflows struct {
 	definitions []workflow.Definition
+	listErr     error
 	validateErr error
 	validations []string
 	mu          sync.Mutex
@@ -55,7 +76,7 @@ func newFakeWorkflows() *fakeWorkflows {
 }
 
 func (f *fakeWorkflows) List(context.Context) ([]workflow.Definition, error) {
-	return f.definitions, nil
+	return f.definitions, f.listErr
 }
 
 func (f *fakeWorkflows) Validate(_ context.Context, source string) error {
@@ -148,7 +169,14 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	if _, err := wire.Publish(state.SettingsUpdated, selected); err != nil {
 		t.Fatal(err)
 	}
-	runner := &fakeAgent{output: "Created the review panel."}
+	runner := &fakeAgent{
+		output: "Created the review panel.",
+		steps: []AgentStep{
+			{Kind: "reasoning", Label: "codex", Content: "Planning the workflow."},
+			{Kind: "tool-use", Label: "command", Content: "workflow validate /workflows/workflow-1.js"},
+			{Kind: "tool-output", Label: "command", Content: "valid"},
+		},
+	}
 	workflows := newFakeWorkflows()
 	loop, err := NewLoop(wire, runner, workflows)
 	if err != nil {
@@ -176,12 +204,157 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	comments := view.CommentsFor("workflow", created.ID)
-	if len(comments) != 2 || comments[1].Author != "agent" {
+	if len(comments) != 5 || comments[1].Kind != "reasoning" || comments[1].Final ||
+		comments[2].Kind != "tool-use" || comments[3].Kind != "tool-output" ||
+		comments[4].Author != "agent" || comments[4].Kind != "message" || !comments[4].Final {
 		t.Fatalf("agent reply missing: %#v", comments)
 	}
 	authored, _ := view.Workflow(created.ID)
 	if authored.Path == nil || *authored.Path != workflows.LocalPath(created.ID) {
 		t.Fatalf("workflow path = %v, want live authoring target", authored.Path)
+	}
+	if _, err := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "workflow", RelationID: created.ID, Author: "user", Content: "Revise the panel",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner.steps = nil
+	runner.output = "Revised the review panel."
+	worked, _, err = loop.step(context.Background())
+	if err != nil || !worked || len(runner.prompts) != 2 {
+		t.Fatalf("second authoring step = %v, %v, prompts = %#v", worked, err, runner.prompts)
+	}
+	secondPrompt := runner.prompts[1]
+	for _, expected := range []string{
+		"user: Build a review panel", "agent: Created the review panel.", "user: Revise the panel",
+	} {
+		if !strings.Contains(secondPrompt, expected) {
+			t.Fatalf("%q missing from second prompt: %s", expected, secondPrompt)
+		}
+	}
+	for _, excluded := range []string{"agent: Planning the workflow.", "agent: workflow validate /workflows/workflow-1.js", "agent: valid"} {
+		if strings.Contains(secondPrompt, excluded) {
+			t.Fatalf("progress %q entered second prompt: %s", excluded, secondPrompt)
+		}
+	}
+	if worked, _, err = loop.step(context.Background()); err != nil || worked {
+		t.Fatalf("answered request was selected again: %v, %v", worked, err)
+	}
+}
+
+func TestLoopPersistsProgressBeforeAuthoringCompletes(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	created, _ := wire.Publish(state.WorkflowCreated, state.WorkflowData{Name: "Draft"})
+	user, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "workflow", RelationID: created.ID, Author: "user", Content: "Build it",
+	})
+	runner := &fakeAgent{
+		steps: []AgentStep{
+			{Kind: "reasoning", Label: "codex", Content: "Inspecting the request."},
+			{Kind: "tool-use", Label: "command", Content: "workflow validate review.js"},
+			{Kind: "tool-output", Label: "command", Content: "valid\n"},
+			{Kind: "message", Content: "The file is ready for validation."},
+		},
+		output: "Created the workflow.", streamed: make(chan struct{}, 1), release: make(chan struct{}),
+	}
+	workflows := newFakeWorkflows()
+	workflows.definitions = []workflow.Definition{
+		{Name: "review", Path: workflows.LocalPath(created.ID), Description: "Review work"},
+	}
+	loop, _ := NewLoop(wire, runner, workflows)
+	finished := make(chan error, 1)
+	go func() {
+		_, _, err := loop.step(context.Background())
+		finished <- err
+	}()
+	waitForSignal(t, runner.streamed, "agent progress")
+
+	view, err := state.ProjectEvents(wire.Events(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments := view.CommentsFor("workflow", created.ID)
+	if len(comments) != 5 {
+		t.Fatalf("live comments = %#v", comments)
+	}
+	for _, comment := range comments[1:] {
+		if comment.ParentCommentID == nil || *comment.ParentCommentID != user.ID || comment.Final {
+			t.Fatalf("live progress comment = %#v", comment)
+		}
+	}
+	pending, found := view.PendingWorkflowComment()
+	if !found || pending.ID != user.ID {
+		t.Fatalf("pending authoring request = %#v, %v", pending, found)
+	}
+	if len(workflows.validations) != 0 || eventTypeCount(wire.Events(0), authoringCompleted) != 0 {
+		t.Fatal("authoring completed before the agent process exited")
+	}
+
+	runner.release <- struct{}{}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("authoring did not finish after release")
+	}
+	view, err = state.ProjectEvents(wire.Events(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments = view.CommentsFor("workflow", created.ID)
+	if len(comments) != 6 || comments[5].Content != "Created the workflow." ||
+		comments[5].Kind != "message" || !comments[5].Final {
+		t.Fatalf("completed comments = %#v", comments)
+	}
+	if _, found := view.PendingWorkflowComment(); found {
+		t.Fatal("final response did not answer the request")
+	}
+	events := wire.Events(0)
+	completedIndex, finalIndex, discoveryIndex := -1, -1, -1
+	for index, event := range events {
+		switch event.Type {
+		case state.WorkflowUpdated:
+			if index > 2 {
+				discoveryIndex = index
+			}
+		case authoringCompleted:
+			completedIndex = index
+		case state.CommentCreated:
+			if event.ID == comments[5].ID {
+				finalIndex = index
+			}
+		}
+	}
+	if len(workflows.validations) != 1 || discoveryIndex < 0 ||
+		!(discoveryIndex < completedIndex && completedIndex < finalIndex) {
+		t.Fatalf("terminal order: discovery=%d completed=%d final=%d events=%#v", discoveryIndex, completedIndex, finalIndex, events)
+	}
+}
+
+func TestAuthorPromptExcludesProgressComments(t *testing.T) {
+	final := true
+	intermediate := false
+	parent := int64(2)
+	comments := []state.Comment{
+		{Record: state.Record{ID: 2}, Author: "user", Kind: "message", Content: "Build it"},
+		{Record: state.Record{ID: 3}, Author: "agent", Kind: "reasoning", Final: false, Content: "Private progress"},
+		{Record: state.Record{ID: 4}, Author: "agent", Kind: "tool-output", Final: intermediate, Content: "Noisy output"},
+		{Record: state.Record{ID: 5}, Author: "agent", Kind: "message", Final: final, Content: "Built it", ParentCommentID: &parent},
+		{Record: state.Record{ID: 6}, Author: "user", Kind: "message", Content: "Revise it"},
+	}
+	prompt := authorPrompt(state.Workflow{Name: "Draft"}, comments, "/workflows/review.js")
+	for _, expected := range []string{"user: Build it", "agent: Built it", "user: Revise it"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("%q missing from prompt: %s", expected, prompt)
+		}
+	}
+	for _, excluded := range []string{"Private progress", "Noisy output"} {
+		if strings.Contains(prompt, excluded) {
+			t.Fatalf("progress %q entered prompt: %s", excluded, prompt)
+		}
 	}
 }
 
@@ -217,9 +390,64 @@ func TestLoopRejectsInvalidAuthoredWorkflow(t *testing.T) {
 	}
 	comments := view.CommentsFor("workflow", created.ID)
 	if len(comments) != 2 ||
+		comments[1].Kind != "error" || !comments[1].Final ||
 		!strings.Contains(comments[1].Content, "parse error near mktemp") {
 		t.Fatalf("authoring failure comment = %#v", comments)
 	}
+}
+
+func TestLoopRecordsRunnerAndDiscoveryFailuresAfterProgress(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		runnerErr error
+		listErr   error
+	}{
+		{name: "runner", runnerErr: errors.New("malformed agent stream")},
+		{name: "discovery", listErr: errors.New("workflow list failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wire := openWire(t)
+			defer wire.Close()
+			created, _ := wire.Publish(state.WorkflowCreated, state.WorkflowData{Name: "Draft"})
+			wire.Publish(state.CommentCreated, state.CommentData{
+				RelationType: "workflow", RelationID: created.ID, Author: "user", Content: "Build it",
+			})
+			runner := &fakeAgent{
+				steps:  []AgentStep{{Kind: "reasoning", Content: "Started work."}},
+				output: "Partial response.", err: test.runnerErr,
+			}
+			workflows := newFakeWorkflows()
+			workflows.listErr = test.listErr
+			loop, _ := NewLoop(wire, runner, workflows)
+			worked, _, err := loop.step(context.Background())
+			if err != nil || !worked {
+				t.Fatalf("authoring step = %v, %v", worked, err)
+			}
+			if eventTypeCount(wire.Events(0), authoringCompleted) != 0 ||
+				eventTypeCount(wire.Events(0), authoringFailed) != 1 {
+				t.Fatalf("authoring events = %#v", wire.Events(0))
+			}
+			view, err := state.ProjectEvents(wire.Events(0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			comments := view.CommentsFor("workflow", created.ID)
+			if len(comments) != 3 || comments[1].Kind != "reasoning" || comments[1].Final ||
+				comments[2].Kind != "error" || !comments[2].Final ||
+				!strings.Contains(comments[2].Content, firstError(test.runnerErr, test.listErr).Error()) {
+				t.Fatalf("failure comments = %#v", comments)
+			}
+		})
+	}
+}
+
+func firstError(values ...error) error {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
 }
 
 func TestLoopRunsMatchingEventTrigger(t *testing.T) {

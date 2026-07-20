@@ -208,6 +208,15 @@ func (l *Loop) authorWorkflow(ctx context.Context, view state.Snapshot, comment 
 		ctx,
 		view.Settings,
 		authorPrompt(selected, view.CommentsFor("workflow", selected.ID), target),
+		func(step AgentStep) error {
+			final := false
+			_, err := l.wire.Publish(state.CommentCreated, state.CommentData{
+				RelationType: "workflow", RelationID: selected.ID, ParentCommentID: &comment.ID,
+				Author: "agent", Kind: step.Kind, Label: step.Label, Final: &final,
+				Content: step.Content,
+			})
+			return err
+		},
 	)
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -223,8 +232,10 @@ func (l *Loop) authorWorkflow(ctx context.Context, view state.Snapshot, comment 
 		response = "Workflow updated."
 	}
 	eventType := authoringCompleted
+	kind := "message"
 	if runErr != nil {
 		eventType = authoringFailed
+		kind = "error"
 		response = strings.TrimSpace(response + "\n\nError: " + runErr.Error())
 	}
 	if _, err := l.wire.Publish(eventType, map[string]any{
@@ -232,9 +243,10 @@ func (l *Loop) authorWorkflow(ctx context.Context, view state.Snapshot, comment 
 	}); err != nil {
 		return err
 	}
+	final := true
 	_, err := l.wire.Publish(state.CommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: selected.ID, ParentCommentID: &comment.ID,
-		Author: "agent", Content: response,
+		Author: "agent", Kind: kind, Final: &final, Content: response,
 	})
 	return err
 }
@@ -601,6 +613,9 @@ func workflowChanged(existing state.Workflow, data state.WorkflowData) bool {
 func authorPrompt(selected state.Workflow, comments []state.Comment, target string) string {
 	var conversation strings.Builder
 	for _, comment := range comments {
+		if comment.Author != "user" && !(comment.Author == "agent" && comment.Final) {
+			continue
+		}
 		fmt.Fprintf(&conversation, "%s: %s\n\n", comment.Author, comment.Content)
 	}
 	source := ""

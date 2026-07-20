@@ -197,8 +197,10 @@ Factory-created workflow files live outside git at:
 ```
 
 Creating or updating a workflow appends a user chat comment. The coordinator
-sends that conversation to the selected unrestricted harness, which
-writes the workflow file before Factory appends its reply. The authoring
+sends that conversation to the selected unrestricted harness. Factory appends
+each exposed reasoning, tool, output, agent, error, or unknown semantic step as
+an ordered live comment while the harness writes the workflow file. After
+validation and rediscovery, Factory appends one final reply. The authoring
 harness runs from the workflow workspace and can use `$FACTORY_CLI` against
 `$FACTORY_URL` to inspect resources or create a trigger when asked. Trigger
 execution uses the same selected harness, model, and reasoning:
