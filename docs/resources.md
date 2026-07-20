@@ -515,6 +515,15 @@ Disabled triggers retain their definitions and remain in list and detail
 responses. They also remain part of the configured trigger count returned by
 `GET /api/health`; only deletion removes a trigger from those views.
 
+The web trigger list can be filtered by one or more represented event types,
+workflow IDs, or both. Several selections within one filter match any selected
+value; selections across the event and workflow filters must both match.
+Disabled triggers remain eligible. Each active workflow option includes its
+ID so workflows with the same name stay distinct, and a trigger that refers to
+a missing workflow remains available as `Workflow <id>`. Filter state lasts
+only while the page is mounted. Clearing the filters restores the complete
+API-ordered list.
+
 The event selector in the web application is derived from observed wire
 types. Publish one event of a new type to make it available, create the
 trigger, then publish a second event to run it. Older events are not replayed
