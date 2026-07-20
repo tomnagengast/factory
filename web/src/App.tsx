@@ -836,53 +836,55 @@ function MediaTextarea(props: {
 
   return (
     <div classList={{ "media-textarea": true, dragging: dragging(), uploading: uploading() }}>
-      <textarea ref={textarea} id={props.id} name={props.name} value={value()} rows={props.rows}
-        required={props.required} placeholder={props.placeholder} disabled={props.disabled || uploading()}
-        onInput={(event) => {
-          setValue(event.currentTarget.value);
-          rememberSelection(event.currentTarget);
-        }}
-        onSelect={(event) => rememberSelection(event.currentTarget)}
-        onBlur={(event) => rememberSelection(event.currentTarget)}
-        onPaste={(event) => {
-          const files = mediaFiles(event.clipboardData);
-          if (!files.length) return;
-          event.preventDefault();
-          void filesAtSelection(files, event.currentTarget.selectionStart, event.currentTarget.selectionEnd);
-        }}
-        onDragOver={(event) => {
-          const transfer = event.dataTransfer;
-          if (!transfer || !Array.from(transfer.types).includes("Files")) return;
-          event.preventDefault();
-          transfer.dropEffect = "copy";
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={(event) => {
-          setDragging(false);
-          const files = mediaFiles(event.dataTransfer);
-          if (!files.length) return;
-          event.preventDefault();
-          void filesAtSelection(files, event.currentTarget.selectionStart, event.currentTarget.selectionEnd);
-        }} />
-      <div class="media-toolbar">
-        <input ref={fileInput} class="media-file-input" type="file" accept={mediaAccept} multiple
-          disabled={props.disabled || uploading()} onChange={(event) => {
-            const files = Array.from(event.currentTarget.files ?? []);
-            event.currentTarget.value = "";
-            void filesAtSelection(files, selectionStart, selectionEnd);
+      <div class="media-editor">
+        <textarea ref={textarea} id={props.id} name={props.name} value={value()} rows={props.rows}
+          required={props.required} placeholder={props.placeholder} disabled={props.disabled || uploading()}
+          onInput={(event) => {
+            setValue(event.currentTarget.value);
+            rememberSelection(event.currentTarget);
+          }}
+          onSelect={(event) => rememberSelection(event.currentTarget)}
+          onBlur={(event) => rememberSelection(event.currentTarget)}
+          onPaste={(event) => {
+            const files = mediaFiles(event.clipboardData);
+            if (!files.length) return;
+            event.preventDefault();
+            void filesAtSelection(files, event.currentTarget.selectionStart, event.currentTarget.selectionEnd);
+          }}
+          onDragOver={(event) => {
+            const transfer = event.dataTransfer;
+            if (!transfer || !Array.from(transfer.types).includes("Files")) return;
+            event.preventDefault();
+            transfer.dropEffect = "copy";
+            setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(event) => {
+            setDragging(false);
+            const files = mediaFiles(event.dataTransfer);
+            if (!files.length) return;
+            event.preventDefault();
+            void filesAtSelection(files, event.currentTarget.selectionStart, event.currentTarget.selectionEnd);
           }} />
-        <button type="button" class="media-picker" aria-label="Add image or video" title="Add image or video"
-          disabled={props.disabled || uploading()} onClick={() => fileInput?.click()}>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <circle cx="8.5" cy="9" r="1.5" />
-            <path d="m4 17 5-5 4 4 2-2 5 5" />
-          </svg>
-        </button>
-        <Show when={uploading()}>
-          <small class="upload-status" aria-live="polite">Uploading {progress()} of {total()}…</small>
-        </Show>
+        <div class="media-toolbar">
+          <input ref={fileInput} class="media-file-input" type="file" accept={mediaAccept} multiple
+            disabled={props.disabled || uploading()} onChange={(event) => {
+              const files = Array.from(event.currentTarget.files ?? []);
+              event.currentTarget.value = "";
+              void filesAtSelection(files, selectionStart, selectionEnd);
+            }} />
+          <button type="button" class="media-picker" aria-label="Add image or video" title="Add image or video"
+            disabled={props.disabled || uploading()} onClick={() => fileInput?.click()}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <circle cx="8.5" cy="9" r="1.5" />
+              <path d="m4 17 5-5 4 4 2-2 5 5" />
+            </svg>
+          </button>
+          <Show when={uploading()}>
+            <small class="upload-status" aria-live="polite">Uploading {progress()} of {total()}…</small>
+          </Show>
+        </div>
       </div>
       <Show when={error()}><small class="form-error" role="alert">{error()}</small></Show>
     </div>
