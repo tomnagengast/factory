@@ -349,7 +349,10 @@ label small { color: var(--color-text-muted); font-weight: 400; }
   background: #171c18; color: #d9e6d6; font: 12px/1.65 var(--mono); tab-size: 2;
 }
 .markdown pre code, .markdown pre code.hljs { padding: 0; background: transparent; font: inherit; }
-.markdown table { width: 100%; display: block; overflow-x: auto; border-collapse: collapse; font-size: 12px; line-height: 1.5; white-space: nowrap; }
+.markdown table {
+  width: 100%; display: block; overflow-x: auto; border-collapse: collapse; font-size: 12px; line-height: 1.5;
+  white-space: nowrap; -webkit-text-size-adjust: 100%; text-size-adjust: 100%;
+}
 .markdown th, .markdown td { padding: 8px 10px; border: 1px solid var(--color-border); text-align: left; }
 .markdown th { background: var(--color-table-heading); }
 .markdown img, .markdown video { max-width: 100%; height: auto; }
