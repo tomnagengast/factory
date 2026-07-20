@@ -33,6 +33,8 @@ type Loop struct {
 	admission *quiescence.Controller
 	active    int
 	completed chan error
+	authoring bool
+	authored  chan error
 }
 
 func NewLoop(
@@ -47,6 +49,7 @@ func NewLoop(
 	return &Loop{
 		store: eventStore, agent: runner, workflows: workflows, admission: admission,
 		completed: make(chan error, state.MaxWorkflowCapacity),
+		authored:  make(chan error, 1),
 	}, nil
 }
 
@@ -109,13 +112,17 @@ func (l *Loop) step(ctx context.Context) (bool, time.Time, error) {
 	}
 	if comment, found, err := l.store.PendingWorkflowComment(); err != nil {
 		return false, time.Time{}, err
-	} else if found {
+	} else if found && !l.authoring {
 		if !l.admission.TryStart() {
 			return false, time.Time{}, nil
 		}
-		authorErr := l.authorWorkflow(ctx, settings, comment)
-		l.admission.Done(authorErr)
-		return true, time.Time{}, authorErr
+		l.authoring = true
+		go func() {
+			authorErr := l.authorWorkflow(ctx, settings, comment)
+			l.authored <- authorErr
+			l.admission.Done(authorErr)
+		}()
+		return true, time.Time{}, nil
 	}
 	if l.active < settings.WorkflowCapacity {
 		if run, response, found, err := l.store.PendingHumanResponse(); err != nil {
@@ -180,6 +187,11 @@ func (l *Loop) wait(
 		cancel()
 		<-wireResult
 		return err
+	case err := <-l.authored:
+		l.authoring = false
+		cancel()
+		<-wireResult
+		return err
 	case err := <-wireResult:
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil
@@ -200,6 +212,11 @@ func (l *Loop) collectCompleted() error {
 			if err != nil {
 				return err
 			}
+		case err := <-l.authored:
+			l.authoring = false
+			if err != nil {
+				return err
+			}
 		default:
 			return nil
 		}
@@ -208,9 +225,22 @@ func (l *Loop) collectCompleted() error {
 
 func (l *Loop) stop(cause error) error {
 	var executionErr error
-	for l.active > 0 {
-		err := <-l.completed
-		l.active--
+	for l.active > 0 || l.authoring {
+		var err error
+		if l.authoring && l.active == 0 {
+			err = <-l.authored
+			l.authoring = false
+		} else if !l.authoring {
+			err = <-l.completed
+			l.active--
+		} else {
+			select {
+			case err = <-l.completed:
+				l.active--
+			case err = <-l.authored:
+				l.authoring = false
+			}
+		}
 		if err != nil && !errors.Is(err, context.Canceled) && executionErr == nil {
 			executionErr = err
 		}

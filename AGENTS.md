@@ -18,9 +18,9 @@
 
 ## Architecture patterns
 
-- Treat the append-only JSONL wire as the durable source of truth. Resource
-  writes append an event, and `api/internal/state` rebuilds projections by
-  replaying the wire.
+- Treat the SQLite `events` table as the durable source of truth. Resource
+  writes append an event and update disposable projections in one transaction.
+  Projection versions rebuild from the event table.
 - A resource creation event ID is also its resource ID. All resources and
   events share one global integer sequence, so gaps in resource IDs are
   expected.

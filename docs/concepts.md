@@ -12,7 +12,7 @@ Everything else exists to make those mechanisms visible and usable.
 
 ```text
 Web UI ─┐
-        ├─> resource API ───────> append-only JSONL wire
+        ├─> resource API ───────> SQLite event store
 CLI ────┘        │                     │
                  └─> immutable blobs   │
                                       ├─> projected resources
@@ -26,12 +26,11 @@ CLI ────┘        │                     │
                          └────────────────> new events <──────────────┘
 ```
 
-There is no database, queue service, permission layer, or embedded workflow
-engine.
+There is no queue service, permission layer, or embedded workflow engine.
 
 ## Event wire
 
-The wire is one append-only JSONL file. Every accepted fact has:
+The wire is one append-only SQLite event table. Every accepted fact has:
 
 | Field | Meaning |
 | --- | --- |
@@ -64,13 +63,14 @@ reader returns to the top.
 ## Projections and resources
 
 Projects, tasks, comments, artifacts, media metadata, triggers, workflow
-metadata, workflow run history, and the singleton agent settings are rebuilt
-by replaying the wire. The wire is the durable source of truth; the resource
-view is derived state.
+metadata, workflow run history, and the singleton agent settings live in
+disposable projection tables. The event table is the durable source of truth.
+Each append and its projection updates commit in one transaction. A projection
+version change rebuilds those tables by scanning events in fixed-size pages.
 
 Media is the one split resource. A `media.created` event stores its name,
 allowed content type, size, and SHA-256 storage key. The immutable bytes live
-under the configured media directory, not in JSONL. Task and comment events
+under the configured media directory, not in SQLite. Task and comment events
 contain short `/api/media/{id}` references instead of repeated binary data.
 Factory keeps finalized blobs even when no task or comment refers to them and
 after a related record is deleted.
@@ -91,18 +91,15 @@ the project is created or updated.
 This gives Factory a deliberately simple write path:
 
 1. validate the request,
-2. append one event,
-3. replay the wire,
-4. return the projected resource.
+2. append one event and update its projections in one transaction,
+3. return the projected resource.
 
 Reaction writes use the same path with one ordering guard. A client supplies
-an exact emoji and desired `active` state. Factory projects one coherent wire
-slice, validates that the target can still receive reactions, then conditionally
-appends `reaction.updated` only if that slice is still current. If another fact
-landed first, Factory replays and validates again. This prevents a stale
-reaction write from landing after target deletion without adding a transaction
-store. Every accepted request remains a fact, including one that repeats the
-current desired state.
+an exact emoji and desired `active` state. Factory reads the target and event
+checkpoint in one transaction, then appends `reaction.updated` only if that
+checkpoint is still current. If another fact landed first, Factory reads the
+target again. Every accepted request remains a fact, including one that
+repeats the current desired state.
 
 Deletes are soft. A deletion event sets `deletedAt`; list routes hide deleted
 records, but historical events remain on the wire.
@@ -126,7 +123,7 @@ mechanism is simply the shared API and wire path through which humans and
 agents record work.
 
 Tasks and task comments can also carry any subset of the fixed reaction
-palette. Reactions use one shared implicit reactor and replay in palette order.
+palette. Reactions use one shared implicit reactor and project in palette order.
 They remain separate from comment records, so reacting to an agent gate prompt
 cannot become a human-review response.
 
@@ -192,7 +189,7 @@ messages, errors, and unknown semantic harness events remain distinct and in
 wire order. Intermediate agent comments do not answer the parent request. Only
 the comment marked final does, and only user and final agent comments enter a
 later authoring prompt. Historical workflow agent replies with a parent that
-predate the final marker replay as final responses.
+predate the final marker are still treated as final responses.
 
 Graceful shutdown records active runs as failed after canceling their
 processes. At startup, the coordinator also closes any projected `running`

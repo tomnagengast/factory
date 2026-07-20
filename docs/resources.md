@@ -228,7 +228,7 @@ Task comment bodies use `content`; workflow conversation bodies use
 Deleting a comment soft-deletes that comment and every descendant reply.
 Ancestors, sibling branches, unrelated comments, artifacts, and media remain
 unchanged. The wire records one `comment.deleted` event for the selected
-comment, and replay derives the same subtree deletion. Direct comment lookup
+comment, and the projection applies the same subtree deletion. Direct comment lookup
 continues to return a soft-deleted record with `deletedAt`; active relation
 lists omit every deleted subtree member.
 
@@ -437,7 +437,8 @@ ANY  /api/ingest
 ANY  /api/ingest/{remaining-path...}
 ```
 
-`GET /api/events?after=42` returns events after ID 42.
+`GET /api/events` returns the newest 200 events. `before=42` returns the next
+older page and `limit` selects a positive page size.
 `GET /api/events/stream?after=42` opens a server-sent event stream after ID
 42. Event types returns all observed types plus `cron`.
 
@@ -559,7 +560,7 @@ Workflow metadata is projected from discovery and authoring events.
 | `scope` | string or null | workflow discovery |
 | `phases` | string array | workflow source `meta` |
 | `mutating` | boolean | workflow discovery |
-| `runCount` | integer | replayed `workflow.run.started` event count |
+| `runCount` | integer | recorded `workflow.run.started` event count |
 | `taskCount` | integer | distinct directly associated task IDs across starts |
 
 Create through an agent conversation:
@@ -651,6 +652,10 @@ GET /api/history
 GET /api/history/{id}
 ```
 
+Both routes return 200 events by default. `before=<id>` loads the next older
+page and `limit` selects a positive page size. Run event pages remain in
+chronological order.
+
 ## Settings
 
 Settings are one global projection rather than an ID-addressed resource.
@@ -680,7 +685,7 @@ PUT /api/settings
 ```
 
 The GET response contains `settings` and a `harnesses` option catalog used by
-the web form. An update appends `settings.updated`; replay restores the latest
+the web form. An update appends `settings.updated`; the settings projection keeps the latest
 selection. Codex, `gpt-5.6-sol`, `low`, and workflow capacity `6` are the
 defaults before the first update. Capacity zero pauses new event and cron
 trigger runs. Lowering it does not cancel active runs.

@@ -147,9 +147,10 @@ The standalone runtime provides:
 | `log(message)` | Emit progress |
 | `budget` | Inspect the run token budget |
 
-Workflow authoring remains one session at a time. Triggered workflows may
-overlap up to Factory's configured workflow capacity, and each workflow may
-also use the runtime's internal concurrency.
+Workflow authoring remains one session at a time in its own lane. Triggered
+workflows continue to dispatch while authoring runs, overlap up to Factory's
+configured workflow capacity, and may also use the runtime's internal
+concurrency.
 
 Authoring progress is durable but is not conversation input. Later authoring
 prompts include user messages and final agent responses only. Reasoning, tool
@@ -263,7 +264,8 @@ workflow's terminal event does not inherit the upstream task.
 The CLI journal is the complete semantic runtime stream: runtime lifecycle,
 phases, workflow logs, diagnostics, agent and gate prompts, cache hits, nested
 workflows, results, token counts, and failures. Factory passes an explicit
-temporary `--journal` path and durably forwards each event without parsing
+temporary `--journal` path and follows appended bytes incrementally. It
+durably forwards each event without parsing
 stderr, filtering fields, or collapsing lifecycle pairs. A wire write failure
 cancels the workflow. The temporary file is removed only after the follower
 finishes.
@@ -375,11 +377,11 @@ Only cron triggers need a schedule. Non-cron triggers ignore it operationally.
 
 ## Ordering and failures
 
-One coordinator prioritizes pending workflow conversations, answered human
-gates, event triggers, then due cron ticks. Authoring remains sequential. When
-neither a conversation nor a human response is pending, the coordinator claims
-matching trigger and source event pairs in wire order and starts workflow
-processes until it reaches the configured capacity.
+One coordinator starts pending workflow conversations in a sequential authoring
+lane, then prioritizes answered human gates, event triggers, and due cron ticks.
+The authoring lane does not hold up those dispatch checks. The coordinator
+claims matching trigger and source event pairs in wire order and starts
+workflow processes until it reaches the configured capacity.
 
 Trigger disable changes future admission only and does not cancel a run that
 already has a `workflow.run.started` event. Conditional wire appends resolve a

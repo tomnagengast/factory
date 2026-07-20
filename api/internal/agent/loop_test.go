@@ -196,6 +196,9 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := finishAuthoring(t, loop); err != nil {
+		t.Fatal(err)
+	}
 	if !worked || len(runner.prompts) != 1 ||
 		!strings.Contains(runner.prompts[0], "Build a review panel") ||
 		!strings.Contains(runner.prompts[0], "$FACTORY_CLI") ||
@@ -231,7 +234,10 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	runner.steps = nil
 	runner.output = "Revised the review panel."
 	worked, _, err = loop.step(context.Background())
-	if err != nil || !worked || len(runner.prompts) != 2 {
+	if err != nil || !worked {
+		t.Fatalf("second authoring step = %v, %v", worked, err)
+	}
+	if err := finishAuthoring(t, loop); err != nil || len(runner.prompts) != 2 {
 		t.Fatalf("second authoring step = %v, %v, prompts = %#v", worked, err, runner.prompts)
 	}
 	secondPrompt := runner.prompts[1]
@@ -273,11 +279,9 @@ func TestLoopPersistsProgressBeforeAuthoringCompletes(t *testing.T) {
 		{Name: "review", Path: workflows.LocalPath(created.ID), Description: "Review work"},
 	}
 	loop, _ := newTestLoop(wire, runner, workflows)
-	finished := make(chan error, 1)
-	go func() {
-		_, _, err := loop.step(context.Background())
-		finished <- err
-	}()
+	if worked, _, err := loop.step(context.Background()); err != nil || !worked {
+		t.Fatalf("authoring step = %v, %v", worked, err)
+	}
 	waitForSignal(t, runner.streamed, "agent progress")
 
 	view, err := state.ProjectEvents(wire.Events(0))
@@ -302,13 +306,8 @@ func TestLoopPersistsProgressBeforeAuthoringCompletes(t *testing.T) {
 	}
 
 	runner.release <- struct{}{}
-	select {
-	case err := <-finished:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("authoring did not finish after release")
+	if err := finishAuthoring(t, loop); err != nil {
+		t.Fatal(err)
 	}
 	view, err = state.ProjectEvents(wire.Events(0))
 	if err != nil {
@@ -342,6 +341,42 @@ func TestLoopPersistsProgressBeforeAuthoringCompletes(t *testing.T) {
 		!(discoveryIndex < completedIndex && completedIndex < finalIndex) {
 		t.Fatalf("terminal order: discovery=%d completed=%d final=%d events=%#v", discoveryIndex, completedIndex, finalIndex, events)
 	}
+}
+
+func TestWorkflowAuthoringDoesNotBlockTriggeredRuns(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	draft, _ := wire.Publish(state.WorkflowCreated, state.WorkflowData{Name: "Draft"})
+	wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "workflow", RelationID: draft.ID, Author: "user", Content: "Build it",
+	})
+	sourcePath := "/workflows/review.js"
+	review, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review", Path: &sourcePath})
+	wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: "release.ready", WorkflowID: review.ID, Enabled: true,
+	})
+	wire.Publish("release.ready", map[string]int{"version": 1})
+	runner := &fakeAgent{
+		output: "Created.", streamed: make(chan struct{}, 1), release: make(chan struct{}),
+	}
+	workflows := newFakeWorkflows()
+	workflows.release = make(chan struct{})
+	loop, _ := newTestLoop(wire, runner, workflows)
+	if worked, _, err := loop.step(context.Background()); err != nil || !worked {
+		t.Fatalf("authoring dispatch = %v, %v", worked, err)
+	}
+	waitForSignal(t, runner.streamed, "workflow authoring start")
+	if worked, _, err := loop.step(context.Background()); err != nil || !worked {
+		t.Fatalf("trigger dispatch during authoring = %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "triggered workflow start")
+	workflows.release <- struct{}{}
+	runner.release <- struct{}{}
+	waitForSignal(t, workflows.finished, "triggered workflow finish")
+	if err := finishAuthoring(t, loop); err != nil {
+		t.Fatal(err)
+	}
+	waitForActiveCount(t, loop, 0)
 }
 
 func TestAuthorPromptExcludesProgressComments(t *testing.T) {
@@ -390,6 +425,9 @@ func TestLoopRejectsInvalidAuthoredWorkflow(t *testing.T) {
 	if err != nil || !worked {
 		t.Fatalf("authoring step = %v, %v", worked, err)
 	}
+	if err := finishAuthoring(t, loop); err != nil {
+		t.Fatal(err)
+	}
 	if eventTypeCount(wire.Events(0), authoringCompleted) != 0 ||
 		eventTypeCount(wire.Events(0), authoringFailed) != 1 {
 		t.Fatalf("authoring events = %#v", wire.Events(0))
@@ -432,6 +470,9 @@ func TestLoopRecordsRunnerAndDiscoveryFailuresAfterProgress(t *testing.T) {
 			worked, _, err := loop.step(context.Background())
 			if err != nil || !worked {
 				t.Fatalf("authoring step = %v, %v", worked, err)
+			}
+			if err := finishAuthoring(t, loop); err != nil {
+				t.Fatal(err)
 			}
 			if eventTypeCount(wire.Events(0), authoringCompleted) != 0 ||
 				eventTypeCount(wire.Events(0), authoringFailed) != 1 {
@@ -977,11 +1018,9 @@ func TestQuiescenceDrainsWorkflowAuthoring(t *testing.T) {
 	}
 	admission := quiescence.New()
 	loop, _ := NewLoop(wire.Store, runner, newFakeWorkflows(), admission)
-	finished := make(chan error, 1)
-	go func() {
-		_, _, stepErr := loop.step(context.Background())
-		finished <- stepErr
-	}()
+	if worked, _, stepErr := loop.step(context.Background()); stepErr != nil || !worked {
+		t.Fatalf("authoring step = %v, %v", worked, stepErr)
+	}
 	waitForSignal(t, runner.streamed, "workflow authoring start")
 
 	acquired := make(chan quiescence.Lease, 1)
@@ -1001,7 +1040,7 @@ func TestQuiescenceDrainsWorkflowAuthoring(t *testing.T) {
 	}
 
 	runner.release <- struct{}{}
-	if stepErr := receiveValue(t, finished, "workflow authoring finish"); stepErr != nil {
+	if stepErr := finishAuthoring(t, loop); stepErr != nil {
 		t.Fatal(stepErr)
 	}
 	lease := receiveValue(t, acquired, "quiescence lease")
@@ -1382,6 +1421,18 @@ func eventTypeCount(events []eventwire.Event, eventType string) int {
 		}
 	}
 	return count
+}
+
+func finishAuthoring(t *testing.T, loop *Loop) error {
+	t.Helper()
+	select {
+	case err := <-loop.authored:
+		loop.authoring = false
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for workflow authoring")
+		return nil
+	}
 }
 
 type testStore struct {

@@ -14,7 +14,7 @@ mechanisms:
 3. one capacity-limited workflow coordinator.
 
 Projects, tasks, comments, artifacts, media metadata, triggers, and workflow metadata are
-projections of a JSONL event log. The Solid web app and `factory` CLI use the
+transactional projections of one event table in SQLite. The Solid web app and `factory` CLI use the
 same HTTP API. No authentication, permissions, policy engine, migration
 framework, or deployment lifecycle lives in the application.
 
@@ -75,7 +75,7 @@ Usage: factory-api [options]
   -codex string
         Codex executable
   -data string
-        append-only event wire path
+		SQLite event store path
   -factory string
         Factory CLI exposed to the authoring harness
   -media string
@@ -86,9 +86,7 @@ Usage: factory-api [options]
         untracked dynamic workflow workspace
 ```
 
-The new domain wire defaults to
-`~/.local/share/factory/wire.jsonl`. The prior demonstrator's
-`events.jsonl` is left untouched as an archive.
+The event store defaults to `~/.local/share/factory/factory.db`.
 Immutable media blobs default to `~/.local/share/factory/media`.
 
 ## Web routes

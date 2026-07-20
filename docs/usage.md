@@ -113,7 +113,7 @@ If the port is free:
 ./factory-api
 ```
 
-Leave that terminal open. Factory logs its listening address, wire path,
+Leave that terminal open. Factory logs its listening address, event store path,
 media directory, and workflow workspace at startup.
 
 Open [http://127.0.0.1:8092](http://127.0.0.1:8092) in a browser. The overview
@@ -287,7 +287,7 @@ The defaults are:
 | Setting | Default |
 | --- | --- |
 | Listen address | `127.0.0.1:$PORT`, or `127.0.0.1:8092` |
-| Event wire | `~/.local/share/factory/wire.jsonl` |
+| Event store | `~/.local/share/factory/factory.db` |
 | Media blobs | `~/.local/share/factory/media` |
 | Workflow workspace | `~/.local/share/factory/workflow-workspace` |
 | Codex executable | `codex` |
@@ -300,7 +300,7 @@ Example with isolated state and a different port:
 ```sh
 ./factory-api \
   -addr 127.0.0.1:9090 \
-  -data "$HOME/.local/share/factory-demo/wire.jsonl" \
+  -data "$HOME/.local/share/factory-demo/factory.db" \
   -media "$HOME/.local/share/factory-demo/media" \
   -workflow-workspace "$HOME/.local/share/factory-demo/workflows"
 ```
@@ -355,13 +355,13 @@ Every semantic workflow event is part of the same durable wire. Restarting
 does not depend on temporary journal files or terminal logs to rebuild run
 history.
 
-Back up or restore the wire and media directory together. The wire identifies
+Back up or restore the database and media directory together. The database identifies
 each media blob, while the blob bytes live only under `-media`. To begin with
 empty state, stop Factory and move all three paths aside:
 
 ```sh
-mv "$HOME/.local/share/factory/wire.jsonl" \
-  "$HOME/.local/share/factory/wire.backup.jsonl"
+mv "$HOME/.local/share/factory/factory.db" \
+  "$HOME/.local/share/factory/factory.backup.db"
 mv "$HOME/.local/share/factory/media" \
   "$HOME/.local/share/factory/media.backup"
 mv "$HOME/.local/share/factory/workflow-workspace" \
@@ -377,7 +377,7 @@ canceled editor, failed task or comment save, or event publication failure.
 
 ### The server exits immediately
 
-Read the terminal error first. Startup requires a writable wire path, the
+Read the terminal error first. Startup requires a writable database path, the
 embedded frontend, and a working `workflow` command.
 
 Verify:
