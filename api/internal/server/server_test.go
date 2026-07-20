@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -13,7 +14,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -111,6 +114,166 @@ func TestTaskListDefaultsToDescendingIDs(t *testing.T) {
 	}
 	if len(result.Tasks) != 2 || result.Tasks[0].ID < result.Tasks[1].ID {
 		t.Fatalf("tasks are not descending: %#v", result.Tasks)
+	}
+}
+
+func TestTaskListSummariesProjectCommentsAndWorkflowRuns(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	project, _ := wire.Publish(state.ProjectCreated, state.ProjectData{
+		Name: "Factory", Path: t.TempDir(),
+	})
+	task, _ := wire.Publish(state.TaskCreated, state.TaskData{
+		Title: "Improve the list", Status: state.InProgress, ProjectID: project.ID,
+	})
+	emptyTask, _ := wire.Publish(state.TaskCreated, state.TaskData{
+		Title: "No activity", Status: state.Backlog, ProjectID: project.ID,
+	})
+
+	root, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, Author: "user", Content: "Root",
+	})
+	wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, ParentCommentID: &root.ID,
+		Author: "user", Content: "Reply",
+	})
+	wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, Author: "agent", Content: "Gate prompt",
+	})
+	deleted, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, Author: "user", Content: "Remove me",
+	})
+	wire.Publish(state.CommentDeleted, state.IDData{ID: deleted.ID})
+
+	review, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	verify, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "verify"})
+	createdRun, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", SourceEventID: task.ID,
+	})
+	wire.Publish(state.WorkflowRunCompleted, state.WorkflowRunData{
+		TriggerID: 50, SourceEventID: task.ID, Output: "done",
+	})
+
+	readList := func(path string) struct {
+		Project           state.Project  `json:"project"`
+		Tasks             []taskListItem `json:"tasks"`
+		CheckpointEventID int64          `json:"checkpointEventId"`
+	} {
+		t.Helper()
+		response := requestJSON(t, handler, http.MethodGet, path, "")
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, body = %s", path, response.Code, response.Body)
+		}
+		var result struct {
+			Project           state.Project  `json:"project"`
+			Tasks             []taskListItem `json:"tasks"`
+			CheckpointEventID int64          `json:"checkpointEventId"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	findTask := func(tasks []taskListItem, id int64) taskListItem {
+		t.Helper()
+		for _, item := range tasks {
+			if item.ID == id {
+				return item
+			}
+		}
+		t.Fatalf("task %d missing from %#v", id, tasks)
+		return taskListItem{}
+	}
+
+	terminal := findTask(readList("/api/tasks").Tasks, task.ID)
+	if len(terminal.WorkflowRuns) != 1 || terminal.WorkflowRuns[0].RunID != createdRun.ID ||
+		terminal.WorkflowRuns[0].Status != "completed" {
+		t.Fatalf("completed fallback = %#v", terminal.WorkflowRuns)
+	}
+
+	firstUpdate, _ := wire.Publish(state.TaskUpdated, state.TaskData{
+		ID: task.ID, Title: "Improve the list", Status: state.InProgress, ProjectID: project.ID,
+	})
+	firstActive, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", SourceEventID: firstUpdate.ID,
+	})
+	secondUpdate, _ := wire.Publish(state.TaskUpdated, state.TaskData{
+		ID: task.ID, Title: "Improve the list", Status: state.InProgress, ProjectID: project.ID,
+	})
+	secondActive, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", SourceEventID: secondUpdate.ID,
+	})
+	wire.Publish(state.WorkflowRunWaiting, state.WorkflowRunStateData{RunID: secondActive.ID})
+	verifyRun, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 60, WorkflowID: verify.ID, WorkflowName: "verify",
+		SourceEventID: secondUpdate.ID, TaskID: task.ID,
+	})
+	wire.Publish(state.WorkflowRunFailed, state.WorkflowRunData{
+		TriggerID: 60, SourceEventID: secondUpdate.ID, Error: "failed",
+	})
+	custom, _ := wire.Publish("release.ready", map[string]int64{"taskId": task.ID})
+	wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 70, WorkflowID: review.ID, WorkflowName: "review", SourceEventID: custom.ID,
+	})
+
+	global := readList("/api/tasks")
+	if global.CheckpointEventID != wire.LastID() {
+		t.Fatalf("global checkpoint = %d, want %d", global.CheckpointEventID, wire.LastID())
+	}
+	if len(global.Tasks) != 2 || global.Tasks[0].ID != emptyTask.ID || global.Tasks[1].ID != task.ID {
+		t.Fatalf("global task order = %#v", global.Tasks)
+	}
+	active := findTask(global.Tasks, task.ID)
+	if active.CommentCount != 3 {
+		t.Fatalf("comment count = %d, want 3", active.CommentCount)
+	}
+	wantRuns := []taskWorkflowRun{
+		{RunID: firstActive.ID, TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", Status: "running"},
+		{RunID: secondActive.ID, TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", Status: "waiting"},
+		{RunID: verifyRun.ID, TriggerID: 60, WorkflowID: verify.ID, WorkflowName: "verify", Status: "failed"},
+	}
+	if !reflect.DeepEqual(active.WorkflowRuns, wantRuns) {
+		t.Fatalf("active workflow runs = %#v, want %#v", active.WorkflowRuns, wantRuns)
+	}
+	empty := findTask(global.Tasks, emptyTask.ID)
+	if empty.CommentCount != 0 || empty.WorkflowRuns == nil || len(empty.WorkflowRuns) != 0 {
+		t.Fatalf("empty task summary = %#v", empty)
+	}
+
+	projectDetail := readList(fmt.Sprintf("/api/projects/%d", project.ID))
+	if projectDetail.CheckpointEventID != global.CheckpointEventID || projectDetail.Project.ID != project.ID {
+		t.Fatalf("project detail = %#v", projectDetail)
+	}
+	projectTask := findTask(projectDetail.Tasks, task.ID)
+	if projectTask.CommentCount != active.CommentCount || !reflect.DeepEqual(projectTask.WorkflowRuns, active.WorkflowRuns) {
+		t.Fatalf("project task summary = %#v, global = %#v", projectTask, active)
+	}
+	if len(projectDetail.Tasks) != 2 || projectDetail.Tasks[0].ID != task.ID ||
+		projectDetail.Tasks[1].ID != emptyTask.ID {
+		t.Fatalf("project task order = %#v", projectDetail.Tasks)
+	}
+
+	wire.Publish(state.WorkflowRunResumed, state.WorkflowRunStateData{RunID: secondActive.ID})
+	resumed := findTask(readList("/api/tasks").Tasks, task.ID)
+	if len(resumed.WorkflowRuns) < 2 || resumed.WorkflowRuns[1].Status != "running" {
+		t.Fatalf("resumed workflow runs = %#v", resumed.WorkflowRuns)
+	}
+	wire.Publish(state.WorkflowRunCompleted, state.WorkflowRunData{
+		TriggerID: 50, SourceEventID: firstUpdate.ID, Output: "done",
+	})
+	remaining := findTask(readList("/api/tasks").Tasks, task.ID)
+	if len(remaining.WorkflowRuns) < 1 || remaining.WorkflowRuns[0].RunID != secondActive.ID ||
+		remaining.WorkflowRuns[0].Status != "running" {
+		t.Fatalf("remaining active workflow runs = %#v", remaining.WorkflowRuns)
+	}
+	wire.Publish(state.WorkflowRunFailed, state.WorkflowRunData{
+		TriggerID: 50, SourceEventID: secondUpdate.ID, Error: "failed",
+	})
+	failed := findTask(readList("/api/tasks").Tasks, task.ID)
+	if len(failed.WorkflowRuns) < 1 || failed.WorkflowRuns[0].RunID != secondActive.ID ||
+		failed.WorkflowRuns[0].Status != "failed" {
+		t.Fatalf("failed terminal fallback = %#v", failed.WorkflowRuns)
 	}
 }
 
@@ -220,6 +383,220 @@ func TestTaskInReviewStatusPersistsAcrossCreateUpdateAndReplay(t *testing.T) {
 		`{"title":"Use an alias","status":"review","projectId":1}`)
 	if rejected.Code != http.StatusBadRequest || wire.LastID() != lastID {
 		t.Fatalf("alias status = %d, body = %s, last ID = %d", rejected.Code, rejected.Body, wire.LastID())
+	}
+}
+
+func TestReactionAPIUpdatesTasksRootCommentsRepliesAndGatePrompts(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	task, _ := wire.Publish(state.TaskCreated, state.TaskData{
+		Title: "Review reactions", Status: state.InReview, ProjectID: 99,
+	})
+	root, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, Author: "user", Content: "Root",
+	})
+	reply, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, ParentCommentID: &root.ID,
+		Author: "user", Content: "Reply",
+	})
+	gate, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, Author: "agent", Content: "Approve it?",
+	})
+	workflowComment, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "workflow", RelationID: 88, Author: "user", Content: "Revise it",
+	})
+	handler := testServer(t, wire).Handler()
+
+	createdComments := eventCount(wire.Events(0), state.CommentCreated)
+	first := requestJSON(t, handler, http.MethodPut, "/api/tasks/1/reactions", `{"emoji":"❤️","active":true}`)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first task reaction = %d %s", first.Code, first.Body)
+	}
+	var firstTask state.Task
+	if err := json.Unmarshal(first.Body.Bytes(), &firstTask); err != nil ||
+		!slices.Equal(firstTask.Reactions, []string{"❤️"}) {
+		t.Fatalf("first task reaction = %#v, %v", firstTask, err)
+	}
+	firstUpdatedAt := firstTask.UpdatedAt
+
+	repeated := requestJSON(t, handler, http.MethodPut, "/api/tasks/1/reactions", `{"emoji":"❤️","active":true}`)
+	var repeatedTask state.Task
+	if repeated.Code != http.StatusOK || json.Unmarshal(repeated.Body.Bytes(), &repeatedTask) != nil ||
+		!repeatedTask.UpdatedAt.After(firstUpdatedAt) || !slices.Equal(repeatedTask.Reactions, []string{"❤️"}) {
+		t.Fatalf("repeated task reaction = %d %s", repeated.Code, repeated.Body)
+	}
+	cleared := requestJSON(t, handler, http.MethodPut, "/api/tasks/1/reactions", `{"emoji":"❤️","active":false}`)
+	var clearedTask state.Task
+	if cleared.Code != http.StatusOK || json.Unmarshal(cleared.Body.Bytes(), &clearedTask) != nil ||
+		clearedTask.Reactions == nil || len(clearedTask.Reactions) != 0 {
+		t.Fatalf("cleared task reaction = %d %s", cleared.Code, cleared.Body)
+	}
+
+	for _, target := range []struct {
+		id    int64
+		emoji string
+	}{
+		{root.ID, "👍"}, {reply.ID, "🎉"}, {gate.ID, "👀"},
+	} {
+		response := requestJSON(t, handler, http.MethodPut,
+			fmt.Sprintf("/api/comments/%d/reactions", target.id),
+			fmt.Sprintf(`{"emoji":%q,"active":true}`, target.emoji))
+		if response.Code != http.StatusOK {
+			t.Fatalf("comment %d reaction = %d %s", target.id, response.Code, response.Body)
+		}
+	}
+	last := wire.Events(0)[len(wire.Events(0))-1]
+	var payload state.ReactionUpdatedData
+	if last.Type != state.ReactionUpdated || json.Unmarshal(last.Data, &payload) != nil ||
+		payload != (state.ReactionUpdatedData{TargetType: "comment", TargetID: gate.ID, Emoji: "👀", Active: true}) {
+		t.Fatalf("last reaction event = %#v, payload = %#v", last, payload)
+	}
+	if eventCount(wire.Events(0), state.CommentCreated) != createdComments {
+		t.Fatal("reaction request created a comment")
+	}
+
+	if response := requestJSON(t, handler, http.MethodDelete, "/api/tasks/1", ""); response.Code != http.StatusNoContent {
+		t.Fatalf("delete task = %d %s", response.Code, response.Body)
+	}
+	if response := requestJSON(t, handler, http.MethodDelete, "/api/comments/2", ""); response.Code != http.StatusNoContent {
+		t.Fatalf("delete root = %d %s", response.Code, response.Body)
+	}
+	orphan := requestJSON(t, handler, http.MethodPut, "/api/comments/3/reactions", `{"emoji":"😂","active":true}`)
+	var orphanReply state.Comment
+	if orphan.Code != http.StatusOK || json.Unmarshal(orphan.Body.Bytes(), &orphanReply) != nil ||
+		!slices.Equal(orphanReply.Reactions, []string{"🎉", "😂"}) {
+		t.Fatalf("orphan reply reaction = %d %s", orphan.Code, orphan.Body)
+	}
+
+	taskDetail := requestJSON(t, handler, http.MethodGet, "/api/tasks/1", "")
+	var taskEnvelope struct {
+		Task     state.Task      `json:"task"`
+		Comments []state.Comment `json:"comments"`
+	}
+	if taskDetail.Code != http.StatusOK || json.Unmarshal(taskDetail.Body.Bytes(), &taskEnvelope) != nil ||
+		taskEnvelope.Task.Reactions == nil || len(taskEnvelope.Comments) != 2 {
+		t.Fatalf("task detail reactions = %d %s", taskDetail.Code, taskDetail.Body)
+	}
+	commentDetail := requestJSON(t, handler, http.MethodGet, "/api/comments/3", "")
+	var commentEnvelope struct {
+		Comment state.Comment   `json:"comment"`
+		Replies []state.Comment `json:"replies"`
+	}
+	if commentDetail.Code != http.StatusOK || json.Unmarshal(commentDetail.Body.Bytes(), &commentEnvelope) != nil ||
+		!slices.Equal(commentEnvelope.Comment.Reactions, []string{"🎉", "😂"}) || commentEnvelope.Replies == nil {
+		t.Fatalf("comment detail reactions = %d %s", commentDetail.Code, commentDetail.Body)
+	}
+
+	lastID := wire.LastID()
+	unsupported := requestJSON(t, handler, http.MethodPut,
+		fmt.Sprintf("/api/comments/%d/reactions", workflowComment.ID), `{"emoji":"👍","active":true}`)
+	if unsupported.Code != http.StatusBadRequest || wire.LastID() != lastID {
+		t.Fatalf("workflow reaction = %d %s, last ID = %d", unsupported.Code, unsupported.Body, wire.LastID())
+	}
+}
+
+func TestReactionAPIRejectsInvalidRequestsWithoutAppendingEvents(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	activeTask, _ := wire.Publish(state.TaskCreated, state.TaskData{Title: "Active", Status: state.Todo, ProjectID: 99})
+	deletedTask, _ := wire.Publish(state.TaskCreated, state.TaskData{Title: "Deleted", Status: state.Todo, ProjectID: 99})
+	activeComment, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: activeTask.ID, Author: "user", Content: "Active",
+	})
+	deletedComment, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: activeTask.ID, Author: "user", Content: "Deleted",
+	})
+	workflowComment, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "workflow", RelationID: 88, Author: "user", Content: "Workflow",
+	})
+	wire.Publish(state.TaskDeleted, state.IDData{ID: deletedTask.ID})
+	wire.Publish(state.CommentDeleted, state.IDData{ID: deletedComment.ID})
+	handler := testServer(t, wire).Handler()
+
+	tests := []struct {
+		name, path, body string
+		status           int
+	}{
+		{"invalid task ID", "/api/tasks/nope/reactions", `{"emoji":"👍","active":true}`, http.StatusBadRequest},
+		{"invalid comment ID", "/api/comments/0/reactions", `{"emoji":"👍","active":true}`, http.StatusBadRequest},
+		{"unknown field", fmt.Sprintf("/api/tasks/%d/reactions", activeTask.ID), `{"emoji":"👍","active":true,"actor":"user"}`, http.StatusBadRequest},
+		{"missing active", fmt.Sprintf("/api/tasks/%d/reactions", activeTask.ID), `{"emoji":"👍"}`, http.StatusBadRequest},
+		{"null active", fmt.Sprintf("/api/tasks/%d/reactions", activeTask.ID), `{"emoji":"👍","active":null}`, http.StatusBadRequest},
+		{"skin tone", fmt.Sprintf("/api/tasks/%d/reactions", activeTask.ID), `{"emoji":"👍🏻","active":true}`, http.StatusBadRequest},
+		{"heart without variation selector", fmt.Sprintf("/api/tasks/%d/reactions", activeTask.ID), `{"emoji":"❤","active":true}`, http.StatusBadRequest},
+		{"whitespace", fmt.Sprintf("/api/comments/%d/reactions", activeComment.ID), `{"emoji":" 👍 ","active":true}`, http.StatusBadRequest},
+		{"missing task", "/api/tasks/999/reactions", `{"emoji":"👍","active":true}`, http.StatusNotFound},
+		{"deleted task", fmt.Sprintf("/api/tasks/%d/reactions", deletedTask.ID), `{"emoji":"👍","active":true}`, http.StatusNotFound},
+		{"missing comment", "/api/comments/999/reactions", `{"emoji":"👍","active":true}`, http.StatusNotFound},
+		{"deleted comment", fmt.Sprintf("/api/comments/%d/reactions", deletedComment.ID), `{"emoji":"👍","active":true}`, http.StatusNotFound},
+		{"workflow comment", fmt.Sprintf("/api/comments/%d/reactions", workflowComment.ID), `{"emoji":"👍","active":true}`, http.StatusBadRequest},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lastID := wire.LastID()
+			response := requestJSON(t, handler, http.MethodPut, test.path, test.body)
+			if response.Code != test.status || wire.LastID() != lastID {
+				t.Fatalf("response = %d %s, last ID = %d, want status %d and ID %d",
+					response.Code, response.Body, wire.LastID(), test.status, lastID)
+			}
+		})
+	}
+}
+
+func TestReactionAndDeletionAreOrderedByTheWire(t *testing.T) {
+	for iteration := 0; iteration < 20; iteration++ {
+		wire := openWire(t)
+		task, _ := wire.Publish(state.TaskCreated, state.TaskData{
+			Title: "Concurrent", Status: state.Todo, ProjectID: 99,
+		})
+		handler := testServer(t, wire).Handler()
+		start := make(chan struct{})
+		responses := make(chan *httptest.ResponseRecorder, 2)
+		var workers sync.WaitGroup
+		workers.Add(2)
+		go func() {
+			defer workers.Done()
+			<-start
+			request := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/tasks/%d/reactions", task.ID),
+				strings.NewReader(`{"emoji":"👍","active":true}`))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			responses <- response
+		}()
+		go func() {
+			defer workers.Done()
+			<-start
+			request := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/tasks/%d", task.ID), nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			responses <- response
+		}()
+		close(start)
+		workers.Wait()
+		close(responses)
+
+		codes := make(map[int]int)
+		for response := range responses {
+			codes[response.Code]++
+		}
+		if codes[http.StatusNoContent] != 1 || codes[http.StatusOK]+codes[http.StatusNotFound] != 1 {
+			t.Fatalf("iteration %d response codes = %#v", iteration, codes)
+		}
+		reactionIndex, deleteIndex := -1, -1
+		for index, event := range wire.Events(0) {
+			switch event.Type {
+			case state.ReactionUpdated:
+				reactionIndex = index
+			case state.TaskDeleted:
+				deleteIndex = index
+			}
+		}
+		if deleteIndex < 0 || reactionIndex > deleteIndex ||
+			(reactionIndex >= 0) != (codes[http.StatusOK] == 1) {
+			t.Fatalf("iteration %d event order reaction=%d delete=%d, codes=%#v, events=%#v",
+				iteration, reactionIndex, deleteIndex, codes, wire.Events(0))
+		}
+		wire.Close()
 	}
 }
 
@@ -838,6 +1215,57 @@ func TestEventStreamConnectsBeforeAnEventExists(t *testing.T) {
 	}
 }
 
+func TestEventStreamReplaysEventAfterTaskListCheckpoint(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	project, _ := wire.Publish(state.ProjectCreated, state.ProjectData{Name: "Factory", Path: t.TempDir()})
+	task, _ := wire.Publish(state.TaskCreated, state.TaskData{
+		Title: "Watch comments", Status: state.Todo, ProjectID: project.ID,
+	})
+	list := requestJSON(t, handler, http.MethodGet, "/api/tasks", "")
+	var snapshot struct {
+		CheckpointEventID int64 `json:"checkpointEventId"`
+	}
+	if list.Code != http.StatusOK || json.Unmarshal(list.Body.Bytes(), &snapshot) != nil {
+		t.Fatalf("task list = %d %s", list.Code, list.Body)
+	}
+	intervening, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, Author: "user", Content: "New comment",
+	})
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
+		fmt.Sprintf("%s/api/events/stream?after=%d", server.URL, snapshot.CheckpointEventID), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	reader := bufio.NewReader(response.Body)
+	for _, expected := range []string{": connected\n", "\n"} {
+		line, err := reader.ReadString('\n')
+		if err != nil || line != expected {
+			t.Fatalf("stream opening = %q, %v; want %q", line, err, expected)
+		}
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "data: ") {
+		t.Fatalf("stream event = %q, %v", line, err)
+	}
+	var event eventwire.Event
+	if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data: "))), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.ID != intervening.ID || event.Type != state.CommentCreated {
+		t.Fatalf("replayed event = %#v, want %#v", event, intervening)
+	}
+}
+
 func requestJSON(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -910,4 +1338,14 @@ func receiveServerResponse(
 		t.Fatalf("timed out waiting for %s", label)
 		return nil
 	}
+}
+
+func eventCount(events []eventwire.Event, eventType string) int {
+	count := 0
+	for _, event := range events {
+		if event.Type == eventType {
+			count++
+		}
+	}
+	return count
 }

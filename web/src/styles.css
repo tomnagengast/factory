@@ -204,15 +204,44 @@ main { min-width: 0; }
 }
 
 .rows, .wire-list { border-top: 1px solid var(--color-border); }
-.task-row, .trigger-row {
-  min-height: 64px; display: grid; grid-template-columns: 90px minmax(0, 1fr) 54px 130px;
+.task-row {
+  min-height: 64px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center; gap: 14px; padding: 10px 12px; border-bottom: 1px solid var(--color-border); text-decoration: none;
 }
+.trigger-row {
+  min-height: 64px; display: grid; align-items: center; gap: 14px;
+  padding: 10px 12px; border-bottom: 1px solid var(--color-border); text-decoration: none;
+}
 .task-row:hover, .trigger-row:hover, .history-row:hover, .event-row:hover { background: var(--color-surface-hover); }
+.task-row-meta { display: inline-flex; align-items: center; gap: 5px; color: var(--color-text-muted); }
+.task-status-icon {
+  width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-linecap: round;
+  stroke-linejoin: round; stroke-width: 1.7;
+}
+.task-status-icon.todo, .task-status-icon.in-review { color: var(--status-info-text); }
+.task-status-icon.in-progress { color: var(--status-warning-text); }
+.task-status-icon.done { color: var(--status-success-text); }
+.task-status-icon.canceled { color: var(--status-danger-text); }
+.task-status-icon .status-fill { fill: currentColor; stroke: none; }
+.task-id { color: var(--color-text-muted); font: 10px var(--mono); }
 .task-title { min-width: 0; }
-.task-title strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.task-title strong { display: block; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 14px; }
 .task-title small { display: block; margin-top: 4px; color: var(--color-text-muted); font-size: 11px; }
 .task-row time, .event-row time { color: var(--color-text-muted); font-size: 11px; text-align: right; }
+.task-row-signals {
+  min-width: 0; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap;
+  gap: 6px 10px; color: var(--color-text-muted);
+}
+.workflow-status-indicators { max-width: 88px; display: inline-flex; align-items: center; flex-wrap: wrap; gap: 3px; }
+.workflow-status-indicator { width: 10px; height: 10px; flex: none; color: var(--status-neutral-text); fill: currentColor; }
+.workflow-status-indicator.waiting { color: var(--status-info-text); }
+.workflow-status-indicator.running { color: var(--status-warning-text); }
+.workflow-status-indicator.completed { color: var(--status-success-text); }
+.workflow-status-indicator.failed { color: var(--status-danger-text); }
+.task-comment-count { display: inline-flex; align-items: center; gap: 4px; font: 10px var(--mono); font-variant-numeric: tabular-nums; }
+.task-comment-count svg {
+  width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-linejoin: round; stroke-width: 1.7;
+}
 .status, .trigger-state, .run-status {
   width: fit-content; padding: 4px 7px; border: 1px solid var(--status-neutral-border);
   background: var(--status-neutral-surface); color: var(--status-neutral-text);
@@ -277,6 +306,7 @@ main { min-width: 0; }
   color: var(--color-chip-text); text-decoration: none;
 }
 .task-properties a:hover { border-color: var(--color-border-hover); }
+.task-properties + .reaction-control { margin: -12px 0 28px; }
 .task-document { min-width: 0; padding: 6px 2px 28px; }
 .muted { color: var(--color-text-muted); }
 .form-panel, .composer, .artifact-form, .comment-form {
@@ -340,6 +370,21 @@ label small { color: var(--color-text-muted); font-weight: 400; }
 .comment header time, .message header time { margin-left: auto; }
 .comment .markdown, .message p { margin-top: 10px; }
 .message p { margin-bottom: 0; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.reaction-control { display: grid; gap: 6px; width: fit-content; max-width: 100%; }
+.comment > .reaction-control { margin-top: 12px; }
+.reaction-bar { display: flex; flex-wrap: wrap; gap: 5px; }
+.reaction-button {
+  width: 34px; height: 30px; display: grid; place-items: center; padding: 0;
+  border: 1px solid var(--color-chip-border); border-radius: 3px;
+  background: var(--color-surface-muted); color: var(--color-text); cursor: pointer;
+}
+.reaction-button:hover:not(:disabled) { border-color: var(--color-border-hover); background: var(--color-surface-hover); }
+.reaction-button.selected {
+  border-color: var(--color-action); background: var(--status-success-surface);
+  box-shadow: inset 0 0 0 1px var(--color-action);
+}
+.reaction-button:disabled { cursor: wait; }
+.reaction-bar.pending { opacity: .65; }
 .replies { margin: 14px 0 0 16px; display: grid; gap: 10px; }
 .comment-form { padding: 14px; grid-template-columns: 1fr auto; gap: 8px; }
 .comment-form textarea { grid-column: 1 / -1; }
@@ -376,7 +421,10 @@ label small { color: var(--color-text-muted); font-weight: 400; }
   background: #171c18; color: #d9e6d6; font: 12px/1.65 var(--mono); tab-size: 2;
 }
 .markdown pre code, .markdown pre code.hljs { padding: 0; background: transparent; font: inherit; }
-.markdown table { width: 100%; display: block; overflow-x: auto; border-collapse: collapse; font-size: 12px; line-height: 1.5; white-space: nowrap; }
+.markdown table {
+  width: 100%; display: block; overflow-x: auto; border-collapse: collapse; font-size: 12px; line-height: 1.5;
+  white-space: nowrap; -webkit-text-size-adjust: 100%; text-size-adjust: 100%;
+}
 .markdown th, .markdown td { padding: 8px 10px; border: 1px solid var(--color-border); text-align: left; }
 .markdown th { background: var(--color-table-heading); }
 .markdown img, .markdown video { max-width: 100%; height: auto; }
@@ -511,7 +559,8 @@ label small { color: var(--color-text-muted); font-weight: 400; }
   .page { padding-inline: 16px; }
   .page-header { align-items: flex-start; flex-direction: column; }
   .card-grid, .field-pair { grid-template-columns: 1fr; }
-  .task-row { grid-template-columns: 82px 1fr 42px; }
+  .task-row { grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 7px 10px; }
+  .task-row-signals { grid-column: 2; justify-self: start; justify-content: flex-start; }
   .task-row time { display: none; }
   .trigger-filters { align-items: stretch; }
   .trigger-filter { width: 100%; }
@@ -525,6 +574,7 @@ label small { color: var(--color-text-muted); font-weight: 400; }
   .event-row, .event-row.expanded { grid-template-columns: 42px 1fr 105px; }
   .event-row code { display: none; }
   .message { max-width: 94%; }
+  .reaction-button { width: 38px; height: 34px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

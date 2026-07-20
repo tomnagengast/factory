@@ -83,11 +83,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{task}", s.task)
 	mux.HandleFunc("PUT /api/tasks/{task}", s.taskUpdate)
 	mux.HandleFunc("DELETE /api/tasks/{task}", s.taskDelete)
+	mux.HandleFunc("PUT /api/tasks/{task}/reactions", s.taskReactionUpdate)
 	mux.HandleFunc("POST /api/tasks/{task}/comments", s.taskComment)
 
 	mux.HandleFunc("GET /api/comments/{comment}", s.comment)
 	mux.HandleFunc("PUT /api/comments/{comment}", s.commentUpdate)
 	mux.HandleFunc("DELETE /api/comments/{comment}", s.commentDelete)
+	mux.HandleFunc("PUT /api/comments/{comment}/reactions", s.commentReactionUpdate)
 
 	mux.HandleFunc("POST /api/media", s.mediaCreate)
 	mux.HandleFunc("GET /api/media/{media}", s.media)
@@ -136,6 +138,20 @@ func (s *Server) snapshot(writer http.ResponseWriter) (state.Snapshot, bool) {
 		return state.Snapshot{}, false
 	}
 	return view, true
+}
+
+func (s *Server) snapshotWithCheckpoint(writer http.ResponseWriter) (state.Snapshot, int64, bool) {
+	events := s.wire.Events(0)
+	view, err := state.ProjectEvents(events)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return state.Snapshot{}, 0, false
+	}
+	checkpoint := int64(0)
+	if len(events) > 0 {
+		checkpoint = events[len(events)-1].ID
+	}
+	return view, checkpoint, true
 }
 
 func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {

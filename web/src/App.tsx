@@ -39,7 +39,10 @@ import {
   type SettingsDetail,
   type Task,
   type TaskDetail,
+  type TaskListResponse,
   type TaskStatus,
+  type TaskSummary,
+  type TaskWorkflowRun,
   type Trigger,
   type Workflow,
   type WorkflowDetail,
@@ -47,6 +50,8 @@ import {
 } from "./types";
 import { sortWorkflowsByUsage } from "./workflows";
 import { workflowCommentPresentation, workflowConversationWorking } from "./workflow-conversation";
+
+const REACTION_EMOJIS = ["👍", "👎", "❤️", "🎉", "😂", "👀"] as const;
 
 export function App() {
   return (
@@ -184,12 +189,42 @@ function Meta(props: { value: { id: number; createdAt: string; updatedAt: string
   );
 }
 
+function ReactionBar(props: {
+  targetKind: "task" | "comment";
+  targetID: number;
+  reactions: string[];
+  onChange: () => unknown;
+}) {
+  const action = mutation();
+  const targetLabel = () => `${props.targetKind} ${props.targetID}`;
+  return (
+    <div class="reaction-control">
+      <div classList={{ "reaction-bar": true, pending: action.pending() }}
+        role="group" aria-label={`Reactions for ${targetLabel()}`}>
+        <For each={REACTION_EMOJIS}>{(emoji) => {
+          const active = () => props.reactions.includes(emoji);
+          const label = () => `${active() ? "Clear" : "Add"} ${emoji} reaction ${active() ? "from" : "to"} ${targetLabel()}`;
+          return <button type="button" classList={{ "reaction-button": true, selected: active() }}
+            aria-pressed={active()} aria-label={label()} title={label()} disabled={action.pending()}
+            onClick={() => action.run(async () => {
+              await put(`/api/${props.targetKind}s/${props.targetID}/reactions`, {
+                emoji, active: !active(),
+              });
+              await props.onChange();
+            })}>{emoji}</button>;
+        }}</For>
+      </div>
+      <Show when={action.error()}><span class="form-error" role="alert">{action.error()}</span></Show>
+    </div>
+  );
+}
+
 function Home() {
-  const [data] = createResource(async () => {
+  const [data, { refetch }] = createResource(async () => {
     const [health, projects, tasks, events] = await Promise.all([
       get<Health>("/api/health"),
       get<{ projects: Project[] }>("/api/projects"),
-      get<{ tasks: Task[] }>("/api/tasks"),
+      get<TaskListResponse>("/api/tasks"),
       get<{ events: Event[] }>("/api/events"),
     ]);
     return {
@@ -197,8 +232,10 @@ function Home() {
       projects: projects.projects.slice(0, 4),
       tasks: tasks.tasks.slice(0, 5),
       events: events.events.slice(-6).reverse(),
+      checkpointEventId: tasks.checkpointEventId,
     };
   });
+  liveTaskRows(() => data()?.checkpointEventId, refetch);
   return (
     <div class="page">
       <PageHeader
@@ -394,6 +431,7 @@ function ProjectView() {
   const params = useParams();
   const navigate = useNavigate();
   const [data, { refetch }] = createResource(() => get<ProjectDetail>(`/api/projects/${params.project}`));
+  liveTaskRows(() => data()?.checkpointEventId, refetch);
   const action = mutation();
   return (
     <div class="page">
@@ -463,12 +501,15 @@ function ProjectForm(props: {
 }
 
 function Tasks() {
-  const [data] = createResource(async () => {
+  const [data, { refetch }] = createResource(async () => {
     const [tasks, projects] = await Promise.all([
-      get<{ tasks: Task[] }>("/api/tasks"), get<{ projects: Project[] }>("/api/projects"),
+      get<TaskListResponse>("/api/tasks"), get<{ projects: Project[] }>("/api/projects"),
     ]);
-    return { tasks: tasks.tasks, projects: projects.projects };
+    return {
+      tasks: tasks.tasks, projects: projects.projects, checkpointEventId: tasks.checkpointEventId,
+    };
   });
+  liveTaskRows(() => data()?.checkpointEventId, refetch);
   const initial = loadTaskViewPreferences();
   const [sortField, setSortField] = createSignal(initial.sortField);
   const [direction, setDirection] = createSignal(initial.direction);
@@ -480,14 +521,14 @@ function Tasks() {
   }));
   const groups = createMemo(() => {
     const value = data();
-    if (!value) return [] as Array<[string, Task[]]>;
+    if (!value) return [] as Array<[string, TaskSummary[]]>;
     const sorted = [...value.tasks].sort((left, right) => {
       const result = compare(taskValue(left, sortField()), taskValue(right, sortField()));
       return direction() === "desc" ? -result : result;
     });
     const field = groupField();
-    if (!field) return [["", sorted]] as Array<[string, Task[]]>;
-    const grouped = new Map<string, Task[]>();
+    if (!field) return [["", sorted]] as Array<[string, TaskSummary[]]>;
+    const grouped = new Map<string, TaskSummary[]>();
     for (const task of sorted) {
       const key = displayTaskValue(task, field, value.projects);
       grouped.set(key, [...(grouped.get(key) ?? []), task]);
@@ -531,14 +572,62 @@ function Tasks() {
   );
 }
 
-function TaskRow(props: { task: Task; projects: Project[] }) {
+function TaskRow(props: { task: TaskSummary; projects: Project[] }) {
   return (
     <A href={`/tasks/${props.task.id}`} class="task-row">
-      <span class={`status ${slug(props.task.status)}`}>{props.task.status}</span>
+      <span class="task-row-meta" role="group" aria-label={`Status: ${props.task.status}`}
+        title={`Status: ${props.task.status}`}>
+        <TaskStatusIcon status={props.task.status} />
+        <span class="task-id">#{props.task.id}</span>
+      </span>
       <span class="task-title"><strong>{props.task.title}</strong><small>{projectName(props.task.projectId, props.projects)}</small></span>
-      <span class="id">#{props.task.id}</span>
-      <time>{date(props.task.updatedAt)}</time>
+      <span class="task-row-signals">
+        <WorkflowStatusIndicators runs={props.task.workflowRuns} />
+        <CommentCount count={props.task.commentCount} />
+        <time>{date(props.task.updatedAt)}</time>
+      </span>
     </A>
+  );
+}
+
+function TaskStatusIcon(props: { status: TaskStatus }) {
+  return (
+    <svg class={`task-status-icon ${slug(props.status)}`} viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8" />
+      <Show when={props.status === "todo"}><path d="M8 12h8" /></Show>
+      <Show when={props.status === "in progress"}><path class="status-fill" d="M12 4a8 8 0 0 1 0 16Z" /></Show>
+      <Show when={props.status === "in review"}><circle class="status-fill" cx="12" cy="12" r="3" /></Show>
+      <Show when={props.status === "done"}><path d="m8 12 2.5 2.5L16 9" /></Show>
+      <Show when={props.status === "canceled"}><path d="m9 9 6 6m0-6-6 6" /></Show>
+    </svg>
+  );
+}
+
+function WorkflowStatusIndicators(props: { runs: TaskWorkflowRun[] }) {
+  const label = () => props.runs.map((run) =>
+    `${run.workflowName || `Workflow ${run.workflowId}`} run #${run.runId}: ${run.status}`).join("; ");
+  return (
+    <Show when={props.runs.length}>
+      <span class="workflow-status-indicators" role="img" aria-label={label()} title={label()}>
+        <For each={props.runs}>{(run) =>
+          <svg class={`workflow-status-indicator ${run.status}`} viewBox="0 0 10 10" aria-hidden="true">
+            <circle cx="5" cy="5" r="4" />
+          </svg>}
+        </For>
+      </span>
+    </Show>
+  );
+}
+
+function CommentCount(props: { count: number }) {
+  const label = () => `${props.count} ${props.count === 1 ? "comment" : "comments"}`;
+  return (
+    <span class="task-comment-count" role="img" aria-label={label()} title={label()}>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 5h14v10H9l-4 4Z" />
+      </svg>
+      <span>{props.count}</span>
+    </span>
   );
 }
 
@@ -546,7 +635,7 @@ function TaskNew() {
   const navigate = useNavigate();
   const [options] = createResource(async () => {
     const [projects, tasks] = await Promise.all([
-      get<{ projects: Project[] }>("/api/projects"), get<{ tasks: Task[] }>("/api/tasks"),
+      get<{ projects: Project[] }>("/api/projects"), get<TaskListResponse>("/api/tasks"),
     ]);
     return { projects: projects.projects, tasks: tasks.tasks };
   });
@@ -569,10 +658,10 @@ function TaskView() {
   const params = useParams();
   const navigate = useNavigate();
   const [data, { refetch }] = createResource(() => get<TaskDetail>(`/api/tasks/${params.task}`));
-  liveRefetch(["comment.created"], refetch);
+  liveRefetch(["comment.created", "reaction.updated"], refetch);
   const [options] = createResource(async () => {
     const [projects, tasks] = await Promise.all([
-      get<{ projects: Project[] }>("/api/projects"), get<{ tasks: Task[] }>("/api/tasks"),
+      get<{ projects: Project[] }>("/api/projects"), get<TaskListResponse>("/api/tasks"),
     ]);
     return { projects: projects.projects, tasks: tasks.tasks };
   });
@@ -590,6 +679,10 @@ function TaskView() {
                 <button class="button" onClick={() => setEditing(true)}>Edit task</button>
               </Show>} />
             <TaskProperties task={current().task} projects={options()?.projects ?? []} tasks={options()?.tasks ?? []} />
+            <Show when={!current().task.deletedAt}>
+              <ReactionBar targetKind="task" targetID={current().task.id}
+                reactions={current().task.reactions} onChange={refetch} />
+            </Show>
             <div class="detail-grid">
               <Show when={editing()} fallback={<section class="task-document">
                 <Show when={current().task.description} fallback={<p class="muted">No description.</p>}>
@@ -720,6 +813,10 @@ function CommentBranch(props: {
             <time>{date(comment.createdAt)}</time>
           </header>
           <Markdown content={comment.content} />
+          <Show when={!comment.deletedAt}>
+            <ReactionBar targetKind="comment" targetID={comment.id}
+              reactions={comment.reactions} onChange={props.onChange} />
+          </Show>
           <CommentForm taskID={props.taskID} parentCommentID={comment.id} compact onChange={props.onChange} />
           <div class="replies">
             <CommentBranch
@@ -897,27 +994,38 @@ function MediaTextarea(props: {
 function CommentView() {
   const params = useParams();
   const [data, { refetch }] = createResource(() => get<CommentDetail>(`/api/comments/${params.comment}`));
+  liveRefetch(["reaction.updated"], refetch);
   return (
     <div class="page narrow">
       <Load data={data} error={() => data.error}>
-        {(value) => (
-          <>
-            <PageHeader eyebrow={`Task ${params.task}`} title={`Comment ${value.comment.id}`}
+        {(value) => {
+          const current = () => data() ?? value;
+          return <>
+            <PageHeader eyebrow={`Task ${params.task}`} title={`Comment ${current().comment.id}`}
               actions={<A class="button" href={`/tasks/${params.task}`}>Back to task</A>} />
             <article class="comment featured">
-              <header><strong>{value.comment.author}</strong><time>{date(value.comment.createdAt)}</time></header>
-              <Markdown content={value.comment.content} />
+              <header><strong>{current().comment.author}</strong><time>{date(current().comment.createdAt)}</time></header>
+              <Markdown content={current().comment.content} />
+              <Show when={!current().comment.deletedAt}>
+                <ReactionBar targetKind="comment" targetID={current().comment.id}
+                  reactions={current().comment.reactions} onChange={refetch} />
+              </Show>
             </article>
-            <Show when={value.replies.length}>
+            <Show when={current().replies.length}>
               <section><SectionTitle title="Direct replies" />
-                <div class="comments"><For each={value.replies}>{(reply) => <article class="comment"><header>
+                <div class="comments"><For each={current().replies}>{(reply) => <article class="comment"><header>
                   <strong>{reply.author}</strong><A href={`/tasks/${params.task}/comments/${reply.id}`}>#{reply.id}</A>
-                  <time>{date(reply.createdAt)}</time></header><Markdown content={reply.content} /></article>}</For></div>
+                  <time>{date(reply.createdAt)}</time></header><Markdown content={reply.content} />
+                  <Show when={!reply.deletedAt}>
+                    <ReactionBar targetKind="comment" targetID={reply.id}
+                      reactions={reply.reactions} onChange={refetch} />
+                  </Show>
+                </article>}</For></div>
               </section>
             </Show>
-            <ArtifactPanel artifacts={value.artifacts} relationType="comment" relationID={value.comment.id} onChange={refetch} />
-          </>
-        )}
+            <ArtifactPanel artifacts={current().artifacts} relationType="comment" relationID={current().comment.id} onChange={refetch} />
+          </>;
+        }}
       </Load>
     </div>
   );
@@ -1562,6 +1670,26 @@ function liveRefetch(types: string[], refetch: () => unknown) {
   onMount(async () => {
     const initial = await get<{ events: Event[] }>("/api/events");
     source = new EventSource(`/api/events/stream?after=${initial.events.at(-1)?.id ?? 0}`);
+    source.onmessage = (message) => {
+      const event = JSON.parse(message.data) as Event;
+      if (types.includes(event.type)) refetch();
+    };
+  });
+  onCleanup(() => source?.close());
+}
+
+function liveTaskRows(checkpoint: () => number | undefined, refetch: () => unknown) {
+  const types = [
+    "task.created", "task.updated", "task.deleted", "comment.created", "comment.deleted",
+    "workflow.run.started", "workflow.run.waiting", "workflow.run.resumed",
+    "workflow.run.completed", "workflow.run.failed",
+  ];
+  let source: EventSource | undefined;
+  createEffect(() => {
+    const after = checkpoint();
+    if (after == null) return;
+    source?.close();
+    source = new EventSource(`/api/events/stream?after=${after}`);
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as Event;
       if (types.includes(event.type)) refetch();
