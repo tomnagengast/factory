@@ -225,6 +225,13 @@ PUT    /api/comments/{id}/reactions
 Task comment bodies use `content`; workflow conversation bodies use
 `message`.
 
+Deleting a comment soft-deletes that comment and every descendant reply.
+Ancestors, sibling branches, unrelated comments, artifacts, and media remain
+unchanged. The wire records one `comment.deleted` event for the selected
+comment, and replay derives the same subtree deletion. Direct comment lookup
+continues to return a soft-deleted record with `deletedAt`; active relation
+lists omit every deleted subtree member.
+
 Root task comments and replies use the same media button, paste, and drop
 behavior as task descriptions. Media-only comments remain valid because the
 generated markup is nonblank content.
@@ -262,10 +269,11 @@ workflow conversation responses. Workflow comments always carry an empty
 array and cannot receive reactions.
 
 Only active tasks and active task comments accept writes. Root comments,
-replies at any depth, and agent gate prompts are supported. An active task
-comment remains eligible after its task or parent comment is deleted. Missing
-or deleted targets return `404`; unsupported emoji and workflow comments
-return `400`.
+replies at any depth, and agent gate prompts are supported. Deleting a task
+alone does not disable reactions on its active comments. Deleting a comment
+soft-deletes its full reply subtree, and later reaction writes to any member
+of that subtree return `404`. Other missing or deleted targets also return
+`404`; unsupported emoji and workflow comments return `400`.
 
 Every accepted request appends one `reaction.updated` event and advances the
 target's `updatedAt`, even when the requested state already matches the current

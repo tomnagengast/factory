@@ -368,6 +368,17 @@ label small { color: var(--color-text-muted); font-weight: 400; }
 .comment header, .message header { display: flex; align-items: center; gap: 10px; color: var(--color-text-muted); font-size: 11px; }
 .comment header strong, .message header strong { color: var(--color-text); text-transform: capitalize; }
 .comment header time, .message header time { margin-left: auto; }
+.comment-delete-control { display: inline-flex; align-items: center; gap: 6px; }
+.comment-delete {
+  width: 28px; height: 28px; display: grid; flex: none; place-items: center; padding: 0;
+  border: 1px solid transparent; border-radius: 2px; background: transparent;
+  color: var(--color-text-muted); cursor: pointer;
+}
+.comment-delete:hover:not(:disabled), .comment-delete:focus-visible {
+  color: var(--color-danger-text); background: var(--color-danger-surface);
+}
+.comment-delete:disabled { opacity: .45; cursor: wait; }
+.comment-delete svg { width: 16px; height: 16px; stroke-width: 1.8; }
 .comment .markdown, .message p { margin-top: 10px; }
 .message p { margin-bottom: 0; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .reaction-control { display: grid; gap: 6px; width: fit-content; max-width: 100%; }

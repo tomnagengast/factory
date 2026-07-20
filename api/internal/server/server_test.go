@@ -68,6 +68,109 @@ func TestProjectTaskCommentAndArtifactAPI(t *testing.T) {
 	}
 }
 
+func TestCommentDeleteCascadesAndSurvivesReplay(t *testing.T) {
+	wirePath := filepath.Join(t.TempDir(), "wire.jsonl")
+	wire, err := eventwire.Open(wirePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = wire.Close() }()
+	handler := testServer(t, wire).Handler()
+	projectPath := filepath.Join(t.TempDir(), "factory")
+	project := requestJSON(t, handler, http.MethodPost, "/api/projects",
+		fmt.Sprintf(`{"name":"Factory","path":%q}`, projectPath))
+	if project.Code != http.StatusCreated {
+		t.Fatalf("project status = %d, body = %s", project.Code, project.Body)
+	}
+	createdTask := requestJSON(t, handler, http.MethodPost, "/api/tasks",
+		`{"title":"Delete a thread","status":"todo","projectId":1}`)
+	var task state.Task
+	if createdTask.Code != http.StatusCreated || json.Unmarshal(createdTask.Body.Bytes(), &task) != nil {
+		t.Fatalf("task = %d %s", createdTask.Code, createdTask.Body)
+	}
+	createComment := func(content string, parentID *int64) state.Comment {
+		t.Helper()
+		body := fmt.Sprintf(`{"content":%q}`, content)
+		if parentID != nil {
+			body = fmt.Sprintf(`{"content":%q,"parentCommentId":%d}`, content, *parentID)
+		}
+		response := requestJSON(t, handler, http.MethodPost,
+			fmt.Sprintf("/api/tasks/%d/comments", task.ID), body)
+		var comment state.Comment
+		if response.Code != http.StatusCreated || json.Unmarshal(response.Body.Bytes(), &comment) != nil {
+			t.Fatalf("comment %q = %d %s", content, response.Code, response.Body)
+		}
+		return comment
+	}
+	root := createComment("Root", nil)
+	child := createComment("Child", &root.ID)
+	grandchild := createComment("Grandchild", &child.ID)
+	sibling := createComment("Sibling", &root.ID)
+
+	beforeDelete := wire.Events(0)
+	deleted := requestJSON(t, handler, http.MethodDelete, fmt.Sprintf("/api/comments/%d", child.ID), "")
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, body = %s", deleted.Code, deleted.Body)
+	}
+	afterDelete := wire.Events(0)
+	if len(afterDelete) != len(beforeDelete)+1 {
+		t.Fatalf("delete appended %d events, want 1", len(afterDelete)-len(beforeDelete))
+	}
+	deleteEvent := afterDelete[len(afterDelete)-1]
+	var deleteData state.IDData
+	if deleteEvent.Type != state.CommentDeleted || json.Unmarshal(deleteEvent.Data, &deleteData) != nil || deleteData.ID != child.ID {
+		t.Fatalf("delete event = %#v, data = %#v", deleteEvent, deleteData)
+	}
+
+	assertTaskComments := func(handler http.Handler) {
+		t.Helper()
+		detail := requestJSON(t, handler, http.MethodGet, fmt.Sprintf("/api/tasks/%d", task.ID), "")
+		var result struct {
+			Comments []state.Comment `json:"comments"`
+		}
+		if detail.Code != http.StatusOK || json.Unmarshal(detail.Body.Bytes(), &result) != nil {
+			t.Fatalf("task detail = %d %s", detail.Code, detail.Body)
+		}
+		ids := make([]int64, len(result.Comments))
+		for index, comment := range result.Comments {
+			ids[index] = comment.ID
+		}
+		if !slices.Equal(ids, []int64{root.ID, sibling.ID}) {
+			t.Fatalf("active task comments = %v", ids)
+		}
+	}
+	assertTaskComments(handler)
+
+	childDetail := requestJSON(t, handler, http.MethodGet, fmt.Sprintf("/api/comments/%d", child.ID), "")
+	var childResult struct {
+		Comment state.Comment   `json:"comment"`
+		Replies []state.Comment `json:"replies"`
+	}
+	if childDetail.Code != http.StatusOK || json.Unmarshal(childDetail.Body.Bytes(), &childResult) != nil ||
+		childResult.Comment.DeletedAt == nil || childResult.Replies == nil || len(childResult.Replies) != 0 {
+		t.Fatalf("deleted child detail = %d %s", childDetail.Code, childDetail.Body)
+	}
+	grandchildDetail := requestJSON(t, handler, http.MethodGet,
+		fmt.Sprintf("/api/comments/%d", grandchild.ID), "")
+	var grandchildResult struct {
+		Comment state.Comment `json:"comment"`
+	}
+	if grandchildDetail.Code != http.StatusOK || json.Unmarshal(grandchildDetail.Body.Bytes(), &grandchildResult) != nil ||
+		grandchildResult.Comment.DeletedAt == nil {
+		t.Fatalf("deleted grandchild detail = %d %s", grandchildDetail.Code, grandchildDetail.Body)
+	}
+
+	if err := wire.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wire, err = eventwire.Open(wirePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler = testServer(t, wire).Handler()
+	assertTaskComments(handler)
+}
+
 func TestTaskDetailIncludesNullOptionalFields(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
@@ -461,11 +564,10 @@ func TestReactionAPIUpdatesTasksRootCommentsRepliesAndGatePrompts(t *testing.T) 
 	if response := requestJSON(t, handler, http.MethodDelete, "/api/comments/2", ""); response.Code != http.StatusNoContent {
 		t.Fatalf("delete root = %d %s", response.Code, response.Body)
 	}
-	orphan := requestJSON(t, handler, http.MethodPut, "/api/comments/3/reactions", `{"emoji":"😂","active":true}`)
-	var orphanReply state.Comment
-	if orphan.Code != http.StatusOK || json.Unmarshal(orphan.Body.Bytes(), &orphanReply) != nil ||
-		!slices.Equal(orphanReply.Reactions, []string{"🎉", "😂"}) {
-		t.Fatalf("orphan reply reaction = %d %s", orphan.Code, orphan.Body)
+	beforeRejectedReaction := wire.LastID()
+	cascaded := requestJSON(t, handler, http.MethodPut, "/api/comments/3/reactions", `{"emoji":"😂","active":true}`)
+	if cascaded.Code != http.StatusNotFound || wire.LastID() != beforeRejectedReaction {
+		t.Fatalf("cascaded reply reaction = %d %s, last ID = %d", cascaded.Code, cascaded.Body, wire.LastID())
 	}
 
 	taskDetail := requestJSON(t, handler, http.MethodGet, "/api/tasks/1", "")
@@ -474,7 +576,7 @@ func TestReactionAPIUpdatesTasksRootCommentsRepliesAndGatePrompts(t *testing.T) 
 		Comments []state.Comment `json:"comments"`
 	}
 	if taskDetail.Code != http.StatusOK || json.Unmarshal(taskDetail.Body.Bytes(), &taskEnvelope) != nil ||
-		taskEnvelope.Task.Reactions == nil || len(taskEnvelope.Comments) != 2 {
+		taskEnvelope.Task.Reactions == nil || len(taskEnvelope.Comments) != 1 || taskEnvelope.Comments[0].ID != gate.ID {
 		t.Fatalf("task detail reactions = %d %s", taskDetail.Code, taskDetail.Body)
 	}
 	commentDetail := requestJSON(t, handler, http.MethodGet, "/api/comments/3", "")
@@ -483,7 +585,8 @@ func TestReactionAPIUpdatesTasksRootCommentsRepliesAndGatePrompts(t *testing.T) 
 		Replies []state.Comment `json:"replies"`
 	}
 	if commentDetail.Code != http.StatusOK || json.Unmarshal(commentDetail.Body.Bytes(), &commentEnvelope) != nil ||
-		!slices.Equal(commentEnvelope.Comment.Reactions, []string{"🎉", "😂"}) || commentEnvelope.Replies == nil {
+		!slices.Equal(commentEnvelope.Comment.Reactions, []string{"🎉"}) ||
+		commentEnvelope.Comment.DeletedAt == nil || commentEnvelope.Replies == nil || len(commentEnvelope.Replies) != 0 {
 		t.Fatalf("comment detail reactions = %d %s", commentDetail.Code, commentDetail.Body)
 	}
 

@@ -11,7 +11,7 @@ import {
   type JSX,
 } from "solid-js";
 import hljs from "highlight.js/lib/common";
-import { ListTodo, Play } from "lucide-solid";
+import { ListTodo, Play, Trash2 } from "lucide-solid";
 import { marked } from "marked";
 import "highlight.js/styles/github-dark.css";
 import { get, optional, optionalID, post, put, remove, uploadMedia } from "./api";
@@ -666,7 +666,7 @@ function TaskView() {
   const params = useParams();
   const navigate = useNavigate();
   const [data, { refetch }] = createResource(() => get<TaskDetail>(`/api/tasks/${params.task}`));
-  liveRefetch(["comment.created", "reaction.updated"], refetch);
+  liveRefetch(["comment.created", "comment.deleted", "reaction.updated"], refetch);
   const [options] = createResource(async () => {
     const [projects, tasks] = await Promise.all([
       get<{ projects: Project[] }>("/api/projects"), get<TaskListResponse>("/api/tasks"),
@@ -807,6 +807,23 @@ function CommentThread(props: { comments: Comment[]; taskID: number; onChange: (
   );
 }
 
+function CommentDeleteButton(props: { commentID: number; onDeleted: () => unknown }) {
+  const action = mutation();
+  const label = () => `Delete comment #${props.commentID}`;
+  return (
+    <span class="comment-delete-control">
+      <button type="button" class="comment-delete" aria-label={label()} title="Delete comment"
+        disabled={action.pending()} onClick={() => action.run(async () => {
+          await remove(`/api/comments/${props.commentID}`);
+          await props.onDeleted();
+        })}>
+        <Trash2 aria-hidden="true" />
+      </button>
+      <Show when={action.error()}><span class="form-error" role="alert">{action.error()}</span></Show>
+    </span>
+  );
+}
+
 function CommentBranch(props: {
   comments: Comment[];
   nodes: Comment[];
@@ -821,6 +838,7 @@ function CommentBranch(props: {
             <strong>{comment.author}</strong>
             <A href={`/tasks/${props.taskID}/comments/${comment.id}`}>#{comment.id}</A>
             <time>{date(comment.createdAt)}</time>
+            <CommentDeleteButton commentID={comment.id} onDeleted={props.onChange} />
           </header>
           <Markdown content={comment.content} />
           <Show when={!comment.deletedAt}>
@@ -1003,8 +1021,9 @@ function MediaTextarea(props: {
 
 function CommentView() {
   const params = useParams();
+  const navigate = useNavigate();
   const [data, { refetch }] = createResource(() => get<CommentDetail>(`/api/comments/${params.comment}`));
-  liveRefetch(["reaction.updated"], refetch);
+  liveRefetch(["comment.deleted", "reaction.updated"], refetch);
   return (
     <div class="page narrow">
       <Load data={data} error={() => data.error}>
@@ -1014,7 +1033,14 @@ function CommentView() {
             <PageHeader eyebrow={`Task ${params.task}`} title={`Comment ${current().comment.id}`}
               actions={<A class="button" href={`/tasks/${params.task}`}>Back to task</A>} />
             <article class="comment featured">
-              <header><strong>{current().comment.author}</strong><time>{date(current().comment.createdAt)}</time></header>
+              <header>
+                <strong>{current().comment.author}</strong>
+                <time>{date(current().comment.createdAt)}</time>
+                <Show when={!current().comment.deletedAt}>
+                  <CommentDeleteButton commentID={current().comment.id}
+                    onDeleted={() => navigate(`/tasks/${params.task}`)} />
+                </Show>
+              </header>
               <Markdown content={current().comment.content} />
               <Show when={!current().comment.deletedAt}>
                 <ReactionBar targetKind="comment" targetID={current().comment.id}
@@ -1025,7 +1051,9 @@ function CommentView() {
               <section><SectionTitle title="Direct replies" />
                 <div class="comments"><For each={current().replies}>{(reply) => <article class="comment"><header>
                   <strong>{reply.author}</strong><A href={`/tasks/${params.task}/comments/${reply.id}`}>#{reply.id}</A>
-                  <time>{date(reply.createdAt)}</time></header><Markdown content={reply.content} />
+                  <time>{date(reply.createdAt)}</time>
+                  <CommentDeleteButton commentID={reply.id} onDeleted={refetch} />
+                </header><Markdown content={reply.content} />
                   <Show when={!reply.deletedAt}>
                     <ReactionBar targetKind="comment" targetID={reply.id}
                       reactions={reply.reactions} onChange={refetch} />

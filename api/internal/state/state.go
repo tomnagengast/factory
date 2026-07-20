@@ -506,9 +506,7 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 			if err := decode(event, &data); err != nil {
 				return Snapshot{}, err
 			}
-			if index, found := commentIndex[data.ID]; found {
-				deleteRecord(&view.Comments[index].Record, event.At)
-			}
+			deleteCommentSubtree(view.Comments, commentIndex, data.ID, event.At)
 
 		case ReactionUpdated:
 			var data ReactionUpdatedData
@@ -887,7 +885,7 @@ func (s Snapshot) ArtifactsFor(relationType string, relationID int64) []Artifact
 func (s Snapshot) PendingWorkflowComment() (Comment, bool) {
 	answered := make(map[int64]bool)
 	for _, comment := range s.Comments {
-		if comment.Author == "agent" && comment.Final && comment.ParentCommentID != nil {
+		if comment.DeletedAt == nil && comment.Author == "agent" && comment.Final && comment.ParentCommentID != nil {
 			answered[*comment.ParentCommentID] = true
 		}
 	}
@@ -909,7 +907,7 @@ func (s Snapshot) RunStarted(triggerID, sourceEventID int64) bool {
 func (s Snapshot) PendingHumanResponse() (WorkflowRun, Comment, bool) {
 	answered := make(map[int64]bool)
 	for _, comment := range s.Comments {
-		if comment.Author == "agent" && comment.ParentCommentID != nil {
+		if comment.DeletedAt == nil && comment.Author == "agent" && comment.ParentCommentID != nil {
 			answered[*comment.ParentCommentID] = true
 		}
 	}
@@ -945,6 +943,29 @@ func newRecord(event eventwire.Event) Record {
 func deleteRecord(record *Record, at time.Time) {
 	record.UpdatedAt = at
 	record.DeletedAt = &at
+}
+
+func deleteCommentSubtree(comments []Comment, indexByID map[int64]int, rootID int64, at time.Time) {
+	pending := []int64{rootID}
+	visited := make(map[int64]bool)
+	for len(pending) > 0 {
+		id := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if visited[id] {
+			continue
+		}
+		visited[id] = true
+		index, found := indexByID[id]
+		if !found {
+			continue
+		}
+		deleteRecord(&comments[index].Record, at)
+		for _, comment := range comments {
+			if comment.ParentCommentID != nil && *comment.ParentCommentID == id {
+				pending = append(pending, comment.ID)
+			}
+		}
+	}
 }
 
 func decode(event eventwire.Event, target any) error {
