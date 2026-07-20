@@ -56,6 +56,10 @@ query value selects an automatically namespaced event type such as
 
 `GET /api/events/stream` exposes new events as server-sent events. The web
 event page and detail views use that stream to update without a page reload.
+The event page opens with the newest event at the top and follows new events
+while the reader remains there. After the reader scrolls into older events,
+new arrivals preserve the visible event and following resumes only when the
+reader returns to the top.
 
 ## Projections and resources
 

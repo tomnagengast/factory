@@ -15,6 +15,7 @@ import { ListTodo, Play } from "lucide-solid";
 import { marked } from "marked";
 import "highlight.js/styles/github-dark.css";
 import { get, optional, optionalID, post, put, remove, uploadMedia } from "./api";
+import { bindNewestFollower, type NewestFollower } from "./follow-newest";
 import { historyResourceLink } from "./history";
 import { insertMediaMarkup, mediaAccept, mediaFiles, mediaKind, mediaMarkup } from "./media";
 import {
@@ -972,7 +973,24 @@ function Events() {
   const [events, setEvents] = createSignal<Event[]>([]);
   const [error, setError] = createSignal("");
   const [connected, setConnected] = createSignal(false);
+  const [wireContent, setWireContent] = createSignal<HTMLDivElement>();
+  let follower: NewestFollower | undefined;
   let source: EventSource | undefined;
+  createEffect(() => {
+    const content = wireContent();
+    if (!content) return;
+    const currentFollower = bindNewestFollower({
+      edge: "start",
+      viewport: window,
+      content,
+      anchorRows: () => content.querySelectorAll<HTMLElement>("[data-event-id]"),
+    });
+    follower = currentFollower;
+    onCleanup(() => {
+      currentFollower.dispose();
+      if (follower === currentFollower) follower = undefined;
+    });
+  });
   onMount(async () => {
     try {
       const initial = await get<{ events: Event[] }>("/api/events");
@@ -983,6 +1001,7 @@ function Events() {
       source.onerror = () => setConnected(false);
       source.onmessage = (message) => {
         const event = JSON.parse(message.data) as Event;
+        follower?.beforePrepend();
         setEvents((current) => [...current.filter((item) => item.id !== event.id), event]);
       };
     } catch (caught) {
@@ -996,7 +1015,7 @@ function Events() {
         actions={<span classList={{ connection: true, live: connected() }}><span />{connected() ? "Live" : "Connecting"}</span>} />
       <Show when={!error()} fallback={<div class="state">{error()}</div>}>
         <Show when={events().length} fallback={<Empty>The wire is quiet.</Empty>}>
-          <div class="wire-table">
+          <div ref={(element) => setWireContent(element)} class="wire-table">
             <For each={[...events()].reverse()}>{(event) => <EventRow event={event} expanded />}</For>
           </div>
         </Show>
@@ -1007,7 +1026,8 @@ function Events() {
 
 function EventRow(props: { event: Event; expanded?: boolean }) {
   return (
-    <A href={`/events/${props.event.id}`} classList={{ "event-row": true, expanded: props.expanded }}>
+    <A href={`/events/${props.event.id}`} classList={{ "event-row": true, expanded: props.expanded }}
+      data-event-id={props.expanded ? props.event.id : undefined}>
       <span class="id">#{props.event.id}</span>
       <strong>{props.event.type}</strong>
       <Show when={props.expanded}><code>{compactJSON(props.event.data)}</code></Show>
@@ -1062,12 +1082,19 @@ function History() {
 function HistoryView() {
   const params = useParams();
   const [data, { refetch }] = createResource(() => get<HistoryDetail>(`/api/history/${params.item}`));
+  const [historyContent, setHistoryContent] = createSignal<HTMLDivElement>();
+  createEffect(() => {
+    const content = historyContent();
+    if (!content) return;
+    const follower = bindNewestFollower({ edge: "end", viewport: window, content });
+    onCleanup(() => follower.dispose());
+  });
   liveRefetch([
     "workflow.run.event", "workflow.run.waiting", "workflow.run.resumed",
     "workflow.run.completed", "workflow.run.failed",
   ], refetch);
   return (
-    <div class="page">
+    <div ref={(element) => setHistoryContent(element)} class="page">
       <Load data={data} error={() => data.error}>
         {(value) => {
           const current = () => data() ?? value;
@@ -1318,6 +1345,15 @@ function WorkflowView() {
   const navigate = useNavigate();
   const [data, { refetch }] = createResource(() => get<WorkflowDetail>(`/api/workflows/${params.workflow}`));
   const action = mutation();
+  const [conversationViewport, setConversationViewport] = createSignal<HTMLDivElement>();
+  const [conversationContent, setConversationContent] = createSignal<HTMLDivElement>();
+  createEffect(() => {
+    const viewport = conversationViewport();
+    const content = conversationContent();
+    if (!viewport || !content) return;
+    const follower = bindNewestFollower({ edge: "end", viewport, content });
+    onCleanup(() => follower.dispose());
+  });
   liveRefetch(["comment.created", "workflow.updated", "workflow.authoring.completed", "workflow.authoring.failed"], refetch);
   let sourcePolling: number | undefined;
   onMount(() => {
@@ -1348,27 +1384,29 @@ function WorkflowView() {
             </div>
             <div class="workflow-studio">
               <section class="workflow-chat" aria-label="Workflow conversation">
-                <div class="conversation" role="log" aria-live="polite">
-                  <For each={current().comments}>{(comment) => {
-                    const presentation = workflowCommentPresentation(comment);
-                    return <article classList={{
-                      message: true,
-                      agent: comment.author === "agent",
-                      step: presentation.intermediate,
-                      error: presentation.error,
-                      reasoning: presentation.reasoning,
-                    }}>
-                      <header>
-                        <strong>{presentation.title}</strong>
-                        <Show when={presentation.kindLabel}>{(label) => <span>{label()}</span>}</Show>
-                        <time>{date(comment.createdAt)}</time>
-                      </header>
-                      <Show when={presentation.preformatted} fallback={<p>{comment.content}</p>}>
-                        <pre>{comment.content}</pre>
-                      </Show>
-                    </article>;
-                  }}</For>
-                  <Show when={working()}><article class="message agent working"><header><strong>Agent</strong></header><p>Working on the workflow…</p></article></Show>
+                <div ref={(element) => setConversationViewport(element)} class="conversation" role="log" aria-live="polite">
+                  <div ref={(element) => setConversationContent(element)} class="conversation-content">
+                    <For each={current().comments}>{(comment) => {
+                      const presentation = workflowCommentPresentation(comment);
+                      return <article classList={{
+                        message: true,
+                        agent: comment.author === "agent",
+                        step: presentation.intermediate,
+                        error: presentation.error,
+                        reasoning: presentation.reasoning,
+                      }}>
+                        <header>
+                          <strong>{presentation.title}</strong>
+                          <Show when={presentation.kindLabel}>{(label) => <span>{label()}</span>}</Show>
+                          <time>{date(comment.createdAt)}</time>
+                        </header>
+                        <Show when={presentation.preformatted} fallback={<p>{comment.content}</p>}>
+                          <pre>{comment.content}</pre>
+                        </Show>
+                      </article>;
+                    }}</For>
+                    <Show when={working()}><article class="message agent working"><header><strong>Agent</strong></header><p>Working on the workflow…</p></article></Show>
+                  </div>
                 </div>
                 <form class="composer" onSubmit={(event) => {
                   event.preventDefault();
