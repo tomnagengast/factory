@@ -19,6 +19,7 @@ const (
 	CommentCreated           = "comment.created"
 	CommentUpdated           = "comment.updated"
 	CommentDeleted           = "comment.deleted"
+	ReactionUpdated          = "reaction.updated"
 	ArtifactCreated          = "artifact.created"
 	ArtifactUpdated          = "artifact.updated"
 	ArtifactDeleted          = "artifact.deleted"
@@ -80,6 +81,12 @@ const (
 
 var TaskStatuses = []TaskStatus{Backlog, Todo, InProgress, InReview, Done, Canceled}
 
+var ReactionEmojis = []string{"👍", "👎", "❤️", "🎉", "😂", "👀"}
+
+func ValidReactionEmoji(emoji string) bool {
+	return slices.Contains(ReactionEmojis, emoji)
+}
+
 type Task struct {
 	Record
 	Title        string     `json:"title"`
@@ -87,18 +94,20 @@ type Task struct {
 	ParentTaskID *int64     `json:"parentTaskId"`
 	Status       TaskStatus `json:"status"`
 	ProjectID    int64      `json:"projectId"`
+	Reactions    []string   `json:"reactions"`
 }
 
 type Comment struct {
 	Record
-	RelationType    string `json:"relationType"`
-	RelationID      int64  `json:"relationId"`
-	ParentCommentID *int64 `json:"parentCommentId,omitempty"`
-	Author          string `json:"author"`
-	Kind            string `json:"kind"`
-	Label           string `json:"label,omitempty"`
-	Final           bool   `json:"final"`
-	Content         string `json:"content"`
+	RelationType    string   `json:"relationType"`
+	RelationID      int64    `json:"relationId"`
+	ParentCommentID *int64   `json:"parentCommentId,omitempty"`
+	Author          string   `json:"author"`
+	Kind            string   `json:"kind"`
+	Label           string   `json:"label,omitempty"`
+	Final           bool     `json:"final"`
+	Content         string   `json:"content"`
+	Reactions       []string `json:"reactions"`
 }
 
 type Artifact struct {
@@ -289,6 +298,13 @@ type CommentData struct {
 	Content         string `json:"content"`
 }
 
+type ReactionUpdatedData struct {
+	TargetType string `json:"targetType"`
+	TargetID   int64  `json:"targetId"`
+	Emoji      string `json:"emoji"`
+	Active     bool   `json:"active"`
+}
+
 type ArtifactData struct {
 	ID           int64   `json:"id,omitempty"`
 	Name         *string `json:"name,omitempty"`
@@ -435,6 +451,7 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 			view.Tasks = append(view.Tasks, Task{
 				Record: newRecord(event), Title: data.Title, Description: data.Description,
 				ParentTaskID: data.ParentTaskID, Status: data.Status, ProjectID: data.ProjectID,
+				Reactions: stringSlice(nil),
 			})
 		case TaskUpdated:
 			var data TaskData
@@ -472,7 +489,7 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 			view.Comments = append(view.Comments, Comment{
 				Record: newRecord(event), RelationType: data.RelationType, RelationID: data.RelationID,
 				ParentCommentID: data.ParentCommentID, Author: data.Author, Kind: kind,
-				Label: data.Label, Final: final, Content: data.Content,
+				Label: data.Label, Final: final, Content: data.Content, Reactions: stringSlice(nil),
 			})
 		case CommentUpdated:
 			var data CommentData
@@ -491,6 +508,33 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 			}
 			if index, found := commentIndex[data.ID]; found {
 				deleteRecord(&view.Comments[index].Record, event.At)
+			}
+
+		case ReactionUpdated:
+			var data ReactionUpdatedData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if data.TargetID < 1 || !ValidReactionEmoji(data.Emoji) {
+				continue
+			}
+			switch data.TargetType {
+			case "task":
+				if index, found := taskIndex[data.TargetID]; found {
+					task := &view.Tasks[index]
+					if task.DeletedAt == nil {
+						task.Reactions = updateReactions(task.Reactions, data.Emoji, data.Active)
+						task.UpdatedAt = event.At
+					}
+				}
+			case "comment":
+				if index, found := commentIndex[data.TargetID]; found {
+					comment := &view.Comments[index]
+					if comment.DeletedAt == nil && comment.RelationType == "task" {
+						comment.Reactions = updateReactions(comment.Reactions, data.Emoji, data.Active)
+						comment.UpdatedAt = event.At
+					}
+				}
 			}
 
 		case ArtifactCreated:
@@ -930,4 +974,19 @@ func taskIDForEvent(event eventwire.Event) (int64, error) {
 
 func stringSlice(values []string) []string {
 	return append([]string{}, values...)
+}
+
+func updateReactions(current []string, emoji string, active bool) []string {
+	selected := make(map[string]bool, len(current)+1)
+	for _, value := range current {
+		selected[value] = true
+	}
+	selected[emoji] = active
+	reactions := make([]string, 0, len(ReactionEmojis))
+	for _, value := range ReactionEmojis {
+		if selected[value] {
+			reactions = append(reactions, value)
+		}
+	}
+	return reactions
 }

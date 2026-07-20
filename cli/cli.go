@@ -174,6 +174,25 @@ func parse(args []string) (command, error) {
 			method: http.MethodPost, path: "/api/" + plural + "/" + id + "/comments", body: body,
 			contentType: "application/json",
 		}, nil
+	case "react":
+		if resource != "task" && resource != "comment" {
+			return command{}, fmt.Errorf("%s does not accept reactions", resource)
+		}
+		if len(args) != 4 {
+			return command{}, fmt.Errorf("usage: factory %s react <id> <json|@file>", resource)
+		}
+		id, err := argumentID(args, 2)
+		if err != nil {
+			return command{}, err
+		}
+		body, err := argumentJSON(args, 3)
+		if err != nil {
+			return command{}, err
+		}
+		return command{
+			method: http.MethodPut, path: "/api/" + plural + "/" + id + "/reactions", body: body,
+			contentType: "application/json",
+		}, nil
 	default:
 		return command{}, fmt.Errorf("unknown %s action %q", resource, action)
 	}
@@ -262,8 +281,8 @@ Usage:
 
 Resources:
   project   list, get, create, update, delete
-  task      list, get, create, update, delete, comment
-  comment   get, update, delete
+  task      list, get, create, update, delete, comment, react
+  comment   get, update, delete, react
   artifact  list, get, create, update, delete
   media     create <file>
   event     list, get, create
@@ -276,6 +295,8 @@ Examples:
   factory project create '{"name":"Factory","path":"/path/to/factory"}'
   factory task create '{"title":"Review the PR","status":"todo","projectId":1}'
   factory task comment 12 '{"content":"The build passed."}'
+  factory task react 12 '{"emoji":"👍","active":true}'
+  factory comment react 18 '{"emoji":"🎉","active":false}'
   factory media create ./screen.png
   factory artifact get 18
   factory workflow create '{"message":"Build a review-panel workflow."}'

@@ -47,6 +47,8 @@ import {
 import { sortWorkflowsByUsage } from "./workflows";
 import { workflowCommentPresentation, workflowConversationWorking } from "./workflow-conversation";
 
+const REACTION_EMOJIS = ["👍", "👎", "❤️", "🎉", "😂", "👀"] as const;
+
 export function App() {
   return (
     <Router root={Shell}>
@@ -180,6 +182,36 @@ function Meta(props: { value: { id: number; createdAt: string; updatedAt: string
       <div><dt>Updated</dt><dd>{date(props.value.updatedAt)}</dd></div>
       <div><dt>Deleted</dt><dd>{props.value.deletedAt ? date(props.value.deletedAt) : "No"}</dd></div>
     </dl>
+  );
+}
+
+function ReactionBar(props: {
+  targetKind: "task" | "comment";
+  targetID: number;
+  reactions: string[];
+  onChange: () => unknown;
+}) {
+  const action = mutation();
+  const targetLabel = () => `${props.targetKind} ${props.targetID}`;
+  return (
+    <div class="reaction-control">
+      <div classList={{ "reaction-bar": true, pending: action.pending() }}
+        role="group" aria-label={`Reactions for ${targetLabel()}`}>
+        <For each={REACTION_EMOJIS}>{(emoji) => {
+          const active = () => props.reactions.includes(emoji);
+          const label = () => `${active() ? "Clear" : "Add"} ${emoji} reaction ${active() ? "from" : "to"} ${targetLabel()}`;
+          return <button type="button" classList={{ "reaction-button": true, selected: active() }}
+            aria-pressed={active()} aria-label={label()} title={label()} disabled={action.pending()}
+            onClick={() => action.run(async () => {
+              await put(`/api/${props.targetKind}s/${props.targetID}/reactions`, {
+                emoji, active: !active(),
+              });
+              await props.onChange();
+            })}>{emoji}</button>;
+        }}</For>
+      </div>
+      <Show when={action.error()}><span class="form-error" role="alert">{action.error()}</span></Show>
+    </div>
   );
 }
 
@@ -568,7 +600,7 @@ function TaskView() {
   const params = useParams();
   const navigate = useNavigate();
   const [data, { refetch }] = createResource(() => get<TaskDetail>(`/api/tasks/${params.task}`));
-  liveRefetch(["comment.created"], refetch);
+  liveRefetch(["comment.created", "reaction.updated"], refetch);
   const [options] = createResource(async () => {
     const [projects, tasks] = await Promise.all([
       get<{ projects: Project[] }>("/api/projects"), get<{ tasks: Task[] }>("/api/tasks"),
@@ -589,6 +621,10 @@ function TaskView() {
                 <button class="button" onClick={() => setEditing(true)}>Edit task</button>
               </Show>} />
             <TaskProperties task={current().task} projects={options()?.projects ?? []} tasks={options()?.tasks ?? []} />
+            <Show when={!current().task.deletedAt}>
+              <ReactionBar targetKind="task" targetID={current().task.id}
+                reactions={current().task.reactions} onChange={refetch} />
+            </Show>
             <div class="detail-grid">
               <Show when={editing()} fallback={<section class="task-document">
                 <Show when={current().task.description} fallback={<p class="muted">No description.</p>}>
@@ -719,6 +755,10 @@ function CommentBranch(props: {
             <time>{date(comment.createdAt)}</time>
           </header>
           <Markdown content={comment.content} />
+          <Show when={!comment.deletedAt}>
+            <ReactionBar targetKind="comment" targetID={comment.id}
+              reactions={comment.reactions} onChange={props.onChange} />
+          </Show>
           <CommentForm taskID={props.taskID} parentCommentID={comment.id} compact onChange={props.onChange} />
           <div class="replies">
             <CommentBranch
@@ -896,27 +936,38 @@ function MediaTextarea(props: {
 function CommentView() {
   const params = useParams();
   const [data, { refetch }] = createResource(() => get<CommentDetail>(`/api/comments/${params.comment}`));
+  liveRefetch(["reaction.updated"], refetch);
   return (
     <div class="page narrow">
       <Load data={data} error={() => data.error}>
-        {(value) => (
-          <>
-            <PageHeader eyebrow={`Task ${params.task}`} title={`Comment ${value.comment.id}`}
+        {(value) => {
+          const current = () => data() ?? value;
+          return <>
+            <PageHeader eyebrow={`Task ${params.task}`} title={`Comment ${current().comment.id}`}
               actions={<A class="button" href={`/tasks/${params.task}`}>Back to task</A>} />
             <article class="comment featured">
-              <header><strong>{value.comment.author}</strong><time>{date(value.comment.createdAt)}</time></header>
-              <Markdown content={value.comment.content} />
+              <header><strong>{current().comment.author}</strong><time>{date(current().comment.createdAt)}</time></header>
+              <Markdown content={current().comment.content} />
+              <Show when={!current().comment.deletedAt}>
+                <ReactionBar targetKind="comment" targetID={current().comment.id}
+                  reactions={current().comment.reactions} onChange={refetch} />
+              </Show>
             </article>
-            <Show when={value.replies.length}>
+            <Show when={current().replies.length}>
               <section><SectionTitle title="Direct replies" />
-                <div class="comments"><For each={value.replies}>{(reply) => <article class="comment"><header>
+                <div class="comments"><For each={current().replies}>{(reply) => <article class="comment"><header>
                   <strong>{reply.author}</strong><A href={`/tasks/${params.task}/comments/${reply.id}`}>#{reply.id}</A>
-                  <time>{date(reply.createdAt)}</time></header><Markdown content={reply.content} /></article>}</For></div>
+                  <time>{date(reply.createdAt)}</time></header><Markdown content={reply.content} />
+                  <Show when={!reply.deletedAt}>
+                    <ReactionBar targetKind="comment" targetID={reply.id}
+                      reactions={reply.reactions} onChange={refetch} />
+                  </Show>
+                </article>}</For></div>
               </section>
             </Show>
-            <ArtifactPanel artifacts={value.artifacts} relationType="comment" relationID={value.comment.id} onChange={refetch} />
-          </>
-        )}
+            <ArtifactPanel artifacts={current().artifacts} relationType="comment" relationID={current().comment.id} onChange={refetch} />
+          </>;
+        }}
       </Load>
     </div>
   );

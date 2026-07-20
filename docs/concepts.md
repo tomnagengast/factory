@@ -95,6 +95,15 @@ This gives Factory a deliberately simple write path:
 3. replay the wire,
 4. return the projected resource.
 
+Reaction writes use the same path with one ordering guard. A client supplies
+an exact emoji and desired `active` state. Factory projects one coherent wire
+slice, validates that the target can still receive reactions, then conditionally
+appends `reaction.updated` only if that slice is still current. If another fact
+landed first, Factory replays and validates again. This prevents a stale
+reaction write from landing after target deletion without adding a transaction
+store. Every accepted request remains a fact, including one that repeats the
+current desired state.
+
 Deletes are soft. A deletion event sets `deletedAt`; list routes hide deleted
 records, but historical events remain on the wire.
 
@@ -115,6 +124,11 @@ Tasks can have threaded comments and polymorphic artifacts. Creating or
 editing a task does not automatically invoke an agent. The task intake
 mechanism is simply the shared API and wire path through which humans and
 agents record work.
+
+Tasks and task comments can also carry any subset of the fixed reaction
+palette. Reactions use one shared implicit reactor and replay in palette order.
+They remain separate from comment records, so reacting to an agent gate prompt
+cannot become a human-review response.
 
 In the web application, local images, animated GIFs, and browser-playable
 videos can be pasted or dropped into task descriptions and task comments.
@@ -264,6 +278,9 @@ task and its required project before running the workflow. The workflow CLI
 and every agent it starts use the project's configured local `path` as their
 working directory. A workflow can inspect `args.event.data`, such as a
 `task.updated` status, and return without acting when its condition is not met.
+Other event types, including `reaction.updated`, remain generic triggers. They
+run from the workflow workspace and carry no task association even when their
+payload names a task or task comment.
 
 ## Deliberate trust model
 

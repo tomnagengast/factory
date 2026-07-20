@@ -13,6 +13,7 @@ function comment(id: number, author: Comment["author"], values: Partial<Comment>
     kind: "message",
     final: author === "agent",
     content: "content",
+    reactions: [],
     ...values,
   };
 }
