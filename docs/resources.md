@@ -159,7 +159,9 @@ full `PUT`.
 The web task detail is rendered by default and enters its form only after
 selecting **Edit task**. Save persists the task; cancel discards the form.
 Task titles use inline Markdown, while descriptions and comments use full
-trusted Markdown or HTML with syntax-highlighted code blocks.
+trusted Markdown or HTML with syntax-highlighted code blocks. Links created
+from Markdown syntax open in a new tab with `noreferrer`; trusted raw HTML
+keeps its authored link behavior.
 
 The web task form accepts local media selected through the image button below
 the description, pasted from the clipboard, or dropped onto the editor. It

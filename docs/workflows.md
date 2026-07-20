@@ -309,7 +309,9 @@ comment at the root or a direct reply to the gate prompt.
 `/history` lists every projected run and `/history/{id}` displays the distinct
 events chronologically in contiguous phase groups. Run content renders as
 Markdown: prose wraps within the page, while code blocks and tables scroll
-horizontally. A task-triggered run links back to its task, including a
+horizontally. Links created from Markdown syntax open in a new tab with
+`noreferrer`; trusted raw HTML keeps its authored link behavior. A
+task-triggered run links back to its task, including a
 `task.deleted` run because the task remains replayable after soft deletion.
 The run detail opens at its latest event or final result and follows later
 content while the reader remains at the bottom. Scrolling up pauses that
