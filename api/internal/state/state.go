@@ -1,0 +1,918 @@
+package state
+
+import (
+	"encoding/json"
+	"fmt"
+	"slices"
+	"time"
+
+	"github.com/tomnagengast/factory/api/internal/eventwire"
+)
+
+const (
+	ProjectCreated           = "project.created"
+	ProjectUpdated           = "project.updated"
+	ProjectDeleted           = "project.deleted"
+	TaskCreated              = "task.created"
+	TaskUpdated              = "task.updated"
+	TaskDeleted              = "task.deleted"
+	CommentCreated           = "comment.created"
+	CommentUpdated           = "comment.updated"
+	CommentDeleted           = "comment.deleted"
+	ArtifactCreated          = "artifact.created"
+	ArtifactUpdated          = "artifact.updated"
+	ArtifactDeleted          = "artifact.deleted"
+	MediaCreated             = "media.created"
+	TriggerCreated           = "trigger.created"
+	TriggerUpdated           = "trigger.updated"
+	TriggerDeleted           = "trigger.deleted"
+	WorkflowCreated          = "workflow.created"
+	WorkflowDiscovered       = "workflow.discovered"
+	WorkflowUpdated          = "workflow.updated"
+	WorkflowDeleted          = "workflow.deleted"
+	CronFired                = "cron"
+	WorkflowRunStarted       = "workflow.run.started"
+	WorkflowRunEventRecorded = "workflow.run.event"
+	WorkflowRunWaiting       = "workflow.run.waiting"
+	WorkflowRunResumed       = "workflow.run.resumed"
+	WorkflowRunCompleted     = "workflow.run.completed"
+	WorkflowRunFailed        = "workflow.run.failed"
+	SettingsUpdated          = "settings.updated"
+)
+
+const (
+	Codex  = "codex"
+	Claude = "claude"
+)
+
+const (
+	MinWorkflowCapacity     = 0
+	MaxWorkflowCapacity     = 10
+	DefaultWorkflowCapacity = 6
+)
+
+type Record struct {
+	ID        int64      `json:"id"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt time.Time  `json:"updatedAt"`
+	DeletedAt *time.Time `json:"deletedAt,omitempty"`
+}
+
+type Project struct {
+	Record
+	Name        string  `json:"name"`
+	Description *string `json:"description,omitempty"`
+	Repo        *string `json:"repo,omitempty"`
+	Path        string  `json:"path"`
+	URL         *string `json:"url,omitempty"`
+}
+
+type TaskStatus string
+
+const (
+	Backlog    TaskStatus = "backlog"
+	Todo       TaskStatus = "todo"
+	InProgress TaskStatus = "in progress"
+	InReview   TaskStatus = "in review"
+	Done       TaskStatus = "done"
+	Canceled   TaskStatus = "canceled"
+)
+
+var TaskStatuses = []TaskStatus{Backlog, Todo, InProgress, InReview, Done, Canceled}
+
+type Task struct {
+	Record
+	Title        string     `json:"title"`
+	Description  *string    `json:"description"`
+	ParentTaskID *int64     `json:"parentTaskId"`
+	Status       TaskStatus `json:"status"`
+	ProjectID    int64      `json:"projectId"`
+}
+
+type Comment struct {
+	Record
+	RelationType    string `json:"relationType"`
+	RelationID      int64  `json:"relationId"`
+	ParentCommentID *int64 `json:"parentCommentId,omitempty"`
+	Author          string `json:"author"`
+	Content         string `json:"content"`
+}
+
+type Artifact struct {
+	Record
+	Name         *string `json:"name,omitempty"`
+	Type         string  `json:"type"`
+	Content      string  `json:"content"`
+	RelationType string  `json:"relationType"`
+	RelationID   int64   `json:"relationId"`
+}
+
+type Media struct {
+	Record
+	Name        string `json:"name"`
+	ContentType string `json:"contentType"`
+	Size        int64  `json:"size"`
+	SHA256      string `json:"sha256"`
+}
+
+type Trigger struct {
+	Record
+	EventType  string  `json:"eventType"`
+	Schedule   *string `json:"schedule,omitempty"`
+	WorkflowID int64   `json:"workflowId"`
+	Enabled    bool    `json:"enabled"`
+}
+
+type Workflow struct {
+	Record
+	Name        string   `json:"name"`
+	Description *string  `json:"description,omitempty"`
+	Path        *string  `json:"path,omitempty"`
+	Scope       *string  `json:"scope,omitempty"`
+	Phases      []string `json:"phases"`
+	Mutating    bool     `json:"mutating"`
+	RunCount    int      `json:"runCount"`
+	TaskCount   int      `json:"taskCount"`
+}
+
+type WorkflowRun struct {
+	ID                int64           `json:"id"`
+	CreatedAt         time.Time       `json:"createdAt"`
+	UpdatedAt         time.Time       `json:"updatedAt"`
+	TriggerID         int64           `json:"triggerId"`
+	WorkflowID        int64           `json:"workflowId"`
+	WorkflowName      string          `json:"workflowName"`
+	WorkflowPhases    []string        `json:"workflowPhases"`
+	SourceEventID     int64           `json:"sourceEventId"`
+	TaskID            int64           `json:"taskId,omitempty"`
+	Status            string          `json:"status"`
+	WaitingGate       *WorkflowGate   `json:"waitingGate,omitempty"`
+	GateCommentID     int64           `json:"gateCommentId,omitempty"`
+	ResponseCommentID int64           `json:"responseCommentId,omitempty"`
+	Output            string          `json:"output,omitempty"`
+	Error             string          `json:"error,omitempty"`
+	Directory         string          `json:"-"`
+	Source            string          `json:"-"`
+	Settings          *Settings       `json:"-"`
+	Arguments         json.RawMessage `json:"-"`
+}
+
+type WorkflowGate struct {
+	Workflow string          `json:"workflow"`
+	Phase    string          `json:"phase,omitempty"`
+	StepID   int64           `json:"stepId"`
+	Key      string          `json:"key"`
+	AgentID  string          `json:"agentId,omitempty"`
+	Message  string          `json:"message"`
+	Schema   json.RawMessage `json:"schema,omitempty"`
+}
+
+type WorkflowRuntimeEvent struct {
+	Sequence    int64           `json:"sequence"`
+	At          time.Time       `json:"at"`
+	Type        string          `json:"type"`
+	Workflow    string          `json:"workflow"`
+	Phase       string          `json:"phase,omitempty"`
+	StepID      int64           `json:"stepId,omitempty"`
+	Key         string          `json:"key,omitempty"`
+	AgentID     string          `json:"agentId,omitempty"`
+	Backend     string          `json:"backend,omitempty"`
+	Kind        string          `json:"kind,omitempty"`
+	Message     string          `json:"message,omitempty"`
+	Schema      json.RawMessage `json:"schema,omitempty"`
+	Result      json.RawMessage `json:"result,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	Tokens      int64           `json:"tokens,omitempty"`
+	Concurrency int             `json:"concurrency,omitempty"`
+	Budget      *int64          `json:"budget,omitempty"`
+}
+
+type WorkflowRunEvent struct {
+	Raw        json.RawMessage `json:"-"`
+	ID         int64           `json:"id"`
+	RunID      int64           `json:"runId"`
+	RecordedAt time.Time       `json:"recordedAt"`
+	WorkflowRuntimeEvent
+}
+
+type Settings struct {
+	Harness          string `json:"harness"`
+	Model            string `json:"model"`
+	Reasoning        string `json:"reasoning"`
+	WorkflowCapacity int    `json:"workflowCapacity"`
+}
+
+type ModelOption struct {
+	ID               string   `json:"id"`
+	Reasoning        []string `json:"reasoning"`
+	DefaultReasoning string   `json:"defaultReasoning"`
+}
+
+type HarnessOption struct {
+	ID     string        `json:"id"`
+	Name   string        `json:"name"`
+	Models []ModelOption `json:"models"`
+}
+
+var (
+	DefaultSettings = Settings{
+		Harness: Codex, Model: "gpt-5.6-sol", Reasoning: "low",
+		WorkflowCapacity: DefaultWorkflowCapacity,
+	}
+	Harnesses = []HarnessOption{
+		{ID: Codex, Name: "Codex", Models: []ModelOption{
+			{ID: "gpt-5.6-sol", Reasoning: []string{"low", "medium", "high", "xhigh", "max", "ultra"}, DefaultReasoning: "low"},
+			{ID: "gpt-5.6-terra", Reasoning: []string{"low", "medium", "high", "xhigh", "max", "ultra"}, DefaultReasoning: "medium"},
+			{ID: "gpt-5.6-luna", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "medium"},
+			{ID: "gpt-5.5", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "medium"},
+			{ID: "gpt-5.4", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "medium"},
+			{ID: "gpt-5.4-mini", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "medium"},
+			{ID: "gpt-5.3-codex-spark", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "high"},
+		}},
+		{ID: Claude, Name: "Claude Code", Models: []ModelOption{
+			{ID: "sonnet", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "high"},
+			{ID: "fable", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "high"},
+			{ID: "opus", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "high"},
+			{ID: "haiku", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "medium"},
+		}},
+	}
+)
+
+func ValidSettings(settings Settings) bool {
+	if settings.WorkflowCapacity < MinWorkflowCapacity ||
+		settings.WorkflowCapacity > MaxWorkflowCapacity {
+		return false
+	}
+	for _, harness := range Harnesses {
+		if harness.ID != settings.Harness {
+			continue
+		}
+		for _, model := range harness.Models {
+			if model.ID == settings.Model {
+				return slices.Contains(model.Reasoning, settings.Reasoning)
+			}
+		}
+	}
+	return false
+}
+
+type ProjectData struct {
+	ID          int64   `json:"id,omitempty"`
+	Name        string  `json:"name"`
+	Description *string `json:"description,omitempty"`
+	Repo        *string `json:"repo,omitempty"`
+	Path        string  `json:"path"`
+	URL         *string `json:"url,omitempty"`
+}
+
+type TaskData struct {
+	ID           int64      `json:"id,omitempty"`
+	Title        string     `json:"title"`
+	Description  *string    `json:"description,omitempty"`
+	ParentTaskID *int64     `json:"parentTaskId,omitempty"`
+	Status       TaskStatus `json:"status"`
+	ProjectID    int64      `json:"projectId"`
+}
+
+type CommentData struct {
+	ID              int64  `json:"id,omitempty"`
+	RelationType    string `json:"relationType"`
+	RelationID      int64  `json:"relationId"`
+	ParentCommentID *int64 `json:"parentCommentId,omitempty"`
+	Author          string `json:"author"`
+	Content         string `json:"content"`
+}
+
+type ArtifactData struct {
+	ID           int64   `json:"id,omitempty"`
+	Name         *string `json:"name,omitempty"`
+	Type         string  `json:"type"`
+	Content      string  `json:"content"`
+	RelationType string  `json:"relationType"`
+	RelationID   int64   `json:"relationId"`
+}
+
+type MediaData struct {
+	Name        string `json:"name"`
+	ContentType string `json:"contentType"`
+	Size        int64  `json:"size"`
+	SHA256      string `json:"sha256"`
+}
+
+type TriggerData struct {
+	ID         int64   `json:"id,omitempty"`
+	EventType  string  `json:"eventType"`
+	Schedule   *string `json:"schedule,omitempty"`
+	WorkflowID int64   `json:"workflowId"`
+	Enabled    bool    `json:"enabled"`
+}
+
+type WorkflowData struct {
+	ID          int64    `json:"id,omitempty"`
+	Name        string   `json:"name"`
+	Description *string  `json:"description,omitempty"`
+	Path        *string  `json:"path,omitempty"`
+	Scope       *string  `json:"scope,omitempty"`
+	Phases      []string `json:"phases,omitempty"`
+	Mutating    bool     `json:"mutating"`
+}
+
+type IDData struct {
+	ID int64 `json:"id"`
+}
+
+type CronData struct {
+	TriggerID int64 `json:"triggerId"`
+}
+
+type WorkflowRunData struct {
+	TriggerID      int64           `json:"triggerId"`
+	WorkflowID     int64           `json:"workflowId"`
+	WorkflowName   string          `json:"workflowName,omitempty"`
+	WorkflowPhases []string        `json:"workflowPhases,omitempty"`
+	SourceEventID  int64           `json:"sourceEventId"`
+	TaskID         int64           `json:"taskId,omitempty"`
+	Directory      string          `json:"directory,omitempty"`
+	Source         string          `json:"source,omitempty"`
+	Settings       *Settings       `json:"settings,omitempty"`
+	Arguments      json.RawMessage `json:"arguments,omitempty"`
+	Output         string          `json:"output,omitempty"`
+	Error          string          `json:"error,omitempty"`
+}
+
+type WorkflowRunStateData struct {
+	RunID             int64         `json:"runId"`
+	Gate              *WorkflowGate `json:"gate,omitempty"`
+	GateCommentID     int64         `json:"gateCommentId,omitempty"`
+	ResponseCommentID int64         `json:"responseCommentId,omitempty"`
+}
+
+type WorkflowRunEventData struct {
+	RunID int64           `json:"runId"`
+	Event json.RawMessage `json:"event"`
+}
+
+type Snapshot struct {
+	Projects   []Project
+	Tasks      []Task
+	Comments   []Comment
+	Artifacts  []Artifact
+	MediaFiles []Media
+	Triggers   []Trigger
+	Workflows  []Workflow
+	Runs       []WorkflowRun
+	RunEvents  []WorkflowRunEvent
+	Settings   Settings
+
+	startedRuns    map[[2]int64]bool
+	lastCron       map[int64]time.Time
+	humanResponses map[int64]bool
+}
+
+func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
+	view := Snapshot{
+		startedRuns:    make(map[[2]int64]bool),
+		lastCron:       make(map[int64]time.Time),
+		humanResponses: make(map[int64]bool),
+		Settings:       DefaultSettings,
+	}
+	projectIndex := make(map[int64]int)
+	taskIndex := make(map[int64]int)
+	commentIndex := make(map[int64]int)
+	artifactIndex := make(map[int64]int)
+	triggerIndex := make(map[int64]int)
+	workflowIndex := make(map[int64]int)
+	runIndex := make(map[[2]int64]int)
+	runIDIndex := make(map[int64]int)
+	eventIndex := make(map[int64]eventwire.Event)
+	workflowRunCount := make(map[int64]int)
+	workflowTasks := make(map[int64]map[int64]struct{})
+
+	for _, event := range events {
+		eventIndex[event.ID] = event
+		switch event.Type {
+		case ProjectCreated:
+			var data ProjectData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			projectIndex[event.ID] = len(view.Projects)
+			view.Projects = append(view.Projects, Project{
+				Record: newRecord(event), Name: data.Name, Description: data.Description,
+				Repo: data.Repo, Path: data.Path, URL: data.URL,
+			})
+		case ProjectUpdated:
+			var data ProjectData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := projectIndex[data.ID]; found {
+				project := &view.Projects[index]
+				project.Name, project.Description, project.Repo = data.Name, data.Description, data.Repo
+				project.Path, project.URL, project.UpdatedAt = data.Path, data.URL, event.At
+			}
+		case ProjectDeleted:
+			var data IDData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := projectIndex[data.ID]; found {
+				deleteRecord(&view.Projects[index].Record, event.At)
+			}
+
+		case TaskCreated:
+			var data TaskData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			taskIndex[event.ID] = len(view.Tasks)
+			view.Tasks = append(view.Tasks, Task{
+				Record: newRecord(event), Title: data.Title, Description: data.Description,
+				ParentTaskID: data.ParentTaskID, Status: data.Status, ProjectID: data.ProjectID,
+			})
+		case TaskUpdated:
+			var data TaskData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := taskIndex[data.ID]; found {
+				task := &view.Tasks[index]
+				task.Title, task.Description, task.ParentTaskID = data.Title, data.Description, data.ParentTaskID
+				task.Status, task.ProjectID, task.UpdatedAt = data.Status, data.ProjectID, event.At
+			}
+		case TaskDeleted:
+			var data IDData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := taskIndex[data.ID]; found {
+				deleteRecord(&view.Tasks[index].Record, event.At)
+			}
+
+		case CommentCreated:
+			var data CommentData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			commentIndex[event.ID] = len(view.Comments)
+			view.Comments = append(view.Comments, Comment{
+				Record: newRecord(event), RelationType: data.RelationType, RelationID: data.RelationID,
+				ParentCommentID: data.ParentCommentID, Author: data.Author, Content: data.Content,
+			})
+		case CommentUpdated:
+			var data CommentData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := commentIndex[data.ID]; found {
+				comment := &view.Comments[index]
+				comment.ParentCommentID, comment.Content = data.ParentCommentID, data.Content
+				comment.UpdatedAt = event.At
+			}
+		case CommentDeleted:
+			var data IDData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := commentIndex[data.ID]; found {
+				deleteRecord(&view.Comments[index].Record, event.At)
+			}
+
+		case ArtifactCreated:
+			var data ArtifactData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			artifactIndex[event.ID] = len(view.Artifacts)
+			view.Artifacts = append(view.Artifacts, Artifact{
+				Record: newRecord(event), Name: data.Name, Type: data.Type, Content: data.Content,
+				RelationType: data.RelationType, RelationID: data.RelationID,
+			})
+		case ArtifactUpdated:
+			var data ArtifactData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := artifactIndex[data.ID]; found {
+				artifact := &view.Artifacts[index]
+				artifact.Name, artifact.Type, artifact.Content = data.Name, data.Type, data.Content
+				artifact.RelationType, artifact.RelationID = data.RelationType, data.RelationID
+				artifact.UpdatedAt = event.At
+			}
+		case ArtifactDeleted:
+			var data IDData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := artifactIndex[data.ID]; found {
+				deleteRecord(&view.Artifacts[index].Record, event.At)
+			}
+
+		case MediaCreated:
+			var data MediaData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			view.MediaFiles = append(view.MediaFiles, Media{
+				Record: newRecord(event), Name: data.Name, ContentType: data.ContentType,
+				Size: data.Size, SHA256: data.SHA256,
+			})
+
+		case TriggerCreated:
+			data := TriggerData{Enabled: true}
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			triggerIndex[event.ID] = len(view.Triggers)
+			view.Triggers = append(view.Triggers, Trigger{
+				Record: newRecord(event), EventType: data.EventType,
+				Schedule: data.Schedule, WorkflowID: data.WorkflowID, Enabled: data.Enabled,
+			})
+		case TriggerUpdated:
+			data := TriggerData{Enabled: true}
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := triggerIndex[data.ID]; found {
+				trigger := &view.Triggers[index]
+				trigger.EventType, trigger.Schedule = data.EventType, data.Schedule
+				trigger.WorkflowID, trigger.Enabled = data.WorkflowID, data.Enabled
+				trigger.UpdatedAt = event.At
+			}
+		case TriggerDeleted:
+			var data IDData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := triggerIndex[data.ID]; found {
+				deleteRecord(&view.Triggers[index].Record, event.At)
+			}
+
+		case WorkflowCreated, WorkflowDiscovered:
+			var data WorkflowData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			name := data.Name
+			if name == "" {
+				name = fmt.Sprintf("Draft %d", event.ID)
+			}
+			workflowIndex[event.ID] = len(view.Workflows)
+			view.Workflows = append(view.Workflows, Workflow{
+				Record: newRecord(event), Name: name, Description: data.Description,
+				Path: data.Path, Scope: data.Scope, Phases: stringSlice(data.Phases), Mutating: data.Mutating,
+			})
+		case WorkflowUpdated:
+			var data WorkflowData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := workflowIndex[data.ID]; found {
+				workflow := &view.Workflows[index]
+				workflow.Name, workflow.Description, workflow.Path = data.Name, data.Description, data.Path
+				workflow.Scope, workflow.Phases = data.Scope, stringSlice(data.Phases)
+				workflow.Mutating, workflow.UpdatedAt = data.Mutating, event.At
+			}
+		case WorkflowDeleted:
+			var data IDData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := workflowIndex[data.ID]; found {
+				deleteRecord(&view.Workflows[index].Record, event.At)
+			}
+
+		case SettingsUpdated:
+			settings := DefaultSettings
+			if err := decode(event, &settings); err != nil {
+				return Snapshot{}, err
+			}
+			if !ValidSettings(settings) {
+				return Snapshot{}, fmt.Errorf("settings event %d is invalid", event.ID)
+			}
+			view.Settings = settings
+
+		case CronFired:
+			var data CronData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			view.lastCron[data.TriggerID] = event.At
+		case WorkflowRunStarted:
+			var data WorkflowRunData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			workflowRunCount[data.WorkflowID]++
+			taskID := data.TaskID
+			if taskID == 0 {
+				source, found := eventIndex[data.SourceEventID]
+				if found {
+					inferred, err := taskIDForEvent(source)
+					if err != nil {
+						return Snapshot{}, err
+					}
+					if _, found := taskIndex[inferred]; found {
+						taskID = inferred
+					}
+				}
+			}
+			if taskID > 0 {
+				if workflowTasks[data.WorkflowID] == nil {
+					workflowTasks[data.WorkflowID] = make(map[int64]struct{})
+				}
+				workflowTasks[data.WorkflowID][taskID] = struct{}{}
+			}
+			key := [2]int64{data.TriggerID, data.SourceEventID}
+			view.startedRuns[key] = true
+			if data.WorkflowName == "" {
+				if index, found := workflowIndex[data.WorkflowID]; found {
+					data.WorkflowName = view.Workflows[index].Name
+					data.WorkflowPhases = view.Workflows[index].Phases
+				}
+			}
+			runIndex[key] = len(view.Runs)
+			runIDIndex[event.ID] = len(view.Runs)
+			view.Runs = append(view.Runs, WorkflowRun{
+				ID: event.ID, CreatedAt: event.At, UpdatedAt: event.At,
+				TriggerID: data.TriggerID, WorkflowID: data.WorkflowID,
+				WorkflowName: data.WorkflowName, WorkflowPhases: stringSlice(data.WorkflowPhases),
+				SourceEventID: data.SourceEventID, TaskID: taskID, Status: "running",
+				Directory: data.Directory, Source: data.Source, Settings: data.Settings,
+				Arguments: append(json.RawMessage(nil), data.Arguments...),
+			})
+		case WorkflowRunEventRecorded:
+			var data WorkflowRunEventData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			var runtimeEvent WorkflowRuntimeEvent
+			if err := json.Unmarshal(data.Event, &runtimeEvent); err != nil {
+				return Snapshot{}, fmt.Errorf("decode workflow event %d: %w", event.ID, err)
+			}
+			view.RunEvents = append(view.RunEvents, WorkflowRunEvent{
+				Raw: append(json.RawMessage(nil), data.Event...),
+				ID:  event.ID, RunID: data.RunID, RecordedAt: event.At,
+				WorkflowRuntimeEvent: runtimeEvent,
+			})
+			if index, found := runIDIndex[data.RunID]; found {
+				view.Runs[index].UpdatedAt = event.At
+			}
+		case WorkflowRunWaiting:
+			var data WorkflowRunStateData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := runIDIndex[data.RunID]; found {
+				run := &view.Runs[index]
+				run.UpdatedAt, run.Status = event.At, "waiting"
+				run.WaitingGate, run.GateCommentID = data.Gate, data.GateCommentID
+				run.ResponseCommentID = 0
+			}
+		case WorkflowRunResumed:
+			var data WorkflowRunStateData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := runIDIndex[data.RunID]; found {
+				run := &view.Runs[index]
+				run.UpdatedAt, run.Status = event.At, "running"
+				run.WaitingGate = nil
+				run.ResponseCommentID = data.ResponseCommentID
+			}
+			view.humanResponses[data.ResponseCommentID] = true
+		case WorkflowRunCompleted, WorkflowRunFailed:
+			var data WorkflowRunData
+			if err := decode(event, &data); err != nil {
+				return Snapshot{}, err
+			}
+			if index, found := runIndex[[2]int64{data.TriggerID, data.SourceEventID}]; found {
+				run := &view.Runs[index]
+				run.UpdatedAt, run.Output, run.Error = event.At, data.Output, data.Error
+				if event.Type == WorkflowRunCompleted {
+					run.Status = "completed"
+				} else {
+					run.Status = "failed"
+				}
+			}
+		}
+	}
+	for index := range view.Workflows {
+		workflow := &view.Workflows[index]
+		workflow.RunCount = workflowRunCount[workflow.ID]
+		workflow.TaskCount = len(workflowTasks[workflow.ID])
+	}
+	return view, nil
+}
+
+func (s Snapshot) Project(id int64) (Project, bool) {
+	for _, project := range s.Projects {
+		if project.ID == id {
+			return project, true
+		}
+	}
+	return Project{}, false
+}
+
+func (s Snapshot) Task(id int64) (Task, bool) {
+	for _, task := range s.Tasks {
+		if task.ID == id {
+			return task, true
+		}
+	}
+	return Task{}, false
+}
+
+func (s Snapshot) Comment(id int64) (Comment, bool) {
+	for _, comment := range s.Comments {
+		if comment.ID == id {
+			return comment, true
+		}
+	}
+	return Comment{}, false
+}
+
+func (s Snapshot) Trigger(id int64) (Trigger, bool) {
+	for _, trigger := range s.Triggers {
+		if trigger.ID == id {
+			return trigger, true
+		}
+	}
+	return Trigger{}, false
+}
+
+func (s Snapshot) Artifact(id int64) (Artifact, bool) {
+	for _, artifact := range s.Artifacts {
+		if artifact.ID == id {
+			return artifact, true
+		}
+	}
+	return Artifact{}, false
+}
+
+func (s Snapshot) Media(id int64) (Media, bool) {
+	for _, media := range s.MediaFiles {
+		if media.ID == id {
+			return media, true
+		}
+	}
+	return Media{}, false
+}
+
+func (s Snapshot) Workflow(id int64) (Workflow, bool) {
+	for _, workflow := range s.Workflows {
+		if workflow.ID == id {
+			return workflow, true
+		}
+	}
+	return Workflow{}, false
+}
+
+func (s Snapshot) WorkflowByPath(path string) (Workflow, bool) {
+	for _, workflow := range s.Workflows {
+		if workflow.Path != nil && *workflow.Path == path {
+			return workflow, true
+		}
+	}
+	return Workflow{}, false
+}
+
+func (s Snapshot) WorkflowByName(name string) (Workflow, bool) {
+	for _, workflow := range s.Workflows {
+		if workflow.Name == name && workflow.DeletedAt == nil {
+			return workflow, true
+		}
+	}
+	return Workflow{}, false
+}
+
+func (s Snapshot) Run(id int64) (WorkflowRun, bool) {
+	for _, run := range s.Runs {
+		if run.ID == id {
+			return run, true
+		}
+	}
+	return WorkflowRun{}, false
+}
+
+func (s Snapshot) EventsFor(runID int64) []WorkflowRunEvent {
+	events := make([]WorkflowRunEvent, 0)
+	for _, event := range s.RunEvents {
+		if event.RunID == runID {
+			events = append(events, event)
+		}
+	}
+	return events
+}
+
+func (s Snapshot) CommentsFor(relationType string, relationID int64) []Comment {
+	comments := make([]Comment, 0)
+	for _, comment := range s.Comments {
+		if comment.RelationType == relationType && comment.RelationID == relationID && comment.DeletedAt == nil {
+			comments = append(comments, comment)
+		}
+	}
+	return comments
+}
+
+func (s Snapshot) ArtifactsFor(relationType string, relationID int64) []Artifact {
+	artifacts := make([]Artifact, 0)
+	for _, artifact := range s.Artifacts {
+		if artifact.RelationType == relationType && artifact.RelationID == relationID && artifact.DeletedAt == nil {
+			artifacts = append(artifacts, artifact)
+		}
+	}
+	return artifacts
+}
+
+func (s Snapshot) PendingWorkflowComment() (Comment, bool) {
+	answered := make(map[int64]bool)
+	for _, comment := range s.Comments {
+		if comment.Author == "agent" && comment.ParentCommentID != nil {
+			answered[*comment.ParentCommentID] = true
+		}
+	}
+	for _, comment := range s.Comments {
+		if comment.DeletedAt != nil || comment.Author != "user" || comment.RelationType != "workflow" || answered[comment.ID] {
+			continue
+		}
+		if workflow, found := s.Workflow(comment.RelationID); found && workflow.DeletedAt == nil {
+			return comment, true
+		}
+	}
+	return Comment{}, false
+}
+
+func (s Snapshot) RunStarted(triggerID, sourceEventID int64) bool {
+	return s.startedRuns[[2]int64{triggerID, sourceEventID}]
+}
+
+func (s Snapshot) PendingHumanResponse() (WorkflowRun, Comment, bool) {
+	answered := make(map[int64]bool)
+	for _, comment := range s.Comments {
+		if comment.Author == "agent" && comment.ParentCommentID != nil {
+			answered[*comment.ParentCommentID] = true
+		}
+	}
+	for _, run := range s.Runs {
+		if run.Status != "waiting" || run.WaitingGate == nil ||
+			run.TaskID < 1 || run.GateCommentID < 1 {
+			continue
+		}
+		for _, comment := range s.Comments {
+			if comment.ID <= run.GateCommentID || comment.DeletedAt != nil ||
+				comment.Author != "user" || comment.RelationType != "task" ||
+				comment.RelationID != run.TaskID || answered[comment.ID] ||
+				s.humanResponses[comment.ID] {
+				continue
+			}
+			if comment.ParentCommentID == nil || *comment.ParentCommentID == run.GateCommentID {
+				return run, comment, true
+			}
+		}
+	}
+	return WorkflowRun{}, Comment{}, false
+}
+
+func (s Snapshot) LastCron(triggerID int64) (time.Time, bool) {
+	value, found := s.lastCron[triggerID]
+	return value, found
+}
+
+func newRecord(event eventwire.Event) Record {
+	return Record{ID: event.ID, CreatedAt: event.At, UpdatedAt: event.At}
+}
+
+func deleteRecord(record *Record, at time.Time) {
+	record.UpdatedAt = at
+	record.DeletedAt = &at
+}
+
+func decode(event eventwire.Event, target any) error {
+	if err := json.Unmarshal(event.Data, target); err != nil {
+		return fmt.Errorf("decode %s event %d: %w", event.Type, event.ID, err)
+	}
+	return nil
+}
+
+func taskIDForEvent(event eventwire.Event) (int64, error) {
+	switch event.Type {
+	case TaskCreated:
+		if event.ID > 0 {
+			return event.ID, nil
+		}
+	case TaskUpdated, TaskDeleted:
+		var data IDData
+		if err := decode(event, &data); err != nil {
+			return 0, err
+		}
+		if data.ID > 0 {
+			return data.ID, nil
+		}
+	}
+	return 0, nil
+}
+
+func stringSlice(values []string) []string {
+	return append([]string{}, values...)
+}
