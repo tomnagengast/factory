@@ -19,6 +19,11 @@ import { bindNewestFollower, type NewestFollower } from "./follow-newest";
 import { historyResourceLink } from "./history";
 import { insertMediaMarkup, mediaAccept, mediaFiles, mediaKind, mediaMarkup } from "./media";
 import {
+  activeTaskCreationProjectId,
+  loadLastTaskProjectId,
+  saveLastTaskProjectId,
+} from "./task-creation-preferences";
+import {
   loadTaskViewPreferences,
   saveTaskViewPreferences,
   taskFields,
@@ -633,6 +638,7 @@ function CommentCount(props: { count: number }) {
 
 function TaskNew() {
   const navigate = useNavigate();
+  const rememberedProjectID = loadLastTaskProjectId();
   const [options] = createResource(async () => {
     const [projects, tasks] = await Promise.all([
       get<{ projects: Project[] }>("/api/projects"), get<TaskListResponse>("/api/tasks"),
@@ -645,8 +651,10 @@ function TaskNew() {
       <PageHeader eyebrow="Tasks" title="Create a task" />
       <Load data={options} error={() => options.error}>
         {(value) => <TaskForm projects={value.projects} tasks={value.tasks} pending={action.pending()} error={action.error()}
+          initialProjectId={activeTaskCreationProjectId(value.projects, rememberedProjectID)}
           onSave={(body) => action.run(async () => {
             const created = await post<Task>("/api/tasks", body);
+            saveLastTaskProjectId(created.projectId);
             navigate(`/tasks/${created.id}`);
           })} />}
       </Load>
@@ -737,6 +745,7 @@ function TaskProperties(props: { task: Task; projects: Project[]; tasks: Task[] 
 
 function TaskForm(props: {
   task?: Task;
+  initialProjectId?: number;
   projects: Project[];
   tasks: Task[];
   pending: boolean;
@@ -768,7 +777,8 @@ function TaskForm(props: {
         <label>Status<select name="status" disabled={uploading()} value={props.task?.status ?? "backlog"}>
           <For each={taskStatuses}>{(status) => <option value={status}>{status}</option>}</For>
         </select></label>
-        <label>Project<select name="projectId" required disabled={uploading()} value={props.task?.projectId ?? ""}>
+        <label>Project<select name="projectId" required disabled={uploading()}
+          value={props.task?.projectId ?? props.initialProjectId ?? ""}>
           <option value="" disabled>Select a project</option>
           <For each={props.projects}>{(project) => <option value={project.id}>{project.name}</option>}</For>
         </select></label>
