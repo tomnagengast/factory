@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -15,8 +16,10 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/tomnagengast/factory/api/internal/eventwire"
+	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
 )
 
@@ -577,6 +580,83 @@ func TestHealthIncludesReleaseIdentity(t *testing.T) {
 			t.Errorf("%s = %#v, want %q", key, health[key], expected)
 		}
 	}
+	if health["workflowActive"] != float64(0) || health["workflowQuiescing"] != false {
+		t.Fatalf("workflow health = %#v", health)
+	}
+}
+
+func TestQuiescenceAPIStopsAdmissionDrainsAndReleases(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	admission := quiescence.New()
+	handler := testServerWithAdmission(t, wire, admission).Handler()
+	if !admission.TryStart() {
+		t.Fatal("active workflow admission was blocked")
+	}
+
+	acquired := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		acquired <- requestJSON(t, handler, http.MethodPost, "/api/quiescence", "")
+	}()
+	waitForServerCondition(t, func() bool { return !admission.Accepting() }, "admission to stop")
+	health := requestJSON(t, handler, http.MethodGet, "/api/health", "")
+	if !strings.Contains(health.Body.String(), `"workflowActive":1`) ||
+		!strings.Contains(health.Body.String(), `"workflowQuiescing":true`) {
+		t.Fatalf("draining health = %s", health.Body)
+	}
+	if response := requestJSON(t, handler, http.MethodPost, "/api/quiescence", ""); response.Code != http.StatusConflict {
+		t.Fatalf("concurrent acquire = %d %s", response.Code, response.Body)
+	}
+	select {
+	case <-acquired:
+		t.Fatal("quiescence returned before active work drained")
+	default:
+	}
+
+	admission.Done(nil)
+	response := receiveServerResponse(t, acquired, "quiescence response")
+	if response.Code != http.StatusOK {
+		t.Fatalf("acquire = %d %s", response.Code, response.Body)
+	}
+	var lease quiescence.Lease
+	if err := json.Unmarshal(response.Body.Bytes(), &lease); err != nil || lease.Token == "" {
+		t.Fatalf("lease = %#v, %v", lease, err)
+	}
+	if response := requestJSON(t, handler, http.MethodDelete, "/api/quiescence/wrong", ""); response.Code != http.StatusNotFound {
+		t.Fatalf("wrong release = %d %s", response.Code, response.Body)
+	}
+	if response := requestJSON(t, handler, http.MethodDelete, "/api/quiescence/"+lease.Token, ""); response.Code != http.StatusOK {
+		t.Fatalf("release = %d %s", response.Code, response.Body)
+	}
+	health = requestJSON(t, handler, http.MethodGet, "/api/health", "")
+	if !strings.Contains(health.Body.String(), `"workflowActive":0`) ||
+		!strings.Contains(health.Body.String(), `"workflowQuiescing":false`) {
+		t.Fatalf("released health = %s", health.Body)
+	}
+}
+
+func TestQuiescenceAPIRejectsFailedDrain(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	admission := quiescence.New()
+	handler := testServerWithAdmission(t, wire, admission).Handler()
+	if !admission.TryStart() {
+		t.Fatal("active workflow admission was blocked")
+	}
+	acquired := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		acquired <- requestJSON(t, handler, http.MethodPost, "/api/quiescence", "")
+	}()
+	waitForServerCondition(t, func() bool { return !admission.Accepting() }, "admission to stop")
+	admission.Done(errors.New("terminal wire event could not be recorded"))
+	response := receiveServerResponse(t, acquired, "failed quiescence response")
+	if response.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(response.Body.String(), "failed while draining") {
+		t.Fatalf("failed drain = %d %s", response.Code, response.Body)
+	}
+	if admission.Accepting() {
+		t.Fatal("failed coordinator resumed admission")
+	}
 }
 
 func TestTriggerEnabledStateDefaultsPersistsAndRequiresExplicitUpdate(t *testing.T) {
@@ -780,15 +860,54 @@ func openWire(t *testing.T) *eventwire.Wire {
 
 func testServer(t *testing.T, wire *eventwire.Wire) *Server {
 	t.Helper()
+	return testServerWithAdmission(t, wire, quiescence.New())
+}
+
+func testServerWithAdmission(
+	t *testing.T,
+	wire *eventwire.Wire,
+	admission *quiescence.Controller,
+) *Server {
+	t.Helper()
 	assets := fstest.MapFS{
 		"index.html":           &fstest.MapFile{Data: []byte("<html></html>")},
 		"assets/app-a1.js":     &fstest.MapFile{Data: []byte("export {};")},
 		"assets/styles-b2.css": &fstest.MapFile{Data: []byte("body {}")},
 	}
 	var filesystem fs.FS = assets
-	server, err := New(wire, filesystem, t.TempDir())
+	server, err := New(wire, filesystem, t.TempDir(), admission)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return server
+}
+
+func waitForServerCondition(t *testing.T, check func() bool, label string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if check() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", label)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func receiveServerResponse(
+	t *testing.T,
+	responses <-chan *httptest.ResponseRecorder,
+	label string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	select {
+	case response := <-responses:
+		return response
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", label)
+		return nil
+	}
 }

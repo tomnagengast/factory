@@ -147,6 +147,16 @@ capacity never cancels active runs; the coordinator waits for enough of them
 to finish before dispatching more. There is no queue service or distributed
 worker pool.
 
+Controlled service replacement uses the coordinator's in-memory quiescence
+lease. Acquiring the lease atomically stops new authoring, resume, event, and
+cron admission, then waits for every admitted operation to record its terminal
+wire event. Admission remains closed until the holder releases the opaque
+lease, the 15-minute lease expires, or the process exits. A failed acquisition
+reopens admission unless the coordinator itself failed; a coordinator failure
+blocks further work and rejects quiescence so deployment cannot hide a missing
+terminal event. This gives deployment code a drain boundary without changing
+trigger state or adding a queue.
+
 The coordinator records progress back on the same wire:
 
 - workflow authoring started, completed, or failed,

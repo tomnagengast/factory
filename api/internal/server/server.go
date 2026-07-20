@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,20 +12,30 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/tomnagengast/factory/api/internal/eventwire"
+	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
 )
+
+const quiescenceLeaseDuration = 15 * time.Minute
 
 type Server struct {
 	wire      *eventwire.Wire
 	assets    fs.FS
 	mediaRoot string
+	admission *quiescence.Controller
 }
 
-func New(wire *eventwire.Wire, assets fs.FS, mediaRoot string) (*Server, error) {
-	if wire == nil || assets == nil || mediaRoot == "" {
-		return nil, errors.New("server requires a wire, frontend, and media path")
+func New(
+	wire *eventwire.Wire,
+	assets fs.FS,
+	mediaRoot string,
+	admission *quiescence.Controller,
+) (*Server, error) {
+	if wire == nil || assets == nil || mediaRoot == "" || admission == nil {
+		return nil, errors.New("server requires a wire, frontend, media path, and workflow admission controller")
 	}
 	if err := os.MkdirAll(mediaRoot, 0o777); err != nil {
 		return nil, fmt.Errorf("create media directory: %w", err)
@@ -41,12 +52,16 @@ func New(wire *eventwire.Wire, assets fs.FS, mediaRoot string) (*Server, error) 
 	if err != nil || !info.IsDir() {
 		return nil, errors.New("media path must be a directory")
 	}
-	return &Server{wire: wire, assets: assets, mediaRoot: canonical}, nil
+	return &Server{
+		wire: wire, assets: assets, mediaRoot: canonical, admission: admission,
+	}, nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.health)
+	mux.HandleFunc("POST /api/quiescence", s.quiescenceAcquire)
+	mux.HandleFunc("DELETE /api/quiescence/{lease}", s.quiescenceRelease)
 	mux.HandleFunc("GET /api/settings", s.settings)
 	mux.HandleFunc("PUT /api/settings", s.settingsUpdate)
 	mux.HandleFunc("GET /api/events", s.events)
@@ -129,21 +144,55 @@ func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"status":           "ok",
-		"app":              "factory",
-		"commit":           os.Getenv("FACTORY_RELEASE_COMMIT"),
-		"tree":             os.Getenv("FACTORY_RELEASE_TREE"),
-		"buildId":          os.Getenv("FACTORY_RELEASE_BUILD"),
-		"deploymentId":     os.Getenv("FACTORY_RELEASE_DEPLOYMENT"),
-		"contractVersion":  os.Getenv("FACTORY_RELEASE_CONTRACT"),
-		"harness":          view.Settings.Harness,
-		"workflowCapacity": view.Settings.WorkflowCapacity,
-		"events":           s.wire.LastID(),
-		"tasks":            len(active(view.Tasks, func(value state.Task) bool { return value.DeletedAt == nil })),
-		"projects":         len(active(view.Projects, func(value state.Project) bool { return value.DeletedAt == nil })),
-		"triggers":         len(active(view.Triggers, func(value state.Trigger) bool { return value.DeletedAt == nil })),
-		"workflows":        len(active(view.Workflows, func(value state.Workflow) bool { return value.DeletedAt == nil })),
+		"status":            "ok",
+		"app":               "factory",
+		"commit":            os.Getenv("FACTORY_RELEASE_COMMIT"),
+		"tree":              os.Getenv("FACTORY_RELEASE_TREE"),
+		"buildId":           os.Getenv("FACTORY_RELEASE_BUILD"),
+		"deploymentId":      os.Getenv("FACTORY_RELEASE_DEPLOYMENT"),
+		"contractVersion":   os.Getenv("FACTORY_RELEASE_CONTRACT"),
+		"harness":           view.Settings.Harness,
+		"workflowCapacity":  view.Settings.WorkflowCapacity,
+		"workflowActive":    s.admission.Active(),
+		"workflowQuiescing": !s.admission.Accepting(),
+		"events":            s.wire.LastID(),
+		"tasks":             len(active(view.Tasks, func(value state.Task) bool { return value.DeletedAt == nil })),
+		"projects":          len(active(view.Projects, func(value state.Project) bool { return value.DeletedAt == nil })),
+		"triggers":          len(active(view.Triggers, func(value state.Trigger) bool { return value.DeletedAt == nil })),
+		"workflows":         len(active(view.Workflows, func(value state.Workflow) bool { return value.DeletedAt == nil })),
 	})
+}
+
+func (s *Server) quiescenceAcquire(writer http.ResponseWriter, request *http.Request) {
+	lease, err := s.admission.Acquire(request.Context(), quiescenceLeaseDuration)
+	if err != nil {
+		switch {
+		case errors.Is(err, context.Canceled):
+			return
+		case errors.Is(err, quiescence.ErrAlreadyHeld):
+			writeError(writer, http.StatusConflict, err)
+		case errors.Is(err, quiescence.ErrExpired):
+			writeError(writer, http.StatusServiceUnavailable, err)
+		case errors.Is(err, quiescence.ErrDrainFailed):
+			writeError(writer, http.StatusServiceUnavailable, err)
+		default:
+			writeError(writer, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"status":    "quiescent",
+		"lease":     lease.Token,
+		"expiresAt": lease.ExpiresAt,
+	})
+}
+
+func (s *Server) quiescenceRelease(writer http.ResponseWriter, request *http.Request) {
+	if !s.admission.Release(request.PathValue("lease")) {
+		writeError(writer, http.StatusNotFound, errors.New("quiescence lease not found"))
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "released"})
 }
 
 func (s *Server) asset(path, contentType string) http.HandlerFunc {

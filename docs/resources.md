@@ -572,6 +572,33 @@ selection. Codex, `gpt-5.6-sol`, `low`, and workflow capacity `6` are the
 defaults before the first update. Capacity zero pauses new event and cron
 trigger runs. Lowering it does not cancel active runs.
 
+## Workflow quiescence
+
+Quiescence is an in-memory deployment lease, not a projected resource.
+
+```text
+POST   /api/quiescence
+DELETE /api/quiescence/{lease}
+```
+
+`POST` atomically stops new workflow authoring, resume, event, and cron
+admission, then waits for every admitted operation to record its terminal wire
+event. A successful response keeps admission closed:
+
+```json
+{
+  "status": "quiescent",
+  "lease": "<opaque token>",
+  "expiresAt": "2026-07-19T20:15:00Z"
+}
+```
+
+The lease lasts 15 minutes. Canceling the request before the drain completes
+releases its claim. A concurrent `POST` returns `409`; expiry before the drain
+completes or a coordinator failure returns `503`. `DELETE` with the current lease returns
+`{"status":"released"}` and reopens admission. An unknown or expired lease
+returns `404`. Replacing the Factory process clears the lease.
+
 ## Health
 
 ```text
@@ -579,8 +606,8 @@ GET /api/health
 ```
 
 The response includes status, active harness, workflow capacity, event and
-resource counts, and release identity when deployment environment variables
-are set.
+resource counts, `workflowActive`, `workflowQuiescing`, and release identity
+when deployment environment variables are set.
 
 ## CLI command matrix
 

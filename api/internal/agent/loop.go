@@ -13,6 +13,7 @@ import (
 	"github.com/robfig/cron/v3"
 
 	"github.com/tomnagengast/factory/api/internal/eventwire"
+	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
 	"github.com/tomnagengast/factory/api/internal/workflow"
 )
@@ -28,16 +29,22 @@ type Loop struct {
 	wire      *eventwire.Wire
 	agent     Runner
 	workflows workflow.Runner
+	admission *quiescence.Controller
 	active    int
 	completed chan error
 }
 
-func NewLoop(wire *eventwire.Wire, runner Runner, workflows workflow.Runner) (*Loop, error) {
-	if wire == nil || runner == nil || workflows == nil {
-		return nil, errors.New("workflow coordinator requires a wire, agent, and workflow CLI")
+func NewLoop(
+	wire *eventwire.Wire,
+	runner Runner,
+	workflows workflow.Runner,
+	admission *quiescence.Controller,
+) (*Loop, error) {
+	if wire == nil || runner == nil || workflows == nil || admission == nil {
+		return nil, errors.New("workflow coordinator requires a wire, agent, workflow CLI, and admission controller")
 	}
 	return &Loop{
-		wire: wire, agent: runner, workflows: workflows,
+		wire: wire, agent: runner, workflows: workflows, admission: admission,
 		completed: make(chan error, state.MaxWorkflowCapacity),
 	}, nil
 }
@@ -55,6 +62,7 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 	for {
 		after := l.wire.LastID()
+		admissionChanged := l.admission.Changes()
 		worked, nextCron, err := l.step(runContext)
 		if err != nil {
 			cancel()
@@ -63,7 +71,7 @@ func (l *Loop) Run(ctx context.Context) error {
 		if worked {
 			continue
 		}
-		if err := l.wait(runContext, after, nextCron); err != nil {
+		if err := l.wait(runContext, after, nextCron, admissionChanged); err != nil {
 			cancel()
 			return l.stop(err)
 		}
@@ -104,16 +112,24 @@ func (l *Loop) step(ctx context.Context) (bool, time.Time, error) {
 		return false, time.Time{}, err
 	}
 	if comment, found := view.PendingWorkflowComment(); found {
-		return true, time.Time{}, l.authorWorkflow(ctx, view, comment)
+		if !l.admission.TryStart() {
+			return false, time.Time{}, nil
+		}
+		authorErr := l.authorWorkflow(ctx, view, comment)
+		l.admission.Done(authorErr)
+		return true, time.Time{}, authorErr
 	}
 	if l.active < view.Settings.WorkflowCapacity {
 		if run, response, found := view.PendingHumanResponse(); found {
-			_, err := l.startResume(ctx, view, run, response, snapshotID)
-			return true, time.Time{}, err
+			started, err := l.startResume(ctx, view, run, response, snapshotID)
+			return started, time.Time{}, err
 		}
 		if trigger, source, found := pendingTrigger(view, events); found {
-			_, err := l.startTrigger(ctx, view, trigger, source, snapshotID)
-			return true, time.Time{}, err
+			started, err := l.startTrigger(ctx, view, trigger, source, snapshotID)
+			return started, time.Time{}, err
+		}
+		if !l.admission.Accepting() {
+			return false, time.Time{}, nil
 		}
 		due, next := nextCron(view, time.Now().UTC())
 		if due != nil {
@@ -127,7 +143,12 @@ func (l *Loop) step(ctx context.Context) (bool, time.Time, error) {
 	return false, time.Time{}, nil
 }
 
-func (l *Loop) wait(ctx context.Context, after int64, nextCron time.Time) error {
+func (l *Loop) wait(
+	ctx context.Context,
+	after int64,
+	nextCron time.Time,
+	admissionChanged <-chan struct{},
+) error {
 	var waitContext context.Context
 	var cancel context.CancelFunc
 	if !nextCron.IsZero() {
@@ -152,6 +173,10 @@ func (l *Loop) wait(ctx context.Context, after int64, nextCron time.Time) error 
 			return nil
 		}
 		return err
+	case <-admissionChanged:
+		cancel()
+		<-wireResult
+		return nil
 	}
 }
 
@@ -257,7 +282,7 @@ func (l *Loop) startTrigger(
 	trigger state.Trigger,
 	source eventwire.Event,
 	expectedLastID int64,
-) (bool, error) {
+) (startedRun bool, err error) {
 	selected, found := view.Workflow(trigger.WorkflowID)
 	directory, taskID, directoryErr := taskContext(view, source)
 	predictedRunID := expectedLastID + 1
@@ -276,6 +301,15 @@ func (l *Loop) startTrigger(
 		run.WorkflowName, run.WorkflowPhases = selected.Name, slices.Clone(selected.Phases)
 		run.Source = stringValue(selected.Path)
 	}
+	if !l.admission.TryStart() {
+		return false, nil
+	}
+	releaseAdmission := true
+	defer func() {
+		if releaseAdmission {
+			l.admission.Done(err)
+		}
+	}()
 	started, published, err := l.wire.PublishIfCurrent(expectedLastID, state.WorkflowRunStarted, run)
 	if err != nil {
 		return false, err
@@ -294,13 +328,16 @@ func (l *Loop) startTrigger(
 		return true, err
 	}
 	l.active++
+	releaseAdmission = false
 	go func() {
-		l.completed <- l.executeRun(ctx, started.ID, workflow.RunRequest{
+		executionErr := l.executeRun(ctx, started.ID, workflow.RunRequest{
 			Directory: directory,
 			Source:    stringValue(selected.Path),
 			Settings:  view.Settings,
 			Arguments: json.RawMessage(arguments),
 		}, run)
+		l.completed <- executionErr
+		l.admission.Done(executionErr)
 	}()
 	return true, nil
 }
@@ -385,7 +422,7 @@ func (l *Loop) startResume(
 	run state.WorkflowRun,
 	response state.Comment,
 	expectedLastID int64,
-) (bool, error) {
+) (startedRun bool, err error) {
 	result, err := humanResult(response.Content, run.WaitingGate.Schema)
 	if err != nil {
 		_, publishErr := l.wire.Publish(state.CommentCreated, state.CommentData{
@@ -420,6 +457,15 @@ func (l *Loop) startResume(
 	if err != nil {
 		return false, fmt.Errorf("encode human review result: %w", err)
 	}
+	if !l.admission.TryStart() {
+		return false, nil
+	}
+	releaseAdmission := true
+	defer func() {
+		if releaseAdmission {
+			l.admission.Done(err)
+		}
+	}()
 	_, published, err := l.wire.PublishIfCurrent(
 		expectedLastID,
 		state.WorkflowRunResumed,
@@ -443,8 +489,11 @@ func (l *Loop) startResume(
 		Resume:    resume,
 	}
 	terminal := workflowRunData(run)
+	releaseAdmission = false
 	go func() {
-		l.completed <- l.executeRun(ctx, run.ID, request, terminal)
+		executionErr := l.executeRun(ctx, run.ID, request, terminal)
+		l.completed <- executionErr
+		l.admission.Done(executionErr)
 	}()
 	return true, nil
 }

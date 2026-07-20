@@ -179,6 +179,13 @@ func (c CLI) Run(
 	commandContext, cancelCommand := context.WithCancel(ctx)
 	defer cancelCommand()
 	command := exec.CommandContext(commandContext, c.Command, commandArgs...)
+	command.Cancel = func() error {
+		if command.Process == nil {
+			return os.ErrProcessDone
+		}
+		return command.Process.Signal(os.Interrupt)
+	}
+	command.WaitDelay = 2 * time.Second
 	factory, err := filepath.Abs(c.FactoryCommand)
 	if err != nil {
 		return "", fmt.Errorf("resolve Factory CLI: %w", err)

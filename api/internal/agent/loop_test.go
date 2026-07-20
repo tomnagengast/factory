@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/api/internal/eventwire"
+	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
 	"github.com/tomnagengast/factory/api/internal/workflow"
 )
@@ -73,6 +74,14 @@ func newFakeWorkflows() *fakeWorkflows {
 		started:  make(chan struct{}, state.MaxWorkflowCapacity+1),
 		finished: make(chan struct{}, state.MaxWorkflowCapacity+1),
 	}
+}
+
+func newTestLoop(
+	wire *eventwire.Wire,
+	runner Runner,
+	workflows workflow.Runner,
+) (*Loop, error) {
+	return NewLoop(wire, runner, workflows, quiescence.New())
 }
 
 func (f *fakeWorkflows) List(context.Context) ([]workflow.Definition, error) {
@@ -178,7 +187,7 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 		},
 	}
 	workflows := newFakeWorkflows()
-	loop, err := NewLoop(wire, runner, workflows)
+	loop, err := newTestLoop(wire, runner, workflows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +271,7 @@ func TestLoopPersistsProgressBeforeAuthoringCompletes(t *testing.T) {
 	workflows.definitions = []workflow.Definition{
 		{Name: "review", Path: workflows.LocalPath(created.ID), Description: "Review work"},
 	}
-	loop, _ := NewLoop(wire, runner, workflows)
+	loop, _ := newTestLoop(wire, runner, workflows)
 	finished := make(chan error, 1)
 	go func() {
 		_, _, err := loop.step(context.Background())
@@ -372,7 +381,7 @@ func TestLoopRejectsInvalidAuthoredWorkflow(t *testing.T) {
 	}
 	workflows := newFakeWorkflows()
 	workflows.validateErr = errors.New("parse error near mktemp")
-	loop, err := NewLoop(wire, &fakeAgent{output: "Updated and validated."}, workflows)
+	loop, err := newTestLoop(wire, &fakeAgent{output: "Updated and validated."}, workflows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +427,7 @@ func TestLoopRecordsRunnerAndDiscoveryFailuresAfterProgress(t *testing.T) {
 			}
 			workflows := newFakeWorkflows()
 			workflows.listErr = test.listErr
-			loop, _ := NewLoop(wire, runner, workflows)
+			loop, _ := newTestLoop(wire, runner, workflows)
 			worked, _, err := loop.step(context.Background())
 			if err != nil || !worked {
 				t.Fatalf("authoring step = %v, %v", worked, err)
@@ -463,7 +472,7 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	source, _ := wire.Publish("release.ready", map[string]string{"version": "1.0"})
 
 	workflows := newFakeWorkflows()
-	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
 	worked, _, err := loop.step(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -555,7 +564,7 @@ func TestLoopWaitsForHumanTaskCommentAndResumesTheSameRun(t *testing.T) {
 		},
 	}
 	workflows.runErrors = []error{workflow.ErrHumanReview, nil}
-	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
 
 	worked, _, err := loop.step(context.Background())
 	if err != nil || !worked {
@@ -671,7 +680,7 @@ func TestLoopRecoversInterruptedRuns(t *testing.T) {
 		WorkflowName: "review", WorkflowPhases: []string{"Review"}, SourceEventID: source.ID,
 	})
 
-	loop, _ := NewLoop(wire, &fakeAgent{}, newFakeWorkflows())
+	loop, _ := newTestLoop(wire, &fakeAgent{}, newFakeWorkflows())
 	if err := loop.recoverInterruptedRuns(); err != nil {
 		t.Fatal(err)
 	}
@@ -709,7 +718,7 @@ func TestLoopPreservesWaitingRunsAcrossRestart(t *testing.T) {
 		},
 	})
 
-	loop, _ := NewLoop(wire, &fakeAgent{}, newFakeWorkflows())
+	loop, _ := newTestLoop(wire, &fakeAgent{}, newFakeWorkflows())
 	if err := loop.recoverInterruptedRuns(); err != nil {
 		t.Fatal(err)
 	}
@@ -751,7 +760,7 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 			}
 
 			workflows := newFakeWorkflows()
-			loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+			loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
 			worked, _, err := loop.step(context.Background())
 			if err != nil {
 				t.Fatal(err)
@@ -805,7 +814,7 @@ func TestLoopRunsTriggersUpToWorkflowCapacity(t *testing.T) {
 
 	workflows := newFakeWorkflows()
 	workflows.release = make(chan struct{})
-	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
 	for range settings.WorkflowCapacity {
 		worked, _, err := loop.step(context.Background())
 		if err != nil || !worked {
@@ -857,6 +866,166 @@ func TestLoopRunsTriggersUpToWorkflowCapacity(t *testing.T) {
 	}
 }
 
+func TestQuiescenceDrainsActiveTriggerAndBlocksNewAdmission(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: true,
+	})
+	wire.Publish("release.ready", map[string]int{"version": 1})
+	wire.Publish("release.ready", map[string]int{"version": 2})
+
+	workflows := newFakeWorkflows()
+	workflows.release = make(chan struct{})
+	admission := quiescence.New()
+	loop, _ := NewLoop(wire, &fakeAgent{}, workflows, admission)
+	worked, _, err := loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("initial dispatch = %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "first workflow start")
+
+	acquired := make(chan quiescence.Lease, 1)
+	go func() {
+		lease, acquireErr := admission.Acquire(context.Background(), time.Second)
+		if acquireErr != nil {
+			t.Errorf("acquire quiescence: %v", acquireErr)
+			return
+		}
+		acquired <- lease
+	}()
+	waitForCondition(t, func() bool { return !admission.Accepting() }, "trigger admission to stop")
+	if worked, _, err = loop.step(context.Background()); err != nil || worked {
+		t.Fatalf("dispatch while draining = %v, %v", worked, err)
+	}
+	select {
+	case <-workflows.started:
+		t.Fatal("second workflow started while quiescing")
+	case <-acquired:
+		t.Fatal("quiescence completed before the active workflow drained")
+	default:
+	}
+
+	workflows.release <- struct{}{}
+	waitForSignal(t, workflows.finished, "first workflow finish")
+	lease := receiveValue(t, acquired, "quiescence lease")
+	if admission.Active() != 0 {
+		t.Fatalf("active admissions = %d", admission.Active())
+	}
+	if worked, _, err = loop.step(context.Background()); err != nil || worked {
+		t.Fatalf("dispatch while quiescent = %v, %v", worked, err)
+	}
+	if !admission.Release(lease.Token) {
+		t.Fatal("quiescence lease did not release")
+	}
+	worked, _, err = loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("dispatch after release = %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "second workflow start")
+	workflows.release <- struct{}{}
+	waitForSignal(t, workflows.finished, "second workflow finish")
+	waitForActiveCount(t, loop, 0)
+	if runs, _ := workflows.snapshot(); runs != 2 {
+		t.Fatalf("runs = %d, want 2", runs)
+	}
+}
+
+func TestQuiescenceDrainsWorkflowAuthoring(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	created, _ := wire.Publish(state.WorkflowCreated, state.WorkflowData{Name: "Draft"})
+	wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "workflow", RelationID: created.ID, Author: "user", Content: "Build it",
+	})
+	runner := &fakeAgent{
+		output: "Created.", streamed: make(chan struct{}, 1), release: make(chan struct{}),
+	}
+	admission := quiescence.New()
+	loop, _ := NewLoop(wire, runner, newFakeWorkflows(), admission)
+	finished := make(chan error, 1)
+	go func() {
+		_, _, stepErr := loop.step(context.Background())
+		finished <- stepErr
+	}()
+	waitForSignal(t, runner.streamed, "workflow authoring start")
+
+	acquired := make(chan quiescence.Lease, 1)
+	go func() {
+		lease, acquireErr := admission.Acquire(context.Background(), time.Second)
+		if acquireErr != nil {
+			t.Errorf("acquire quiescence: %v", acquireErr)
+			return
+		}
+		acquired <- lease
+	}()
+	waitForCondition(t, func() bool { return !admission.Accepting() }, "authoring admission to stop")
+	select {
+	case <-acquired:
+		t.Fatal("quiescence completed before authoring drained")
+	default:
+	}
+
+	runner.release <- struct{}{}
+	if stepErr := receiveValue(t, finished, "workflow authoring finish"); stepErr != nil {
+		t.Fatal(stepErr)
+	}
+	lease := receiveValue(t, acquired, "quiescence lease")
+	if eventTypeCount(wire.Events(0), authoringCompleted) != 1 {
+		t.Fatal("quiescence completed before the authoring terminal event")
+	}
+	if !admission.Release(lease.Token) {
+		t.Fatal("quiescence lease did not release")
+	}
+}
+
+func TestQuiescenceReleaseWakesPendingDispatchWithoutAnotherWireEvent(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	sourcePath := "/workflows/review.js"
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{
+		Name: "review", Path: &sourcePath,
+	})
+	wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: true,
+	})
+	wire.Publish("release.ready", map[string]int{"version": 1})
+
+	workflows := newFakeWorkflows()
+	admission := quiescence.New()
+	loop, _ := NewLoop(wire, &fakeAgent{}, workflows, admission)
+	lease, err := admission.Acquire(context.Background(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := wire.LastID()
+	admissionChanged := admission.Changes()
+	worked, nextCron, err := loop.step(context.Background())
+	if err != nil || worked || !nextCron.IsZero() {
+		t.Fatalf("blocked step = %v, %v, next cron %v", worked, err, nextCron)
+	}
+	if !admission.Release(lease.Token) {
+		t.Fatal("quiescence lease did not release")
+	}
+	waitContext, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := loop.wait(waitContext, after, nextCron, admissionChanged); err != nil {
+		t.Fatalf("wait after release = %v", err)
+	}
+	if wire.LastID() != after {
+		t.Fatal("release wake required an unrelated wire event")
+	}
+
+	worked, _, err = loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("dispatch after release = %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "released workflow start")
+	waitForSignal(t, workflows.finished, "released workflow finish")
+	waitForActiveCount(t, loop, 0)
+}
+
 func TestLoopPausesTriggerDispatchAtZeroCapacity(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
@@ -870,7 +1039,7 @@ func TestLoopPausesTriggerDispatchAtZeroCapacity(t *testing.T) {
 	wire.Publish("release.ready", map[string]int{"version": 1})
 
 	workflows := newFakeWorkflows()
-	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
 	worked, _, err := loop.step(context.Background())
 	if err != nil || worked {
 		t.Fatalf("zero-capacity step = %v, %v", worked, err)
@@ -902,7 +1071,7 @@ func TestLoopDiscardsDisabledEventsAndRunsNewEventAfterEnable(t *testing.T) {
 	wire.Publish("release.ready", map[string]int{"version": 1})
 
 	workflows := newFakeWorkflows()
-	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
 	worked, _, err := loop.step(context.Background())
 	if err != nil || worked || eventTypeCount(wire.Events(0), state.WorkflowRunStarted) != 0 {
 		t.Fatalf("disabled dispatch = %v, %v, events = %#v", worked, err, wire.Events(0))
@@ -990,7 +1159,7 @@ func TestCronResumesAfterEnableWithoutCatchUp(t *testing.T) {
 
 	wire.Publish(state.CronFired, state.CronData{TriggerID: triggerEvent.ID})
 	workflows := newFakeWorkflows()
-	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
 	worked, _, err := loop.step(context.Background())
 	if err != nil || !worked {
 		t.Fatalf("post-enable cron dispatch = %v, %v", worked, err)
@@ -1011,7 +1180,7 @@ func TestDisablingTriggerDoesNotCancelActiveRun(t *testing.T) {
 
 	workflows := newFakeWorkflows()
 	workflows.release = make(chan struct{})
-	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
 	worked, _, err := loop.step(context.Background())
 	if err != nil || !worked {
 		t.Fatalf("initial dispatch = %v, %v", worked, err)
@@ -1060,7 +1229,7 @@ func TestDisableWinsAgainstStaleTriggerAdmission(t *testing.T) {
 	})
 
 	workflows := newFakeWorkflows()
-	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
 	published, err := loop.startTrigger(context.Background(), view, trigger, source, snapshotID)
 	if err != nil || published || loop.active != 0 ||
 		eventTypeCount(wire.Events(0), state.WorkflowRunStarted) != 0 {
@@ -1089,7 +1258,7 @@ func TestLoopRunCancelsAndWaitsForActiveWorkflows(t *testing.T) {
 
 	workflows := newFakeWorkflows()
 	workflows.release = make(chan struct{})
-	loop, _ := NewLoop(wire, &fakeAgent{}, workflows)
+	loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan error, 1)
 	go func() { stopped <- loop.Run(ctx) }()
@@ -1129,6 +1298,33 @@ func waitForSignal(t *testing.T, channel <-chan struct{}, label string) {
 	case <-channel:
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for %s", label)
+	}
+}
+
+func waitForCondition(t *testing.T, check func() bool, label string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if check() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", label)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func receiveValue[T any](t *testing.T, channel <-chan T, label string) T {
+	t.Helper()
+	select {
+	case value := <-channel:
+		return value
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", label)
+		var zero T
+		return zero
 	}
 }
 

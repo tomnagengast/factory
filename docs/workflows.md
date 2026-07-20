@@ -384,6 +384,15 @@ available. Lowering capacity does not cancel active runs; new runs wait until
 the active count falls below the new value. Raising it lets the coordinator
 fill the new slots. There is no separate queue or retry service.
 
+Deployment code can acquire `POST /api/quiescence` before replacing the
+Factory process. The coordinator first closes all workflow admission, including
+authoring and human-gate resumes, and then waits until admitted work has
+recorded its terminal wire events. A successful response contains an opaque
+lease that keeps admission closed. `DELETE /api/quiescence/{lease}` reopens it.
+The lease expires after 15 minutes, and a canceled acquisition releases its
+claim. Process replacement also clears this in-memory state. Only one
+quiescence acquisition can exist at a time.
+
 Failures remain observable:
 
 - authoring errors preserve earlier steps, then become
