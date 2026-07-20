@@ -1,6 +1,12 @@
 # Factory
 
-![](https://media.tenor.com/4LvAD8hD5tcAAAAM/charlie-day.gif)
+<video
+  src="https://raw.githubusercontent.com/tomnagengast/factory/main/docs/assets/the-gang-invents-graph-engineering.mp4"
+  controls
+  width="960"
+></video>
+
+[Watch The Gang Invents Graph Engineering](docs/assets/the-gang-invents-graph-engineering.mp4)
 
 Factory is an intentionally unsafe trusted-environment demonstrator for three
 mechanisms:
