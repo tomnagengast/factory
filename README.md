@@ -1,6 +1,6 @@
 # Factory
 
-https://media.tenor.com/4LvAD8hD5tcAAAAM/charlie-day.gif
+![](https://media.tenor.com/4LvAD8hD5tcAAAAM/charlie-day.gif)
 
 Factory is an intentionally unsafe trusted-environment demonstrator for three
 mechanisms:
