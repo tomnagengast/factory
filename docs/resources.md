@@ -146,10 +146,15 @@ atomic snapshot, including events written before the stream connection opens.
 The web application can re-sort or group tasks by any task field. It stores
 the selected sort field, direction, and group field in the browser and
 restores them on later visits. A missing or invalid saved preference uses ID
-descending with no grouping. The project must exist and not be deleted. Task
-detail includes comments and artifacts. Task resource responses always
-include `description` and `parentTaskId`; unset values are `null`, so a client
-can use a fetched task as the basis for a full `PUT`.
+descending with no grouping. After a task is created successfully, the web
+application also remembers its project in the browser. Later task creation
+forms restore that project while it remains active. A missing, invalid, or
+inactive saved project leaves the required project choice blank. Failed
+creations and task edits do not change the remembered project. The project
+must exist and not be deleted. Task detail includes comments and artifacts.
+Task resource responses always include `description` and `parentTaskId`;
+unset values are `null`, so a client can use a fetched task as the basis for a
+full `PUT`.
 
 The web task detail is rendered by default and enters its form only after
 selecting **Edit task**. Save persists the task; cancel discards the form.
