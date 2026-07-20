@@ -81,6 +81,73 @@ func TestTaskCommentUsesResourceAPI(t *testing.T) {
 	}
 }
 
+func TestTaskAndCommentReactionsUseResourceAPI(t *testing.T) {
+	type receivedRequest struct {
+		method, path, body string
+	}
+	var received []receivedRequest
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		data, _ := io.ReadAll(request.Body)
+		received = append(received, receivedRequest{request.Method, request.URL.Path, string(data)})
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":12,"reactions":["👍"]}`))
+	}))
+	defer server.Close()
+
+	taskBody := `{"emoji":"👍","active":true}`
+	commentBody := `{"emoji":"🎉","active":false}`
+	var output bytes.Buffer
+	for _, args := range [][]string{
+		{"--url", server.URL, "task", "react", "12", taskBody},
+		{"--url", server.URL, "comment", "react", "18", commentBody},
+	} {
+		if err := Run(args, &output, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []receivedRequest{
+		{http.MethodPut, "/api/tasks/12/reactions", taskBody},
+		{http.MethodPut, "/api/comments/18/reactions", commentBody},
+	}
+	if len(received) != len(want) {
+		t.Fatalf("requests = %#v", received)
+	}
+	for index := range want {
+		if received[index] != want[index] {
+			t.Fatalf("request %d = %#v, want %#v", index, received[index], want[index])
+		}
+	}
+	if strings.Count(output.String(), `"reactions": [`) != 2 {
+		t.Fatalf("output = %s", output.String())
+	}
+}
+
+func TestReactionCommandsValidateArgumentsAndPropagateServerErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"task", "react"},
+		{"task", "react", "nope", `{"emoji":"👍","active":true}`},
+		{"comment", "react", "1"},
+		{"workflow", "react", "1", `{"emoji":"👍","active":true}`},
+	} {
+		if _, err := parse(args); err == nil {
+			t.Fatalf("expected %v to fail", args)
+		}
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"error":"unsupported reaction emoji"}`))
+	}))
+	defer server.Close()
+	err := Run([]string{
+		"--url", server.URL, "task", "react", "12", `{"emoji":"💥","active":true}`,
+	}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "400 Bad Request") ||
+		!strings.Contains(err.Error(), "unsupported reaction emoji") {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
 func TestTaskCreateAndUpdateForwardInReviewStatus(t *testing.T) {
 	type receivedRequest struct {
 		method, path, body string

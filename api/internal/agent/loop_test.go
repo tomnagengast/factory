@@ -531,6 +531,48 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	}
 }
 
+func TestReactionTriggerHasNoTaskContext(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	task, _ := wire.Publish(state.TaskCreated, state.TaskData{
+		Title: "React to this", Status: state.Todo, ProjectID: 99,
+	})
+	sourcePath := "/workflows/reactions.js"
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{
+		Name: "reactions", Path: &sourcePath,
+	})
+	wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: state.ReactionUpdated, WorkflowID: workflowEvent.ID, Enabled: true,
+	})
+	wire.Publish(state.ReactionUpdated, state.ReactionUpdatedData{
+		TargetType: "task", TargetID: task.ID, Emoji: "👍", Active: true,
+	})
+
+	workflows := newFakeWorkflows()
+	loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
+	worked, _, err := loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("reaction dispatch = %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "reaction workflow start")
+	waitForSignal(t, workflows.finished, "reaction workflow finish")
+	waitForActiveCount(t, loop, 0)
+	workflows.mu.Lock()
+	if len(workflows.runs) != 1 || workflows.runs[0].directory != "" ||
+		workflows.runs[0].source != sourcePath {
+		workflows.mu.Unlock()
+		t.Fatalf("reaction workflow runs = %#v", workflows.runs)
+	}
+	workflows.mu.Unlock()
+	view, err := state.ProjectEvents(wire.Events(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Runs) != 1 || view.Runs[0].TaskID != 0 {
+		t.Fatalf("reaction-triggered run = %#v", view.Runs)
+	}
+}
+
 func TestLoopWaitsForHumanTaskCommentAndResumesTheSameRun(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()

@@ -250,6 +250,15 @@ func (s *Server) taskDelete(writer http.ResponseWriter, request *http.Request) {
 	s.delete(writer, request, "task", state.TaskDeleted)
 }
 
+func (s *Server) taskReactionUpdate(writer http.ResponseWriter, request *http.Request) {
+	id, err := pathID(request, "task")
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	s.reactionUpdate(writer, request, "task", id)
+}
+
 func validateTask(input *state.TaskData, view state.Snapshot) error {
 	input.Title = strings.TrimSpace(input.Title)
 	if input.Title == "" {
@@ -359,6 +368,100 @@ func (s *Server) commentUpdate(writer http.ResponseWriter, request *http.Request
 
 func (s *Server) commentDelete(writer http.ResponseWriter, request *http.Request) {
 	s.delete(writer, request, "comment", state.CommentDeleted)
+}
+
+func (s *Server) commentReactionUpdate(writer http.ResponseWriter, request *http.Request) {
+	id, err := pathID(request, "comment")
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	s.reactionUpdate(writer, request, "comment", id)
+}
+
+func (s *Server) reactionUpdate(
+	writer http.ResponseWriter,
+	request *http.Request,
+	targetType string,
+	targetID int64,
+) {
+	var input struct {
+		Emoji  string `json:"emoji"`
+		Active *bool  `json:"active"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	if input.Active == nil {
+		writeError(writer, http.StatusBadRequest, errors.New("reaction active state is required"))
+		return
+	}
+	if !state.ValidReactionEmoji(input.Emoji) {
+		writeError(writer, http.StatusBadRequest, errors.New("unsupported reaction emoji"))
+		return
+	}
+	data := state.ReactionUpdatedData{
+		TargetType: targetType, TargetID: targetID, Emoji: input.Emoji, Active: *input.Active,
+	}
+	for {
+		if request.Context().Err() != nil {
+			return
+		}
+		events := s.wire.Events(0)
+		view, err := state.ProjectEvents(events)
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, err)
+			return
+		}
+		if status, err := validateReactionTarget(view, targetType, targetID); err != nil {
+			writeError(writer, status, err)
+			return
+		}
+		expectedLastID := int64(0)
+		if len(events) > 0 {
+			expectedLastID = events[len(events)-1].ID
+		}
+		event, published, err := s.wire.PublishIfCurrent(expectedLastID, state.ReactionUpdated, data)
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, err)
+			return
+		}
+		if !published {
+			continue
+		}
+		view, err = state.ProjectEvents(append(events, event))
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, err)
+			return
+		}
+		if targetType == "task" {
+			task, _ := view.Task(targetID)
+			writeJSON(writer, http.StatusOK, task)
+			return
+		}
+		comment, _ := view.Comment(targetID)
+		writeJSON(writer, http.StatusOK, comment)
+		return
+	}
+}
+
+func validateReactionTarget(view state.Snapshot, targetType string, targetID int64) (int, error) {
+	if targetType == "task" {
+		task, found := view.Task(targetID)
+		if !found || task.DeletedAt != nil {
+			return http.StatusNotFound, errors.New("task not found")
+		}
+		return 0, nil
+	}
+	comment, found := view.Comment(targetID)
+	if !found || comment.DeletedAt != nil {
+		return http.StatusNotFound, errors.New("comment not found")
+	}
+	if comment.RelationType != "task" {
+		return http.StatusBadRequest, errors.New("reactions are supported only on task comments")
+	}
+	return 0, nil
 }
 
 func (s *Server) createComment(writer http.ResponseWriter, data state.CommentData) {

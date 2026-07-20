@@ -22,6 +22,7 @@ export type Task = Record & {
   parentTaskId?: number;
   status: TaskStatus;
   projectId: number;
+  reactions: string[];
 };
 
 export type Comment = Record & {
@@ -33,6 +34,7 @@ export type Comment = Record & {
   label?: string;
   final: boolean;
   content: string;
+  reactions: string[];
 };
 
 export type Artifact = Record & {

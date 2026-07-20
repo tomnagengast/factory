@@ -2,6 +2,8 @@ package state
 
 import (
 	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +42,137 @@ func TestProjectEventsBuildsDomainState(t *testing.T) {
 	}
 	if len(view.CommentsFor("task", 2)) != 1 || len(view.ArtifactsFor("task", 2)) != 1 {
 		t.Fatal("relations were not projected")
+	}
+}
+
+func TestTaskReactionsReplayDesiredStateInPaletteOrder(t *testing.T) {
+	at := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	events := []eventwire.Event{
+		event(1, TaskCreated, at, TaskData{Title: "First", Status: Todo, ProjectID: 99}),
+		event(2, TaskCreated, at.Add(time.Minute), TaskData{Title: "Second", Status: Todo, ProjectID: 99}),
+	}
+	for index, emoji := range []string{"👀", "😂", "🎉", "❤️", "👎", "👍"} {
+		events = append(events, event(int64(index+3), ReactionUpdated, at.Add(time.Duration(index+2)*time.Minute), ReactionUpdatedData{
+			TargetType: "task", TargetID: 1, Emoji: emoji, Active: true,
+		}))
+	}
+	events = append(events,
+		event(9, ReactionUpdated, at.Add(8*time.Minute), ReactionUpdatedData{
+			TargetType: "task", TargetID: 1, Emoji: "👍", Active: true,
+		}),
+		event(10, ReactionUpdated, at.Add(9*time.Minute), ReactionUpdatedData{
+			TargetType: "task", TargetID: 1, Emoji: "👎", Active: false,
+		}),
+		event(11, ReactionUpdated, at.Add(10*time.Minute), ReactionUpdatedData{
+			TargetType: "task", TargetID: 1, Emoji: "👎", Active: false,
+		}),
+		event(12, ReactionUpdated, at.Add(11*time.Minute), ReactionUpdatedData{
+			TargetType: "task", TargetID: 1, Emoji: "👎", Active: true,
+		}),
+		event(13, ReactionUpdated, at.Add(12*time.Minute), ReactionUpdatedData{
+			TargetType: "task", TargetID: 2, Emoji: "😂", Active: true,
+		}),
+		event(14, ReactionUpdated, at.Add(13*time.Minute), ReactionUpdatedData{
+			TargetType: "task", TargetID: 1, Emoji: "👍🏻", Active: true,
+		}),
+		event(15, ReactionUpdated, at.Add(14*time.Minute), ReactionUpdatedData{
+			TargetType: "workflow", TargetID: 1, Emoji: "👍", Active: true,
+		}),
+		event(16, ReactionUpdated, at.Add(15*time.Minute), ReactionUpdatedData{
+			TargetType: "task", TargetID: 999, Emoji: "👍", Active: true,
+		}),
+		event(17, TaskDeleted, at.Add(16*time.Minute), IDData{ID: 1}),
+		event(18, ReactionUpdated, at.Add(17*time.Minute), ReactionUpdatedData{
+			TargetType: "task", TargetID: 1, Emoji: "🎉", Active: false,
+		}),
+	)
+
+	view, err := ProjectEvents(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, found := view.Task(1)
+	if !found || !slices.Equal(first.Reactions, ReactionEmojis) || first.DeletedAt == nil ||
+		first.UpdatedAt != events[16].At || *first.DeletedAt != events[16].At {
+		t.Fatalf("first task = %#v, found = %v", first, found)
+	}
+	second, found := view.Task(2)
+	if !found || !slices.Equal(second.Reactions, []string{"😂"}) || second.UpdatedAt != events[12].At {
+		t.Fatalf("second task = %#v, found = %v", second, found)
+	}
+
+	legacy, err := ProjectEvents(events[:2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Tasks[0].Reactions == nil || len(legacy.Tasks[0].Reactions) != 0 {
+		t.Fatalf("legacy task reactions = %#v", legacy.Tasks[0].Reactions)
+	}
+	encoded, _ := json.Marshal(legacy.Tasks[0])
+	if !strings.Contains(string(encoded), `"reactions":[]`) {
+		t.Fatalf("legacy task JSON = %s", encoded)
+	}
+}
+
+func TestTaskCommentReactionsIgnoreRelationsButRespectCommentState(t *testing.T) {
+	at := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	rootID, replyID := int64(2), int64(3)
+	events := []eventwire.Event{
+		event(1, TaskCreated, at, TaskData{Title: "Task", Status: Todo, ProjectID: 99}),
+		event(2, CommentCreated, at.Add(time.Minute), CommentData{
+			RelationType: "task", RelationID: 1, Author: "user", Content: "Root",
+		}),
+		event(3, CommentCreated, at.Add(2*time.Minute), CommentData{
+			RelationType: "task", RelationID: 1, ParentCommentID: &rootID, Author: "user", Content: "Reply",
+		}),
+		event(4, CommentCreated, at.Add(3*time.Minute), CommentData{
+			RelationType: "task", RelationID: 1, ParentCommentID: &replyID, Author: "agent", Content: "Nested",
+		}),
+		event(5, CommentCreated, at.Add(4*time.Minute), CommentData{
+			RelationType: "workflow", RelationID: 88, Author: "user", Content: "Workflow",
+		}),
+		event(6, ReactionUpdated, at.Add(5*time.Minute), ReactionUpdatedData{
+			TargetType: "comment", TargetID: 2, Emoji: "❤️", Active: true,
+		}),
+		event(7, ReactionUpdated, at.Add(6*time.Minute), ReactionUpdatedData{
+			TargetType: "comment", TargetID: 3, Emoji: "👍", Active: true,
+		}),
+		event(8, CommentDeleted, at.Add(7*time.Minute), IDData{ID: 2}),
+		event(9, ReactionUpdated, at.Add(8*time.Minute), ReactionUpdatedData{
+			TargetType: "comment", TargetID: 4, Emoji: "🎉", Active: true,
+		}),
+		event(10, TaskDeleted, at.Add(9*time.Minute), IDData{ID: 1}),
+		event(11, ReactionUpdated, at.Add(10*time.Minute), ReactionUpdatedData{
+			TargetType: "comment", TargetID: 3, Emoji: "👀", Active: true,
+		}),
+		event(12, ReactionUpdated, at.Add(11*time.Minute), ReactionUpdatedData{
+			TargetType: "comment", TargetID: 5, Emoji: "😂", Active: true,
+		}),
+		event(13, CommentDeleted, at.Add(12*time.Minute), IDData{ID: 3}),
+		event(14, ReactionUpdated, at.Add(13*time.Minute), ReactionUpdatedData{
+			TargetType: "comment", TargetID: 3, Emoji: "😂", Active: true,
+		}),
+	}
+
+	view, err := ProjectEvents(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, _ := view.Comment(2)
+	reply, _ := view.Comment(3)
+	nested, _ := view.Comment(4)
+	workflow, _ := view.Comment(5)
+	if !slices.Equal(root.Reactions, []string{"❤️"}) || root.UpdatedAt != events[7].At {
+		t.Fatalf("root comment = %#v", root)
+	}
+	if !slices.Equal(reply.Reactions, []string{"👍", "👀"}) || reply.UpdatedAt != events[12].At {
+		t.Fatalf("reply comment = %#v", reply)
+	}
+	if !slices.Equal(nested.Reactions, []string{"🎉"}) || nested.UpdatedAt != events[8].At {
+		t.Fatalf("nested comment = %#v", nested)
+	}
+	if workflow.Reactions == nil || len(workflow.Reactions) != 0 || workflow.UpdatedAt != workflow.CreatedAt {
+		t.Fatalf("workflow comment = %#v", workflow)
 	}
 }
 
@@ -382,8 +515,8 @@ func TestWaitingRunFindsAUserTaskCommentAndResumes(t *testing.T) {
 				Key: "gate-key", Message: "Approve it?",
 			},
 		}),
-		event(7, CommentCreated, at, CommentData{
-			RelationType: "task", RelationID: 2, Author: "user", Content: "Approved.",
+		event(7, ReactionUpdated, at, ReactionUpdatedData{
+			TargetType: "comment", TargetID: 5, Emoji: "👍", Active: true,
 		}),
 	}
 	view, err := ProjectEvents(events)
@@ -397,20 +530,31 @@ func TestWaitingRunFindsAUserTaskCommentAndResumes(t *testing.T) {
 		string(run.Arguments) != `{"runId":3}` {
 		t.Fatalf("waiting run = %#v, found = %v", run, found)
 	}
+	if _, _, found := view.PendingHumanResponse(); found {
+		t.Fatal("reaction satisfied a waiting human gate")
+	}
+
+	events = append(events, event(8, CommentCreated, at, CommentData{
+		RelationType: "task", RelationID: 2, Author: "user", Content: "Approved.",
+	}))
+	view, err = ProjectEvents(events)
+	if err != nil {
+		t.Fatal(err)
+	}
 	selected, response, found := view.PendingHumanResponse()
-	if !found || selected.ID != 3 || response.ID != 7 || response.Content != "Approved." {
+	if !found || selected.ID != 3 || response.ID != 8 || response.Content != "Approved." {
 		t.Fatalf("pending response = %#v, %#v, %v", selected, response, found)
 	}
 
-	events = append(events, event(8, WorkflowRunResumed, at, WorkflowRunStateData{
-		RunID: 3, ResponseCommentID: 7,
+	events = append(events, event(9, WorkflowRunResumed, at, WorkflowRunStateData{
+		RunID: 3, ResponseCommentID: 8,
 	}))
 	view, err = ProjectEvents(events)
 	if err != nil {
 		t.Fatal(err)
 	}
 	run, _ = view.Run(3)
-	if run.Status != "running" || run.WaitingGate != nil || run.ResponseCommentID != 7 {
+	if run.Status != "running" || run.WaitingGate != nil || run.ResponseCommentID != 8 {
 		t.Fatalf("resumed run = %#v", run)
 	}
 	if _, _, found := view.PendingHumanResponse(); found {

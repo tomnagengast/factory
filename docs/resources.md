@@ -65,6 +65,7 @@ Creating or updating a project creates its local `path` if needed.
 | `parentTaskId` | integer or null | no |
 | `status` | string | no, defaults to `backlog` |
 | `projectId` | integer | yes |
+| `reactions` | string array | response only; fixed palette order |
 
 Allowed status values:
 
@@ -94,6 +95,7 @@ POST   /api/tasks
 GET    /api/tasks/{id}
 PUT    /api/tasks/{id}
 DELETE /api/tasks/{id}
+PUT    /api/tasks/{id}/reactions
 POST   /api/tasks/{id}/comments
 ```
 
@@ -139,6 +141,7 @@ can reply to another comment.
 | `label` | string or omitted | Tool or harness-specific label |
 | `final` | boolean | Whether an agent comment answers its parent user comment |
 | `content` | string | Comment text |
+| `reactions` | string array | Fixed palette order; empty for workflow comments |
 
 User comments are non-final. Workflow authoring progress comments use the root
 user request as their parent and remain non-final. The one terminal agent
@@ -168,6 +171,7 @@ POST   /api/workflows/{workflowId}/comments
 GET    /api/comments/{id}
 PUT    /api/comments/{id}
 DELETE /api/comments/{id}
+PUT    /api/comments/{id}/reactions
 ```
 
 Task comment bodies use `content`; workflow conversation bodies use
@@ -176,6 +180,50 @@ Task comment bodies use `content`; workflow conversation bodies use
 Root task comments and replies use the same media button, paste, and drop
 behavior as task descriptions. Media-only comments remain valid because the
 generated markup is nonblank content.
+
+## Reactions
+
+Tasks and task comments use one shared implicit reactor. A reaction write sets
+the requested state instead of toggling it:
+
+```sh
+factory task react 12 '{"emoji":"👍","active":true}'
+factory comment react 18 '{"emoji":"🎉","active":false}'
+```
+
+The same operations through HTTP are:
+
+```text
+PUT /api/tasks/{id}/reactions
+PUT /api/comments/{id}/reactions
+```
+
+Both routes accept only `emoji` and the required boolean `active`. The exact
+palette is:
+
+```text
+👍 👎 ❤️ 🎉 😂 👀
+```
+
+Factory matches the decoded emoji string exactly. It does not trim, normalize,
+accept aliases, or accept skin-tone variants. Responses return the updated task
+or comment. Reaction arrays always follow palette order and serialize as `[]`
+when empty. Because tasks and comments use shared record shapes, `reactions`
+also appears in task lists, project detail, task detail, comment detail, and
+workflow conversation responses. Workflow comments always carry an empty
+array and cannot receive reactions.
+
+Only active tasks and active task comments accept writes. Root comments,
+replies at any depth, and agent gate prompts are supported. An active task
+comment remains eligible after its task or parent comment is deleted. Missing
+or deleted targets return `404`; unsupported emoji and workflow comments
+return `400`.
+
+Every accepted request appends one `reaction.updated` event and advances the
+target's `updatedAt`, even when the requested state already matches the current
+state. These events are observable and triggerable like other wire facts. They
+do not create comments, identify a reactor, carry task workflow context, or
+count reactions.
 
 ## Media
 
@@ -613,8 +661,8 @@ when deployment environment variables are set.
 
 ```text
 project   list, get, create, update, delete
-task      list, get, create, update, delete, comment
-comment   get, update, delete
+task      list, get, create, update, delete, comment, react
+comment   get, update, delete, react
 artifact  list, get, create, update, delete
 media     create <file>
 event     list, get, create

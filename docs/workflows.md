@@ -301,6 +301,11 @@ With a schema, the comment must contain matching JSON. Factory replies with a
 validation error and keeps the run waiting when the JSON is invalid. Unrelated
 thread replies do not resume the run.
 
+Emoji reactions never resume a human gate. Reacting to the task, the gate
+prompt, or another task comment appends `reaction.updated`, not
+`comment.created`. The coordinator selects only a later active user task
+comment at the root or a direct reply to the gate prompt.
+
 `/history` lists every projected run and `/history/{id}` displays the distinct
 events chronologically in contiguous phase groups. Run content renders as
 Markdown: prose wraps within the page, while code blocks and tables scroll
@@ -334,7 +339,9 @@ recursively starting the same workflow.
 
 Deleted tasks remain in the projection, so Factory can still resolve the
 project path for cleanup workflows triggered by `task.deleted`. Other event
-types run from the configured workflow workspace.
+types run from the configured workflow workspace. This includes
+`reaction.updated`: it is observable and triggerable, but a run started from it
+has no task ID or project working directory.
 
 ## Cron triggers
 
