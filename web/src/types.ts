@@ -29,6 +29,9 @@ export type Comment = Record & {
   relationId: number;
   parentCommentId?: number;
   author: "user" | "agent";
+  kind: "message" | "reasoning" | "tool-use" | "tool-output" | "error" | "event";
+  label?: string;
+  final: boolean;
   content: string;
 };
 

@@ -95,6 +95,9 @@ type Comment struct {
 	RelationID      int64  `json:"relationId"`
 	ParentCommentID *int64 `json:"parentCommentId,omitempty"`
 	Author          string `json:"author"`
+	Kind            string `json:"kind"`
+	Label           string `json:"label,omitempty"`
+	Final           bool   `json:"final"`
 	Content         string `json:"content"`
 }
 
@@ -280,6 +283,9 @@ type CommentData struct {
 	RelationID      int64  `json:"relationId"`
 	ParentCommentID *int64 `json:"parentCommentId,omitempty"`
 	Author          string `json:"author"`
+	Kind            string `json:"kind,omitempty"`
+	Label           string `json:"label,omitempty"`
+	Final           *bool  `json:"final,omitempty"`
 	Content         string `json:"content"`
 }
 
@@ -454,10 +460,19 @@ func ProjectEvents(events []eventwire.Event) (Snapshot, error) {
 			if err := decode(event, &data); err != nil {
 				return Snapshot{}, err
 			}
+			kind := data.Kind
+			if kind == "" {
+				kind = "message"
+			}
+			final := data.Author == "agent" && data.RelationType == "workflow" && data.ParentCommentID != nil
+			if data.Final != nil {
+				final = *data.Final
+			}
 			commentIndex[event.ID] = len(view.Comments)
 			view.Comments = append(view.Comments, Comment{
 				Record: newRecord(event), RelationType: data.RelationType, RelationID: data.RelationID,
-				ParentCommentID: data.ParentCommentID, Author: data.Author, Content: data.Content,
+				ParentCommentID: data.ParentCommentID, Author: data.Author, Kind: kind,
+				Label: data.Label, Final: final, Content: data.Content,
 			})
 		case CommentUpdated:
 			var data CommentData
@@ -828,7 +843,7 @@ func (s Snapshot) ArtifactsFor(relationType string, relationID int64) []Artifact
 func (s Snapshot) PendingWorkflowComment() (Comment, bool) {
 	answered := make(map[int64]bool)
 	for _, comment := range s.Comments {
-		if comment.Author == "agent" && comment.ParentCommentID != nil {
+		if comment.Author == "agent" && comment.Final && comment.ParentCommentID != nil {
 			answered[*comment.ParentCommentID] = true
 		}
 	}

@@ -135,7 +135,15 @@ can reply to another comment.
 | `relationId` | integer | Related resource ID |
 | `parentCommentId` | integer or omitted | Reply parent |
 | `author` | string | `user` or `agent` |
+| `kind` | string | `message`, `reasoning`, `tool-use`, `tool-output`, `error`, or `event` |
+| `label` | string or omitted | Tool or harness-specific label |
+| `final` | boolean | Whether an agent comment answers its parent user comment |
 | `content` | string | Comment text |
+
+User comments are non-final. Workflow authoring progress comments use the root
+user request as their parent and remain non-final. The one terminal agent
+response is final. Historical workflow agent replies with a parent written
+before this field existed replay as final responses.
 
 Create a root task comment:
 
@@ -471,7 +479,10 @@ POST   /api/workflows/{id}/comments
 ```
 
 Workflow detail includes metadata, conversation comments, artifacts, and the
-current source file text. Usage fields are recomputed from the wire on each
+current source file text. Comments appear exactly once in append-only wire
+order, including live authoring reasoning, tool calls, complete tool results,
+agent messages, errors, and unknown semantic harness events. Usage fields are
+recomputed from the wire on each
 snapshot. Every start counts, including running, waiting, completed, failed,
 and immediate-failure runs. Task usage counts distinct positive task IDs from
 the run's direct task context; historical starts without `taskId` recover it

@@ -67,10 +67,25 @@ The coordinator's sequential authoring path:
 2. assigns `<workflow-workspace>/.claude/workflows/workflow-<id>.js`,
 3. appends `workflow.authoring.started`,
 4. runs the selected unrestricted harness with its model and reasoning level,
-5. asks the workflow CLI to validate the complete written file,
-6. asks the workflow CLI to rediscover the validated file,
-7. appends a completed or failed event,
-8. appends the harness response as an agent comment.
+5. appends each completed semantic harness step as a non-final agent comment,
+6. asks the workflow CLI to validate the complete written file,
+7. asks the workflow CLI to rediscover the validated file,
+8. appends a completed or failed event,
+9. appends one final agent comment.
+
+Codex runs with JSONL output and Claude Code runs with verbose `stream-json`
+output. Factory normalizes exposed reasoning or thinking, agent messages, tool
+calls, complete tool results, errors, and unknown semantic events into ordered
+comments. Transport lifecycle records and token deltas do not become comments.
+The stream contains only reasoning that the harness exposes. It does not expose
+private chain-of-thought.
+
+Factory holds the newest agent text as the possible final response. If later
+semantic work arrives, that text becomes a non-final message. After a clean
+process exit, Factory validates and rediscovers the workflow before it appends
+the remaining text once as the final response. Process, stream, validation,
+and discovery failures follow the same order and end with one final error
+response.
 
 The harness runs with the workflow workspace as its working directory. Factory
 exposes the resource client as `$FACTORY_CLI` and the current server as
@@ -82,9 +97,12 @@ create or update the trigger that will run the workflow:
 ```
 
 The workflow detail page highlights the live source as plain JavaScript. It
-polls the current file once per second while a user message awaits an agent
-reply and highlights each changed response. Chat and source scroll
-independently on wide screens and stack on narrow screens.
+The page receives each durable comment through the live event
+stream and polls the current file once per second while any user message lacks
+a final agent response, highlighting each changed source response. Intermediate
+steps do not stop the updating state. Chat and source scroll independently on
+wide screens and stack on narrow screens. Refreshing the page replays the same
+steps once in wire order.
 
 Use `/settings` or `factory settings update` to select the harness, model,
 reasoning level, and workflow capacity. The API supplies the supported option
@@ -130,6 +148,11 @@ The standalone runtime provides:
 Workflow authoring remains one session at a time. Triggered workflows may
 overlap up to Factory's configured workflow capacity, and each workflow may
 also use the runtime's internal concurrency.
+
+Authoring progress is durable but is not conversation input. Later authoring
+prompts include user messages and final agent responses only. Reasoning, tool
+input, tool output, and harness event records remain visible without being
+sent back to the harness.
 
 The workflow loader expects deterministic source:
 
@@ -358,7 +381,8 @@ fill the new slots. There is no separate queue or retry service.
 
 Failures remain observable:
 
-- authoring errors become `workflow.authoring.failed` and an agent reply,
+- authoring errors preserve earlier steps, then become
+  `workflow.authoring.failed` and one final error reply,
 - run errors become `workflow.run.failed`,
 - canceled runs become `workflow.run.failed` during graceful shutdown,
 - startup appends `workflow.run.failed` for a prior run left `running`

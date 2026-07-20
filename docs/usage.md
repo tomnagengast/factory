@@ -208,6 +208,11 @@ report with blocking findings first.
 Factory appends the request to the wire, assigns an untracked workflow file,
 and gives the conversation to the selected harness. The workflow page shows
 the conversation and live file contents side by side while the agent writes.
+Exposed reasoning or thinking, tool calls, complete tool results, agent
+messages, and errors appear as separate messages while the process runs. The
+source stays marked **Updating** until Factory validates and rediscovers the
+workflow and records one final response. Refreshing during or after the run
+replays the same messages once in wire order.
 
 That agent process runs in the workflow workspace. It receives the current
 server as `$FACTORY_URL` and the CLI as `$FACTORY_CLI`, so you can ask it to
@@ -370,8 +375,10 @@ codex exec --help
 claude --help
 ```
 
-The workflow conversation records the agent process error as an agent reply,
-and the event wire records `workflow.authoring.failed`.
+The workflow conversation keeps every step recorded before the failure and
+ends with one final error reply. The event wire records
+`workflow.authoring.failed`. Stream parsing, process, workflow validation, and
+workflow discovery failures use the same terminal behavior.
 
 ### The browser shows an older UI
 
