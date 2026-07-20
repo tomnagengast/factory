@@ -347,6 +347,10 @@ and generated workflow files. Startup appends a failure event for any earlier
 run still projected as `running`, such as a process interrupted by a crash or
 service replacement.
 
+Nags deployments run the signed API and CLI from stable paths in
+`~/.local/share/factory/bin`. This lets macOS reuse Factory's privacy grants
+after a new immutable release replaces the prior build.
+
 Every semantic workflow event is part of the same durable wire. Restarting
 does not depend on temporary journal files or terminal logs to rebuild run
 history.

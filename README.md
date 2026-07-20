@@ -249,5 +249,7 @@ bun run --cwd web typecheck
 bun run --cwd web build
 ```
 
-The deployment manifest builds both Go binaries, embeds the frozen Solid
-bundle in `factory-api`, and runs `factory-api`.
+The local deployment manifest builds both Go binaries and embeds the frozen
+Solid bundle in `factory-api`. Nags signs both binaries and runs them from
+stable paths under `~/.local/share/factory/bin`, so macOS keeps one privacy
+identity across deployments.
