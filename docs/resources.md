@@ -438,6 +438,8 @@ Workflow metadata is projected from discovery and authoring events.
 | `scope` | string or null | workflow discovery |
 | `phases` | string array | workflow source `meta` |
 | `mutating` | boolean | workflow discovery |
+| `runCount` | integer | replayed `workflow.run.started` event count |
+| `taskCount` | integer | distinct directly associated task IDs across starts |
 
 Create through an agent conversation:
 
@@ -469,7 +471,12 @@ POST   /api/workflows/{id}/comments
 ```
 
 Workflow detail includes metadata, conversation comments, artifacts, and the
-current source file text.
+current source file text. Usage fields are recomputed from the wire on each
+snapshot. Every start counts, including running, waiting, completed, failed,
+and immediate-failure runs. Task usage counts distinct positive task IDs from
+the run's direct task context; historical starts without `taskId` recover it
+only when their immediate source is `task.created`, `task.updated`, or
+`task.deleted`.
 
 ## Workflow history
 

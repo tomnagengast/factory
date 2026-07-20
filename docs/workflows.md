@@ -229,6 +229,12 @@ The workflow receives `args.event`, `args.trigger`, and its integer
    pauses without holding a process or capacity slot,
 4. `workflow.run.completed` or `workflow.run.failed` closes the run.
 
+Workflow usage counts each `workflow.run.started` event once, regardless of
+whether the run remains active, waits for a human, completes, or fails. Its
+distinct task count uses only direct task context from a `task.created`,
+`task.updated`, or `task.deleted` source. A workflow started from another
+workflow's terminal event does not inherit the upstream task.
+
 The CLI journal is the complete semantic runtime stream: runtime lifecycle,
 phases, workflow logs, diagnostics, agent and gate prompts, cache hits, nested
 workflows, results, token counts, and failures. Factory passes an explicit
