@@ -102,7 +102,7 @@ Immutable media blobs default to `~/.local/share/factory/media`.
 /tasks/:task/comments/:comment         directly address a comment
 /events                                live event wire
 /events/:event                         directly address an event
-/triggers                              trigger list with enabled state
+/triggers                              filterable trigger list with enabled state
 /triggers/new                          create trigger
 /triggers/:trigger                     view and edit trigger
 /workflows                             discovered workflow list
