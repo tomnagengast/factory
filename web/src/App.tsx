@@ -19,11 +19,17 @@ import { bindNewestFollower, type NewestFollower } from "./follow-newest";
 import { historyResourceLink } from "./history";
 import { insertMediaMarkup, mediaAccept, mediaFiles, mediaKind, mediaMarkup } from "./media";
 import {
+  activeTaskCreationProjectId,
+  loadLastTaskProjectId,
+  saveLastTaskProjectId,
+} from "./task-creation-preferences";
+import {
   loadTaskViewPreferences,
   saveTaskViewPreferences,
   taskFields,
   type TaskField,
 } from "./task-view-preferences";
+import { filterTriggers, triggerEventTypeOptions, triggerWorkflowOptions } from "./triggers";
 import { highlightWorkflowSource } from "./workflow-source";
 import {
   taskStatuses,
@@ -632,6 +638,7 @@ function CommentCount(props: { count: number }) {
 
 function TaskNew() {
   const navigate = useNavigate();
+  const rememberedProjectID = loadLastTaskProjectId();
   const [options] = createResource(async () => {
     const [projects, tasks] = await Promise.all([
       get<{ projects: Project[] }>("/api/projects"), get<TaskListResponse>("/api/tasks"),
@@ -644,8 +651,10 @@ function TaskNew() {
       <PageHeader eyebrow="Tasks" title="Create a task" />
       <Load data={options} error={() => options.error}>
         {(value) => <TaskForm projects={value.projects} tasks={value.tasks} pending={action.pending()} error={action.error()}
+          initialProjectId={activeTaskCreationProjectId(value.projects, rememberedProjectID)}
           onSave={(body) => action.run(async () => {
             const created = await post<Task>("/api/tasks", body);
+            saveLastTaskProjectId(created.projectId);
             navigate(`/tasks/${created.id}`);
           })} />}
       </Load>
@@ -736,6 +745,7 @@ function TaskProperties(props: { task: Task; projects: Project[]; tasks: Task[] 
 
 function TaskForm(props: {
   task?: Task;
+  initialProjectId?: number;
   projects: Project[];
   tasks: Task[];
   pending: boolean;
@@ -767,7 +777,8 @@ function TaskForm(props: {
         <label>Status<select name="status" disabled={uploading()} value={props.task?.status ?? "backlog"}>
           <For each={taskStatuses}>{(status) => <option value={status}>{status}</option>}</For>
         </select></label>
-        <label>Project<select name="projectId" required disabled={uploading()} value={props.task?.projectId ?? ""}>
+        <label>Project<select name="projectId" required disabled={uploading()}
+          value={props.task?.projectId ?? props.initialProjectId ?? ""}>
           <option value="" disabled>Select a project</option>
           <For each={props.projects}>{(project) => <option value={project.id}>{project.name}</option>}</For>
         </select></label>
@@ -1306,24 +1317,106 @@ function Triggers() {
     ]);
     return { triggers: triggers.triggers, workflows: workflows.workflows };
   });
+  const [selectedEventTypes, setSelectedEventTypes] = createSignal<string[]>([]);
+  const [selectedWorkflowIDs, setSelectedWorkflowIDs] = createSignal<number[]>([]);
+  const eventTypeOptions = createMemo(() => triggerEventTypeOptions(data()?.triggers ?? []));
+  const workflowOptions = createMemo(() => triggerWorkflowOptions(
+    data()?.triggers ?? [],
+    data()?.workflows ?? [],
+  ));
+  const filteredTriggers = createMemo(() => filterTriggers(data()?.triggers ?? [], {
+    eventTypes: selectedEventTypes(),
+    workflowIds: selectedWorkflowIDs(),
+  }));
+  const activeFilterCount = createMemo(() => selectedEventTypes().length + selectedWorkflowIDs().length);
+  const displayedResultCount = createMemo(() => filteredTriggers().length);
+  const clearFilters = () => {
+    setSelectedEventTypes([]);
+    setSelectedWorkflowIDs([]);
+  };
   return (
     <div class="page">
       <PageHeader title="Triggers" description="Match an event on the wire or a cron tick, then run one workflow when enabled."
         actions={<A class="button primary" href="/triggers/new">New trigger</A>} />
       <Load data={data} error={() => data.error}>
         {(value) => <Show when={value.triggers.length} fallback={<Empty>No triggers configured.</Empty>}>
-          <div class="rows"><For each={value.triggers}>{(trigger) => <A
-            classList={{ "trigger-row": true, disabled: !trigger.enabled }} href={`/triggers/${trigger.id}`}>
-            <span class="event-chip">{trigger.eventType}</span>
-            <strong>{workflowName(trigger.workflowId, value.workflows)}</strong>
-            <span class="trigger-schedule">{trigger.schedule || "On event"}</span>
-            <span class={`trigger-state ${trigger.enabled ? "enabled" : "disabled"}`}>
-              {trigger.enabled ? "Enabled" : "Disabled"}
-            </span>
-            <span class="id">#{trigger.id}</span>
-          </A>}</For></div>
+          <TriggerFilters
+            eventTypes={eventTypeOptions()}
+            workflows={workflowOptions()}
+            selectedEventTypes={selectedEventTypes()}
+            selectedWorkflowIDs={selectedWorkflowIDs()}
+            activeFilterCount={activeFilterCount()}
+            displayedResultCount={displayedResultCount()}
+            totalResultCount={value.triggers.length}
+            onEventTypeChange={(eventType, selected) => setSelectedEventTypes((current) => selected
+              ? [...current, eventType]
+              : current.filter((value) => value !== eventType))}
+            onWorkflowChange={(workflowID, selected) => setSelectedWorkflowIDs((current) => selected
+              ? [...current, workflowID]
+              : current.filter((value) => value !== workflowID))}
+            onClear={clearFilters}
+          />
+          <Show when={displayedResultCount()} fallback={<div class="empty trigger-filter-empty">
+            <p>No triggers match these filters.</p>
+            <button type="button" class="button quiet" onClick={clearFilters}>Clear filters</button>
+          </div>}>
+            <div class="rows"><For each={filteredTriggers()}>{(trigger) => <A
+              classList={{ "trigger-row": true, disabled: !trigger.enabled }} href={`/triggers/${trigger.id}`}>
+              <span class="event-chip">{trigger.eventType}</span>
+              <strong>{workflowName(trigger.workflowId, value.workflows)}</strong>
+              <span class="trigger-schedule">{trigger.schedule || "On event"}</span>
+              <span class={`trigger-state ${trigger.enabled ? "enabled" : "disabled"}`}>
+                {trigger.enabled ? "Enabled" : "Disabled"}
+              </span>
+              <span class="id">#{trigger.id}</span>
+            </A>}</For></div>
+          </Show>
         </Show>}
       </Load>
+    </div>
+  );
+}
+
+function TriggerFilters(props: {
+  eventTypes: string[];
+  workflows: Array<{ id: number; label: string }>;
+  selectedEventTypes: string[];
+  selectedWorkflowIDs: number[];
+  activeFilterCount: number;
+  displayedResultCount: number;
+  totalResultCount: number;
+  onEventTypeChange: (eventType: string, selected: boolean) => void;
+  onWorkflowChange: (workflowID: number, selected: boolean) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div class="trigger-filters" aria-label="Trigger filters">
+      <details class="trigger-filter">
+        <summary>Events <span>{props.selectedEventTypes.length} selected</span></summary>
+        <div class="trigger-filter-options" role="group" aria-label="Filter by event type">
+          <For each={props.eventTypes}>{(eventType) => <label>
+            <input type="checkbox" checked={props.selectedEventTypes.includes(eventType)}
+              onChange={(event) => props.onEventTypeChange(eventType, event.currentTarget.checked)} />
+            <span>{eventType}</span>
+          </label>}</For>
+        </div>
+      </details>
+      <details class="trigger-filter">
+        <summary>Workflows <span>{props.selectedWorkflowIDs.length} selected</span></summary>
+        <div class="trigger-filter-options" role="group" aria-label="Filter by workflow">
+          <For each={props.workflows}>{(workflow) => <label>
+            <input type="checkbox" checked={props.selectedWorkflowIDs.includes(workflow.id)}
+              onChange={(event) => props.onWorkflowChange(workflow.id, event.currentTarget.checked)} />
+            <span>{workflow.label}</span>
+          </label>}</For>
+        </div>
+      </details>
+      <button type="button" class="button quiet" disabled={props.activeFilterCount === 0} onClick={props.onClear}>
+        Clear filters
+      </button>
+      <p class="trigger-filter-results" role="status">
+        Showing {props.displayedResultCount} of {props.totalResultCount} triggers
+      </p>
     </div>
   );
 }
