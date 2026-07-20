@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/api/internal/agent"
-	"github.com/tomnagengast/factory/api/internal/eventwire"
 	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/server"
+	"github.com/tomnagengast/factory/api/internal/store"
 	"github.com/tomnagengast/factory/api/internal/workflow"
 )
 
@@ -78,8 +78,8 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 	flags.StringVar(
 		&configuration.DataPath,
 		"data",
-		filepath.Join(home, ".local", "share", "factory", "wire.jsonl"),
-		"append-only event wire path",
+		filepath.Join(home, ".local", "share", "factory", "factory.db"),
+		"SQLite event store path",
 	)
 	flags.StringVar(
 		&configuration.MediaPath,
@@ -120,11 +120,25 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 }
 
 func run(ctx context.Context, configuration config) error {
-	wire, err := eventwire.Open(configuration.DataPath)
+	eventStore, err := store.Open(configuration.DataPath)
 	if err != nil {
 		return err
 	}
-	defer wire.Close()
+	defer eventStore.Close()
+	legacyPath := filepath.Join(filepath.Dir(configuration.DataPath), "wire.jsonl")
+	if filepath.Clean(legacyPath) != filepath.Clean(configuration.DataPath) {
+		lastID, err := eventStore.LastID()
+		if err != nil {
+			return err
+		}
+		if _, statErr := os.Stat(legacyPath); lastID == 0 && statErr == nil {
+			imported, err := eventStore.ImportJSONL(ctx, legacyPath)
+			if err != nil {
+				return err
+			}
+			slog.Info("imported legacy event wire", "events", imported, "source", legacyPath)
+		}
+	}
 
 	workflowCLI := workflow.CLI{
 		Command: configuration.WorkflowCommand, Workspace: configuration.WorkflowWorkspace,
@@ -135,7 +149,7 @@ func run(ctx context.Context, configuration config) error {
 		return err
 	}
 	admission := quiescence.New()
-	loop, err := agent.NewLoop(wire, agent.CommandRunner{
+	loop, err := agent.NewLoop(eventStore, agent.CommandRunner{
 		CodexCommand: configuration.CodexCommand, ClaudeCommand: configuration.ClaudeCommand,
 		Workspace:      configuration.WorkflowWorkspace,
 		FactoryCommand: configuration.FactoryCommand, FactoryURL: "http://" + configuration.Address,
@@ -147,7 +161,7 @@ func run(ctx context.Context, configuration config) error {
 	if err != nil {
 		return fmt.Errorf("open embedded web bundle: %w", err)
 	}
-	app, err := server.New(wire, assets, configuration.MediaPath, admission)
+	app, err := server.New(eventStore, assets, configuration.MediaPath, admission)
 	if err != nil {
 		return err
 	}
@@ -167,7 +181,7 @@ func run(ctx context.Context, configuration config) error {
 	slog.Info(
 		"factory listening",
 		"address", "http://"+listener.Addr().String(),
-		"wire", configuration.DataPath,
+		"store", configuration.DataPath,
 		"media", configuration.MediaPath,
 		"workflowWorkspace", configuration.WorkflowWorkspace,
 	)

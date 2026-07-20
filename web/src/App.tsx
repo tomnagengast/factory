@@ -57,6 +57,7 @@ import { sortWorkflowsByUsage } from "./workflows";
 import { workflowCommentPresentation, workflowConversationWorking } from "./workflow-conversation";
 
 const REACTION_EMOJIS = ["👍", "👎", "❤️", "🎉", "😂", "👀"] as const;
+const PAGE_SIZE = 200;
 
 export function App() {
   return (
@@ -236,7 +237,7 @@ function Home() {
       health,
       projects: projects.projects.slice(0, 4),
       tasks: tasks.tasks.slice(0, 5),
-      events: events.events.slice(-6).reverse(),
+      events: events.events.slice(0, 6),
       checkpointEventId: tasks.checkpointEventId,
     };
   });
@@ -1117,9 +1118,11 @@ function ArtifactPanel(props: {
 }
 
 function Events() {
-  const [events, setEvents] = createSignal<Event[]>([]);
-  const [error, setError] = createSignal("");
-  const [connected, setConnected] = createSignal(false);
+	const [events, setEvents] = createSignal<Event[]>([]);
+	const [error, setError] = createSignal("");
+	const [connected, setConnected] = createSignal(false);
+	const [hasOlder, setHasOlder] = createSignal(false);
+	const older = mutation();
   const [wireContent, setWireContent] = createSignal<HTMLDivElement>();
   let follower: NewestFollower | undefined;
   let source: EventSource | undefined;
@@ -1140,16 +1143,17 @@ function Events() {
   });
   onMount(async () => {
     try {
-      const initial = await get<{ events: Event[] }>("/api/events");
-      setEvents(initial.events);
-      const after = initial.events.at(-1)?.id ?? 0;
+		const initial = await get<{ events: Event[] }>("/api/events");
+		setEvents(initial.events);
+		setHasOlder(initial.events.length === PAGE_SIZE);
+		const after = initial.events[0]?.id ?? 0;
       source = new EventSource(`/api/events/stream?after=${after}`);
       source.onopen = () => setConnected(true);
       source.onerror = () => setConnected(false);
       source.onmessage = (message) => {
         const event = JSON.parse(message.data) as Event;
         follower?.beforePrepend();
-        setEvents((current) => [...current.filter((item) => item.id !== event.id), event]);
+			setEvents((current) => [event, ...current.filter((item) => item.id !== event.id)]);
       };
     } catch (caught) {
       setError(errorMessage(caught));
@@ -1163,10 +1167,20 @@ function Events() {
       <Show when={!error()} fallback={<div class="state">{error()}</div>}>
         <Show when={events().length} fallback={<Empty>The wire is quiet.</Empty>}>
           <div ref={(element) => setWireContent(element)} class="wire-table">
-            <For each={[...events()].reverse()}>{(event) => <EventRow event={event} expanded />}</For>
-          </div>
-        </Show>
-      </Show>
+			<For each={events()}>{(event) => <EventRow event={event} expanded />}</For>
+		  </div>
+		</Show>
+		<Show when={hasOlder()}>
+		  <button class="button quiet" disabled={older.pending()} onClick={() => older.run(async () => {
+			const before = events().at(-1)?.id;
+			if (!before) return;
+			const page = await get<{ events: Event[] }>(`/api/events?before=${before}`);
+			setEvents((current) => [...current, ...page.events]);
+			setHasOlder(page.events.length === PAGE_SIZE);
+		  })}>{older.pending() ? "Loading…" : "Load older events"}</button>
+		</Show>
+		<Show when={older.error()}><span class="form-error">{older.error()}</span></Show>
+	  </Show>
     </div>
   );
 }
@@ -1200,7 +1214,15 @@ function EventView() {
 }
 
 function History() {
-  const [data, { refetch }] = createResource(() => get<{ history: WorkflowRun[] }>("/api/history"));
+	const [data, { refetch }] = createResource(() => get<{ history: WorkflowRun[] }>("/api/history"));
+	const [olderRuns, setOlderRuns] = createSignal<WorkflowRun[]>([]);
+	const [hasOlder, setHasOlder] = createSignal(false);
+	const older = mutation();
+	createEffect(() => {
+		const latest = data()?.history;
+		if (latest && olderRuns().length === 0) setHasOlder(latest.length === PAGE_SIZE);
+	});
+	const runs = createMemo(() => uniqueByID([...(data()?.history ?? []), ...olderRuns()]));
   liveRefetch([
     "workflow.run.started", "workflow.run.event", "workflow.run.waiting",
     "workflow.run.resumed", "workflow.run.completed", "workflow.run.failed",
@@ -1210,25 +1232,41 @@ function History() {
       <PageHeader title="Workflow history"
         description="Live, waiting, and completed workflow runs, newest first." />
       <Load data={data} error={() => data.error}>
-        {(value) => <Show when={value.history.length} fallback={<Empty>No workflows have run yet.</Empty>}>
-          <div class="rows">
-            <For each={value.history}>{(run) => <A class="history-row" href={`/history/${run.id}`}>
+		{() => <Show when={runs().length} fallback={<Empty>No workflows have run yet.</Empty>}>
+		  <div class="rows">
+			<For each={runs()}>{(run) => <A class="history-row" href={`/history/${run.id}`}>
               <span class={`run-status ${run.status}`}>{run.status}</span>
               <span class="run-title"><strong>{run.workflowName || `Workflow ${run.workflowId}`}</strong>
                 <small>Event #{run.sourceEventId} · Trigger #{run.triggerId}</small></span>
               <span class="id">#{run.id}</span>
               <time>{date(run.createdAt)}</time>
             </A>}</For>
-          </div>
-        </Show>}
+		  </div>
+		  <Show when={hasOlder()}>
+			<button class="button quiet" disabled={older.pending()} onClick={() => older.run(async () => {
+			  const before = runs().at(-1)?.id;
+			  if (!before) return;
+			  const page = await get<{ history: WorkflowRun[] }>(`/api/history?before=${before}`);
+			  setOlderRuns((current) => uniqueByID([...current, ...page.history]));
+			  setHasOlder(page.history.length === PAGE_SIZE);
+			})}>{older.pending() ? "Loading…" : "Load older runs"}</button>
+		  </Show>
+		</Show>}
       </Load>
     </div>
   );
 }
 
 function HistoryView() {
-  const params = useParams();
-  const [data, { refetch }] = createResource(() => get<HistoryDetail>(`/api/history/${params.item}`));
+	const params = useParams();
+	const [data, { refetch }] = createResource(() => get<HistoryDetail>(`/api/history/${params.item}`));
+	const [olderEvents, setOlderEvents] = createSignal<HistoryDetail["events"]>([]);
+	const [hasOlder, setHasOlder] = createSignal(false);
+	const older = mutation();
+	createEffect(() => {
+		const latest = data()?.events;
+		if (latest && olderEvents().length === 0) setHasOlder(latest.length === PAGE_SIZE);
+	});
   const [historyContent, setHistoryContent] = createSignal<HTMLDivElement>();
   createEffect(() => {
     const content = historyContent();
@@ -1243,8 +1281,11 @@ function HistoryView() {
   return (
     <div ref={(element) => setHistoryContent(element)} class="page">
       <Load data={data} error={() => data.error}>
-        {(value) => {
-          const current = () => data() ?? value;
+		{(value) => {
+		  const current = () => {
+			const latest = data() ?? value;
+			return { ...latest, events: uniqueByID([...olderEvents(), ...latest.events]).sort((left, right) => left.id - right.id) };
+		  };
           const resource = () => historyResourceLink(current().run);
           return <>
             <PageHeader eyebrow={`Run ${value.run.id}`}
@@ -1295,8 +1336,17 @@ function HistoryView() {
                   </div>
                 </section>}</For>
               </div>
-            </Show>
-            <Show when={current().run.output || current().run.error}>
+			</Show>
+			<Show when={hasOlder()}>
+			  <button class="button quiet" disabled={older.pending()} onClick={() => older.run(async () => {
+				const before = current().events[0]?.id;
+				if (!before) return;
+				const page = await get<HistoryDetail>(`/api/history/${params.item}?before=${before}`);
+				setOlderEvents((events) => uniqueByID([...page.events, ...events]));
+				setHasOlder(page.events.length === PAGE_SIZE);
+			  })}>{older.pending() ? "Loading…" : "Load older run events"}</button>
+			</Show>
+			<Show when={current().run.output || current().run.error}>
               <section class="run-output"><SectionTitle title={current().run.error ? "Run error" : "Final result"} />
                 <div classList={{ "run-event-content": true, "step-error": Boolean(current().run.error) }}>
                   <Markdown content={current().run.error || current().run.output} />
@@ -1707,7 +1757,7 @@ function liveRefetch(types: string[], refetch: () => unknown) {
   let source: EventSource | undefined;
   onMount(async () => {
     const initial = await get<{ events: Event[] }>("/api/events");
-    source = new EventSource(`/api/events/stream?after=${initial.events.at(-1)?.id ?? 0}`);
+	source = new EventSource(`/api/events/stream?after=${initial.events[0]?.id ?? 0}`);
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as Event;
       if (types.includes(event.type)) refetch();
@@ -1754,6 +1804,15 @@ function displayTaskValue(task: Task, field: TaskField, projects: Project[]) {
 function compare(left: string | number, right: string | number) {
   if (typeof left === "number" && typeof right === "number") return left - right;
   return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
+}
+
+function uniqueByID<T extends { id: number }>(values: T[]) {
+	const seen = new Set<number>();
+	return values.filter((value) => {
+		if (seen.has(value.id)) return false;
+		seen.add(value.id);
+		return true;
+	});
 }
 
 function projectName(id: number, projects: Project[]) {

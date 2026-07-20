@@ -14,28 +14,28 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/tomnagengast/factory/api/internal/eventwire"
 	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
+	"github.com/tomnagengast/factory/api/internal/store"
 )
 
 const quiescenceLeaseDuration = 15 * time.Minute
 
 type Server struct {
-	wire      *eventwire.Wire
+	store     *store.Store
 	assets    fs.FS
 	mediaRoot string
 	admission *quiescence.Controller
 }
 
 func New(
-	wire *eventwire.Wire,
+	eventStore *store.Store,
 	assets fs.FS,
 	mediaRoot string,
 	admission *quiescence.Controller,
 ) (*Server, error) {
-	if wire == nil || assets == nil || mediaRoot == "" || admission == nil {
-		return nil, errors.New("server requires a wire, frontend, media path, and workflow admission controller")
+	if eventStore == nil || assets == nil || mediaRoot == "" || admission == nil {
+		return nil, errors.New("server requires an event store, frontend, media path, and workflow admission controller")
 	}
 	if err := os.MkdirAll(mediaRoot, 0o777); err != nil {
 		return nil, fmt.Errorf("create media directory: %w", err)
@@ -53,7 +53,7 @@ func New(
 		return nil, errors.New("media path must be a directory")
 	}
 	return &Server{
-		wire: wire, assets: assets, mediaRoot: canonical, admission: admission,
+		store: eventStore, assets: assets, mediaRoot: canonical, admission: admission,
 	}, nil
 }
 
@@ -132,7 +132,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) snapshot(writer http.ResponseWriter) (state.Snapshot, bool) {
-	view, err := state.ProjectEvents(s.wire.Events(0))
+	view, _, err := s.store.Snapshot()
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return state.Snapshot{}, false
@@ -141,22 +141,23 @@ func (s *Server) snapshot(writer http.ResponseWriter) (state.Snapshot, bool) {
 }
 
 func (s *Server) snapshotWithCheckpoint(writer http.ResponseWriter) (state.Snapshot, int64, bool) {
-	events := s.wire.Events(0)
-	view, err := state.ProjectEvents(events)
+	view, checkpoint, err := s.store.Snapshot()
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return state.Snapshot{}, 0, false
-	}
-	checkpoint := int64(0)
-	if len(events) > 0 {
-		checkpoint = events[len(events)-1].ID
 	}
 	return view, checkpoint, true
 }
 
 func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
-	view, ok := s.snapshot(writer)
-	if !ok {
+	settings, err := s.store.Settings()
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	counts, err := s.store.Health()
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
@@ -167,15 +168,15 @@ func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 		"buildId":           os.Getenv("FACTORY_RELEASE_BUILD"),
 		"deploymentId":      os.Getenv("FACTORY_RELEASE_DEPLOYMENT"),
 		"contractVersion":   os.Getenv("FACTORY_RELEASE_CONTRACT"),
-		"harness":           view.Settings.Harness,
-		"workflowCapacity":  view.Settings.WorkflowCapacity,
+		"harness":           settings.Harness,
+		"workflowCapacity":  settings.WorkflowCapacity,
 		"workflowActive":    s.admission.Active(),
 		"workflowQuiescing": !s.admission.Accepting(),
-		"events":            s.wire.LastID(),
-		"tasks":             len(active(view.Tasks, func(value state.Task) bool { return value.DeletedAt == nil })),
-		"projects":          len(active(view.Projects, func(value state.Project) bool { return value.DeletedAt == nil })),
-		"triggers":          len(active(view.Triggers, func(value state.Trigger) bool { return value.DeletedAt == nil })),
-		"workflows":         len(active(view.Workflows, func(value state.Workflow) bool { return value.DeletedAt == nil })),
+		"events":            counts.Events,
+		"tasks":             counts.Tasks,
+		"projects":          counts.Projects,
+		"triggers":          counts.Triggers,
+		"workflows":         counts.Workflows,
 	})
 }
 

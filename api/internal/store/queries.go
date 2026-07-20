@@ -115,8 +115,17 @@ func (s *Store) Project(id int64) (state.Project, bool, error) {
 func (s *Store) Task(id int64) (state.Task, bool, error) {
 	return queryOneJSON[state.Task](s.db, `SELECT data FROM tasks WHERE id = ?`, id)
 }
+
+func (s *Store) TaskWithCheckpoint(id int64) (state.Task, int64, bool, error) {
+	return entityWithCheckpoint[state.Task](s.db, `SELECT data FROM tasks WHERE id = ?`, id)
+}
+
 func (s *Store) Comment(id int64) (state.Comment, bool, error) {
 	return queryOneJSON[state.Comment](s.db, `SELECT data FROM comments WHERE id = ?`, id)
+}
+
+func (s *Store) CommentWithCheckpoint(id int64) (state.Comment, int64, bool, error) {
+	return entityWithCheckpoint[state.Comment](s.db, `SELECT data FROM comments WHERE id = ?`, id)
 }
 func (s *Store) Artifact(id int64) (state.Artifact, bool, error) {
 	return queryOneJSON[state.Artifact](s.db, `SELECT data FROM artifacts WHERE id = ?`, id)
@@ -171,6 +180,27 @@ func (s *Store) Triggers() ([]state.Trigger, error) {
 }
 func (s *Store) Workflows() ([]state.Workflow, error) {
 	return queryJSON[state.Workflow](s.db, `SELECT data FROM workflows WHERE deleted = 0 ORDER BY name, id`)
+}
+
+func entityWithCheckpoint[T any](db *sql.DB, query string, args ...any) (T, int64, bool, error) {
+	var zero T
+	tx, err := db.Begin()
+	if err != nil {
+		return zero, 0, false, err
+	}
+	defer tx.Rollback()
+	value, found, err := queryOneJSON[T](tx, query, args...)
+	if err != nil {
+		return zero, 0, false, err
+	}
+	var checkpoint int64
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM events`).Scan(&checkpoint); err != nil {
+		return zero, 0, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return zero, 0, false, err
+	}
+	return value, checkpoint, found, nil
 }
 
 func (s *Store) Run(id int64) (state.WorkflowRun, bool, error) {
@@ -251,6 +281,28 @@ func (s *Store) RunEvents(runID, before int64, limit int) ([]state.WorkflowRunEv
 	}
 	slices.Reverse(values)
 	return values, nil
+}
+
+func (s *Store) RunJournal(runID int64) ([]json.RawMessage, error) {
+	rows, err := s.db.Query(`
+		SELECT json_extract(e.data, '$.event')
+		FROM workflow_run_event_index i
+		JOIN events e ON e.id = i.event_id
+		WHERE i.run_id = ?
+		ORDER BY i.sequence`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := make([]json.RawMessage, 0)
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		values = append(values, append(json.RawMessage(nil), raw...))
+	}
+	return values, rows.Err()
 }
 
 func (s *Store) RunningRuns() ([]state.WorkflowRun, error) {

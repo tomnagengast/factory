@@ -295,12 +295,9 @@ func TestMediaRetrievalRejectsUntrustedProjectedMetadata(t *testing.T) {
 
 func TestMediaPersistsAcrossWireAndServerRestart(t *testing.T) {
 	base := t.TempDir()
-	wirePath := filepath.Join(base, "wire.jsonl")
+	wirePath := filepath.Join(base, "factory.db")
 	mediaRoot := filepath.Join(base, "media")
-	wire, err := eventwire.Open(wirePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	wire := openStoreAt(t, wirePath)
 	handler := testServerWithMedia(t, wire, mediaRoot).Handler()
 	data := []byte("restart-video")
 	upload := uploadRequest(t, handler, "restart.webm", "video/webm", data)
@@ -311,10 +308,7 @@ func TestMediaPersistsAcrossWireAndServerRestart(t *testing.T) {
 	if err := wire.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := eventwire.Open(wirePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reopened := openStoreAt(t, wirePath)
 	defer reopened.Close()
 	handler = testServerWithMedia(t, reopened, mediaRoot).Handler()
 	get := requestJSON(t, handler, http.MethodGet, created.URL, "")
@@ -325,12 +319,9 @@ func TestMediaPersistsAcrossWireAndServerRestart(t *testing.T) {
 
 func TestMediaReferencesPersistInTasksAndThreadedComments(t *testing.T) {
 	base := t.TempDir()
-	wirePath := filepath.Join(base, "wire.jsonl")
+	wirePath := filepath.Join(base, "factory.db")
 	mediaRoot := filepath.Join(base, "media")
-	wire, err := eventwire.Open(wirePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	wire := openStoreAt(t, wirePath)
 	handler := testServerWithMedia(t, wire, mediaRoot).Handler()
 	markups := make([]string, 0, 3)
 	for _, fixture := range []struct{ name, kind string }{
@@ -379,10 +370,7 @@ func TestMediaReferencesPersistInTasksAndThreadedComments(t *testing.T) {
 	if err := wire.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := eventwire.Open(wirePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reopened := openStoreAt(t, wirePath)
 	defer reopened.Close()
 	handler = testServerWithMedia(t, reopened, mediaRoot).Handler()
 	detail := requestJSON(t, handler, http.MethodGet, fmt.Sprintf("/api/tasks/%d", taskRecord.ID), "")
@@ -493,7 +481,7 @@ func assertNoMediaTemps(t *testing.T, root string) {
 	}
 }
 
-func testServerWithMedia(t *testing.T, wire *eventwire.Wire, root string) *Server {
+func testServerWithMedia(t *testing.T, wire *testStore, root string) *Server {
 	t.Helper()
 	assets := fstest.MapFS{
 		"index.html":           &fstest.MapFile{Data: []byte("<html></html>")},
@@ -501,7 +489,7 @@ func testServerWithMedia(t *testing.T, wire *eventwire.Wire, root string) *Serve
 		"assets/styles-b2.css": &fstest.MapFile{Data: []byte("body {}")},
 	}
 	var filesystem fs.FS = assets
-	server, err := New(wire, filesystem, root, quiescence.New())
+	server, err := New(wire.Store, filesystem, root, quiescence.New())
 	if err != nil {
 		t.Fatal(err)
 	}

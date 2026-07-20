@@ -24,6 +24,7 @@ import (
 	"github.com/tomnagengast/factory/api/internal/eventwire"
 	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
+	"github.com/tomnagengast/factory/api/internal/store"
 )
 
 func TestProjectTaskCommentAndArtifactAPI(t *testing.T) {
@@ -69,11 +70,8 @@ func TestProjectTaskCommentAndArtifactAPI(t *testing.T) {
 }
 
 func TestCommentDeleteCascadesAndSurvivesReplay(t *testing.T) {
-	wirePath := filepath.Join(t.TempDir(), "wire.jsonl")
-	wire, err := eventwire.Open(wirePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	wirePath := filepath.Join(t.TempDir(), "factory.db")
+	wire := openStoreAt(t, wirePath)
 	defer func() { _ = wire.Close() }()
 	handler := testServer(t, wire).Handler()
 	projectPath := filepath.Join(t.TempDir(), "factory")
@@ -163,10 +161,7 @@ func TestCommentDeleteCascadesAndSurvivesReplay(t *testing.T) {
 	if err := wire.Close(); err != nil {
 		t.Fatal(err)
 	}
-	wire, err = eventwire.Open(wirePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	wire = openStoreAt(t, wirePath)
 	handler = testServer(t, wire).Handler()
 	assertTaskComments(handler)
 }
@@ -1010,11 +1005,8 @@ func TestUniversalIngress(t *testing.T) {
 }
 
 func TestUniversalIngressSurvivesReplay(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "wire.jsonl")
-	wire, err := eventwire.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	path := filepath.Join(t.TempDir(), "factory.db")
+	wire := openStoreAt(t, path)
 	response := requestJSON(t, testServer(t, wire).Handler(), http.MethodPost,
 		"/api/ingest?source=linear", `{"type":"Issue","action":"update"}`)
 	if response.Code != http.StatusOK {
@@ -1023,10 +1015,7 @@ func TestUniversalIngressSurvivesReplay(t *testing.T) {
 	if err := wire.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := eventwire.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reopened := openStoreAt(t, path)
 	defer reopened.Close()
 	events := reopened.Events(0)
 	var data struct {
@@ -1140,11 +1129,8 @@ func TestQuiescenceAPIRejectsFailedDrain(t *testing.T) {
 }
 
 func TestTriggerEnabledStateDefaultsPersistsAndRequiresExplicitUpdate(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "wire.jsonl")
-	wire, err := eventwire.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	path := filepath.Join(t.TempDir(), "factory.db")
+	wire := openStoreAt(t, path)
 	handler := testServer(t, wire).Handler()
 
 	created := requestJSON(t, handler, http.MethodPost, "/api/triggers",
@@ -1212,10 +1198,7 @@ func TestTriggerEnabledStateDefaultsPersistsAndRequiresExplicitUpdate(t *testing
 	if err := wire.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := eventwire.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reopened := openStoreAt(t, path)
 	defer reopened.Close()
 	handler = testServer(t, reopened).Handler()
 	detail = requestJSON(t, handler, http.MethodGet, "/api/triggers/1", "")
@@ -1380,23 +1363,64 @@ func requestJSON(t *testing.T, handler http.Handler, method, path, body string) 
 	return response
 }
 
-func openWire(t *testing.T) *eventwire.Wire {
+type testStore struct {
+	*store.Store
+	t *testing.T
+}
+
+func (s *testStore) Publish(eventType string, data any) (eventwire.Event, error) {
+	return s.Append(eventType, data)
+}
+
+func (s *testStore) Events(after int64) []eventwire.Event {
+	s.t.Helper()
+	events, err := s.EventsAfter(after, 100_000)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return events
+}
+
+func (s *testStore) Event(id int64) (eventwire.Event, bool) {
+	s.t.Helper()
+	event, found, err := s.Store.Event(id)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return event, found
+}
+
+func (s *testStore) LastID() int64 {
+	s.t.Helper()
+	id, err := s.Store.LastID()
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return id
+}
+
+func openStoreAt(t *testing.T, path string) *testStore {
 	t.Helper()
-	wire, err := eventwire.Open(filepath.Join(t.TempDir(), "wire.jsonl"))
+	eventStore, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return wire
+	return &testStore{Store: eventStore, t: t}
 }
 
-func testServer(t *testing.T, wire *eventwire.Wire) *Server {
+func openWire(t *testing.T) *testStore {
+	t.Helper()
+	return openStoreAt(t, filepath.Join(t.TempDir(), "factory.db"))
+}
+
+func testServer(t *testing.T, wire *testStore) *Server {
 	t.Helper()
 	return testServerWithAdmission(t, wire, quiescence.New())
 }
 
 func testServerWithAdmission(
 	t *testing.T,
-	wire *eventwire.Wire,
+	wire *testStore,
 	admission *quiescence.Controller,
 ) *Server {
 	t.Helper()
@@ -1406,7 +1430,7 @@ func testServerWithAdmission(
 		"assets/styles-b2.css": &fstest.MapFile{Data: []byte("body {}")},
 	}
 	var filesystem fs.FS = assets
-	server, err := New(wire, filesystem, t.TempDir(), admission)
+	server, err := New(wire.Store, filesystem, t.TempDir(), admission)
 	if err != nil {
 		t.Fatal(err)
 	}

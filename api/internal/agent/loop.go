@@ -15,6 +15,7 @@ import (
 	"github.com/tomnagengast/factory/api/internal/eventwire"
 	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
+	"github.com/tomnagengast/factory/api/internal/store"
 	"github.com/tomnagengast/factory/api/internal/workflow"
 )
 
@@ -26,7 +27,7 @@ const (
 )
 
 type Loop struct {
-	wire      *eventwire.Wire
+	store     *store.Store
 	agent     Runner
 	workflows workflow.Runner
 	admission *quiescence.Controller
@@ -35,16 +36,16 @@ type Loop struct {
 }
 
 func NewLoop(
-	wire *eventwire.Wire,
+	eventStore *store.Store,
 	runner Runner,
 	workflows workflow.Runner,
 	admission *quiescence.Controller,
 ) (*Loop, error) {
-	if wire == nil || runner == nil || workflows == nil || admission == nil {
-		return nil, errors.New("workflow coordinator requires a wire, agent, workflow CLI, and admission controller")
+	if eventStore == nil || runner == nil || workflows == nil || admission == nil {
+		return nil, errors.New("workflow coordinator requires an event store, agent, workflow CLI, and admission controller")
 	}
 	return &Loop{
-		wire: wire, agent: runner, workflows: workflows, admission: admission,
+		store: eventStore, agent: runner, workflows: workflows, admission: admission,
 		completed: make(chan error, state.MaxWorkflowCapacity),
 	}, nil
 }
@@ -61,7 +62,10 @@ func (l *Loop) Run(ctx context.Context) error {
 		return err
 	}
 	for {
-		after := l.wire.LastID()
+		after, err := l.store.LastID()
+		if err != nil {
+			return err
+		}
 		admissionChanged := l.admission.Changes()
 		worked, nextCron, err := l.step(runContext)
 		if err != nil {
@@ -79,15 +83,12 @@ func (l *Loop) Run(ctx context.Context) error {
 }
 
 func (l *Loop) recoverInterruptedRuns() error {
-	view, err := state.ProjectEvents(l.wire.Events(0))
+	runs, err := l.store.RunningRuns()
 	if err != nil {
 		return err
 	}
-	for _, run := range view.Runs {
-		if run.Status != "running" {
-			continue
-		}
-		if _, err := l.wire.Publish(state.WorkflowRunFailed, state.WorkflowRunData{
+	for _, run := range runs {
+		if _, err := l.store.Append(state.WorkflowRunFailed, state.WorkflowRunData{
 			TriggerID: run.TriggerID, WorkflowID: run.WorkflowID,
 			WorkflowName: run.WorkflowName, WorkflowPhases: slices.Clone(run.WorkflowPhases),
 			SourceEventID: run.SourceEventID, Output: run.Output, Error: interruptedRun,
@@ -102,39 +103,50 @@ func (l *Loop) step(ctx context.Context) (bool, time.Time, error) {
 	if err := l.collectCompleted(); err != nil {
 		return false, time.Time{}, err
 	}
-	events := l.wire.Events(0)
-	snapshotID := int64(0)
-	if len(events) > 0 {
-		snapshotID = events[len(events)-1].ID
-	}
-	view, err := state.ProjectEvents(events)
+	settings, err := l.store.Settings()
 	if err != nil {
 		return false, time.Time{}, err
 	}
-	if comment, found := view.PendingWorkflowComment(); found {
+	if comment, found, err := l.store.PendingWorkflowComment(); err != nil {
+		return false, time.Time{}, err
+	} else if found {
 		if !l.admission.TryStart() {
 			return false, time.Time{}, nil
 		}
-		authorErr := l.authorWorkflow(ctx, view, comment)
+		authorErr := l.authorWorkflow(ctx, settings, comment)
 		l.admission.Done(authorErr)
 		return true, time.Time{}, authorErr
 	}
-	if l.active < view.Settings.WorkflowCapacity {
-		if run, response, found := view.PendingHumanResponse(); found {
-			started, err := l.startResume(ctx, view, run, response, snapshotID)
+	if l.active < settings.WorkflowCapacity {
+		if run, response, found, err := l.store.PendingHumanResponse(); err != nil {
+			return false, time.Time{}, err
+		} else if found {
+			checkpoint, err := l.store.LastID()
+			if err != nil {
+				return false, time.Time{}, err
+			}
+			started, err := l.startResume(ctx, run, response, checkpoint)
 			return started, time.Time{}, err
 		}
-		if trigger, source, found := pendingTrigger(view, events); found {
-			started, err := l.startTrigger(ctx, view, trigger, source, snapshotID)
+		trigger, source, checkpoint, found, err := l.store.PendingTrigger()
+		if err != nil {
+			return false, time.Time{}, err
+		}
+		if found {
+			started, err := l.startTrigger(ctx, settings, trigger, source, checkpoint)
 			return started, time.Time{}, err
 		}
 		if !l.admission.Accepting() {
 			return false, time.Time{}, nil
 		}
-		due, next := nextCron(view, time.Now().UTC())
+		cronStates, err := l.store.CronStates()
+		if err != nil {
+			return false, time.Time{}, err
+		}
+		due, next := nextCron(cronStates, time.Now().UTC())
 		if due != nil {
-			_, _, err := l.wire.PublishIfCurrent(
-				snapshotID, state.CronFired, state.CronData{TriggerID: due.ID},
+			_, _, err := l.store.AppendIfCurrent(
+				checkpoint, state.CronFired, state.CronData{TriggerID: due.ID},
 			)
 			return true, time.Time{}, err
 		}
@@ -159,7 +171,7 @@ func (l *Loop) wait(
 	defer cancel()
 	wireResult := make(chan error, 1)
 	go func() {
-		_, err := l.wire.Wait(waitContext, after)
+		_, err := l.store.Wait(waitContext, after, 200)
 		wireResult <- err
 	}()
 	select {
@@ -209,14 +221,21 @@ func (l *Loop) stop(cause error) error {
 	return cause
 }
 
-func (l *Loop) authorWorkflow(ctx context.Context, view state.Snapshot, comment state.Comment) error {
-	selected, found := view.Workflow(comment.RelationID)
+func (l *Loop) authorWorkflow(ctx context.Context, settings state.Settings, comment state.Comment) error {
+	selected, found, err := l.store.Workflow(comment.RelationID)
+	if err != nil {
+		return err
+	}
 	if !found {
 		return nil
 	}
+	comments, err := l.store.CommentsFor("workflow", selected.ID)
+	if err != nil {
+		return err
+	}
 	target := l.workflows.LocalPath(selected.ID)
 	if filepath.Clean(stringValue(selected.Path)) != filepath.Clean(target) {
-		if _, err := l.wire.Publish(state.WorkflowUpdated, state.WorkflowData{
+		if _, err := l.store.Append(state.WorkflowUpdated, state.WorkflowData{
 			ID: selected.ID, Name: selected.Name, Description: selected.Description,
 			Path: &target, Scope: selected.Scope, Phases: slices.Clone(selected.Phases),
 			Mutating: selected.Mutating,
@@ -224,18 +243,18 @@ func (l *Loop) authorWorkflow(ctx context.Context, view state.Snapshot, comment 
 			return err
 		}
 	}
-	if _, err := l.wire.Publish(authoringStarted, map[string]int64{
+	if _, err := l.store.Append(authoringStarted, map[string]int64{
 		"workflowId": selected.ID, "commentId": comment.ID,
 	}); err != nil {
 		return err
 	}
 	output, runErr := l.agent.Run(
 		ctx,
-		view.Settings,
-		authorPrompt(selected, view.CommentsFor("workflow", selected.ID), target),
+		settings,
+		authorPrompt(selected, comments, target),
 		func(step AgentStep) error {
 			final := false
-			_, err := l.wire.Publish(state.CommentCreated, state.CommentData{
+			_, err := l.store.Append(state.CommentCreated, state.CommentData{
 				RelationType: "workflow", RelationID: selected.ID, ParentCommentID: &comment.ID,
 				Author: "agent", Kind: step.Kind, Label: step.Label, Final: &final,
 				Content: step.Content,
@@ -263,13 +282,13 @@ func (l *Loop) authorWorkflow(ctx context.Context, view state.Snapshot, comment 
 		kind = "error"
 		response = strings.TrimSpace(response + "\n\nError: " + runErr.Error())
 	}
-	if _, err := l.wire.Publish(eventType, map[string]any{
+	if _, err := l.store.Append(eventType, map[string]any{
 		"workflowId": selected.ID, "commentId": comment.ID, "response": response,
 	}); err != nil {
 		return err
 	}
 	final := true
-	_, err := l.wire.Publish(state.CommentCreated, state.CommentData{
+	_, err = l.store.Append(state.CommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: selected.ID, ParentCommentID: &comment.ID,
 		Author: "agent", Kind: kind, Final: &final, Content: response,
 	})
@@ -278,13 +297,16 @@ func (l *Loop) authorWorkflow(ctx context.Context, view state.Snapshot, comment 
 
 func (l *Loop) startTrigger(
 	ctx context.Context,
-	view state.Snapshot,
+	settings state.Settings,
 	trigger state.Trigger,
 	source eventwire.Event,
 	expectedLastID int64,
 ) (startedRun bool, err error) {
-	selected, found := view.Workflow(trigger.WorkflowID)
-	directory, taskID, directoryErr := taskContext(view, source)
+	selected, found, err := l.store.Workflow(trigger.WorkflowID)
+	if err != nil {
+		return false, err
+	}
+	directory, taskID, directoryErr := l.taskContext(source)
 	predictedRunID := expectedLastID + 1
 	arguments, err := json.Marshal(map[string]any{
 		"event": source, "trigger": trigger, "runId": predictedRunID,
@@ -292,7 +314,6 @@ func (l *Loop) startTrigger(
 	if err != nil {
 		return false, fmt.Errorf("encode workflow arguments: %w", err)
 	}
-	settings := view.Settings
 	run := state.WorkflowRunData{
 		TriggerID: trigger.ID, WorkflowID: trigger.WorkflowID, SourceEventID: source.ID,
 		TaskID: taskID, Directory: directory, Settings: &settings, Arguments: arguments,
@@ -310,7 +331,7 @@ func (l *Loop) startTrigger(
 			l.admission.Done(err)
 		}
 	}()
-	started, published, err := l.wire.PublishIfCurrent(expectedLastID, state.WorkflowRunStarted, run)
+	started, published, err := l.store.AppendIfCurrent(expectedLastID, state.WorkflowRunStarted, run)
 	if err != nil {
 		return false, err
 	}
@@ -319,12 +340,12 @@ func (l *Loop) startTrigger(
 	}
 	if !found || selected.DeletedAt != nil {
 		run.Error = "workflow not found"
-		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
+		_, err := l.store.Append(state.WorkflowRunFailed, run)
 		return true, err
 	}
 	if directoryErr != nil {
 		run.Error = directoryErr.Error()
-		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
+		_, err := l.store.Append(state.WorkflowRunFailed, run)
 		return true, err
 	}
 	l.active++
@@ -333,7 +354,7 @@ func (l *Loop) startTrigger(
 		executionErr := l.executeRun(ctx, started.ID, workflow.RunRequest{
 			Directory: directory,
 			Source:    stringValue(selected.Path),
-			Settings:  view.Settings,
+			Settings:  settings,
 			Arguments: json.RawMessage(arguments),
 		}, run)
 		l.completed <- executionErr
@@ -357,7 +378,7 @@ func (l *Loop) executeRun(
 				copied := event
 				suspended = &copied
 			}
-			_, err := l.wire.Publish(state.WorkflowRunEventRecorded, state.WorkflowRunEventData{
+			_, err := l.store.Append(state.WorkflowRunEventRecorded, state.WorkflowRunEventData{
 				RunID: runID, Event: event.Raw,
 			})
 			return err
@@ -366,7 +387,7 @@ func (l *Loop) executeRun(
 	run.Output = output
 	if ctx.Err() != nil {
 		run.Error = "workflow canceled before completion: " + ctx.Err().Error()
-		if _, err := l.wire.Publish(state.WorkflowRunFailed, run); err != nil {
+		if _, err := l.store.Append(state.WorkflowRunFailed, run); err != nil {
 			return err
 		}
 		return ctx.Err()
@@ -374,37 +395,37 @@ func (l *Loop) executeRun(
 	if errors.Is(runErr, workflow.ErrHumanReview) {
 		if suspended == nil {
 			run.Error = "workflow exited for human review without a runtime.suspended event"
-			_, err := l.wire.Publish(state.WorkflowRunFailed, run)
+			_, err := l.store.Append(state.WorkflowRunFailed, run)
 			return err
 		}
 		return l.suspendRun(runID, run, *suspended)
 	}
 	if runErr != nil {
 		run.Error = runErr.Error()
-		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
+		_, err := l.store.Append(state.WorkflowRunFailed, run)
 		return err
 	}
-	_, err := l.wire.Publish(state.WorkflowRunCompleted, run)
+	_, err := l.store.Append(state.WorkflowRunCompleted, run)
 	return err
 }
 
 func (l *Loop) suspendRun(runID int64, run state.WorkflowRunData, event workflow.Event) error {
 	if run.TaskID < 1 {
 		run.Error = "human review gates require a task-triggered workflow"
-		_, err := l.wire.Publish(state.WorkflowRunFailed, run)
+		_, err := l.store.Append(state.WorkflowRunFailed, run)
 		return err
 	}
 	content := strings.TrimSpace(event.Message)
 	if len(event.Schema) > 0 {
 		content += "\n\nReply with JSON matching this schema:\n" + string(event.Schema)
 	}
-	comment, err := l.wire.Publish(state.CommentCreated, state.CommentData{
+	comment, err := l.store.Append(state.CommentCreated, state.CommentData{
 		RelationType: "task", RelationID: run.TaskID, Author: "agent", Content: content,
 	})
 	if err != nil {
 		return err
 	}
-	_, err = l.wire.Publish(state.WorkflowRunWaiting, state.WorkflowRunStateData{
+	_, err = l.store.Append(state.WorkflowRunWaiting, state.WorkflowRunStateData{
 		RunID: runID,
 		Gate: &state.WorkflowGate{
 			Workflow: event.Workflow, Phase: event.Phase, StepID: event.StepID,
@@ -418,14 +439,13 @@ func (l *Loop) suspendRun(runID int64, run state.WorkflowRunData, event workflow
 
 func (l *Loop) startResume(
 	ctx context.Context,
-	view state.Snapshot,
 	run state.WorkflowRun,
 	response state.Comment,
 	expectedLastID int64,
 ) (startedRun bool, err error) {
 	result, err := humanResult(response.Content, run.WaitingGate.Schema)
 	if err != nil {
-		_, publishErr := l.wire.Publish(state.CommentCreated, state.CommentData{
+		_, publishErr := l.store.Append(state.CommentCreated, state.CommentData{
 			RelationType: "task", RelationID: run.TaskID, ParentCommentID: &response.ID,
 			Author: "agent", Content: "I could not use this review response: " + err.Error(),
 		})
@@ -434,18 +454,25 @@ func (l *Loop) startResume(
 	if run.Settings == nil || strings.TrimSpace(run.Source) == "" || len(run.Arguments) == 0 {
 		terminal := workflowRunData(run)
 		terminal.Error = "waiting workflow is missing durable continuation context"
-		_, err := l.wire.Publish(state.WorkflowRunFailed, terminal)
+		_, err := l.store.Append(state.WorkflowRunFailed, terminal)
 		return true, err
 	}
-	events := view.EventsFor(run.ID)
+	events, err := l.store.RunJournal(run.ID)
+	if err != nil {
+		return false, err
+	}
 	sequence := int64(0)
 	resume := make([]json.RawMessage, 0, len(events)+1)
-	for _, event := range events {
-		if event.Sequence != sequence+1 || len(event.Raw) == 0 {
+	for _, rawEvent := range events {
+		var event workflow.Event
+		if err := json.Unmarshal(rawEvent, &event); err != nil {
+			return false, fmt.Errorf("decode run %d journal after sequence %d: %w", run.ID, sequence, err)
+		}
+		if event.Sequence != sequence+1 || len(rawEvent) == 0 {
 			return false, fmt.Errorf("run %d has invalid journal after sequence %d", run.ID, sequence)
 		}
 		sequence = event.Sequence
-		resume = append(resume, append(json.RawMessage(nil), event.Raw...))
+		resume = append(resume, append(json.RawMessage(nil), rawEvent...))
 	}
 	gate := run.WaitingGate
 	completed := workflow.Event{
@@ -466,7 +493,7 @@ func (l *Loop) startResume(
 			l.admission.Done(err)
 		}
 	}()
-	_, published, err := l.wire.PublishIfCurrent(
+	_, published, err := l.store.AppendIfCurrent(
 		expectedLastID,
 		state.WorkflowRunResumed,
 		state.WorkflowRunStateData{RunID: run.ID, ResponseCommentID: response.ID},
@@ -474,7 +501,7 @@ func (l *Loop) startResume(
 	if err != nil || !published {
 		return published, err
 	}
-	if _, err := l.wire.Publish(state.WorkflowRunEventRecorded, state.WorkflowRunEventData{
+	if _, err := l.store.Append(state.WorkflowRunEventRecorded, state.WorkflowRunEventData{
 		RunID: run.ID, Event: raw,
 	}); err != nil {
 		return true, err
@@ -509,7 +536,7 @@ func workflowRunData(run state.WorkflowRun) state.WorkflowRunData {
 	}
 }
 
-func taskContext(view state.Snapshot, event eventwire.Event) (string, int64, error) {
+func (l *Loop) taskContext(event eventwire.Event) (string, int64, error) {
 	var projectID int64
 	var taskID int64
 	switch event.Type {
@@ -529,7 +556,10 @@ func taskContext(view state.Snapshot, event eventwire.Event) (string, int64, err
 			return "", 0, errors.New("decode task event")
 		}
 		taskID = data.ID
-		task, found := view.Task(data.ID)
+		task, found, err := l.store.Task(data.ID)
+		if err != nil {
+			return "", 0, err
+		}
 		if !found {
 			return "", 0, errors.New("task project not found")
 		}
@@ -537,7 +567,10 @@ func taskContext(view state.Snapshot, event eventwire.Event) (string, int64, err
 	default:
 		return "", 0, nil
 	}
-	project, found := view.Project(projectID)
+	project, found, err := l.store.Project(projectID)
+	if err != nil {
+		return "", taskID, err
+	}
 	if !found || strings.TrimSpace(project.Path) == "" {
 		return "", taskID, errors.New("task project path is required")
 	}
@@ -549,26 +582,26 @@ func (l *Loop) syncWorkflows(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	view, err := state.ProjectEvents(l.wire.Events(0))
+	workflows, err := l.store.Workflows()
 	if err != nil {
 		return err
 	}
 	for _, definition := range definitions {
-		existing, found := matchingWorkflow(view, definition, l.workflows)
+		existing, found := matchingWorkflow(workflows, definition, l.workflows)
 		data := state.WorkflowData{
 			Name: definition.Name, Description: stringPointer(definition.Description),
 			Path: stringPointer(definition.Path), Scope: stringPointer(definition.Scope),
 			Phases: slices.Clone(definition.Phases), Mutating: definition.Mutating,
 		}
 		if !found {
-			if _, err := l.wire.Publish(state.WorkflowDiscovered, data); err != nil {
+			if _, err := l.store.Append(state.WorkflowDiscovered, data); err != nil {
 				return err
 			}
 			continue
 		}
 		data.ID = existing.ID
 		if workflowChanged(existing, data) {
-			if _, err := l.wire.Publish(state.WorkflowUpdated, data); err != nil {
+			if _, err := l.store.Append(state.WorkflowUpdated, data); err != nil {
 				return err
 			}
 		}
@@ -576,47 +609,12 @@ func (l *Loop) syncWorkflows(ctx context.Context) error {
 	return nil
 }
 
-func pendingTrigger(view state.Snapshot, events []eventwire.Event) (state.Trigger, eventwire.Event, bool) {
-	for _, event := range events {
-		for _, trigger := range view.Triggers {
-			if !trigger.Enabled || trigger.DeletedAt != nil ||
-				trigger.EventType != event.Type || !event.At.After(trigger.UpdatedAt) {
-				continue
-			}
-			if workflowID, found := terminalWorkflow(event); found && workflowID == trigger.WorkflowID {
-				continue
-			}
-			if event.Type == state.CronFired {
-				var cronEvent state.CronData
-				if json.Unmarshal(event.Data, &cronEvent) != nil || cronEvent.TriggerID != trigger.ID {
-					continue
-				}
-			}
-			if !view.RunStarted(trigger.ID, event.ID) {
-				return trigger, event, true
-			}
-		}
-	}
-	return state.Trigger{}, eventwire.Event{}, false
-}
-
-func terminalWorkflow(event eventwire.Event) (int64, bool) {
-	if event.Type != state.WorkflowRunCompleted && event.Type != state.WorkflowRunFailed {
-		return 0, false
-	}
-	var run state.WorkflowRunData
-	if json.Unmarshal(event.Data, &run) != nil {
-		return 0, false
-	}
-	return run.WorkflowID, true
-}
-
-func nextCron(view state.Snapshot, now time.Time) (*state.Trigger, time.Time) {
+func nextCron(states []store.CronState, now time.Time) (*state.Trigger, time.Time) {
 	var next time.Time
-	for index := range view.Triggers {
-		trigger := &view.Triggers[index]
-		if !trigger.Enabled || trigger.DeletedAt != nil ||
-			trigger.EventType != state.CronFired || trigger.Schedule == nil {
+	for index := range states {
+		value := &states[index]
+		trigger := &value.Trigger
+		if trigger.Schedule == nil {
 			continue
 		}
 		schedule, err := cron.ParseStandard(*trigger.Schedule)
@@ -624,8 +622,8 @@ func nextCron(view state.Snapshot, now time.Time) (*state.Trigger, time.Time) {
 			continue
 		}
 		anchor := trigger.UpdatedAt
-		if last, found := view.LastCron(trigger.ID); found && last.After(anchor) {
-			anchor = last
+		if value.Last != nil && value.Last.After(anchor) {
+			anchor = *value.Last
 		}
 		due := schedule.Next(anchor)
 		if !due.After(now) {
@@ -638,16 +636,21 @@ func nextCron(view state.Snapshot, now time.Time) (*state.Trigger, time.Time) {
 	return nil, next
 }
 
-func matchingWorkflow(view state.Snapshot, definition workflow.Definition, runner workflow.Runner) (state.Workflow, bool) {
-	if selected, found := view.WorkflowByPath(definition.Path); found {
-		return selected, true
-	}
-	for _, selected := range view.Workflows {
+func matchingWorkflow(workflows []state.Workflow, definition workflow.Definition, runner workflow.Runner) (state.Workflow, bool) {
+	for _, selected := range workflows {
+		if stringValue(selected.Path) == definition.Path {
+			return selected, true
+		}
 		if filepath.Clean(runner.LocalPath(selected.ID)) == filepath.Clean(definition.Path) {
 			return selected, true
 		}
 	}
-	return view.WorkflowByName(definition.Name)
+	for _, selected := range workflows {
+		if selected.Name == definition.Name {
+			return selected, true
+		}
+	}
+	return state.Workflow{}, false
 }
 
 func workflowChanged(existing state.Workflow, data state.WorkflowData) bool {

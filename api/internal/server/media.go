@@ -129,7 +129,7 @@ func (s *Server) storeMedia(request *http.Request) (state.Media, error) {
 		_ = existing.Close()
 	}
 
-	event, err := s.wire.Publish(state.MediaCreated, state.MediaData{
+	event, err := s.store.Append(state.MediaCreated, state.MediaData{
 		Name: name, ContentType: contentType, Size: size, SHA256: sha,
 	})
 	if err != nil {
@@ -147,11 +147,11 @@ func (s *Server) media(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	view, ok := s.snapshot(writer)
-	if !ok {
+	mediaFile, found, err := s.store.Media(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	mediaFile, found := view.Media(id)
 	if !found {
 		http.NotFound(writer, request)
 		return

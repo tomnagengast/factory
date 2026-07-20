@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -256,35 +257,49 @@ func followJournal(
 	sequence int64,
 	emit func(Event) error,
 ) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if _, err := file.Seek(int64(offset), io.SeekStart); err != nil {
+		return err
+	}
+	buffer := make([]byte, 32<<10)
+	pending := make([]byte, 0)
 	read := func() error {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if len(data) <= offset {
-			return nil
-		}
-		chunk := data[offset:]
-		end := bytes.LastIndexByte(chunk, '\n')
-		if end < 0 {
-			return nil
-		}
-		offset += end + 1
-		for _, line := range bytes.Split(chunk[:end], []byte{'\n'}) {
-			var event Event
-			if err := json.Unmarshal(line, &event); err != nil {
-				return fmt.Errorf("decode sequence %d: %w", sequence+1, err)
+		for {
+			count, readErr := file.Read(buffer)
+			if count > 0 {
+				pending = append(pending, buffer[:count]...)
 			}
-			if event.Sequence != sequence+1 || event.Type == "" || event.Workflow == "" {
-				return fmt.Errorf("invalid workflow event after sequence %d", sequence)
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				return readErr
 			}
-			event.Raw = append(event.Raw, line...)
-			if err := emit(event); err != nil {
-				return err
+			for {
+				end := bytes.IndexByte(pending, '\n')
+				if end < 0 {
+					break
+				}
+				line := pending[:end]
+				var event Event
+				if err := json.Unmarshal(line, &event); err != nil {
+					return fmt.Errorf("decode sequence %d: %w", sequence+1, err)
+				}
+				if event.Sequence != sequence+1 || event.Type == "" || event.Workflow == "" {
+					return fmt.Errorf("invalid workflow event after sequence %d", sequence)
+				}
+				event.Raw = append(event.Raw, line...)
+				if err := emit(event); err != nil {
+					return err
+				}
+				sequence = event.Sequence
+				pending = pending[end+1:]
 			}
-			sequence = event.Sequence
+			if errors.Is(readErr, io.EOF) {
+				return nil
+			}
 		}
-		return nil
 	}
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()

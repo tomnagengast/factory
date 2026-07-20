@@ -14,6 +14,7 @@ import (
 	"github.com/tomnagengast/factory/api/internal/eventwire"
 	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
+	"github.com/tomnagengast/factory/api/internal/store"
 	"github.com/tomnagengast/factory/api/internal/workflow"
 )
 
@@ -77,11 +78,11 @@ func newFakeWorkflows() *fakeWorkflows {
 }
 
 func newTestLoop(
-	wire *eventwire.Wire,
+	wire *testStore,
 	runner Runner,
 	workflows workflow.Runner,
 ) (*Loop, error) {
-	return NewLoop(wire, runner, workflows, quiescence.New())
+	return NewLoop(wire.Store, runner, workflows, quiescence.New())
 }
 
 func (f *fakeWorkflows) List(context.Context) ([]workflow.Definition, error) {
@@ -682,25 +683,15 @@ func TestLoopSkipsAWorkflowOwnTerminalEvents(t *testing.T) {
 				TriggerID: 10, WorkflowID: summary.ID, SourceEventID: 11,
 			})
 
-			events := wire.Events(0)
-			view, err := state.ProjectEvents(events)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, _, found := pendingTrigger(view, events); found {
+			if _, _, _, found, err := wire.PendingTrigger(); err != nil || found {
 				t.Fatal("workflow matched its own terminal event")
 			}
 
 			source, _ := wire.Publish(eventType, state.WorkflowRunData{
 				TriggerID: 20, WorkflowID: other.ID, SourceEventID: 21,
 			})
-			events = wire.Events(0)
-			view, err = state.ProjectEvents(events)
-			if err != nil {
-				t.Fatal(err)
-			}
-			selected, matched, found := pendingTrigger(view, events)
-			if !found || selected.ID != trigger.ID || matched.ID != source.ID {
+			selected, matched, _, found, err := wire.PendingTrigger()
+			if err != nil || !found || selected.ID != trigger.ID || matched.ID != source.ID {
 				t.Fatalf("other workflow terminal event did not match: %#v, %#v, %v", selected, matched, found)
 			}
 		})
@@ -921,7 +912,7 @@ func TestQuiescenceDrainsActiveTriggerAndBlocksNewAdmission(t *testing.T) {
 	workflows := newFakeWorkflows()
 	workflows.release = make(chan struct{})
 	admission := quiescence.New()
-	loop, _ := NewLoop(wire, &fakeAgent{}, workflows, admission)
+	loop, _ := NewLoop(wire.Store, &fakeAgent{}, workflows, admission)
 	worked, _, err := loop.step(context.Background())
 	if err != nil || !worked {
 		t.Fatalf("initial dispatch = %v, %v", worked, err)
@@ -985,7 +976,7 @@ func TestQuiescenceDrainsWorkflowAuthoring(t *testing.T) {
 		output: "Created.", streamed: make(chan struct{}, 1), release: make(chan struct{}),
 	}
 	admission := quiescence.New()
-	loop, _ := NewLoop(wire, runner, newFakeWorkflows(), admission)
+	loop, _ := NewLoop(wire.Store, runner, newFakeWorkflows(), admission)
 	finished := make(chan error, 1)
 	go func() {
 		_, _, stepErr := loop.step(context.Background())
@@ -1036,7 +1027,7 @@ func TestQuiescenceReleaseWakesPendingDispatchWithoutAnotherWireEvent(t *testing
 
 	workflows := newFakeWorkflows()
 	admission := quiescence.New()
-	loop, _ := NewLoop(wire, &fakeAgent{}, workflows, admission)
+	loop, _ := NewLoop(wire.Store, &fakeAgent{}, workflows, admission)
 	lease, err := admission.Acquire(context.Background(), time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -1152,21 +1143,15 @@ func TestDisabledCronIsNeitherScheduledNorDispatched(t *testing.T) {
 		EventType: state.CronFired, Schedule: &schedule,
 		WorkflowID: workflowEvent.ID, Enabled: false,
 	})
-	events := wire.Events(0)
-	view, err := state.ProjectEvents(events)
+	cronStates, err := wire.CronStates()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if due, next := nextCron(view, time.Now().UTC().Add(time.Hour)); due != nil || !next.IsZero() {
+	if due, next := nextCron(cronStates, time.Now().UTC().Add(time.Hour)); due != nil || !next.IsZero() {
 		t.Fatalf("disabled cron = %#v, %v", due, next)
 	}
 	wire.Publish(state.CronFired, state.CronData{TriggerID: triggerEvent.ID})
-	events = wire.Events(0)
-	view, err = state.ProjectEvents(events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, found := pendingTrigger(view, events); found {
+	if _, _, _, found, err := wire.PendingTrigger(); err != nil || found {
 		t.Fatal("targeted cron event matched a disabled trigger")
 	}
 }
@@ -1188,14 +1173,20 @@ func TestCronResumesAfterEnableWithoutCatchUp(t *testing.T) {
 		ID: triggerEvent.ID, EventType: state.CronFired, Schedule: &schedule,
 		WorkflowID: workflowEvent.ID, Enabled: true,
 	})
-	view, err := state.ProjectEvents(wire.Events(0))
+	reenabled, found, err := wire.Trigger(triggerEvent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reenabled, _ := view.Trigger(triggerEvent.ID)
-	if due, next := nextCron(view, reenabled.UpdatedAt); due != nil || next.IsZero() || !next.After(reenabled.UpdatedAt) {
+	if !found {
+		t.Fatal("reenabled trigger not found")
+	}
+	cronStates, err := wire.CronStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if due, next := nextCron(cronStates, reenabled.UpdatedAt); due != nil || next.IsZero() || !next.After(reenabled.UpdatedAt) {
 		t.Fatalf("cron catch-up = %#v, next = %v, update = %v", due, next, reenabled.UpdatedAt)
-	} else if dueAtTick, _ := nextCron(view, next); dueAtTick == nil || dueAtTick.ID != triggerEvent.ID {
+	} else if dueAtTick, _ := nextCron(cronStates, next); dueAtTick == nil || dueAtTick.ID != triggerEvent.ID {
 		t.Fatalf("first post-enable tick was not due: %#v", dueAtTick)
 	}
 
@@ -1256,23 +1247,18 @@ func TestDisableWinsAgainstStaleTriggerAdmission(t *testing.T) {
 		EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: true,
 	})
 	wire.Publish("release.ready", map[string]int{"version": 1})
-	events := wire.Events(0)
-	view, err := state.ProjectEvents(events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trigger, source, found := pendingTrigger(view, events)
-	if !found {
+	trigger, source, snapshotID, found, err := wire.PendingTrigger()
+	if err != nil || !found {
 		t.Fatal("trigger was not selected")
 	}
-	snapshotID := events[len(events)-1].ID
 	wire.Publish(state.TriggerUpdated, state.TriggerData{
 		ID: triggerEvent.ID, EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: false,
 	})
 
 	workflows := newFakeWorkflows()
 	loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
-	published, err := loop.startTrigger(context.Background(), view, trigger, source, snapshotID)
+	settings, _ := wire.Settings()
+	published, err := loop.startTrigger(context.Background(), settings, trigger, source, snapshotID)
 	if err != nil || published || loop.active != 0 ||
 		eventTypeCount(wire.Events(0), state.WorkflowRunStarted) != 0 {
 		t.Fatalf("stale admission = %v, %v, events = %#v", published, err, wire.Events(0))
@@ -1398,11 +1384,47 @@ func eventTypeCount(events []eventwire.Event, eventType string) int {
 	return count
 }
 
-func openWire(t *testing.T) *eventwire.Wire {
+type testStore struct {
+	*store.Store
+	t *testing.T
+}
+
+func (s *testStore) Publish(eventType string, data any) (eventwire.Event, error) {
+	return s.Append(eventType, data)
+}
+
+func (s *testStore) Events(after int64) []eventwire.Event {
+	s.t.Helper()
+	events, err := s.EventsAfter(after, 100_000)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return events
+}
+
+func (s *testStore) Event(id int64) (eventwire.Event, bool) {
+	s.t.Helper()
+	event, found, err := s.Store.Event(id)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return event, found
+}
+
+func (s *testStore) LastID() int64 {
+	s.t.Helper()
+	id, err := s.Store.LastID()
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return id
+}
+
+func openWire(t *testing.T) *testStore {
 	t.Helper()
-	wire, err := eventwire.Open(filepath.Join(t.TempDir(), "wire.jsonl"))
+	eventStore, err := store.Open(filepath.Join(t.TempDir(), "factory.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return wire
+	return &testStore{Store: eventStore, t: t}
 }

@@ -18,12 +18,13 @@ import (
 )
 
 func (s *Server) settings(writer http.ResponseWriter, _ *http.Request) {
-	view, ok := s.snapshot(writer)
-	if !ok {
+	settings, err := s.store.Settings()
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"settings": view.Settings, "harnesses": state.Harnesses,
+		"settings": settings, "harnesses": state.Harnesses,
 	})
 }
 
@@ -54,7 +55,7 @@ func (s *Server) settingsUpdate(writer http.ResponseWriter, request *http.Reques
 		)
 		return
 	}
-	if _, err := s.wire.Publish(state.SettingsUpdated, settings); err != nil {
+	if _, err := s.store.Append(state.SettingsUpdated, settings); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
@@ -62,12 +63,11 @@ func (s *Server) settingsUpdate(writer http.ResponseWriter, request *http.Reques
 }
 
 func (s *Server) projects(writer http.ResponseWriter, _ *http.Request) {
-	view, ok := s.snapshot(writer)
-	if !ok {
+	projects, err := s.store.Projects()
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	projects := active(view.Projects, func(value state.Project) bool { return value.DeletedAt == nil })
-	sort.SliceStable(projects, func(i, j int) bool { return projects[i].ID > projects[j].ID })
 	writeJSON(writer, http.StatusOK, map[string]any{"projects": projects})
 }
 
@@ -107,13 +107,16 @@ func (s *Server) projectCreate(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	event, err := s.wire.Publish(state.ProjectCreated, input)
+	event, err := s.store.Append(state.ProjectCreated, input)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	view, _ := state.ProjectEvents(s.wire.Events(0))
-	project, _ := view.Project(event.ID)
+	project, _, err := s.store.Project(event.ID)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(writer, http.StatusCreated, project)
 }
 
@@ -133,12 +136,15 @@ func (s *Server) projectUpdate(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if _, err := s.wire.Publish(state.ProjectUpdated, input); err != nil {
+	if _, err := s.store.Append(state.ProjectUpdated, input); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	view, _ := state.ProjectEvents(s.wire.Events(0))
-	project, found := view.Project(id)
+	project, found, err := s.store.Project(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("project not found"))
 		return
@@ -254,17 +260,27 @@ func (s *Server) task(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	view, ok := s.snapshot(writer)
-	if !ok {
+	task, found, err := s.store.Task(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	task, found := view.Task(id)
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("task not found"))
 		return
 	}
+	comments, err := s.store.CommentsFor("task", id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	artifacts, err := s.store.Artifacts("task", id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"task": task, "comments": view.CommentsFor("task", id), "artifacts": view.ArtifactsFor("task", id),
+		"task": task, "comments": comments, "artifacts": artifacts,
 	})
 }
 
@@ -282,13 +298,16 @@ func (s *Server) taskCreate(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	event, err := s.wire.Publish(state.TaskCreated, input)
+	event, err := s.store.Append(state.TaskCreated, input)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	view, _ = state.ProjectEvents(s.wire.Events(0))
-	task, _ := view.Task(event.ID)
+	task, _, err := s.store.Task(event.ID)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(writer, http.StatusCreated, task)
 }
 
@@ -312,12 +331,15 @@ func (s *Server) taskUpdate(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if _, err := s.wire.Publish(state.TaskUpdated, input); err != nil {
+	if _, err := s.store.Append(state.TaskUpdated, input); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	view, _ = state.ProjectEvents(s.wire.Events(0))
-	task, found := view.Task(id)
+	task, found, err := s.store.Task(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("task not found"))
 		return
@@ -385,23 +407,27 @@ func (s *Server) comment(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	view, ok := s.snapshot(writer)
-	if !ok {
+	comment, found, err := s.store.Comment(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	comment, found := view.Comment(id)
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("comment not found"))
 		return
 	}
-	replies := make([]state.Comment, 0)
-	for _, candidate := range view.Comments {
-		if candidate.ParentCommentID != nil && *candidate.ParentCommentID == id && candidate.DeletedAt == nil {
-			replies = append(replies, candidate)
-		}
+	replies, err := s.store.Replies(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	artifacts, err := s.store.Artifacts("comment", id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"comment": comment, "replies": replies, "artifacts": view.ArtifactsFor("comment", id),
+		"comment": comment, "replies": replies, "artifacts": artifacts,
 	})
 }
 
@@ -411,11 +437,11 @@ func (s *Server) commentUpdate(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	view, ok := s.snapshot(writer)
-	if !ok {
+	existing, found, err := s.store.Comment(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	existing, found := view.Comment(id)
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("comment not found"))
 		return
@@ -433,15 +459,18 @@ func (s *Server) commentUpdate(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusBadRequest, errors.New("comment content is required"))
 		return
 	}
-	if _, err := s.wire.Publish(state.CommentUpdated, state.CommentData{
+	if _, err := s.store.Append(state.CommentUpdated, state.CommentData{
 		ID: id, RelationType: existing.RelationType, RelationID: existing.RelationID,
 		ParentCommentID: input.ParentCommentID, Author: existing.Author, Content: input.Content,
 	}); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	view, _ = state.ProjectEvents(s.wire.Events(0))
-	updated, _ := view.Comment(id)
+	updated, _, err := s.store.Comment(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(writer, http.StatusOK, updated)
 }
 
@@ -487,21 +516,12 @@ func (s *Server) reactionUpdate(
 		if request.Context().Err() != nil {
 			return
 		}
-		events := s.wire.Events(0)
-		view, err := state.ProjectEvents(events)
+		checkpoint, status, err := s.reactionTarget(targetType, targetID)
 		if err != nil {
-			writeError(writer, http.StatusInternalServerError, err)
-			return
-		}
-		if status, err := validateReactionTarget(view, targetType, targetID); err != nil {
 			writeError(writer, status, err)
 			return
 		}
-		expectedLastID := int64(0)
-		if len(events) > 0 {
-			expectedLastID = events[len(events)-1].ID
-		}
-		event, published, err := s.wire.PublishIfCurrent(expectedLastID, state.ReactionUpdated, data)
+		_, published, err := s.store.AppendIfCurrent(checkpoint, state.ReactionUpdated, data)
 		if err != nil {
 			writeError(writer, http.StatusInternalServerError, err)
 			return
@@ -509,38 +529,47 @@ func (s *Server) reactionUpdate(
 		if !published {
 			continue
 		}
-		view, err = state.ProjectEvents(append(events, event))
+		if targetType == "task" {
+			task, _, err := s.store.Task(targetID)
+			if err != nil {
+				writeError(writer, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(writer, http.StatusOK, task)
+			return
+		}
+		comment, _, err := s.store.Comment(targetID)
 		if err != nil {
 			writeError(writer, http.StatusInternalServerError, err)
 			return
 		}
-		if targetType == "task" {
-			task, _ := view.Task(targetID)
-			writeJSON(writer, http.StatusOK, task)
-			return
-		}
-		comment, _ := view.Comment(targetID)
 		writeJSON(writer, http.StatusOK, comment)
 		return
 	}
 }
 
-func validateReactionTarget(view state.Snapshot, targetType string, targetID int64) (int, error) {
+func (s *Server) reactionTarget(targetType string, targetID int64) (int64, int, error) {
 	if targetType == "task" {
-		task, found := view.Task(targetID)
-		if !found || task.DeletedAt != nil {
-			return http.StatusNotFound, errors.New("task not found")
+		task, checkpoint, found, err := s.store.TaskWithCheckpoint(targetID)
+		if err != nil {
+			return 0, http.StatusInternalServerError, err
 		}
-		return 0, nil
+		if !found || task.DeletedAt != nil {
+			return 0, http.StatusNotFound, errors.New("task not found")
+		}
+		return checkpoint, 0, nil
 	}
-	comment, found := view.Comment(targetID)
+	comment, checkpoint, found, err := s.store.CommentWithCheckpoint(targetID)
+	if err != nil {
+		return 0, http.StatusInternalServerError, err
+	}
 	if !found || comment.DeletedAt != nil {
-		return http.StatusNotFound, errors.New("comment not found")
+		return 0, http.StatusNotFound, errors.New("comment not found")
 	}
 	if comment.RelationType != "task" {
-		return http.StatusBadRequest, errors.New("reactions are supported only on task comments")
+		return 0, http.StatusBadRequest, errors.New("reactions are supported only on task comments")
 	}
-	return 0, nil
+	return checkpoint, 0, nil
 }
 
 func (s *Server) createComment(writer http.ResponseWriter, data state.CommentData) {
@@ -549,29 +578,27 @@ func (s *Server) createComment(writer http.ResponseWriter, data state.CommentDat
 		writeError(writer, http.StatusBadRequest, errors.New("comment content is required"))
 		return
 	}
-	event, err := s.wire.Publish(state.CommentCreated, data)
+	event, err := s.store.Append(state.CommentCreated, data)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	view, _ := state.ProjectEvents(s.wire.Events(0))
-	comment, _ := view.Comment(event.ID)
+	comment, _, err := s.store.Comment(event.ID)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(writer, http.StatusCreated, comment)
 }
 
 func (s *Server) artifacts(writer http.ResponseWriter, request *http.Request) {
-	view, ok := s.snapshot(writer)
-	if !ok {
-		return
-	}
 	relationType := request.URL.Query().Get("relationType")
 	relationID, _ := strconv.ParseInt(request.URL.Query().Get("relationId"), 10, 64)
-	artifacts := active(view.Artifacts, func(value state.Artifact) bool {
-		return value.DeletedAt == nil &&
-			(relationType == "" || value.RelationType == relationType) &&
-			(relationID == 0 || value.RelationID == relationID)
-	})
-	sort.SliceStable(artifacts, func(i, j int) bool { return artifacts[i].ID > artifacts[j].ID })
+	artifacts, err := s.store.Artifacts(relationType, relationID)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{"artifacts": artifacts})
 }
 
@@ -581,11 +608,11 @@ func (s *Server) artifact(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	view, ok := s.snapshot(writer)
-	if !ok {
+	artifact, found, err := s.store.Artifact(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	artifact, found := view.Artifact(id)
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("artifact not found"))
 		return
@@ -603,13 +630,16 @@ func (s *Server) artifactCreate(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	event, err := s.wire.Publish(state.ArtifactCreated, input)
+	event, err := s.store.Append(state.ArtifactCreated, input)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	view, _ := state.ProjectEvents(s.wire.Events(0))
-	artifact, _ := view.Artifact(event.ID)
+	artifact, _, err := s.store.Artifact(event.ID)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(writer, http.StatusCreated, artifact)
 }
 
@@ -629,12 +659,15 @@ func (s *Server) artifactUpdate(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if _, err := s.wire.Publish(state.ArtifactUpdated, input); err != nil {
+	if _, err := s.store.Append(state.ArtifactUpdated, input); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	view, _ := state.ProjectEvents(s.wire.Events(0))
-	artifact, found := view.Artifact(id)
+	artifact, found, err := s.store.Artifact(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("artifact not found"))
 		return
@@ -657,12 +690,11 @@ func validateArtifact(input state.ArtifactData) error {
 }
 
 func (s *Server) triggers(writer http.ResponseWriter, _ *http.Request) {
-	view, ok := s.snapshot(writer)
-	if !ok {
+	triggers, err := s.store.Triggers()
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	triggers := active(view.Triggers, func(value state.Trigger) bool { return value.DeletedAt == nil })
-	sort.SliceStable(triggers, func(i, j int) bool { return triggers[i].ID > triggers[j].ID })
 	writeJSON(writer, http.StatusOK, map[string]any{"triggers": triggers})
 }
 
@@ -672,11 +704,11 @@ func (s *Server) trigger(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	view, ok := s.snapshot(writer)
-	if !ok {
+	trigger, found, err := s.store.Trigger(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	trigger, found := view.Trigger(id)
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("trigger not found"))
 		return
@@ -713,13 +745,16 @@ func (s *Server) triggerCreate(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	event, err := s.wire.Publish(state.TriggerCreated, data)
+	event, err := s.store.Append(state.TriggerCreated, data)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	view, _ := state.ProjectEvents(s.wire.Events(0))
-	trigger, _ := view.Trigger(event.ID)
+	trigger, _, err := s.store.Trigger(event.ID)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(writer, http.StatusCreated, trigger)
 }
 
@@ -743,12 +778,15 @@ func (s *Server) triggerUpdate(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if _, err := s.wire.Publish(state.TriggerUpdated, data); err != nil {
+	if _, err := s.store.Append(state.TriggerUpdated, data); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	view, _ := state.ProjectEvents(s.wire.Events(0))
-	trigger, found := view.Trigger(id)
+	trigger, found, err := s.store.Trigger(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("trigger not found"))
 		return
@@ -768,12 +806,11 @@ func validateTrigger(input state.TriggerData) error {
 }
 
 func (s *Server) workflows(writer http.ResponseWriter, _ *http.Request) {
-	view, ok := s.snapshot(writer)
-	if !ok {
+	workflows, err := s.store.Workflows()
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	workflows := active(view.Workflows, func(value state.Workflow) bool { return value.DeletedAt == nil })
-	sort.SliceStable(workflows, func(i, j int) bool { return workflows[i].Name < workflows[j].Name })
 	writeJSON(writer, http.StatusOK, map[string]any{"workflows": workflows})
 }
 
@@ -783,11 +820,11 @@ func (s *Server) workflow(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	view, ok := s.snapshot(writer)
-	if !ok {
+	workflow, found, err := s.store.Workflow(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	workflow, found := view.Workflow(id)
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("workflow not found"))
 		return
@@ -798,9 +835,19 @@ func (s *Server) workflow(writer http.ResponseWriter, request *http.Request) {
 			source = string(data)
 		}
 	}
+	comments, err := s.store.CommentsFor("workflow", id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	artifacts, err := s.store.Artifacts("workflow", id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"workflow": workflow, "comments": view.CommentsFor("workflow", id),
-		"artifacts": view.ArtifactsFor("workflow", id), "source": source,
+		"workflow": workflow, "comments": comments,
+		"artifacts": artifacts, "source": source,
 	})
 }
 
@@ -810,19 +857,22 @@ func (s *Server) workflowCreate(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	created, err := s.wire.Publish(state.WorkflowCreated, state.WorkflowData{Description: &message})
+	created, err := s.store.Append(state.WorkflowCreated, state.WorkflowData{Description: &message})
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := s.wire.Publish(state.CommentCreated, state.CommentData{
+	if _, err := s.store.Append(state.CommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: created.ID, Author: "user", Content: message,
 	}); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	view, _ := state.ProjectEvents(s.wire.Events(0))
-	workflow, _ := view.Workflow(created.ID)
+	workflow, _, err := s.store.Workflow(created.ID)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(writer, http.StatusCreated, workflow)
 }
 
@@ -850,13 +900,17 @@ func (s *Server) workflowDelete(writer http.ResponseWriter, request *http.Reques
 	s.delete(writer, request, "workflow", state.WorkflowDeleted)
 }
 
-func (s *Server) history(writer http.ResponseWriter, _ *http.Request) {
-	view, ok := s.snapshot(writer)
-	if !ok {
+func (s *Server) history(writer http.ResponseWriter, request *http.Request) {
+	before, limit, err := page(request)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	runs := slices.Clone(view.Runs)
-	sort.SliceStable(runs, func(i, j int) bool { return runs[i].ID > runs[j].ID })
+	runs, err := s.store.History(before, limit)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{"history": runs})
 }
 
@@ -866,16 +920,26 @@ func (s *Server) historyItem(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	view, ok := s.snapshot(writer)
-	if !ok {
+	run, found, err := s.store.Run(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	run, found := view.Run(id)
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("workflow run not found"))
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"run": run, "events": view.EventsFor(id)})
+	before, limit, err := page(request)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	events, err := s.store.RunEvents(id, before, limit)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"run": run, "events": events})
 }
 
 func messageBody(request *http.Request) (string, error) {
@@ -893,12 +957,17 @@ func messageBody(request *http.Request) (string, error) {
 }
 
 func (s *Server) events(writer http.ResponseWriter, request *http.Request) {
-	after, err := afterID(request)
+	before, limit, err := page(request)
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"events": s.wire.Events(after)})
+	events, err := s.store.EventsBefore(before, limit)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"events": events})
 }
 
 func (s *Server) event(writer http.ResponseWriter, request *http.Request) {
@@ -907,7 +976,11 @@ func (s *Server) event(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	event, found := s.wire.Event(id)
+	event, found, err := s.store.Event(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("event not found"))
 		return
@@ -916,7 +989,11 @@ func (s *Server) event(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) eventTypes(writer http.ResponseWriter, _ *http.Request) {
-	types := s.wire.Types()
+	types, err := s.store.Types()
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	if !slices.Contains(types, state.CronFired) {
 		types = append(types, state.CronFired)
 		sort.Strings(types)
@@ -946,7 +1023,7 @@ func (s *Server) eventCreate(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusBadRequest, errors.New("event data must be JSON"))
 		return
 	}
-	event, err := s.wire.Publish(input.Type, data)
+	event, err := s.store.Append(input.Type, data)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
@@ -968,7 +1045,7 @@ func (s *Server) ingest(writer http.ResponseWriter, request *http.Request) {
 	if source := strings.TrimSpace(request.URL.Query().Get("source")); source != "" {
 		eventType = "ingress." + source
 	}
-	if _, err := s.wire.Publish(eventType, map[string]any{
+	if _, err := s.store.Append(eventType, map[string]any{
 		"method": request.Method, "url": request.URL.RequestURI(), "headers": request.Header,
 		"bodyEncoding": encoding, "body": content,
 	}); err != nil {
@@ -1008,7 +1085,7 @@ func (s *Server) stream(writer http.ResponseWriter, request *http.Request) {
 	}
 	flusher.Flush()
 	for {
-		events, err := s.wire.Wait(request.Context(), after)
+		events, err := s.store.Wait(request.Context(), after, 200)
 		if err != nil {
 			return
 		}
@@ -1038,13 +1115,33 @@ func afterID(request *http.Request) (int64, error) {
 	return id, nil
 }
 
+func page(request *http.Request) (int64, int, error) {
+	before := int64(0)
+	if value := request.URL.Query().Get("before"); value != "" {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || parsed < 1 {
+			return 0, 0, errors.New("before must be an event ID")
+		}
+		before = parsed
+	}
+	limit := 200
+	if value := request.URL.Query().Get("limit"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 {
+			return 0, 0, errors.New("limit must be positive")
+		}
+		limit = parsed
+	}
+	return before, limit, nil
+}
+
 func (s *Server) delete(writer http.ResponseWriter, request *http.Request, pathName, eventType string) {
 	id, err := pathID(request, pathName)
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if _, err := s.wire.Publish(eventType, state.IDData{ID: id}); err != nil {
+	if _, err := s.store.Append(eventType, state.IDData{ID: id}); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}

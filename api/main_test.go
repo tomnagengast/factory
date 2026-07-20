@@ -14,7 +14,7 @@ import (
 func TestParseConfigAcceptsExplicitMediaPath(t *testing.T) {
 	var output bytes.Buffer
 	configuration, err := parseConfig([]string{
-		"-data", "/tmp/factory-wire.jsonl",
+		"-data", "/tmp/factory.db",
 		"-media", "/tmp/factory-media",
 		"-workflow-workspace", "/tmp/factory-workflows",
 	}, &output)
