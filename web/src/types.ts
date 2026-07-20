@@ -24,6 +24,24 @@ export type Task = Record & {
   projectId: number;
 };
 
+export type TaskWorkflowRun = {
+  runId: number;
+  triggerId: number;
+  workflowId: number;
+  workflowName: string;
+  status: "running" | "waiting" | "completed" | "failed";
+};
+
+export type TaskSummary = Task & {
+  commentCount: number;
+  workflowRuns: TaskWorkflowRun[];
+};
+
+export type TaskListResponse = {
+  checkpointEventId: number;
+  tasks: TaskSummary[];
+};
+
 export type Comment = Record & {
   relationType: string;
   relationId: number;
@@ -158,7 +176,7 @@ export type HarnessOption = {
 
 export type SettingsDetail = { settings: Settings; harnesses: HarnessOption[] };
 export type HistoryDetail = { run: WorkflowRun; events: WorkflowRunEvent[] };
-export type ProjectDetail = { project: Project; tasks: Task[] };
+export type ProjectDetail = { project: Project; tasks: TaskSummary[]; checkpointEventId: number };
 export type TaskDetail = { task: Task; comments: Comment[]; artifacts: Artifact[] };
 export type CommentDetail = { comment: Comment; replies: Comment[]; artifacts: Artifact[] };
 export type WorkflowDetail = {

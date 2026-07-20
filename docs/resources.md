@@ -53,7 +53,9 @@ PUT    /api/projects/{id}
 DELETE /api/projects/{id}
 ```
 
-Project detail includes the project's active tasks.
+Project detail includes the project's active tasks. Its task objects use the
+same list summaries and snapshot checkpoint as `GET /api/tasks`, described
+below.
 Creating or updating a project creates its local `path` if needed.
 
 ## Tasks
@@ -97,14 +99,55 @@ DELETE /api/tasks/{id}
 POST   /api/tasks/{id}/comments
 ```
 
-The API task list is sorted by ID descending. The web application can re-sort
-or group it by any task field. It stores the selected sort field, direction,
-and group field in the browser and restores them on later visits. A missing or
-invalid saved preference uses ID descending with no grouping. The project must
-exist and not be deleted. Task detail includes comments and artifacts. Task
-resource responses always include `description` and `parentTaskId`; unset
-values are `null`, so a client can use a fetched task as the basis for a full
-`PUT`.
+The API task list is sorted by ID descending. Each list task adds a
+`commentCount` and `workflowRuns` summary. Project detail uses the same task
+shape. The list and project-detail response also includes
+`checkpointEventId`, the last event included in the snapshot:
+
+```json
+{
+  "checkpointEventId": 123,
+  "tasks": [
+    {
+      "id": 81,
+      "title": "Improve task list display",
+      "commentCount": 3,
+      "workflowRuns": [
+        {
+          "runId": 120,
+          "triggerId": 28,
+          "workflowId": 24,
+          "workflowName": "rpi-agentic-light",
+          "status": "waiting"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`commentCount` counts all active comments related to the task, including
+roots, replies, user comments, and agent comments. Deleted comments do not
+count, and zero is explicit. `workflowRuns` groups task-associated runs by
+workflow. A group includes every active `running` or `waiting` run. When no
+run in that workflow remains active, it includes only the run with the newest
+run ID in `completed` or `failed` state. Waiting means that a human gate has
+suspended the run; completed reports workflow lifecycle completion and does
+not imply that the workflow changed the task. Workflow groups sort by workflow
+ID, and concurrent runs sort by run ID. Empty summaries are `[]`.
+
+Clients that need live summaries should open
+`GET /api/events/stream?after=<checkpointEventId>` with the checkpoint from
+the displayed list response. The stream replays any event appended after that
+atomic snapshot, including events written before the stream connection opens.
+
+The web application can re-sort or group tasks by any task field. It stores
+the selected sort field, direction, and group field in the browser and
+restores them on later visits. A missing or invalid saved preference uses ID
+descending with no grouping. The project must exist and not be deleted. Task
+detail includes comments and artifacts. Task resource responses always
+include `description` and `parentTaskId`; unset values are `null`, so a client
+can use a fetched task as the basis for a full `PUT`.
 
 The web task detail is rendered by default and enters its form only after
 selecting **Edit task**. Save persists the task; cancel discards the form.

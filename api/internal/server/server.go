@@ -138,6 +138,20 @@ func (s *Server) snapshot(writer http.ResponseWriter) (state.Snapshot, bool) {
 	return view, true
 }
 
+func (s *Server) snapshotWithCheckpoint(writer http.ResponseWriter) (state.Snapshot, int64, bool) {
+	events := s.wire.Events(0)
+	view, err := state.ProjectEvents(events)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return state.Snapshot{}, 0, false
+	}
+	checkpoint := int64(0)
+	if len(events) > 0 {
+		checkpoint = events[len(events)-1].ID
+	}
+	return view, checkpoint, true
+}
+
 func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 	view, ok := s.snapshot(writer)
 	if !ok {

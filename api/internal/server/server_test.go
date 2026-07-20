@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -111,6 +112,166 @@ func TestTaskListDefaultsToDescendingIDs(t *testing.T) {
 	}
 	if len(result.Tasks) != 2 || result.Tasks[0].ID < result.Tasks[1].ID {
 		t.Fatalf("tasks are not descending: %#v", result.Tasks)
+	}
+}
+
+func TestTaskListSummariesProjectCommentsAndWorkflowRuns(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	project, _ := wire.Publish(state.ProjectCreated, state.ProjectData{
+		Name: "Factory", Path: t.TempDir(),
+	})
+	task, _ := wire.Publish(state.TaskCreated, state.TaskData{
+		Title: "Improve the list", Status: state.InProgress, ProjectID: project.ID,
+	})
+	emptyTask, _ := wire.Publish(state.TaskCreated, state.TaskData{
+		Title: "No activity", Status: state.Backlog, ProjectID: project.ID,
+	})
+
+	root, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, Author: "user", Content: "Root",
+	})
+	wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, ParentCommentID: &root.ID,
+		Author: "user", Content: "Reply",
+	})
+	wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, Author: "agent", Content: "Gate prompt",
+	})
+	deleted, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, Author: "user", Content: "Remove me",
+	})
+	wire.Publish(state.CommentDeleted, state.IDData{ID: deleted.ID})
+
+	review, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	verify, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "verify"})
+	createdRun, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", SourceEventID: task.ID,
+	})
+	wire.Publish(state.WorkflowRunCompleted, state.WorkflowRunData{
+		TriggerID: 50, SourceEventID: task.ID, Output: "done",
+	})
+
+	readList := func(path string) struct {
+		Project           state.Project  `json:"project"`
+		Tasks             []taskListItem `json:"tasks"`
+		CheckpointEventID int64          `json:"checkpointEventId"`
+	} {
+		t.Helper()
+		response := requestJSON(t, handler, http.MethodGet, path, "")
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, body = %s", path, response.Code, response.Body)
+		}
+		var result struct {
+			Project           state.Project  `json:"project"`
+			Tasks             []taskListItem `json:"tasks"`
+			CheckpointEventID int64          `json:"checkpointEventId"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	findTask := func(tasks []taskListItem, id int64) taskListItem {
+		t.Helper()
+		for _, item := range tasks {
+			if item.ID == id {
+				return item
+			}
+		}
+		t.Fatalf("task %d missing from %#v", id, tasks)
+		return taskListItem{}
+	}
+
+	terminal := findTask(readList("/api/tasks").Tasks, task.ID)
+	if len(terminal.WorkflowRuns) != 1 || terminal.WorkflowRuns[0].RunID != createdRun.ID ||
+		terminal.WorkflowRuns[0].Status != "completed" {
+		t.Fatalf("completed fallback = %#v", terminal.WorkflowRuns)
+	}
+
+	firstUpdate, _ := wire.Publish(state.TaskUpdated, state.TaskData{
+		ID: task.ID, Title: "Improve the list", Status: state.InProgress, ProjectID: project.ID,
+	})
+	firstActive, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", SourceEventID: firstUpdate.ID,
+	})
+	secondUpdate, _ := wire.Publish(state.TaskUpdated, state.TaskData{
+		ID: task.ID, Title: "Improve the list", Status: state.InProgress, ProjectID: project.ID,
+	})
+	secondActive, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", SourceEventID: secondUpdate.ID,
+	})
+	wire.Publish(state.WorkflowRunWaiting, state.WorkflowRunStateData{RunID: secondActive.ID})
+	verifyRun, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 60, WorkflowID: verify.ID, WorkflowName: "verify",
+		SourceEventID: secondUpdate.ID, TaskID: task.ID,
+	})
+	wire.Publish(state.WorkflowRunFailed, state.WorkflowRunData{
+		TriggerID: 60, SourceEventID: secondUpdate.ID, Error: "failed",
+	})
+	custom, _ := wire.Publish("release.ready", map[string]int64{"taskId": task.ID})
+	wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 70, WorkflowID: review.ID, WorkflowName: "review", SourceEventID: custom.ID,
+	})
+
+	global := readList("/api/tasks")
+	if global.CheckpointEventID != wire.LastID() {
+		t.Fatalf("global checkpoint = %d, want %d", global.CheckpointEventID, wire.LastID())
+	}
+	if len(global.Tasks) != 2 || global.Tasks[0].ID != emptyTask.ID || global.Tasks[1].ID != task.ID {
+		t.Fatalf("global task order = %#v", global.Tasks)
+	}
+	active := findTask(global.Tasks, task.ID)
+	if active.CommentCount != 3 {
+		t.Fatalf("comment count = %d, want 3", active.CommentCount)
+	}
+	wantRuns := []taskWorkflowRun{
+		{RunID: firstActive.ID, TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", Status: "running"},
+		{RunID: secondActive.ID, TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", Status: "waiting"},
+		{RunID: verifyRun.ID, TriggerID: 60, WorkflowID: verify.ID, WorkflowName: "verify", Status: "failed"},
+	}
+	if !reflect.DeepEqual(active.WorkflowRuns, wantRuns) {
+		t.Fatalf("active workflow runs = %#v, want %#v", active.WorkflowRuns, wantRuns)
+	}
+	empty := findTask(global.Tasks, emptyTask.ID)
+	if empty.CommentCount != 0 || empty.WorkflowRuns == nil || len(empty.WorkflowRuns) != 0 {
+		t.Fatalf("empty task summary = %#v", empty)
+	}
+
+	projectDetail := readList(fmt.Sprintf("/api/projects/%d", project.ID))
+	if projectDetail.CheckpointEventID != global.CheckpointEventID || projectDetail.Project.ID != project.ID {
+		t.Fatalf("project detail = %#v", projectDetail)
+	}
+	projectTask := findTask(projectDetail.Tasks, task.ID)
+	if projectTask.CommentCount != active.CommentCount || !reflect.DeepEqual(projectTask.WorkflowRuns, active.WorkflowRuns) {
+		t.Fatalf("project task summary = %#v, global = %#v", projectTask, active)
+	}
+	if len(projectDetail.Tasks) != 2 || projectDetail.Tasks[0].ID != task.ID ||
+		projectDetail.Tasks[1].ID != emptyTask.ID {
+		t.Fatalf("project task order = %#v", projectDetail.Tasks)
+	}
+
+	wire.Publish(state.WorkflowRunResumed, state.WorkflowRunStateData{RunID: secondActive.ID})
+	resumed := findTask(readList("/api/tasks").Tasks, task.ID)
+	if len(resumed.WorkflowRuns) < 2 || resumed.WorkflowRuns[1].Status != "running" {
+		t.Fatalf("resumed workflow runs = %#v", resumed.WorkflowRuns)
+	}
+	wire.Publish(state.WorkflowRunCompleted, state.WorkflowRunData{
+		TriggerID: 50, SourceEventID: firstUpdate.ID, Output: "done",
+	})
+	remaining := findTask(readList("/api/tasks").Tasks, task.ID)
+	if len(remaining.WorkflowRuns) < 1 || remaining.WorkflowRuns[0].RunID != secondActive.ID ||
+		remaining.WorkflowRuns[0].Status != "running" {
+		t.Fatalf("remaining active workflow runs = %#v", remaining.WorkflowRuns)
+	}
+	wire.Publish(state.WorkflowRunFailed, state.WorkflowRunData{
+		TriggerID: 50, SourceEventID: secondUpdate.ID, Error: "failed",
+	})
+	failed := findTask(readList("/api/tasks").Tasks, task.ID)
+	if len(failed.WorkflowRuns) < 1 || failed.WorkflowRuns[0].RunID != secondActive.ID ||
+		failed.WorkflowRuns[0].Status != "failed" {
+		t.Fatalf("failed terminal fallback = %#v", failed.WorkflowRuns)
 	}
 }
 
@@ -835,6 +996,57 @@ func TestEventStreamConnectsBeforeAnEventExists(t *testing.T) {
 	}
 	if string(comment) != ": connected\n\n" {
 		t.Fatalf("stream opening = %q", comment)
+	}
+}
+
+func TestEventStreamReplaysEventAfterTaskListCheckpoint(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	project, _ := wire.Publish(state.ProjectCreated, state.ProjectData{Name: "Factory", Path: t.TempDir()})
+	task, _ := wire.Publish(state.TaskCreated, state.TaskData{
+		Title: "Watch comments", Status: state.Todo, ProjectID: project.ID,
+	})
+	list := requestJSON(t, handler, http.MethodGet, "/api/tasks", "")
+	var snapshot struct {
+		CheckpointEventID int64 `json:"checkpointEventId"`
+	}
+	if list.Code != http.StatusOK || json.Unmarshal(list.Body.Bytes(), &snapshot) != nil {
+		t.Fatalf("task list = %d %s", list.Code, list.Body)
+	}
+	intervening, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, Author: "user", Content: "New comment",
+	})
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
+		fmt.Sprintf("%s/api/events/stream?after=%d", server.URL, snapshot.CheckpointEventID), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	reader := bufio.NewReader(response.Body)
+	for _, expected := range []string{": connected\n", "\n"} {
+		line, err := reader.ReadString('\n')
+		if err != nil || line != expected {
+			t.Fatalf("stream opening = %q, %v; want %q", line, err, expected)
+		}
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "data: ") {
+		t.Fatalf("stream event = %q, %v", line, err)
+	}
+	var event eventwire.Event
+	if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data: "))), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.ID != intervening.ID || event.Type != state.CommentCreated {
+		t.Fatalf("replayed event = %#v, want %#v", event, intervening)
 	}
 }
 

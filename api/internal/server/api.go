@@ -77,7 +77,7 @@ func (s *Server) project(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	view, ok := s.snapshot(writer)
+	view, checkpoint, ok := s.snapshotWithCheckpoint(writer)
 	if !ok {
 		return
 	}
@@ -92,7 +92,9 @@ func (s *Server) project(writer http.ResponseWriter, request *http.Request) {
 			tasks = append(tasks, task)
 		}
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"project": project, "tasks": tasks})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"project": project, "tasks": taskListItems(view, tasks), "checkpointEventId": checkpoint,
+	})
 }
 
 func (s *Server) projectCreate(writer http.ResponseWriter, request *http.Request) {
@@ -160,13 +162,90 @@ func prepareProject(input *state.ProjectData) error {
 }
 
 func (s *Server) tasks(writer http.ResponseWriter, _ *http.Request) {
-	view, ok := s.snapshot(writer)
+	view, checkpoint, ok := s.snapshotWithCheckpoint(writer)
 	if !ok {
 		return
 	}
 	tasks := active(view.Tasks, func(value state.Task) bool { return value.DeletedAt == nil })
 	sort.SliceStable(tasks, func(i, j int) bool { return tasks[i].ID > tasks[j].ID })
-	writeJSON(writer, http.StatusOK, map[string]any{"tasks": tasks})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"tasks": taskListItems(view, tasks), "checkpointEventId": checkpoint,
+	})
+}
+
+type taskWorkflowRun struct {
+	RunID        int64  `json:"runId"`
+	TriggerID    int64  `json:"triggerId"`
+	WorkflowID   int64  `json:"workflowId"`
+	WorkflowName string `json:"workflowName"`
+	Status       string `json:"status"`
+}
+
+type taskListItem struct {
+	state.Task
+	CommentCount int               `json:"commentCount"`
+	WorkflowRuns []taskWorkflowRun `json:"workflowRuns"`
+}
+
+func taskListItems(view state.Snapshot, tasks []state.Task) []taskListItem {
+	commentCounts := make(map[int64]int)
+	for _, comment := range view.Comments {
+		if comment.DeletedAt == nil && comment.RelationType == "task" {
+			commentCounts[comment.RelationID]++
+		}
+	}
+
+	runsByTask := make(map[int64]map[int64][]state.WorkflowRun)
+	for _, run := range view.Runs {
+		if run.TaskID < 1 {
+			continue
+		}
+		if runsByTask[run.TaskID] == nil {
+			runsByTask[run.TaskID] = make(map[int64][]state.WorkflowRun)
+		}
+		runsByTask[run.TaskID][run.WorkflowID] = append(
+			runsByTask[run.TaskID][run.WorkflowID], run,
+		)
+	}
+
+	items := make([]taskListItem, 0, len(tasks))
+	for _, task := range tasks {
+		workflowRuns := make([]taskWorkflowRun, 0)
+		groups := runsByTask[task.ID]
+		workflowIDs := make([]int64, 0, len(groups))
+		for workflowID := range groups {
+			workflowIDs = append(workflowIDs, workflowID)
+		}
+		slices.Sort(workflowIDs)
+		for _, workflowID := range workflowIDs {
+			runs := groups[workflowID]
+			sort.SliceStable(runs, func(i, j int) bool { return runs[i].ID < runs[j].ID })
+			activeRuns := make([]state.WorkflowRun, 0, len(runs))
+			var newestTerminal *state.WorkflowRun
+			for index := range runs {
+				run := runs[index]
+				if run.Status == "running" || run.Status == "waiting" {
+					activeRuns = append(activeRuns, run)
+				} else if run.Status == "completed" || run.Status == "failed" {
+					newestTerminal = &runs[index]
+				}
+			}
+			selected := activeRuns
+			if len(selected) == 0 && newestTerminal != nil {
+				selected = []state.WorkflowRun{*newestTerminal}
+			}
+			for _, run := range selected {
+				workflowRuns = append(workflowRuns, taskWorkflowRun{
+					RunID: run.ID, TriggerID: run.TriggerID, WorkflowID: run.WorkflowID,
+					WorkflowName: run.WorkflowName, Status: run.Status,
+				})
+			}
+		}
+		items = append(items, taskListItem{
+			Task: task, CommentCount: commentCounts[task.ID], WorkflowRuns: workflowRuns,
+		})
+	}
+	return items
 }
 
 func (s *Server) task(writer http.ResponseWriter, request *http.Request) {
