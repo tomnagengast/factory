@@ -261,6 +261,9 @@ input, textarea, select {
   width: 100%; border: 1px solid var(--color-border-strong); border-radius: 2px; padding: 10px 11px;
   background: var(--color-surface-raised); color: var(--color-text); resize: vertical;
 }
+@media (hover: none) and (pointer: coarse) {
+  input, textarea { font-size: max(16px, 1em); }
+}
 input::placeholder, textarea::placeholder { color: var(--color-text-muted); opacity: 1; }
 .media-textarea { display: grid; }
 .media-textarea textarea { display: block; border-radius: 2px 2px 0 0; }
