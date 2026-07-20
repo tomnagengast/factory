@@ -322,6 +322,25 @@ Press `Ctrl-C` in the server terminal. Factory stops the HTTP server,
 coordinator, and active workflow processes together. Canceled workflow runs
 are recorded as failed before shutdown completes.
 
+For a controlled deployment, acquire quiescence before replacing the process:
+
+```sh
+curl -fsS -X POST http://127.0.0.1:8092/api/quiescence
+```
+
+The request stops new workflow admission and returns only after active
+authoring and workflow runs have recorded terminal events. Its response
+contains a 15-minute opaque `lease`. If deployment stops before replacing the
+Factory process, reopen admission with:
+
+```sh
+curl -fsS -X DELETE \
+  http://127.0.0.1:8092/api/quiescence/<lease>
+```
+
+Deployment automation must release the lease on every failed or aborted path.
+A successful process replacement clears the in-memory lease.
+
 Restarting with the same `-data`, `-media`, and `-workflow-workspace` values
 preserves resources, comments, media, events, triggers, workflow run history,
 and generated workflow files. Startup appends a failure event for any earlier

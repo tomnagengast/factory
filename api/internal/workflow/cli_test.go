@@ -145,9 +145,11 @@ func TestCLIValidatesWorkflow(t *testing.T) {
 func TestCLICancelsWorkflowWhenEventCannotBeRecorded(t *testing.T) {
 	directory := t.TempDir()
 	command := filepath.Join(directory, "workflow")
+	interrupted := filepath.Join(directory, "interrupted")
 	script := "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do if [ \"$1\" = \"--journal\" ]; then shift; journal=\"$1\"; fi; shift; done\n" +
+		"trap 'printf interrupted > " + interrupted + "; exit 130' INT\n" +
 		"printf '%s\\n' '{\"sequence\":1,\"at\":\"2026-07-17T12:00:00Z\",\"type\":\"runtime.started\",\"workflow\":\"demo\"}' > \"$journal\"\n" +
-		"while :; do :; done\n"
+		"while :; do sleep 0.05; done\n"
 	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +169,9 @@ func TestCLICancelsWorkflowWhenEventCannotBeRecorded(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "wire unavailable") {
 		t.Fatalf("run error = %v", err)
+	}
+	if marker, readErr := os.ReadFile(interrupted); readErr != nil || string(marker) != "interrupted" {
+		t.Fatalf("workflow did not receive an interrupt: %q, %v", marker, readErr)
 	}
 }
 
