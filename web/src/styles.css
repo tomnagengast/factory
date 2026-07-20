@@ -358,7 +358,9 @@ label small { color: var(--color-text-muted); font-weight: 400; }
 .connection { display: flex; align-items: center; gap: 8px; color: var(--color-text-muted); font: 10px var(--mono); text-transform: uppercase; }
 .connection span { width: 8px; height: 8px; border-radius: 50%; background: var(--color-warning-dot); }
 .connection.live span { background: var(--color-live-dot); box-shadow: 0 0 0 5px var(--color-live-ring); }
-.wire-table { border: 1px solid var(--color-border); background: var(--color-surface); }
+.wire-table {
+  overflow-anchor: none; border: 1px solid var(--color-border); background: var(--color-surface);
+}
 .event-row {
   display: grid; grid-template-columns: 56px minmax(0, 1fr) 150px; gap: 14px; align-items: center;
   min-height: 48px; padding: 9px 12px; border-bottom: 1px solid var(--color-border); text-decoration: none;
@@ -399,7 +401,8 @@ label small { color: var(--color-text-muted); font-weight: 400; }
 
 .workflow-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: -18px 0 24px; color: var(--color-text-muted); font: 10px var(--mono); }
 .workflow-meta code { padding: 4px 7px; background: var(--color-inline-code); overflow-wrap: anywhere; }
-.conversation { display: grid; gap: 12px; margin-bottom: 16px; }
+.conversation { margin-bottom: 16px; }
+.conversation-content { display: grid; align-content: start; gap: 12px; }
 .message { max-width: 82%; margin-left: auto; padding: 16px 18px; border: 1px solid var(--color-message-border); background: var(--color-message); }
 .message.agent { margin: 0 auto 0 0; border-color: var(--color-border); background: var(--color-surface); }
 .message.step { max-width: 94%; padding: 12px 14px; background: var(--color-surface-muted); }
@@ -428,7 +431,7 @@ label small { color: var(--color-text-muted); font-weight: 400; }
 }
 .workflow-chat { min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; }
 .workflow-chat .conversation {
-  min-height: 0; margin: 0; padding: 4px 8px 12px 0; align-content: start; overflow-y: auto;
+  min-height: 0; margin: 0; padding: 4px 8px 12px 0; overflow-y: auto;
   overscroll-behavior: contain;
 }
 .workflow-chat .composer { position: static; margin-top: 12px; padding: 18px; box-shadow: none; }

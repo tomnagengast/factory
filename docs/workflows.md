@@ -96,13 +96,15 @@ create or update the trigger that will run the workflow:
 "$FACTORY_CLI" trigger create '{"eventType":"task.updated","workflowId":24,"enabled":true}'
 ```
 
-The workflow detail page highlights the live source as plain JavaScript. It
-The page receives each durable comment through the live event
-stream and polls the current file once per second while any user message lacks
-a final agent response, highlighting each changed source response. Intermediate
-steps do not stop the updating state. Chat and source scroll independently on
-wide screens and stack on narrow screens. Refreshing the page replays the same
-steps once in wire order.
+The workflow detail page highlights the live source as plain JavaScript. The
+page receives each durable comment through the live event stream and polls the
+current file once per second while any user message lacks a final agent
+response, highlighting each changed source response. Intermediate steps do not
+stop the updating state. Chat and source scroll independently on wide screens
+and stack on narrow screens. The conversation opens at its latest message and
+follows new replies while the reader remains at the bottom. Scrolling up
+pauses that following until the reader returns to the bottom. Refreshing the
+page replays the same steps once in wire order.
 
 Use `/settings` or `factory settings update` to select the harness, model,
 reasoning level, and workflow capacity. The API supplies the supported option
@@ -304,7 +306,10 @@ events chronologically in contiguous phase groups. Run content renders as
 Markdown: prose wraps within the page, while code blocks and tables scroll
 horizontally. A task-triggered run links back to its task, including a
 `task.deleted` run because the task remains replayable after soft deletion.
-Both views update from the same server-sent event stream as the event wire.
+The run detail opens at its latest event or final result and follows later
+content while the reader remains at the bottom. Scrolling up pauses that
+following until the reader returns to the bottom. Both views update from the
+same server-sent event stream as the event wire.
 
 ### Task event triggers
 
