@@ -38,7 +38,10 @@ import {
   type SettingsDetail,
   type Task,
   type TaskDetail,
+  type TaskListResponse,
   type TaskStatus,
+  type TaskSummary,
+  type TaskWorkflowRun,
   type Trigger,
   type Workflow,
   type WorkflowDetail,
@@ -216,11 +219,11 @@ function ReactionBar(props: {
 }
 
 function Home() {
-  const [data] = createResource(async () => {
+  const [data, { refetch }] = createResource(async () => {
     const [health, projects, tasks, events] = await Promise.all([
       get<Health>("/api/health"),
       get<{ projects: Project[] }>("/api/projects"),
-      get<{ tasks: Task[] }>("/api/tasks"),
+      get<TaskListResponse>("/api/tasks"),
       get<{ events: Event[] }>("/api/events"),
     ]);
     return {
@@ -228,8 +231,10 @@ function Home() {
       projects: projects.projects.slice(0, 4),
       tasks: tasks.tasks.slice(0, 5),
       events: events.events.slice(-6).reverse(),
+      checkpointEventId: tasks.checkpointEventId,
     };
   });
+  liveTaskRows(() => data()?.checkpointEventId, refetch);
   return (
     <div class="page">
       <PageHeader
@@ -425,6 +430,7 @@ function ProjectView() {
   const params = useParams();
   const navigate = useNavigate();
   const [data, { refetch }] = createResource(() => get<ProjectDetail>(`/api/projects/${params.project}`));
+  liveTaskRows(() => data()?.checkpointEventId, refetch);
   const action = mutation();
   return (
     <div class="page">
@@ -494,12 +500,15 @@ function ProjectForm(props: {
 }
 
 function Tasks() {
-  const [data] = createResource(async () => {
+  const [data, { refetch }] = createResource(async () => {
     const [tasks, projects] = await Promise.all([
-      get<{ tasks: Task[] }>("/api/tasks"), get<{ projects: Project[] }>("/api/projects"),
+      get<TaskListResponse>("/api/tasks"), get<{ projects: Project[] }>("/api/projects"),
     ]);
-    return { tasks: tasks.tasks, projects: projects.projects };
+    return {
+      tasks: tasks.tasks, projects: projects.projects, checkpointEventId: tasks.checkpointEventId,
+    };
   });
+  liveTaskRows(() => data()?.checkpointEventId, refetch);
   const initial = loadTaskViewPreferences();
   const [sortField, setSortField] = createSignal(initial.sortField);
   const [direction, setDirection] = createSignal(initial.direction);
@@ -511,14 +520,14 @@ function Tasks() {
   }));
   const groups = createMemo(() => {
     const value = data();
-    if (!value) return [] as Array<[string, Task[]]>;
+    if (!value) return [] as Array<[string, TaskSummary[]]>;
     const sorted = [...value.tasks].sort((left, right) => {
       const result = compare(taskValue(left, sortField()), taskValue(right, sortField()));
       return direction() === "desc" ? -result : result;
     });
     const field = groupField();
-    if (!field) return [["", sorted]] as Array<[string, Task[]]>;
-    const grouped = new Map<string, Task[]>();
+    if (!field) return [["", sorted]] as Array<[string, TaskSummary[]]>;
+    const grouped = new Map<string, TaskSummary[]>();
     for (const task of sorted) {
       const key = displayTaskValue(task, field, value.projects);
       grouped.set(key, [...(grouped.get(key) ?? []), task]);
@@ -562,14 +571,62 @@ function Tasks() {
   );
 }
 
-function TaskRow(props: { task: Task; projects: Project[] }) {
+function TaskRow(props: { task: TaskSummary; projects: Project[] }) {
   return (
     <A href={`/tasks/${props.task.id}`} class="task-row">
-      <span class={`status ${slug(props.task.status)}`}>{props.task.status}</span>
+      <span class="task-row-meta" role="group" aria-label={`Status: ${props.task.status}`}
+        title={`Status: ${props.task.status}`}>
+        <TaskStatusIcon status={props.task.status} />
+        <span class="task-id">#{props.task.id}</span>
+      </span>
       <span class="task-title"><strong>{props.task.title}</strong><small>{projectName(props.task.projectId, props.projects)}</small></span>
-      <span class="id">#{props.task.id}</span>
-      <time>{date(props.task.updatedAt)}</time>
+      <span class="task-row-signals">
+        <WorkflowStatusIndicators runs={props.task.workflowRuns} />
+        <CommentCount count={props.task.commentCount} />
+        <time>{date(props.task.updatedAt)}</time>
+      </span>
     </A>
+  );
+}
+
+function TaskStatusIcon(props: { status: TaskStatus }) {
+  return (
+    <svg class={`task-status-icon ${slug(props.status)}`} viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8" />
+      <Show when={props.status === "todo"}><path d="M8 12h8" /></Show>
+      <Show when={props.status === "in progress"}><path class="status-fill" d="M12 4a8 8 0 0 1 0 16Z" /></Show>
+      <Show when={props.status === "in review"}><circle class="status-fill" cx="12" cy="12" r="3" /></Show>
+      <Show when={props.status === "done"}><path d="m8 12 2.5 2.5L16 9" /></Show>
+      <Show when={props.status === "canceled"}><path d="m9 9 6 6m0-6-6 6" /></Show>
+    </svg>
+  );
+}
+
+function WorkflowStatusIndicators(props: { runs: TaskWorkflowRun[] }) {
+  const label = () => props.runs.map((run) =>
+    `${run.workflowName || `Workflow ${run.workflowId}`} run #${run.runId}: ${run.status}`).join("; ");
+  return (
+    <Show when={props.runs.length}>
+      <span class="workflow-status-indicators" role="img" aria-label={label()} title={label()}>
+        <For each={props.runs}>{(run) =>
+          <svg class={`workflow-status-indicator ${run.status}`} viewBox="0 0 10 10" aria-hidden="true">
+            <circle cx="5" cy="5" r="4" />
+          </svg>}
+        </For>
+      </span>
+    </Show>
+  );
+}
+
+function CommentCount(props: { count: number }) {
+  const label = () => `${props.count} ${props.count === 1 ? "comment" : "comments"}`;
+  return (
+    <span class="task-comment-count" role="img" aria-label={label()} title={label()}>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 5h14v10H9l-4 4Z" />
+      </svg>
+      <span>{props.count}</span>
+    </span>
   );
 }
 
@@ -577,7 +634,7 @@ function TaskNew() {
   const navigate = useNavigate();
   const [options] = createResource(async () => {
     const [projects, tasks] = await Promise.all([
-      get<{ projects: Project[] }>("/api/projects"), get<{ tasks: Task[] }>("/api/tasks"),
+      get<{ projects: Project[] }>("/api/projects"), get<TaskListResponse>("/api/tasks"),
     ]);
     return { projects: projects.projects, tasks: tasks.tasks };
   });
@@ -603,7 +660,7 @@ function TaskView() {
   liveRefetch(["comment.created", "reaction.updated"], refetch);
   const [options] = createResource(async () => {
     const [projects, tasks] = await Promise.all([
-      get<{ projects: Project[] }>("/api/projects"), get<{ tasks: Task[] }>("/api/tasks"),
+      get<{ projects: Project[] }>("/api/projects"), get<TaskListResponse>("/api/tasks"),
     ]);
     return { projects: projects.projects, tasks: tasks.tasks };
   });
@@ -1530,6 +1587,26 @@ function liveRefetch(types: string[], refetch: () => unknown) {
   onMount(async () => {
     const initial = await get<{ events: Event[] }>("/api/events");
     source = new EventSource(`/api/events/stream?after=${initial.events.at(-1)?.id ?? 0}`);
+    source.onmessage = (message) => {
+      const event = JSON.parse(message.data) as Event;
+      if (types.includes(event.type)) refetch();
+    };
+  });
+  onCleanup(() => source?.close());
+}
+
+function liveTaskRows(checkpoint: () => number | undefined, refetch: () => unknown) {
+  const types = [
+    "task.created", "task.updated", "task.deleted", "comment.created", "comment.deleted",
+    "workflow.run.started", "workflow.run.waiting", "workflow.run.resumed",
+    "workflow.run.completed", "workflow.run.failed",
+  ];
+  let source: EventSource | undefined;
+  createEffect(() => {
+    const after = checkpoint();
+    if (after == null) return;
+    source?.close();
+    source = new EventSource(`/api/events/stream?after=${after}`);
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as Event;
       if (types.includes(event.type)) refetch();

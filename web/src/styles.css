@@ -204,15 +204,44 @@ main { min-width: 0; }
 }
 
 .rows, .wire-list { border-top: 1px solid var(--color-border); }
-.task-row, .trigger-row {
-  min-height: 64px; display: grid; grid-template-columns: 90px minmax(0, 1fr) 54px 130px;
+.task-row {
+  min-height: 64px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center; gap: 14px; padding: 10px 12px; border-bottom: 1px solid var(--color-border); text-decoration: none;
 }
+.trigger-row {
+  min-height: 64px; display: grid; align-items: center; gap: 14px;
+  padding: 10px 12px; border-bottom: 1px solid var(--color-border); text-decoration: none;
+}
 .task-row:hover, .trigger-row:hover, .history-row:hover, .event-row:hover { background: var(--color-surface-hover); }
+.task-row-meta { display: inline-flex; align-items: center; gap: 5px; color: var(--color-text-muted); }
+.task-status-icon {
+  width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-linecap: round;
+  stroke-linejoin: round; stroke-width: 1.7;
+}
+.task-status-icon.todo, .task-status-icon.in-review { color: var(--status-info-text); }
+.task-status-icon.in-progress { color: var(--status-warning-text); }
+.task-status-icon.done { color: var(--status-success-text); }
+.task-status-icon.canceled { color: var(--status-danger-text); }
+.task-status-icon .status-fill { fill: currentColor; stroke: none; }
+.task-id { color: var(--color-text-muted); font: 10px var(--mono); }
 .task-title { min-width: 0; }
-.task-title strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.task-title strong { display: block; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 14px; }
 .task-title small { display: block; margin-top: 4px; color: var(--color-text-muted); font-size: 11px; }
 .task-row time, .event-row time { color: var(--color-text-muted); font-size: 11px; text-align: right; }
+.task-row-signals {
+  min-width: 0; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap;
+  gap: 6px 10px; color: var(--color-text-muted);
+}
+.workflow-status-indicators { max-width: 88px; display: inline-flex; align-items: center; flex-wrap: wrap; gap: 3px; }
+.workflow-status-indicator { width: 10px; height: 10px; flex: none; color: var(--status-neutral-text); fill: currentColor; }
+.workflow-status-indicator.waiting { color: var(--status-info-text); }
+.workflow-status-indicator.running { color: var(--status-warning-text); }
+.workflow-status-indicator.completed { color: var(--status-success-text); }
+.workflow-status-indicator.failed { color: var(--status-danger-text); }
+.task-comment-count { display: inline-flex; align-items: center; gap: 4px; font: 10px var(--mono); font-variant-numeric: tabular-nums; }
+.task-comment-count svg {
+  width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-linejoin: round; stroke-width: 1.7;
+}
 .status, .trigger-state, .run-status {
   width: fit-content; padding: 4px 7px; border: 1px solid var(--status-neutral-border);
   background: var(--status-neutral-surface); color: var(--status-neutral-text);
@@ -503,7 +532,8 @@ label small { color: var(--color-text-muted); font-weight: 400; }
   .page { padding-inline: 16px; }
   .page-header { align-items: flex-start; flex-direction: column; }
   .card-grid, .field-pair { grid-template-columns: 1fr; }
-  .task-row { grid-template-columns: 82px 1fr 42px; }
+  .task-row { grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 7px 10px; }
+  .task-row-signals { grid-column: 2; justify-self: start; justify-content: flex-start; }
   .task-row time { display: none; }
   .trigger-row { grid-template-columns: 96px minmax(0, 1fr) 68px 38px; gap: 8px; }
   .trigger-schedule { display: none; }
