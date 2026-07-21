@@ -1,4 +1,5 @@
-import type { MediaUpload } from "./types";
+import { createSignal, onCleanup, onMount } from "solid-js";
+import type { Event, MediaUpload } from "./types";
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -39,4 +40,41 @@ export function optional(value: FormDataEntryValue | null) {
 export function optionalID(value: FormDataEntryValue | null) {
   const text = optional(value);
   return text ? Number(text) : undefined;
+}
+
+export function mutation() {
+  const [pending, setPending] = createSignal(false);
+  const [error, setError] = createSignal<string>();
+  return {
+    pending,
+    error,
+    run: async (action: () => Promise<void>) => {
+      setPending(true);
+      setError();
+      try {
+        await action();
+      } catch (caught) {
+        setError(errorMessage(caught));
+      } finally {
+        setPending(false);
+      }
+    },
+  };
+}
+
+export function liveRefetch(types: string[], refetch: () => unknown) {
+  let source: EventSource | undefined;
+  onMount(async () => {
+    const initial = await get<{ events: Event[] }>("/api/events");
+    source = new EventSource(`/api/events/stream?after=${initial.events[0]?.id ?? 0}`);
+    source.onmessage = (message) => {
+      const event = JSON.parse(message.data) as Event;
+      if (types.includes(event.type)) refetch();
+    };
+  });
+  onCleanup(() => source?.close());
+}
+
+export function errorMessage(value: unknown) {
+  return value instanceof Error ? value.message : String(value || "Something went wrong.");
 }

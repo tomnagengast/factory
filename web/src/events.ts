@@ -28,3 +28,12 @@ export function shouldContinueEventPaging(state: EventPagingState) {
     && bounds.bottom > 0
     && bounds.top < state.viewportHeight;
 }
+
+export function uniqueByID<T extends { id: number }>(values: T[]) {
+  const seen = new Set<number>();
+  return values.filter((value) => {
+    if (seen.has(value.id)) return false;
+    seen.add(value.id);
+    return true;
+  });
+}

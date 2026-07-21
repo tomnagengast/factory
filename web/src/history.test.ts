@@ -10,7 +10,7 @@ import {
   historyStatuses,
   mergeHistoryRuns,
   observeHistorySentinel,
-} from "./history";
+} from "./history-helpers";
 import type { WorkflowRun } from "./types";
 
 describe("workflow history routes", () => {

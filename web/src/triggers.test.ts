@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Trigger, Workflow } from "./types";
-import { filterTriggers, triggerEventTypeOptions, triggerWorkflowOptions } from "./triggers";
+import { filterTriggers, triggerEventTypeOptions, triggerWorkflowOptions } from "./trigger-helpers";
 
 function trigger(id: number, eventType: string, workflowId: number, enabled = true): Trigger {
   return {
