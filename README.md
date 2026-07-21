@@ -96,7 +96,7 @@ Immutable media blobs default to `~/.local/share/factory/media`.
 /projects                              project list
 /projects/new                          create project
 /projects/:project                     view and edit project
-/tasks                                 sortable and groupable task list
+/tasks                                 filterable, sortable, and groupable task list
 /tasks/new                             create task
 /tasks/:task                           view and edit task, comments, artifacts
 /tasks/:task/comments/:comment         directly address a comment

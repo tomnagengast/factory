@@ -1,4 +1,4 @@
-import { A, Route, Router, useNavigate, useParams } from "@solidjs/router";
+import { A, Route, Router, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 import {
   createEffect,
   createMemo,
@@ -11,7 +11,7 @@ import {
   type JSX,
 } from "solid-js";
 import hljs from "highlight.js/lib/common";
-import { ListTodo, Play, Trash2 } from "lucide-solid";
+import { ArrowDownWideNarrow, ArrowUpNarrowWide, ListTodo, Play, Trash2 } from "lucide-solid";
 import "highlight.js/styles/github-dark.css";
 import { get, optional, optionalID, post, put, remove, uploadMedia } from "./api";
 import { bindNewestFollower, type NewestFollower } from "./follow-newest";
@@ -24,10 +24,15 @@ import {
   saveLastTaskProjectId,
 } from "./task-creation-preferences";
 import {
-  loadTaskViewPreferences,
-  saveTaskViewPreferences,
+  filterTasks,
+  parseTaskViewSearchParams,
   taskFields,
+  taskProjectOptions,
+  taskViewSearchParams,
+  taskViewSearchParamsAreCanonical,
   type TaskField,
+  type TaskProjectOption,
+  type TaskViewPreferences,
 } from "./task-view-preferences";
 import { filterTriggers, triggerEventTypeOptions, triggerWorkflowOptions } from "./triggers";
 import { highlightWorkflowSource } from "./workflow-source";
@@ -506,6 +511,7 @@ function ProjectForm(props: {
 }
 
 function Tasks() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [data, { refetch }] = createResource(async () => {
     const [tasks, projects] = await Promise.all([
       get<TaskListResponse>("/api/tasks"), get<{ projects: Project[] }>("/api/projects"),
@@ -515,23 +521,32 @@ function Tasks() {
     };
   });
   liveTaskRows(() => data()?.checkpointEventId, refetch);
-  const initial = loadTaskViewPreferences();
-  const [sortField, setSortField] = createSignal(initial.sortField);
-  const [direction, setDirection] = createSignal(initial.direction);
-  const [groupField, setGroupField] = createSignal(initial.groupField);
-  createEffect(() => saveTaskViewPreferences({
-    sortField: sortField(),
-    direction: direction(),
-    groupField: groupField(),
-  }));
+  const projectOptions = createMemo(() => taskProjectOptions(data()?.tasks ?? [], data()?.projects ?? []));
+  const preferences = createMemo(() => parseTaskViewSearchParams(
+    searchParams,
+    data() ? projectOptions().map((project) => project.id) : undefined,
+  ));
+  const updateView = (updates: Partial<TaskViewPreferences>) => {
+    setSearchParams(taskViewSearchParams({ ...preferences(), ...updates }));
+  };
+  const clearFilters = () => updateView({ statuses: [], projectIds: [] });
+  const filtered = createMemo(() => filterTasks(data()?.tasks ?? [], preferences()));
+  const activeFilterCount = createMemo(() => preferences().statuses.length + preferences().projectIds.length);
+  createEffect(() => {
+    if (!data()) return;
+    const canonical = taskViewSearchParams(preferences());
+    if (!taskViewSearchParamsAreCanonical(searchParams, canonical)) {
+      setSearchParams(canonical, { replace: true });
+    }
+  });
   const groups = createMemo(() => {
     const value = data();
     if (!value) return [] as Array<[string, TaskSummary[]]>;
-    const sorted = [...value.tasks].sort((left, right) => {
-      const result = compare(taskValue(left, sortField()), taskValue(right, sortField()));
-      return direction() === "desc" ? -result : result;
+    const sorted = [...filtered()].sort((left, right) => {
+      const result = compare(taskValue(left, preferences().sortField), taskValue(right, preferences().sortField));
+      return preferences().direction === "desc" ? -result : result;
     });
-    const field = groupField();
+    const field = preferences().groupField;
     if (!field) return [["", sorted]] as Array<[string, TaskSummary[]]>;
     const grouped = new Map<string, TaskSummary[]>();
     for (const task of sorted) {
@@ -544,35 +559,119 @@ function Tasks() {
     <div class="page">
       <PageHeader
         title="Tasks"
-        description="Ungrouped and newest first by default. Change either control without changing the underlying wire."
+        description="Filter, sort, and group the loaded tasks without changing the underlying wire."
         actions={<A class="button primary" href="/tasks/new">New task</A>}
       />
-      <div class="controls">
-        <label>Sort by<select value={sortField()} onChange={(event) => setSortField(event.currentTarget.value as TaskField)}>
-          <For each={taskFields}>{(field) => <option value={field[0]}>{field[1]}</option>}</For>
-        </select></label>
-        <label>Direction<select value={direction()} onChange={(event) => setDirection(event.currentTarget.value as "asc" | "desc")}>
-          <option value="desc">Descending</option><option value="asc">Ascending</option>
-        </select></label>
-        <label>Group by<select value={groupField()} onChange={(event) => setGroupField(event.currentTarget.value as TaskField | "")}>
-          <option value="">No grouping</option>
-          <For each={taskFields}>{(field) => <option value={field[0]}>{field[1]}</option>}</For>
-        </select></label>
-      </div>
       <Load data={data} error={() => data.error}>
         {(value) => (
           <Show when={value.tasks.length} fallback={<Empty>No tasks yet.</Empty>}>
-            <For each={groups()}>
-              {([label, tasks]) => (
-                <section class="task-group">
-                  <Show when={label}><h2>{label}<span>{tasks.length}</span></h2></Show>
-                  <div class="rows"><For each={tasks}>{(task) => <TaskRow task={task} projects={value.projects} />}</For></div>
-                </section>
-              )}
-            </For>
+            <div class="task-view-controls">
+              <div class="task-order-controls" aria-label="Task order and grouping">
+                <div class="task-sort-control">
+                  <label>Sort by<select value={preferences().sortField}
+                    onChange={(event) => updateView({ sortField: event.currentTarget.value as TaskField })}>
+                    <For each={taskFields}>{(field) => <option value={field[0]}>{field[1]}</option>}</For>
+                  </select></label>
+                  <button type="button" class="sort-direction"
+                    aria-label={sortDirectionLabel(preferences().direction)}
+                    title={sortDirectionLabel(preferences().direction)}
+                    onClick={() => updateView({ direction: preferences().direction === "desc" ? "asc" : "desc" })}>
+                    <Show when={preferences().direction === "desc"}
+                      fallback={<ArrowUpNarrowWide aria-hidden="true" />}>
+                      <ArrowDownWideNarrow aria-hidden="true" />
+                    </Show>
+                  </button>
+                </div>
+                <label>Group by<select value={preferences().groupField}
+                  onChange={(event) => updateView({ groupField: event.currentTarget.value as TaskField | "" })}>
+                  <option value="">No grouping</option>
+                  <For each={taskFields}>{(field) => <option value={field[0]}>{field[1]}</option>}</For>
+                </select></label>
+              </div>
+              <TaskFilters
+                projects={projectOptions()}
+                selectedStatuses={preferences().statuses}
+                selectedProjectIds={preferences().projectIds}
+                activeFilterCount={activeFilterCount()}
+                displayedResultCount={filtered().length}
+                totalResultCount={value.tasks.length}
+                onStatusChange={(status, selected) => updateView({
+                  statuses: selected
+                    ? [...preferences().statuses, status]
+                    : preferences().statuses.filter((value) => value !== status),
+                })}
+                onProjectChange={(projectId, selected) => updateView({
+                  projectIds: selected
+                    ? [...preferences().projectIds, projectId]
+                    : preferences().projectIds.filter((value) => value !== projectId),
+                })}
+                onClear={clearFilters}
+              />
+            </div>
+            <Show when={filtered().length} fallback={<div class="empty task-filter-empty">
+              <p>No tasks match these filters.</p>
+              <button type="button" class="button quiet" onClick={clearFilters}>Clear filters</button>
+            </div>}>
+              <For each={groups()}>
+                {([label, tasks]) => (
+                  <section class="task-group">
+                    <Show when={label}><h2>{label}<span>{tasks.length}</span></h2></Show>
+                    <div class="rows"><For each={tasks}>{(task) => <TaskRow task={task} projects={value.projects} />}</For></div>
+                  </section>
+                )}
+              </For>
+            </Show>
           </Show>
         )}
       </Load>
+    </div>
+  );
+}
+
+function TaskFilters(props: {
+  projects: TaskProjectOption[];
+  selectedStatuses: TaskStatus[];
+  selectedProjectIds: number[];
+  activeFilterCount: number;
+  displayedResultCount: number;
+  totalResultCount: number;
+  onStatusChange: (status: TaskStatus, selected: boolean) => void;
+  onProjectChange: (projectId: number, selected: boolean) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div class="task-filters" aria-label="Task filters">
+      <details class="task-filter">
+        <summary>Filter <span>{props.activeFilterCount} selected</span></summary>
+        <div class="task-filter-panel">
+          <fieldset>
+            <legend>Status</legend>
+            <div class="task-filter-options" role="group" aria-label="Filter by status">
+              <For each={taskStatuses}>{(status) => <label>
+                <input type="checkbox" checked={props.selectedStatuses.includes(status)}
+                  onChange={(event) => props.onStatusChange(status, event.currentTarget.checked)} />
+                <span>{status}</span>
+              </label>}</For>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Project</legend>
+            <div class="task-filter-options" role="group" aria-label="Filter by project">
+              <For each={props.projects}>{(project) => <label>
+                <input type="checkbox" checked={props.selectedProjectIds.includes(project.id)}
+                  onChange={(event) => props.onProjectChange(project.id, event.currentTarget.checked)} />
+                <span>{project.label}</span>
+              </label>}</For>
+            </div>
+          </fieldset>
+          <button type="button" class="button quiet" disabled={props.activeFilterCount === 0} onClick={props.onClear}>
+            Clear filters
+          </button>
+        </div>
+      </details>
+      <p class="task-filter-results" role="status">
+        Showing {props.displayedResultCount} of {props.totalResultCount} tasks
+      </p>
     </div>
   );
 }
@@ -1822,6 +1921,12 @@ function displayTaskValue(task: Task, field: TaskField, projects: Project[]) {
 function compare(left: string | number, right: string | number) {
   if (typeof left === "number" && typeof right === "number") return left - right;
   return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
+}
+
+function sortDirectionLabel(direction: TaskViewPreferences["direction"]) {
+  return direction === "desc"
+    ? "Sort descending; switch to ascending"
+    : "Sort ascending; switch to descending";
 }
 
 function uniqueByID<T extends { id: number }>(values: T[]) {
