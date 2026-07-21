@@ -197,7 +197,7 @@ type WorkflowRuntimeEvent struct {
 }
 
 type WorkflowRunEvent struct {
-	Raw        json.RawMessage `json:"-"`
+	Raw        json.RawMessage `json:"raw"`
 	ID         int64           `json:"id"`
 	RunID      int64           `json:"runId"`
 	RecordedAt time.Time       `json:"recordedAt"`

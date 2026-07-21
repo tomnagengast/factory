@@ -625,13 +625,15 @@ POST   /api/workflows/{id}/comments
 Workflow detail includes metadata, conversation comments, artifacts, and the
 current source file text. Comments appear exactly once in append-only wire
 order, including live authoring reasoning, tool calls, complete tool results,
-agent messages, errors, and unknown semantic harness events. Usage fields are
-recomputed from the wire on each
-snapshot. Every start counts, including running, waiting, completed, failed,
-and immediate-failure runs. Task usage counts distinct positive task IDs from
-the run's direct task context; historical starts without `taskId` recover it
-only when their immediate source is `task.created`, `task.updated`, or
-`task.deleted`.
+agent messages, errors, and unknown semantic harness events. The web view keeps
+human and agent prose in the narrative and groups only consecutive operational
+comments for display. Expanding a group shows every source comment without
+pairing, filtering, or truncating it. Usage fields are recomputed from the wire
+on each snapshot. Every start counts, including running, waiting, completed,
+failed, and immediate-failure runs. Task usage counts distinct positive task
+IDs from the run's direct task context; historical starts without `taskId`
+recover it only when their immediate source is `task.created`, `task.updated`,
+or `task.deleted`.
 
 ## Workflow history
 
@@ -662,7 +664,17 @@ recorded time, workflow sequence and timestamp, type, and workflow name.
 Depending on the event, it also includes phase, step ID, cache key, agent ID,
 backend, kind, prompt or log message, schema, result, error, tokens,
 concurrency, and budget. Starts, cache hits, suspensions, resumes, completions,
-and failures remain distinct events.
+and failures remain distinct events. Each detail event also includes `raw`, the
+complete journal object copied from the workflow CLI. It preserves every known
+and extension field, including fields that Factory does not model in its typed
+summary. `id`, `runId`, and `recordedAt` remain separate Factory wire metadata
+and are not merged into `raw`.
+
+The web run detail renders logs as narrative Markdown and groups other events
+behind activity summaries. Expanded entries retain sequence order and show the
+complete `raw` object. Runtime step correlation is presentation-only and is
+scoped to boundaries formed by `runtime.started` and `runtime.resumed`; reused
+step IDs in later attempts remain separate observations.
 The web run detail links `taskId` back to the task. Replay recovers the task
 association for older task-triggered runs that did not record `taskId` on the
 run start event.

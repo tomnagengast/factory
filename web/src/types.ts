@@ -131,6 +131,7 @@ export type WorkflowRunEvent = {
   id: number;
   runId: number;
   recordedAt: string;
+  raw: { [key: string]: unknown };
   sequence: number;
   at: string;
   type: string;

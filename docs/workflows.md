@@ -100,11 +100,15 @@ The workflow detail page highlights the live source as plain JavaScript. The
 page receives each durable comment through the live event stream and polls the
 current file once per second while any user message lacks a final agent
 response, highlighting each changed source response. Intermediate steps do not
-stop the updating state. Chat and source scroll independently on wide screens
-and stack on narrow screens. The conversation opens at its latest message and
-follows new replies while the reader remains at the bottom. Scrolling up
-pauses that following until the reader returns to the bottom. Refreshing the
-page replays the same steps once in wire order.
+stop the updating state. The chat keeps human requests in compact bubbles and
+agent prose in the narrative. It groups consecutive reasoning, tool, result,
+error, and harness comments into collapsed activity summaries. Expanding a
+summary and its entries shows every stored label, kind, time, and complete
+content in wire order. Chat and source scroll independently on wide screens and
+stack on narrow screens. The conversation opens at its latest message and
+follows new replies while the reader remains at the bottom. Scrolling up pauses
+that following until the reader returns to the bottom. Refreshing the page
+replays the same comments in wire order.
 
 Use `/settings` or `factory settings update` to select the harness, model,
 reasoning level, and workflow capacity. The API supplies the supported option
@@ -155,7 +159,8 @@ concurrency.
 Authoring progress is durable but is not conversation input. Later authoring
 prompts include user messages and final agent responses only. Reasoning, tool
 input, tool output, and harness event records remain visible without being
-sent back to the harness.
+sent back to the harness. Display grouping does not pair tool calls with
+results or alter those distinct comment records.
 
 The workflow loader expects deterministic source:
 
@@ -314,16 +319,25 @@ status path, which loads matching runs newest first in 25-run pages as the
 reader scrolls. Lifecycle events move a run between these views without a page
 reload. Every row links straight to its numeric `/history/{id}` detail.
 
-Run detail displays distinct events chronologically in contiguous phase
-groups. Run content renders as Markdown: prose wraps within the page, while
-code blocks and tables scroll horizontally. Links created from Markdown syntax
-open in a new tab with `noreferrer`; trusted raw HTML keeps its authored link
-behavior. A task-triggered run links back to its task, including a
-`task.deleted` run because the task remains replayable after soft deletion.
-The run detail opens at its latest event or final result and follows later
-content while the reader remains at the bottom. Scrolling up pauses that
+Run detail displays narrative logs and collapsed activity summaries inside
+contiguous phase groups. Failures remain marked while collapsed. Expanding a
+summary keeps every journal event in sequence order and exposes its Factory
+wire metadata, typed prompts and results, and complete raw journal object.
+Step summaries correlate lifecycle records only inside one runtime attempt.
+Each `runtime.started` or `runtime.resumed` event begins a new attempt, so a
+cached replay after a human-gate resume stays separate from the original gate
+even when both use the same workflow, step ID, and key.
+
+Run content renders as Markdown: prose wraps within the page, while code
+blocks, tables, and raw JSON scroll inside their detail panes. Links created
+from Markdown syntax open in a new tab with `noreferrer`; trusted raw HTML
+keeps its authored link behavior. A task-triggered run links back to its task,
+including a `task.deleted` run because the task remains replayable after soft
+deletion. The run detail opens at its latest event or final result and follows
+later content while the reader remains at the bottom. Scrolling up pauses that
 following until the reader returns to the bottom. History views update from
-the same server-sent event stream as the event wire.
+the same server-sent event stream as the event wire. Reader expansion choices
+survive those live refetches while the view remains mounted.
 
 ### Task event triggers
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Comment } from "./types";
-import { workflowCommentPresentation, workflowConversationWorking } from "./workflow-conversation";
+import { workflowConversationWorking } from "./workflow-conversation";
 
 function comment(id: number, author: Comment["author"], values: Partial<Comment> = {}): Comment {
   return {
@@ -47,53 +47,5 @@ describe("workflowConversationWorking", () => {
       comment(3, "user", { final: false }),
       comment(4, "agent", { parentCommentId: 3, kind: "reasoning", final: false }),
     ])).toBeTrue();
-  });
-});
-
-describe("workflowCommentPresentation", () => {
-  test("classifies every intermediate step kind", () => {
-    const expected = {
-      message: ["Agent message", false],
-      reasoning: ["Reasoning", false],
-      "tool-use": ["Tool use", true],
-      "tool-output": ["Tool output", true],
-      error: ["Error", false],
-      event: ["Harness event", true],
-    } as const;
-    for (const kind of Object.keys(expected) as Comment["kind"][]) {
-      const presentation = workflowCommentPresentation(comment(2, "agent", { kind, final: false }));
-      expect(presentation.intermediate).toBeTrue();
-      expect(presentation.title).toBe(expected[kind][0]);
-      expect(presentation.kindLabel).toBe(expected[kind][0]);
-      expect(presentation.preformatted).toBe(expected[kind][1]);
-      expect(presentation.error).toBe(kind === "error");
-      expect(presentation.reasoning).toBe(kind === "reasoning");
-    }
-  });
-
-  test("uses harness and tool labels while retaining the normalized kind", () => {
-    for (const label of ["codex", "Bash"]) {
-      const presentation = workflowCommentPresentation(comment(2, "agent", {
-        kind: label === "codex" ? "reasoning" : "tool-use",
-        label,
-        final: false,
-      }));
-      expect(presentation.title).toBe(label);
-      expect(presentation.kindLabel).toBe(label === "codex" ? "Reasoning" : "Tool use");
-    }
-  });
-
-  test("labels final agent responses and user messages as conversation bubbles", () => {
-    expect(workflowCommentPresentation(comment(2, "agent", {
-      kind: "error", label: "claude", final: true,
-    }))).toEqual({
-      intermediate: false,
-      title: "Agent",
-      kindLabel: undefined,
-      preformatted: false,
-      error: true,
-      reasoning: false,
-    });
-    expect(workflowCommentPresentation(comment(1, "user", { final: false })).title).toBe("You");
   });
 });

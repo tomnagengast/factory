@@ -917,7 +917,7 @@ func TestWorkflowHistoryListsRunsAndEvents(t *testing.T) {
 	})
 	wire.Publish(state.WorkflowRunEventRecorded, state.WorkflowRunEventData{
 		RunID: started.ID, Event: json.RawMessage(
-			`{"sequence":1,"at":"2026-07-17T12:00:00Z","type":"log","workflow":"review","phase":"Review","message":"Inspecting the change"}`,
+			`{"sequence":1,"at":"2026-07-17T12:00:00Z","type":"runtime.failed","workflow":"review","phase":"Review","message":"Inspecting the change","error":"agent failed","errorCode":"backend-failed","extension":{"provider":{"requestId":"req-1"}}}`,
 		),
 	})
 	custom, _ := wire.Publish("release.ready", map[string]int64{"id": task.ID})
@@ -948,8 +948,17 @@ func TestWorkflowHistoryListsRunsAndEvents(t *testing.T) {
 	}
 	if detail.Code != http.StatusOK || json.Unmarshal(detail.Body.Bytes(), &decoded) != nil ||
 		decoded.Run.TaskID != task.ID || len(decoded.Events) != 1 ||
-		decoded.Events[0].Message != "Inspecting the change" {
+		decoded.Events[0].Message != "Inspecting the change" || decoded.Events[0].Type != "runtime.failed" ||
+		decoded.Events[0].ID == 0 || decoded.Events[0].RunID != started.ID || decoded.Events[0].RecordedAt.IsZero() {
 		t.Fatalf("history detail = %d %s", detail.Code, detail.Body)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(decoded.Events[0].Raw, &raw); err != nil {
+		t.Fatalf("raw journal event = %s: %v", decoded.Events[0].Raw, err)
+	}
+	if string(raw["errorCode"]) != `"backend-failed"` ||
+		string(raw["extension"]) != `{"provider":{"requestId":"req-1"}}` {
+		t.Fatalf("raw journal event = %s", decoded.Events[0].Raw)
 	}
 	nonTaskDetail := requestJSON(t, handler, http.MethodGet, fmt.Sprintf("/api/history/%d", nonTask.ID), "")
 	var nonTaskDecoded struct {
