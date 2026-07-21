@@ -76,6 +76,7 @@ import {
 } from "./types";
 import { sortWorkflowsByUsage } from "./workflows";
 import { workflowCommentPresentation, workflowConversationWorking } from "./workflow-conversation";
+import { formatWorkflowRunDuration } from "./workflow-run-duration";
 
 const REACTION_EMOJIS = ["👍", "👎", "❤️", "🎉", "😂", "👀"] as const;
 const PAGE_SIZE = 200;
@@ -862,6 +863,26 @@ function TaskView() {
 }
 
 function TaskWorkflowRuns(props: { runs: TaskWorkflowRun[] }) {
+  const [now, setNow] = createSignal(Date.now());
+  let timer: number | undefined;
+
+  createEffect(() => {
+    const hasActiveRun = props.runs.some((run) => run.status === "running" || run.status === "waiting");
+    if (hasActiveRun && timer == null) {
+      setNow(Date.now());
+      timer = window.setInterval(() => setNow(Date.now()), 1000);
+    } else if (!hasActiveRun && timer != null) {
+      window.clearInterval(timer);
+      timer = undefined;
+    }
+  });
+  onCleanup(() => window.clearInterval(timer));
+
+  const duration = (run: TaskWorkflowRun) => formatWorkflowRunDuration(
+    run.createdAt,
+    run.status === "completed" || run.status === "failed" ? run.updatedAt : now(),
+  );
+
   return (
     <section class="task-workflow-runs">
       <SectionTitle title="Workflow runs" />
@@ -873,7 +894,12 @@ function TaskWorkflowRuns(props: { runs: TaskWorkflowRun[] }) {
               <strong>{run.workflowName || `Workflow ${run.workflowId}`}</strong>
               <small>Workflow #{run.workflowId} · Trigger #{run.triggerId}</small>
             </span>
-            <span class="id">#{run.runId}</span>
+            <span class="task-workflow-run-meta">
+              <span class="id">#{run.runId}</span>
+              <span class="task-workflow-run-duration" title="Run length" aria-label={`Run length ${duration(run)}`}>
+                {duration(run)}
+              </span>
+            </span>
           </A>}</For>
         </div>
       </Show>

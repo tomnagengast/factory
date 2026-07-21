@@ -31,6 +31,8 @@ export type TaskWorkflowRun = {
   workflowId: number;
   workflowName: string;
   status: "running" | "waiting" | "completed" | "failed";
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type TaskSummary = Task & {

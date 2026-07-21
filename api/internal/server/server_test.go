@@ -249,7 +249,7 @@ func TestTaskListSummariesProjectCommentsAndWorkflowRuns(t *testing.T) {
 	createdRun, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
 		TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", SourceEventID: task.ID,
 	})
-	wire.Publish(state.WorkflowRunCompleted, state.WorkflowRunData{
+	createdCompleted, _ := wire.Publish(state.WorkflowRunCompleted, state.WorkflowRunData{
 		TriggerID: 50, SourceEventID: task.ID, Output: "done",
 	})
 
@@ -302,12 +302,12 @@ func TestTaskListSummariesProjectCommentsAndWorkflowRuns(t *testing.T) {
 	secondActive, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
 		TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", SourceEventID: secondUpdate.ID,
 	})
-	wire.Publish(state.WorkflowRunWaiting, state.WorkflowRunStateData{RunID: secondActive.ID})
+	secondWaiting, _ := wire.Publish(state.WorkflowRunWaiting, state.WorkflowRunStateData{RunID: secondActive.ID})
 	verifyRun, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
 		TriggerID: 60, WorkflowID: verify.ID, WorkflowName: "verify",
 		SourceEventID: secondUpdate.ID, TaskID: task.ID,
 	})
-	wire.Publish(state.WorkflowRunFailed, state.WorkflowRunData{
+	verifyFailed, _ := wire.Publish(state.WorkflowRunFailed, state.WorkflowRunData{
 		TriggerID: 60, SourceEventID: secondUpdate.ID, Error: "failed",
 	})
 	verifyRetrySource, _ := wire.Publish(state.TaskUpdated, state.TaskData{
@@ -317,7 +317,7 @@ func TestTaskListSummariesProjectCommentsAndWorkflowRuns(t *testing.T) {
 		TriggerID: 60, WorkflowID: verify.ID, WorkflowName: "verify",
 		SourceEventID: verifyRetrySource.ID,
 	})
-	wire.Publish(state.WorkflowRunCompleted, state.WorkflowRunData{
+	verifyRetryCompleted, _ := wire.Publish(state.WorkflowRunCompleted, state.WorkflowRunData{
 		TriggerID: 60, SourceEventID: verifyRetrySource.ID, Output: "no changes needed",
 	})
 	custom, _ := wire.Publish("release.ready", map[string]int64{"taskId": task.ID})
@@ -337,11 +337,11 @@ func TestTaskListSummariesProjectCommentsAndWorkflowRuns(t *testing.T) {
 		t.Fatalf("comment count = %d, want 3", active.CommentCount)
 	}
 	wantRuns := []taskWorkflowRun{
-		{RunID: createdRun.ID, TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", Status: "completed"},
-		{RunID: firstActive.ID, TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", Status: "running"},
-		{RunID: secondActive.ID, TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", Status: "waiting"},
-		{RunID: verifyRun.ID, TriggerID: 60, WorkflowID: verify.ID, WorkflowName: "verify", Status: "failed"},
-		{RunID: verifyRetry.ID, TriggerID: 60, WorkflowID: verify.ID, WorkflowName: "verify", Status: "completed"},
+		{RunID: createdRun.ID, TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", Status: "completed", CreatedAt: createdRun.At, UpdatedAt: createdCompleted.At},
+		{RunID: firstActive.ID, TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", Status: "running", CreatedAt: firstActive.At, UpdatedAt: firstActive.At},
+		{RunID: secondActive.ID, TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", Status: "waiting", CreatedAt: secondActive.At, UpdatedAt: secondWaiting.At},
+		{RunID: verifyRun.ID, TriggerID: 60, WorkflowID: verify.ID, WorkflowName: "verify", Status: "failed", CreatedAt: verifyRun.At, UpdatedAt: verifyFailed.At},
+		{RunID: verifyRetry.ID, TriggerID: 60, WorkflowID: verify.ID, WorkflowName: "verify", Status: "completed", CreatedAt: verifyRetry.At, UpdatedAt: verifyRetryCompleted.At},
 	}
 	if !reflect.DeepEqual(active.WorkflowRuns, wantRuns) {
 		t.Fatalf("active workflow runs = %#v, want %#v", active.WorkflowRuns, wantRuns)
@@ -375,25 +375,27 @@ func TestTaskListSummariesProjectCommentsAndWorkflowRuns(t *testing.T) {
 		t.Fatalf("task detail workflow runs = %d %s", taskDetailResponse.Code, taskDetailResponse.Body)
 	}
 
-	wire.Publish(state.WorkflowRunResumed, state.WorkflowRunStateData{RunID: secondActive.ID})
+	resumedEvent, _ := wire.Publish(state.WorkflowRunResumed, state.WorkflowRunStateData{RunID: secondActive.ID})
 	resumed := findTask(readList("/api/tasks").Tasks, task.ID)
-	if len(resumed.WorkflowRuns) != len(wantRuns) || resumed.WorkflowRuns[2].Status != "running" {
+	if len(resumed.WorkflowRuns) != len(wantRuns) || resumed.WorkflowRuns[2].Status != "running" ||
+		resumed.WorkflowRuns[2].UpdatedAt != resumedEvent.At {
 		t.Fatalf("resumed workflow runs = %#v", resumed.WorkflowRuns)
 	}
-	wire.Publish(state.WorkflowRunCompleted, state.WorkflowRunData{
+	firstCompleted, _ := wire.Publish(state.WorkflowRunCompleted, state.WorkflowRunData{
 		TriggerID: 50, SourceEventID: firstUpdate.ID, Output: "done",
 	})
 	remaining := findTask(readList("/api/tasks").Tasks, task.ID)
 	if len(remaining.WorkflowRuns) != len(wantRuns) ||
-		remaining.WorkflowRuns[1].Status != "completed" || remaining.WorkflowRuns[2].Status != "running" {
+		remaining.WorkflowRuns[1].Status != "completed" || remaining.WorkflowRuns[1].UpdatedAt != firstCompleted.At ||
+		remaining.WorkflowRuns[2].Status != "running" {
 		t.Fatalf("updated workflow runs = %#v", remaining.WorkflowRuns)
 	}
-	wire.Publish(state.WorkflowRunFailed, state.WorkflowRunData{
+	secondFailed, _ := wire.Publish(state.WorkflowRunFailed, state.WorkflowRunData{
 		TriggerID: 50, SourceEventID: secondUpdate.ID, Error: "failed",
 	})
 	failed := findTask(readList("/api/tasks").Tasks, task.ID)
 	if len(failed.WorkflowRuns) != len(wantRuns) || failed.WorkflowRuns[2].RunID != secondActive.ID ||
-		failed.WorkflowRuns[2].Status != "failed" {
+		failed.WorkflowRuns[2].Status != "failed" || failed.WorkflowRuns[2].UpdatedAt != secondFailed.At {
 		t.Fatalf("failed workflow runs = %#v", failed.WorkflowRuns)
 	}
 }

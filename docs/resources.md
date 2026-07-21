@@ -120,7 +120,9 @@ shape. The list and project-detail response also includes
           "triggerId": 28,
           "workflowId": 24,
           "workflowName": "rpi-agentic-light",
-          "status": "waiting"
+          "status": "waiting",
+          "createdAt": "2026-07-20T21:30:00Z",
+          "updatedAt": "2026-07-20T21:31:12Z"
         }
       ]
     }
@@ -136,7 +138,10 @@ Waiting means that a human gate has suspended the run; completed reports
 workflow lifecycle completion and does not imply that the workflow changed
 the task. Runs sort by workflow ID and then run ID. Empty summaries are `[]`.
 Task detail returns the same complete `workflowRuns` array and a
-`checkpointEventId` for live updates.
+`checkpointEventId` for live updates. Each run includes its start time in
+`createdAt` and its latest lifecycle event time in `updatedAt`. The web task
+detail shows elapsed wall time. Completed and failed run lengths stop at
+`updatedAt`; running and waiting lengths continue from the browser clock.
 
 Clients that need live summaries should open
 `GET /api/events/stream?after=<checkpointEventId>` with the checkpoint from

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/tomnagengast/factory/api/internal/state"
@@ -180,11 +181,13 @@ func (s *Server) tasks(writer http.ResponseWriter, _ *http.Request) {
 }
 
 type taskWorkflowRun struct {
-	RunID        int64  `json:"runId"`
-	TriggerID    int64  `json:"triggerId"`
-	WorkflowID   int64  `json:"workflowId"`
-	WorkflowName string `json:"workflowName"`
-	Status       string `json:"status"`
+	RunID        int64     `json:"runId"`
+	TriggerID    int64     `json:"triggerId"`
+	WorkflowID   int64     `json:"workflowId"`
+	WorkflowName string    `json:"workflowName"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 type taskListItem struct {
@@ -223,6 +226,7 @@ func taskListItems(view state.Snapshot, tasks []state.Task) []taskListItem {
 			workflowRuns = append(workflowRuns, taskWorkflowRun{
 				RunID: run.ID, TriggerID: run.TriggerID, WorkflowID: run.WorkflowID,
 				WorkflowName: run.WorkflowName, Status: run.Status,
+				CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt,
 			})
 		}
 		items = append(items, taskListItem{
