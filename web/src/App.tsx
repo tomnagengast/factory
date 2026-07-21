@@ -76,7 +76,14 @@ import {
   type WorkflowRunStatus,
 } from "./types";
 import { sortWorkflowsByUsage } from "./workflows";
-import { workflowCommentPresentation, workflowConversationWorking } from "./workflow-conversation";
+import {
+  workflowConversationBlocks,
+  workflowRunPhases,
+  type WorkflowActivityBlock,
+  type WorkflowActivityDetail,
+  type WorkflowActivityEntry,
+} from "./workflow-activity";
+import { workflowConversationWorking } from "./workflow-conversation";
 import { formatWorkflowRunDuration } from "./workflow-run-duration";
 
 const REACTION_EMOJIS = ["👍", "👎", "❤️", "🎉", "😂", "👀"] as const;
@@ -208,6 +215,101 @@ function Markdown(props: { content?: string; inline?: boolean }) {
   return props.inline
     ? <span class="markdown inline" innerHTML={html()} />
     : <div ref={body} class="markdown" innerHTML={html()} />;
+}
+
+function ActivityDisclosure(props: {
+  block: Extract<WorkflowActivityBlock, { kind: "activity" }>;
+  expanded: boolean;
+  entryExpanded: (id: string) => boolean;
+  onToggle: () => void;
+  onEntryToggle: (id: string) => void;
+}) {
+  const panelID = () => `${props.block.id}-details`;
+  return (
+    <section classList={{ "activity-group": true, failed: props.block.failed }}>
+      <button type="button" class="activity-summary" aria-expanded={props.expanded}
+        aria-controls={panelID()} onClick={props.onToggle}>
+        <span classList={{ "activity-chevron": true, expanded: props.expanded }} aria-hidden="true">›</span>
+        <span>{props.block.summary}</span>
+        <Show when={props.block.failed}><span class="activity-failure">Failure</span></Show>
+      </button>
+      <Show when={props.expanded}>
+        <div id={panelID()} class="activity-entries">
+          <For each={props.block.entries}>{(entry) =>
+            <ActivityEntryDisclosure entry={entry} expanded={props.entryExpanded(entry.id)}
+              onToggle={() => props.onEntryToggle(entry.id)} />}
+          </For>
+        </div>
+      </Show>
+    </section>
+  );
+}
+
+function ActivityEntryDisclosure(props: {
+  entry: WorkflowActivityEntry;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const panelID = () => `${props.entry.id}-details`;
+  return (
+    <div classList={{ "activity-entry": true, failed: props.entry.failed }}>
+      <button type="button" class="activity-entry-summary" aria-expanded={props.expanded}
+        aria-controls={panelID()} onClick={props.onToggle}>
+        <span classList={{ "activity-chevron": true, expanded: props.expanded }} aria-hidden="true">›</span>
+        <span class="activity-kind">{props.entry.kindLabel}</span>
+        <strong>{props.entry.title}</strong>
+        <time>{shortTime(props.entry.at)}</time>
+      </button>
+      <Show when={props.expanded}>
+        <div id={panelID()} class="activity-entry-details">
+          <dl class="activity-metadata">
+            <For each={props.entry.metadata}>{(item) => <div><dt>{item.label}</dt><dd>{item.value}</dd></div>}</For>
+          </dl>
+          <For each={props.entry.details}>{(detail) => <ActivityDetail detail={detail} />}</For>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
+function ActivityDetail(props: { detail: WorkflowActivityDetail }) {
+  return (
+    <section class="activity-detail">
+      <h4>{props.detail.label}</h4>
+      <Show when={props.detail.format === "markdown" && typeof props.detail.value === "string"}
+        fallback={<pre classList={{ "activity-data": true, json: props.detail.format === "json" }}>{props.detail.format === "json"
+          ? formatJSON(props.detail.value)
+          : String(props.detail.value ?? "")}</pre>}>
+        <Markdown content={String(props.detail.value)} />
+      </Show>
+    </section>
+  );
+}
+
+function ActivityNarrative(props: {
+  block: Extract<WorkflowActivityBlock, { kind: "narrative" }>;
+  entryExpanded: (id: string) => boolean;
+  onEntryToggle: (id: string) => void;
+}) {
+  return (
+    <article classList={{
+      "workflow-narrative": true,
+      user: props.block.role === "user",
+      agent: props.block.role === "agent",
+      error: props.block.error,
+    }}>
+      <Show when={props.block.role === "agent"} fallback={<p>{props.block.content}</p>}>
+        <Markdown content={props.block.content} />
+      </Show>
+      <time>{shortTime(props.block.at)}</time>
+      <Show when={props.block.entry}>{(entry) =>
+        <div class="narrative-event-detail">
+          <ActivityEntryDisclosure entry={entry()} expanded={props.entryExpanded(entry().id)}
+            onToggle={() => props.onEntryToggle(entry().id)} />
+        </div>}
+      </Show>
+    </article>
+  );
 }
 
 function Meta(props: { value: { id: number; createdAt: string; updatedAt: string; deletedAt?: string } }) {
@@ -1698,15 +1800,19 @@ function HistoryStatusPage(props: { status: WorkflowRunStatus; label: string }) 
 }
 
 function HistoryView() {
-	const params = useParams();
-	const [data, { refetch }] = createResource(() => get<HistoryDetail>(`/api/history/${params.item}`));
-	const [olderEvents, setOlderEvents] = createSignal<HistoryDetail["events"]>([]);
-	const [hasOlder, setHasOlder] = createSignal(false);
-	const older = mutation();
-	createEffect(() => {
-		const latest = data()?.events;
-		if (latest && olderEvents().length === 0) setHasOlder(latest.length === PAGE_SIZE);
-	});
+  const params = useParams();
+  const [data, { refetch }] = createResource(() => get<HistoryDetail>(`/api/history/${params.item}`));
+  const [olderEvents, setOlderEvents] = createSignal<HistoryDetail["events"]>([]);
+  const [hasOlder, setHasOlder] = createSignal(false);
+  const [expandedGroups, setExpandedGroups] = createSignal(new Set<string>());
+  const [expandedEntries, setExpandedEntries] = createSignal(new Set<string>());
+  const older = mutation();
+  const toggleGroup = (id: string) => setExpandedGroups((current) => toggledSet(current, id));
+  const toggleEntry = (id: string) => setExpandedEntries((current) => toggledSet(current, id));
+  createEffect(() => {
+    const latest = data()?.events;
+    if (latest && olderEvents().length === 0) setHasOlder(latest.length === PAGE_SIZE);
+  });
   const [historyContent, setHistoryContent] = createSignal<HTMLDivElement>();
   createEffect(() => {
     const content = historyContent();
@@ -1721,11 +1827,15 @@ function HistoryView() {
   return (
     <div ref={(element) => setHistoryContent(element)} class="page">
       <Load data={data} error={() => data.error}>
-		{(value) => {
-		  const current = () => {
-			const latest = data() ?? value;
-			return { ...latest, events: uniqueByID([...olderEvents(), ...latest.events]).sort((left, right) => left.id - right.id) };
-		  };
+        {(value) => {
+          const current = () => {
+            const latest = data() ?? value;
+            return {
+              ...latest,
+              events: uniqueByID([...olderEvents(), ...latest.events]).sort((left, right) => left.id - right.id),
+            };
+          };
+          const phases = createMemo(() => workflowRunPhases(current().events));
           const resource = () => historyResourceLink(current().run);
           return <>
             <PageHeader eyebrow={`Run ${value.run.id}`}
@@ -1743,7 +1853,7 @@ function HistoryView() {
               <time>Started {date(value.run.createdAt)}</time>
               <time>Updated {date(current().run.updatedAt)}</time>
             </div>
-            <Show when={phaseGroups(current()).length} fallback={<Empty>
+            <Show when={phases().length} fallback={<Empty>
               {current().run.status === "running"
                 ? "Waiting for the first workflow event…"
                 : current().run.status === "waiting"
@@ -1751,42 +1861,31 @@ function HistoryView() {
                   : "No workflow events were recorded for this run."}
             </Empty>}>
               <div class="run-phases">
-                <For each={phaseGroups(current())}>{([phase, events]) => <section class="run-phase">
-                  <header><h2>{phase}</h2><span>{events.length} {events.length === 1 ? "event" : "events"}</span></header>
+                <For each={phases()}>{(phase) => <section class="run-phase">
+                  <header><h2>{phase.title}</h2><span>{phase.eventCount} {phase.eventCount === 1 ? "event" : "events"}</span></header>
                   <div class="run-events">
-                    <For each={events}>{(event) => <article class="run-event">
-                      <header>
-                        <span class="artifact-type">{event.type}</span>
-                        <strong>{workflowEventTitle(event)}</strong>
-                        <Show when={event.backend}><span>{event.backend}</span></Show>
-                        <span>seq {event.sequence}</span>
-                        <time>{date(event.at)}</time>
-                      </header>
-                      <Show when={workflowEventMeta(event)}>{(meta) => <p class="run-event-meta">{meta()}</p>}</Show>
-                      <Show when={event.message}>{(message) =>
-                        <div class="run-event-content"><Markdown content={message()} /></div>}
-                      </Show>
-                      <Show when={event.error}>{(error) =>
-                        <div class="run-event-content step-error"><Markdown content={error()} /></div>}
-                      </Show>
-                      <Show when={event.result != null}>
-                        <div class="run-event-content"><Markdown content={formatResult(event.result)} /></div>
-                      </Show>
-                    </article>}</For>
+                    <For each={phase.blocks}>{(block) => <Show when={block.kind === "activity"}
+                      fallback={<ActivityNarrative
+                        block={block as Extract<WorkflowActivityBlock, { kind: "narrative" }>}
+                        entryExpanded={(id) => expandedEntries().has(id)} onEntryToggle={toggleEntry} />}>
+                      <ActivityDisclosure block={block as Extract<WorkflowActivityBlock, { kind: "activity" }>}
+                        expanded={expandedGroups().has(block.id)} entryExpanded={(id) => expandedEntries().has(id)}
+                        onToggle={() => toggleGroup(block.id)} onEntryToggle={toggleEntry} />
+                    </Show>}</For>
                   </div>
                 </section>}</For>
               </div>
-			</Show>
-			<Show when={hasOlder()}>
-			  <button class="button quiet" disabled={older.pending()} onClick={() => older.run(async () => {
-				const before = current().events[0]?.id;
-				if (!before) return;
-				const page = await get<HistoryDetail>(`/api/history/${params.item}?before=${before}`);
-				setOlderEvents((events) => uniqueByID([...page.events, ...events]));
-				setHasOlder(page.events.length === PAGE_SIZE);
-			  })}>{older.pending() ? "Loading…" : "Load older run events"}</button>
-			</Show>
-			<Show when={current().run.output || current().run.error}>
+            </Show>
+            <Show when={hasOlder()}>
+              <button class="button quiet" disabled={older.pending()} onClick={() => older.run(async () => {
+                const before = current().events[0]?.id;
+                if (!before) return;
+                const page = await get<HistoryDetail>(`/api/history/${params.item}?before=${before}`);
+                setOlderEvents((events) => uniqueByID([...page.events, ...events]));
+                setHasOlder(page.events.length === PAGE_SIZE);
+              })}>{older.pending() ? "Loading…" : "Load older run events"}</button>
+            </Show>
+            <Show when={current().run.output || current().run.error}>
               <section class="run-output"><SectionTitle title={current().run.error ? "Run error" : "Final result"} />
                 <div classList={{ "run-event-content": true, "step-error": Boolean(current().run.error) }}>
                   <Markdown content={current().run.error || current().run.output} />
@@ -2066,6 +2165,10 @@ function WorkflowView() {
   const action = mutation();
   const [conversationViewport, setConversationViewport] = createSignal<HTMLDivElement>();
   const [conversationContent, setConversationContent] = createSignal<HTMLDivElement>();
+  const [expandedGroups, setExpandedGroups] = createSignal(new Set<string>());
+  const [expandedEntries, setExpandedEntries] = createSignal(new Set<string>());
+  const toggleGroup = (id: string) => setExpandedGroups((current) => toggledSet(current, id));
+  const toggleEntry = (id: string) => setExpandedEntries((current) => toggledSet(current, id));
   createEffect(() => {
     const viewport = conversationViewport();
     const content = conversationContent();
@@ -2087,6 +2190,7 @@ function WorkflowView() {
         {(value) => {
           const current = () => data() ?? value;
           const working = () => workflowConversationWorking(current().comments);
+          const blocks = createMemo(() => workflowConversationBlocks(current().comments));
           const source = createMemo(() => current().source);
           const highlightedSource = createMemo(() => highlightWorkflowSource(source()).value);
           return <>
@@ -2105,26 +2209,17 @@ function WorkflowView() {
               <section class="workflow-chat" aria-label="Workflow conversation">
                 <div ref={(element) => setConversationViewport(element)} class="conversation" role="log" aria-live="polite">
                   <div ref={(element) => setConversationContent(element)} class="conversation-content">
-                    <For each={current().comments}>{(comment) => {
-                      const presentation = workflowCommentPresentation(comment);
-                      return <article classList={{
-                        message: true,
-                        agent: comment.author === "agent",
-                        step: presentation.intermediate,
-                        error: presentation.error,
-                        reasoning: presentation.reasoning,
-                      }}>
-                        <header>
-                          <strong>{presentation.title}</strong>
-                          <Show when={presentation.kindLabel}>{(label) => <span>{label()}</span>}</Show>
-                          <time>{date(comment.createdAt)}</time>
-                        </header>
-                        <Show when={presentation.preformatted} fallback={<p>{comment.content}</p>}>
-                          <pre>{comment.content}</pre>
-                        </Show>
-                      </article>;
-                    }}</For>
-                    <Show when={working()}><article class="message agent working"><header><strong>Agent</strong></header><p>Working on the workflow…</p></article></Show>
+                    <For each={blocks()}>{(block) => <Show when={block.kind === "activity"}
+                      fallback={<ActivityNarrative
+                        block={block as Extract<WorkflowActivityBlock, { kind: "narrative" }>}
+                        entryExpanded={(id) => expandedEntries().has(id)} onEntryToggle={toggleEntry} />}>
+                      <ActivityDisclosure block={block as Extract<WorkflowActivityBlock, { kind: "activity" }>}
+                        expanded={expandedGroups().has(block.id)} entryExpanded={(id) => expandedEntries().has(id)}
+                        onToggle={() => toggleGroup(block.id)} onEntryToggle={toggleEntry} />
+                    </Show>}</For>
+                    <Show when={working()}><article class="workflow-narrative agent working">
+                      <p>Working on the workflow<span aria-hidden="true" /></p>
+                    </article></Show>
                   </div>
                 </div>
                 <form class="composer" onSubmit={(event) => {
@@ -2298,45 +2393,29 @@ function fileName(path: string | undefined) {
   return path?.split("/").at(-1) ?? "workflow.js";
 }
 
-function phaseGroups(detail: HistoryDetail) {
-  const groups: Array<[string, HistoryDetail["events"]]> = [];
-  for (const event of detail.events) {
-    const phase = event.phase || "Run";
-    const group = groups.at(-1);
-    if (group?.[0] === phase) group[1].push(event);
-    else groups.push([phase, [event]]);
+function toggledSet(current: Set<string>, id: string) {
+  const next = new Set(current);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  return next;
+}
+
+function formatJSON(value: unknown) {
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value ?? "");
+  } catch {
+    return String(value ?? "");
   }
-  return groups;
-}
-
-function workflowEventTitle(event: HistoryDetail["events"][number]) {
-  if (event.type === "phase.started") return `Entered ${event.phase || "phase"}`;
-  if (event.type === "log") return "Workflow log";
-  if (event.type === "diagnostic") return "Runtime diagnostic";
-  if (event.type.startsWith("runtime.")) return event.type.replace(".", " ");
-  const name = event.agentId || event.kind || "Step";
-  return `${name} ${event.type.replace("step.", "")}`;
-}
-
-function workflowEventMeta(event: HistoryDetail["events"][number]) {
-  return [
-    event.workflow,
-    event.kind,
-    event.stepId ? `step ${event.stepId}` : "",
-    event.tokens != null ? `${event.tokens} tokens` : "",
-    event.concurrency ? `concurrency ${event.concurrency}` : "",
-    event.type === "runtime.started" ? `budget ${event.budget ?? "unlimited"}` : "",
-  ].filter(Boolean).join(" · ");
-}
-
-function formatResult(value: unknown) {
-  return typeof value === "string" ? value : `\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``;
 }
 
 function date(value: string) {
   return new Intl.DateTimeFormat(undefined, {
     month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
   }).format(new Date(value));
+}
+
+function shortTime(value: string) {
+  return new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(new Date(value));
 }
 
 function slug(value: string) {

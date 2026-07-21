@@ -189,14 +189,20 @@ and Completed sections, in that order, with five runs per section. Each linked
 status page reads 25 matching rows at a time from the indexed SQLite
 projection. It does not load and filter the full run set in the browser or use
 a separate log store. Each semantic runtime event remains one distinct wire
-record; the projection never collapses lifecycle pairs.
+record; the projection never collapses lifecycle pairs. The web detail groups
+those records only for presentation. Its step summaries derive runtime
+attempts from existing start and resume records and never rewrite, filter, or
+merge the stored journal events.
 
 Authoring comments use the same rule. Reasoning, tool use, tool output, agent
 messages, errors, and unknown semantic harness events remain distinct and in
-wire order. Intermediate agent comments do not answer the parent request. Only
-the comment marked final does, and only user and final agent comments enter a
-later authoring prompt. Historical workflow agent replies with a parent that
-predate the final marker are still treated as final responses.
+wire order. The web view places agent prose in the narrative and groups
+consecutive operational comments behind a compact summary, but expansion
+restores every ordered comment and its complete content. Intermediate agent
+comments do not answer the parent request. Only the comment marked final does,
+and only user and final agent comments enter a later authoring prompt.
+Historical workflow agent replies with a parent that predate the final marker
+are still treated as final responses.
 
 Graceful shutdown records active runs as failed after canceling their
 processes. At startup, the coordinator also closes any projected `running`
@@ -218,11 +224,12 @@ Factory-created files live in:
 When a user starts a workflow conversation, Factory assigns the local target
 before the selected harness begins. The workflow detail API reads the current
 file on every request, allowing the web application to show live source while
-the agent writes. The same page shows each durable semantic harness step as it
-arrives and keeps its updating state until a final response exists. The
-authoring harness runs in the workflow workspace and
-receives `$FACTORY_CLI` and `$FACTORY_URL`, so the same conversation can
-inspect resources or configure a trigger when the user asks.
+the agent writes. The same page shows narrative replies and compact activity
+groups as durable semantic harness steps arrive. Those groups are a display
+view over unchanged comment records, and the page keeps its updating state
+until a final response exists. The authoring harness runs in the workflow
+workspace and receives `$FACTORY_CLI` and `$FACTORY_URL`, so the same
+conversation can inspect resources or configure a trigger when the user asks.
 
 After authoring, Factory asks the workflow CLI to rediscover definitions and
 projects the resolved name, description, phases, scope, path, and mutating
