@@ -229,12 +229,12 @@ main { min-width: 0; }
 .task-title small { display: block; margin-top: 4px; color: var(--color-text-muted); font-size: 11px; }
 .task-row time, .event-row time { color: var(--color-text-muted); font-size: 11px; text-align: right; }
 .task-row-signals {
-  width: 250px; min-width: 0; display: grid; grid-template-columns: 88px 28px minmax(0, 1fr);
+  width: 250px; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center; gap: 10px; color: var(--color-text-muted);
 }
 .workflow-status-indicators {
-  width: 88px; display: inline-flex; grid-column: 1; align-items: center;
-  justify-content: space-between; flex-wrap: wrap; gap: 3px;
+  width: 100%; display: inline-flex; grid-column: 1; grid-row: 1; align-items: center;
+  justify-content: flex-start; flex-wrap: wrap; gap: 4px 5px;
 }
 .workflow-status-indicator { width: 10px; height: 10px; flex: none; color: var(--status-neutral-text); fill: currentColor; }
 .workflow-status-indicator.waiting { color: var(--status-info-text); }
@@ -242,10 +242,10 @@ main { min-width: 0; }
 .workflow-status-indicator.completed { color: var(--status-success-text); }
 .workflow-status-indicator.failed { color: var(--status-danger-text); }
 .task-comment-count {
-  grid-column: 2; justify-self: end; display: inline-flex; align-items: center; gap: 4px;
+  grid-column: 3; grid-row: 1; align-self: start; justify-self: end; display: inline-flex; align-items: center; gap: 4px;
   font: 10px var(--mono); font-variant-numeric: tabular-nums;
 }
-.task-row-signals time { grid-column: 3; }
+.task-row-signals time { grid-column: 2; grid-row: 1; }
 .task-comment-count svg {
   width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-linejoin: round; stroke-width: 1.7;
 }
@@ -633,7 +633,11 @@ label small { color: var(--color-text-muted); font-weight: 400; }
   .page-header { align-items: flex-start; flex-direction: column; }
   .card-grid, .field-pair { grid-template-columns: 1fr; }
   .task-row { grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 7px 10px; }
-  .task-row-signals { width: 126px; grid-column: 2; grid-template-columns: 88px 28px; justify-self: start; }
+  .task-row-signals {
+    width: 100%; grid-column: 2; grid-template-columns: minmax(0, 1fr) auto; justify-self: stretch;
+  }
+  .workflow-status-indicators { width: 100%; }
+  .task-comment-count { grid-column: 2; }
   .task-row time { display: none; }
   .task-order-controls { display: grid; grid-template-columns: 1fr; }
   .task-order-controls > label { width: 100%; }
