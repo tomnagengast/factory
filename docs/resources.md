@@ -143,15 +143,33 @@ Clients that need live summaries should open
 the displayed list response. The stream replays any event appended after that
 atomic snapshot, including events written before the stream connection opens.
 
-The web application can re-sort or group tasks by any task field. It stores
-the selected sort field, direction, and group field in the browser and
-restores them on later visits. A missing or invalid saved preference uses ID
-descending with no grouping. After a task is created successfully, the web
-application also remembers its project in the browser. Later task creation
-forms restore that project while it remains active. A missing, invalid, or
-inactive saved project leaves the required project choice blank. Failed
-creations and task edits do not change the remembered project. The project
-must exist and not be deleted. Task detail includes comments and artifacts.
+The web task list can filter by status and project, then sort or group by any
+task field. Several selections within one filter match any selected value;
+status and project selections must both match. Filtering happens before
+sorting and grouping, so group counts include only visible tasks. The filter
+control reports the visible and total task counts, and its clear action
+restores the full list. A loaded list with no matches has a separate empty
+state from an API response with no tasks.
+
+The complete task-list view lives in the `/tasks` query string. Its owned keys
+are `sort`, `direction`, `group`, repeated `status`, and repeated `project`.
+The bare route means ID descending, no grouping, and no filters, so default
+and empty values are omitted. Status values use the allowed status catalog;
+project values are positive integer IDs available from active projects or
+represented tasks. Repeated statuses follow catalog order, and repeated
+projects sort by ID to keep copied links stable. Invalid, duplicate, and
+unavailable values are removed from the canonical URL without disturbing
+unrelated query keys. View changes add browser-history entries, so back and
+forward restore earlier filters, sorting, and grouping. This URL contract
+replaces the former `factory.tasks.view` browser-storage preference. Live
+task, comment, and workflow-run refetches keep applying the current URL view.
+
+After a task is created successfully, the web application also remembers its
+project in the browser. Later task creation forms restore that project while
+it remains active. A missing, invalid, or inactive saved project leaves the
+required project choice blank. Failed creations and task edits do not change
+the remembered project. The project must exist and not be deleted. Task
+detail includes comments and artifacts.
 Task resource responses always include `description` and `parentTaskId`;
 unset values are `null`, so a client can use a fetched task as the basis for a
 full `PUT`.
