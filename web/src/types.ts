@@ -153,7 +153,8 @@ export type Health = {
   projects: number;
   tasks: number;
   triggers: number;
-  workflows: number;
+  workflowRunning: number;
+  checkpointEventId: number;
   commit?: string;
 };
 

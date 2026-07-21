@@ -177,6 +177,8 @@ func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 		"projects":          counts.Projects,
 		"triggers":          counts.Triggers,
 		"workflows":         counts.Workflows,
+		"workflowRunning":   counts.WorkflowRunning,
+		"checkpointEventId": counts.CheckpointEventID,
 	})
 }
 

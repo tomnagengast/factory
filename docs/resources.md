@@ -744,8 +744,23 @@ GET /api/health
 ```
 
 The response includes status, active harness, workflow capacity, event and
-resource counts, `workflowActive`, `workflowQuiescing`, and release identity
-when deployment environment variables are set.
+resource counts, workflow state, and release identity when deployment
+environment variables are set.
+
+`workflowRunning` is the number of durable workflow-run projections whose
+status is exactly `running`. Waiting, completed, and failed runs do not count.
+This differs from `workflowActive`, which counts work admitted by the
+in-memory coordinator, including workflow authoring, for quiescence and
+deployment observability. `workflowQuiescing` reports whether that coordinator
+has stopped accepting new work.
+
+`checkpointEventId` is the newest event represented by the same database
+snapshot as `workflowRunning`. A client displaying the health snapshot can
+open `GET /api/events/stream?after=<checkpointEventId>` to replay every newer
+transition, including one written before the stream connection opens. When a
+view combines health with another checkpointed snapshot, it should stream
+after the smaller checkpoint so no change to either displayed snapshot is
+lost.
 
 ## CLI command matrix
 

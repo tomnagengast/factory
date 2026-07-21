@@ -242,7 +242,7 @@ function Home() {
       projects: projects.projects.slice(0, 4),
       tasks: tasks.tasks.slice(0, 5),
       events: events.events.slice(0, 6),
-      checkpointEventId: tasks.checkpointEventId,
+      checkpointEventId: Math.min(tasks.checkpointEventId, health.checkpointEventId),
     };
   });
   liveTaskRows(() => data()?.checkpointEventId, refetch);
@@ -254,34 +254,35 @@ function Home() {
         description="Projects and tasks enter one observable wire. The selected harness authors workflows and executes triggered runs within the configured capacity."
       />
       <Load data={data} error={() => data.error}>
-        {(value) => (
-          <>
-            <section class="metrics" aria-label="Factory totals">
-              <Metric label="Projects" value={value.health.projects} href="/projects" />
-              <Metric label="Tasks" value={value.health.tasks} href="/tasks" />
-              <Metric label="Events" value={value.health.events} href="/events" />
-              <Metric label="Workflows" value={value.health.workflows} href="/workflows" />
+        {(value) => {
+          const current = () => data() ?? value;
+          return <>
+            <section class="metrics" aria-label="Factory overview metrics">
+              <Metric label="Projects" value={current().health.projects} href="/projects" />
+              <Metric label="Tasks" value={current().health.tasks} href="/tasks" />
+              <Metric label="Events" value={current().health.events} href="/events" />
+              <Metric label="Running workflows" value={current().health.workflowRunning} href="/history" />
             </section>
             <div class="split">
               <section>
                 <SectionTitle title="Recent tasks" href="/tasks" />
-                <Show when={value.tasks.length} fallback={<Empty>No tasks yet.</Empty>}>
+                <Show when={current().tasks.length} fallback={<Empty>No tasks yet.</Empty>}>
                   <div class="rows">
-                    <For each={value.tasks}>{(task) => <TaskRow task={task} projects={value.projects} />}</For>
+                    <For each={current().tasks}>{(task) => <TaskRow task={task} projects={current().projects} />}</For>
                   </div>
                 </Show>
               </section>
               <section>
                 <SectionTitle title="Latest on the wire" href="/events" />
-                <Show when={value.events.length} fallback={<Empty>The wire is quiet.</Empty>}>
+                <Show when={current().events.length} fallback={<Empty>The wire is quiet.</Empty>}>
                   <div class="wire-list">
-                    <For each={value.events}>{(event) => <EventRow event={event} />}</For>
+                    <For each={current().events}>{(event) => <EventRow event={event} />}</For>
                   </div>
                 </Show>
               </section>
             </div>
-          </>
-        )}
+          </>;
+        }}
       </Load>
     </div>
   );
