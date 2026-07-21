@@ -1054,6 +1054,57 @@ func TestHealthIncludesReleaseIdentity(t *testing.T) {
 	}
 }
 
+func TestHealthTracksRunningWorkflowLifecycle(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	readHealth := func(wantRunning int) {
+		t.Helper()
+		response := requestJSON(t, handler, http.MethodGet, "/api/health", "")
+		var health struct {
+			WorkflowRunning   int   `json:"workflowRunning"`
+			WorkflowActive    int   `json:"workflowActive"`
+			CheckpointEventID int64 `json:"checkpointEventId"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &health) != nil {
+			t.Fatalf("health = %d %s", response.Code, response.Body)
+		}
+		if health.WorkflowRunning != wantRunning || health.CheckpointEventID != wire.LastID() {
+			t.Fatalf("health = %#v, want %d running at checkpoint %d",
+				health, wantRunning, wire.LastID())
+		}
+		if health.WorkflowActive != 0 {
+			t.Fatalf("projected runs changed workflow admission: %#v", health)
+		}
+	}
+
+	readHealth(0)
+	workflow, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	firstSource, _ := wire.Publish("release.first", map[string]bool{"ready": true})
+	secondSource, _ := wire.Publish("release.second", map[string]bool{"ready": true})
+	readHealth(0)
+	firstRun, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 10, WorkflowID: workflow.ID, WorkflowName: "review", SourceEventID: firstSource.ID,
+	})
+	readHealth(1)
+	wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 11, WorkflowID: workflow.ID, WorkflowName: "review", SourceEventID: secondSource.ID,
+	})
+	readHealth(2)
+	wire.Publish(state.WorkflowRunWaiting, state.WorkflowRunStateData{RunID: firstRun.ID})
+	readHealth(1)
+	wire.Publish(state.WorkflowRunResumed, state.WorkflowRunStateData{RunID: firstRun.ID})
+	readHealth(2)
+	wire.Publish(state.WorkflowRunCompleted, state.WorkflowRunData{
+		TriggerID: 11, SourceEventID: secondSource.ID, Output: "done",
+	})
+	readHealth(1)
+	wire.Publish(state.WorkflowRunFailed, state.WorkflowRunData{
+		TriggerID: 10, SourceEventID: firstSource.ID, Error: "failed",
+	})
+	readHealth(0)
+}
+
 func TestQuiescenceAPIStopsAdmissionDrainsAndReleases(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
@@ -1348,6 +1399,58 @@ func TestEventStreamReplaysEventAfterTaskListCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	if event.ID != intervening.ID || event.Type != state.CommentCreated {
+		t.Fatalf("replayed event = %#v, want %#v", event, intervening)
+	}
+}
+
+func TestEventStreamReplaysWorkflowTransitionAfterHealthCheckpoint(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	workflow, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
+	source, _ := wire.Publish("release.ready", map[string]bool{"ready": true})
+	started, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 10, WorkflowID: workflow.ID, WorkflowName: "review", SourceEventID: source.ID,
+	})
+	health := requestJSON(t, handler, http.MethodGet, "/api/health", "")
+	var snapshot struct {
+		WorkflowRunning   int   `json:"workflowRunning"`
+		CheckpointEventID int64 `json:"checkpointEventId"`
+	}
+	if health.Code != http.StatusOK || json.Unmarshal(health.Body.Bytes(), &snapshot) != nil ||
+		snapshot.WorkflowRunning != 1 || snapshot.CheckpointEventID != started.ID {
+		t.Fatalf("health = %d %s", health.Code, health.Body)
+	}
+	intervening, _ := wire.Publish(state.WorkflowRunWaiting, state.WorkflowRunStateData{RunID: started.ID})
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
+		fmt.Sprintf("%s/api/events/stream?after=%d", server.URL, snapshot.CheckpointEventID), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	reader := bufio.NewReader(response.Body)
+	for _, expected := range []string{": connected\n", "\n"} {
+		line, err := reader.ReadString('\n')
+		if err != nil || line != expected {
+			t.Fatalf("stream opening = %q, %v; want %q", line, err, expected)
+		}
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "data: ") {
+		t.Fatalf("stream event = %q, %v", line, err)
+	}
+	var event eventwire.Event
+	if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data: "))), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.ID != intervening.ID || event.Type != state.WorkflowRunWaiting {
 		t.Fatalf("replayed event = %#v, want %#v", event, intervening)
 	}
 }

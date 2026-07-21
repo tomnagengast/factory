@@ -18,11 +18,13 @@ type queryer interface {
 }
 
 type HealthCounts struct {
-	Events    int64
-	Tasks     int
-	Projects  int
-	Triggers  int
-	Workflows int
+	Events            int64
+	Tasks             int
+	Projects          int
+	Triggers          int
+	Workflows         int
+	WorkflowRunning   int
+	CheckpointEventID int64
 }
 
 type CronState struct {
@@ -88,8 +90,11 @@ func (s *Store) Health() (HealthCounts, error) {
 		(SELECT COUNT(*) FROM tasks WHERE deleted = 0),
 		(SELECT COUNT(*) FROM projects WHERE deleted = 0),
 		(SELECT COUNT(*) FROM triggers WHERE deleted = 0),
-		(SELECT COUNT(*) FROM workflows WHERE deleted = 0)`).Scan(
+		(SELECT COUNT(*) FROM workflows WHERE deleted = 0),
+		(SELECT COUNT(*) FROM workflow_runs WHERE status = 'running'),
+		(SELECT COALESCE(MAX(id), 0) FROM events)`).Scan(
 		&value.Events, &value.Tasks, &value.Projects, &value.Triggers, &value.Workflows,
+		&value.WorkflowRunning, &value.CheckpointEventID,
 	)
 	return value, err
 }
