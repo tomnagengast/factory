@@ -14,6 +14,7 @@ import hljs from "highlight.js/lib/common";
 import { ArrowDownWideNarrow, ArrowUpNarrowWide, ListTodo, Play, Trash2 } from "lucide-solid";
 import "highlight.js/styles/github-dark.css";
 import { get, optional, optionalID, post, put, remove, uploadMedia } from "./api";
+import { eventTypeOptions, filterEvents, shouldContinueEventPaging } from "./events";
 import { bindNewestFollower, type NewestFollower } from "./follow-newest";
 import {
   HISTORY_OVERVIEW_LIMIT,
@@ -637,6 +638,12 @@ function Tasks() {
                     ? [...preferences().projectIds, projectId]
                     : preferences().projectIds.filter((value) => value !== projectId),
                 })}
+                onSelectAllStatuses={() => updateView({ statuses: [...taskStatuses] })}
+                onUnselectAllStatuses={() => updateView({ statuses: [] })}
+                onSelectAllProjects={() => updateView({
+                  projectIds: projectOptions().map(({ id }) => id),
+                })}
+                onUnselectAllProjects={() => updateView({ projectIds: [] })}
                 onClear={clearFilters}
               />
             </div>
@@ -669,15 +676,32 @@ function TaskFilters(props: {
   totalResultCount: number;
   onStatusChange: (status: TaskStatus, selected: boolean) => void;
   onProjectChange: (projectId: number, selected: boolean) => void;
+  onSelectAllStatuses: () => void;
+  onUnselectAllStatuses: () => void;
+  onSelectAllProjects: () => void;
+  onUnselectAllProjects: () => void;
   onClear: () => void;
 }) {
+  const allStatusesSelected = () => taskStatuses.every((status) => props.selectedStatuses.includes(status));
+  const allProjectsSelected = () => props.projects.length > 0
+    && props.projects.every((project) => props.selectedProjectIds.includes(project.id));
   return (
     <div class="task-filters" aria-label="Task filters">
       <details class="task-filter">
         <summary>Filter <span>{props.activeFilterCount} selected</span></summary>
         <div class="task-filter-panel">
           <fieldset>
-            <legend>Status</legend>
+            <legend class="filter-field-legend">
+              <span>Status</span>
+              <FilterFieldActions
+                selectLabel="Select all statuses"
+                unselectLabel="Unselect all statuses"
+                selectDisabled={allStatusesSelected()}
+                unselectDisabled={props.selectedStatuses.length === 0}
+                onSelect={props.onSelectAllStatuses}
+                onUnselect={props.onUnselectAllStatuses}
+              />
+            </legend>
             <div class="task-filter-options" role="group" aria-label="Filter by status">
               <For each={taskStatuses}>{(status) => <label>
                 <input type="checkbox" checked={props.selectedStatuses.includes(status)}
@@ -687,7 +711,17 @@ function TaskFilters(props: {
             </div>
           </fieldset>
           <fieldset>
-            <legend>Project</legend>
+            <legend class="filter-field-legend">
+              <span>Project</span>
+              <FilterFieldActions
+                selectLabel="Select all projects"
+                unselectLabel="Unselect all projects"
+                selectDisabled={allProjectsSelected()}
+                unselectDisabled={props.selectedProjectIds.length === 0}
+                onSelect={props.onSelectAllProjects}
+                onUnselect={props.onUnselectAllProjects}
+              />
+            </legend>
             <div class="task-filter-options" role="group" aria-label="Filter by project">
               <For each={props.projects}>{(project) => <label>
                 <input type="checkbox" checked={props.selectedProjectIds.includes(project.id)}
@@ -705,6 +739,24 @@ function TaskFilters(props: {
         Showing {props.displayedResultCount} of {props.totalResultCount} tasks
       </p>
     </div>
+  );
+}
+
+function FilterFieldActions(props: {
+  selectLabel: string;
+  unselectLabel: string;
+  selectDisabled: boolean;
+  unselectDisabled: boolean;
+  onSelect: () => void;
+  onUnselect: () => void;
+}) {
+  return (
+    <span class="filter-field-actions">
+      <button type="button" aria-label={props.selectLabel} disabled={props.selectDisabled}
+        onClick={props.onSelect}>Select all</button>
+      <button type="button" aria-label={props.unselectLabel} disabled={props.unselectDisabled}
+        onClick={props.onUnselect}>Unselect all</button>
+    </span>
   );
 }
 
@@ -1295,6 +1347,7 @@ function ArtifactPanel(props: {
 
 function Events() {
   const [events, setEvents] = createSignal<Event[]>([]);
+  const [selectedEventTypes, setSelectedEventTypes] = createSignal<string[]>([]);
   const [error, setError] = createSignal("");
   const [connected, setConnected] = createSignal(false);
   const [hasOlder, setHasOlder] = createSignal(false);
@@ -1303,16 +1356,36 @@ function Events() {
   const [olderSentinel, setOlderSentinel] = createSignal<HTMLDivElement>();
   let follower: NewestFollower | undefined;
   let source: EventSource | undefined;
-  const loadOlder = () => {
-    if (!hasOlder() || older.pending()) return;
+  let continuationFrame: number | undefined;
+  const eventTypes = createMemo(() => eventTypeOptions(events()));
+  const filteredEvents = createMemo(() => filterEvents(events(), selectedEventTypes()));
+  const allEventTypesSelected = createMemo(() => eventTypes().length > 0
+    && eventTypes().every((eventType) => selectedEventTypes().includes(eventType)));
+  const scheduleOlderContinuation = () => {
+    if (continuationFrame != null) window.cancelAnimationFrame(continuationFrame);
+    continuationFrame = window.requestAnimationFrame(() => {
+      continuationFrame = undefined;
+      const sentinel = olderSentinel();
+      if (shouldContinueEventPaging({
+        hasOlder: hasOlder(),
+        pending: older.pending(),
+        error: Boolean(older.error()),
+        sentinelBounds: sentinel?.getBoundingClientRect(),
+        viewportHeight: window.innerHeight,
+      })) loadOlder();
+    });
+  };
+  function loadOlder(retry = false) {
+    if (!hasOlder() || older.pending() || (older.error() && !retry)) return;
     void older.run(async () => {
       const before = events().at(-1)?.id;
       if (!before) return;
       const page = await get<{ events: Event[] }>(`/api/events?before=${before}&limit=${EVENT_PAGE_SIZE}`);
       setEvents((current) => uniqueByID([...current, ...page.events]));
       setHasOlder(page.events.length === EVENT_PAGE_SIZE);
+      scheduleOlderContinuation();
     });
-  };
+  }
   createEffect(() => {
     const content = wireContent();
     if (!content) return;
@@ -1355,27 +1428,95 @@ function Events() {
       setError(errorMessage(caught));
     }
   });
-  onCleanup(() => source?.close());
+  onCleanup(() => {
+    source?.close();
+    if (continuationFrame != null) window.cancelAnimationFrame(continuationFrame);
+  });
   return (
     <div class="page">
       <PageHeader title="Event wire" description="Every accepted fact, newest first."
         actions={<span classList={{ connection: true, live: connected() }}><span />{connected() ? "Live" : "Connecting"}</span>} />
       <Show when={!error()} fallback={<div class="state">{error()}</div>}>
         <Show when={events().length} fallback={<Empty>The wire is quiet.</Empty>}>
-          <div ref={(element) => setWireContent(element)} class="wire-table">
-            <For each={events()}>{(event) => <EventRow event={event} expanded />}</For>
-          </div>
+          <EventFilters
+            eventTypes={eventTypes()}
+            selectedEventTypes={selectedEventTypes()}
+            displayedResultCount={filteredEvents().length}
+            totalResultCount={events().length}
+            allSelected={allEventTypesSelected()}
+            onEventTypeChange={(eventType, selected) => setSelectedEventTypes((current) => selected
+              ? [...current, eventType]
+              : current.filter((value) => value !== eventType))}
+            onSelectAll={() => setSelectedEventTypes([...eventTypes()])}
+            onUnselectAll={() => setSelectedEventTypes([])}
+            onClear={() => setSelectedEventTypes([])}
+          />
+          <Show when={filteredEvents().length} fallback={<div class="empty event-filter-empty">
+            <p>No loaded events match this filter.</p>
+            <button type="button" class="button quiet" onClick={() => setSelectedEventTypes([])}>Clear filters</button>
+          </div>}>
+            <div ref={(element) => setWireContent(element)} class="wire-table">
+              <For each={filteredEvents()}>{(event) => <EventRow event={event} expanded />}</For>
+            </div>
+          </Show>
         </Show>
         <Show when={hasOlder()}>
           <div ref={(element) => setOlderSentinel(element)} class="wire-loader" aria-live="polite">
             <Show when={older.pending()}>Loading {EVENT_PAGE_SIZE} older events…</Show>
             <Show when={older.error()}>
               <span class="form-error">{older.error()}</span>
-              <button type="button" class="button quiet" onClick={loadOlder}>Retry</button>
+              <button type="button" class="button quiet" onClick={() => loadOlder(true)}>Retry</button>
             </Show>
           </div>
         </Show>
       </Show>
+    </div>
+  );
+}
+
+function EventFilters(props: {
+  eventTypes: string[];
+  selectedEventTypes: string[];
+  displayedResultCount: number;
+  totalResultCount: number;
+  allSelected: boolean;
+  onEventTypeChange: (eventType: string, selected: boolean) => void;
+  onSelectAll: () => void;
+  onUnselectAll: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <div class="event-filters" aria-label="Event filters">
+      <details class="event-filter">
+        <summary>Events <span>{props.selectedEventTypes.length} selected</span></summary>
+        <div class="event-filter-panel">
+          <fieldset>
+            <legend class="filter-field-legend">
+              <span>Seen event types</span>
+              <FilterFieldActions
+                selectLabel="Select all event types"
+                unselectLabel="Unselect all event types"
+                selectDisabled={props.allSelected}
+                unselectDisabled={props.selectedEventTypes.length === 0}
+                onSelect={props.onSelectAll}
+                onUnselect={props.onUnselectAll}
+              />
+            </legend>
+            <div class="event-filter-options" role="group" aria-label="Filter by event type">
+              <For each={props.eventTypes}>{(eventType) => <label>
+                <input type="checkbox" checked={props.selectedEventTypes.includes(eventType)}
+                  onChange={(event) => props.onEventTypeChange(eventType, event.currentTarget.checked)} />
+                <span>{eventType}</span>
+              </label>}</For>
+            </div>
+          </fieldset>
+          <button type="button" class="button quiet" disabled={props.selectedEventTypes.length === 0}
+            onClick={props.onClear}>Clear filters</button>
+        </div>
+      </details>
+      <p class="event-filter-results" role="status">
+        Showing {props.displayedResultCount} of {props.totalResultCount} loaded events
+      </p>
     </div>
   );
 }

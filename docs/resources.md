@@ -152,9 +152,11 @@ The web task list can filter by status and project, then sort or group by any
 task field. Several selections within one filter match any selected value;
 status and project selections must both match. Filtering happens before
 sorting and grouping, so group counts include only visible tasks. The filter
-control reports the visible and total task counts, and its clear action
-restores the full list. A loaded list with no matches has a separate empty
-state from an API response with no tasks.
+control reports the visible and total task counts. Each field can select all
+current choices or unselect all of them. An empty field selection removes that
+restriction, so Unselect all restores unrestricted matching for that field.
+The task-wide clear action removes both restrictions. A loaded list with no
+matches has a separate empty state from an API response with no tasks.
 
 The complete task-list view lives in the `/tasks` query string. Its owned keys
 are `sort`, `direction`, `group`, repeated `status`, and repeated `project`.
@@ -471,6 +473,16 @@ ANY  /api/ingest/{remaining-path...}
 older page and `limit` selects a positive page size.
 `GET /api/events/stream?after=42` opens a server-sent event stream after ID
 42. Event types returns all observed types plus `cron`.
+
+The web event wire requests raw pages of 25 events and filters the loaded rows
+in the browser. Its choices are the distinct types seen during the current page
+session across the initial page, older pages, and live stream. Select all
+chooses every current type; a type first seen later stays unselected. Unselect
+all and Clear filters remove the restriction and show every loaded event. The
+visible and loaded counts do not include wire history that has not been paged.
+If filtering leaves the older-page marker visible, raw paging continues across
+consecutive pages with no matching rows until the marker leaves the viewport,
+history ends, or a request fails.
 
 Universal ingress records any HTTP request without validating or normalizing
 its payload:

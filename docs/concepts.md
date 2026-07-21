@@ -56,10 +56,14 @@ query value selects an automatically namespaced event type such as
 `GET /api/events/stream` exposes new events as server-sent events. The web
 event page and detail views use that stream to update without a page reload.
 The event page opens with the newest 25 events at the top and appends older
-events in batches of 25 as the reader scrolls down. It follows new events while
-the reader remains at the top. After the reader scrolls into older events, new
-arrivals preserve the visible event and following resumes only when the reader
-returns to the top.
+events in batches of 25 as the reader scrolls down. Its page-local filter lists
+the distinct event types seen in the initial page, older pages, and live
+arrivals. Filtering applies to those loaded rows in the browser; the result
+count does not describe unloaded wire history. Raw paging continues while the
+older-page marker remains visible, including when one or more raw pages contain
+no selected types. The page follows new events while the reader remains at the
+top. After the reader scrolls into older events, new arrivals preserve the
+visible event and following resumes only when the reader returns to the top.
 
 ## Projections and resources
 
