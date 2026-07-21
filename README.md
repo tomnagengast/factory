@@ -117,7 +117,7 @@ Immutable media blobs default to `~/.local/share/factory/media`.
 /history/failed                        failed runs, loaded 25 at a time
 /history/completed                     completed runs, loaded 25 at a time
 /history/:item                         phase-grouped semantic event timeline
-/settings                              select harness, model, reasoning, and run capacity
+/settings                              select harness, model, reasoning, run capacity, and canned reactions
 ```
 
 Resource and detail route IDs are integers. The four history status routes use
@@ -191,7 +191,7 @@ factory workflow update 24 '{"message":"Add a security reviewer."}'
 factory event create '{"type":"release.ready","data":{"version":"1.0"}}'
 factory trigger update 41 '{"eventType":"release.ready","workflowId":24,"enabled":false}'
 factory history get 30
-factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6}'
+factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6,"reactionEmojis":["👍","🎉","🤔"]}'
 ```
 
 `FACTORY_URL` changes the default server from `http://127.0.0.1:8092`.
@@ -242,7 +242,8 @@ prompt as a task comment, leaves the run waiting without a live process, and
 resumes that same journal from the next root comment or direct reply.
 Workflow conversations remain sequential. Triggered workflows run in parallel
 up to the configured capacity, which defaults to six and can be set from zero
-through ten in `/settings`.
+through ten in `/settings`. The same page configures the ordered canned
+reactions used by every task and task-comment control.
 
 Factory records `deployment.started`, `deployment.quiescing`,
 `deployment.quiesced`, and `deployment.resumed` on the generic event wire.

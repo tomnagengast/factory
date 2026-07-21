@@ -18,7 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const projectionVersion = 1
+const projectionVersion = 2
 
 var ErrClosed = errors.New("event store is closed")
 

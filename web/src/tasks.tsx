@@ -9,7 +9,7 @@ import {
   Show,
 } from "solid-js";
 import { ArrowDownWideNarrow, ArrowUpNarrowWide } from "lucide-solid";
-import { get, mutation, optional, optionalID, post, put, remove } from "./api";
+import { get, liveRefetch, mutation, optional, optionalID, post, put, remove } from "./api";
 import { ArtifactPanel, CommentThread, MediaTextarea, ReactionBar } from "./comments";
 import {
   activeTaskCreationProjectId,
@@ -34,6 +34,7 @@ import {
   taskStatuses,
   type Event,
   type Project,
+  type SettingsDetail,
   type Task,
   type TaskDetail,
   type TaskListResponse,
@@ -357,7 +358,9 @@ export function TaskView() {
   const params = useParams();
   const navigate = useNavigate();
   const [data, { refetch }] = createResource(() => get<TaskDetail>(`/api/tasks/${params.task}`));
+  const [settings, { refetch: refetchSettings }] = createResource(() => get<SettingsDetail>("/api/settings"));
   liveTaskRows(() => data()?.checkpointEventId, refetch);
+  liveRefetch(["settings.updated"], refetchSettings);
   const [options] = createResource(async () => {
     const [projects, tasks] = await Promise.all([
       get<{ projects: Project[] }>("/api/projects"), get<TaskListResponse>("/api/tasks"),
@@ -368,10 +371,12 @@ export function TaskView() {
   const [editing, setEditing] = createSignal(false);
   return (
     <div class="page">
-      <Load data={data} error={() => data.error}>
-        {(value) => {
-          const current = () => data() ?? value;
-          return (
+      <Load data={settings} error={() => settings.error}>
+        {(settingsValue) => <Load data={data} error={() => data.error}>
+          {(value) => {
+            const current = () => data() ?? value;
+            const currentSettings = () => settings() ?? settingsValue;
+            return (
           <>
             <PageHeader eyebrow={`Task ${current().task.id}`} title={<Markdown content={current().task.title} inline />}
               actions={<Show when={!editing()}>
@@ -380,7 +385,8 @@ export function TaskView() {
             <TaskProperties task={current().task} projects={options()?.projects ?? []} tasks={options()?.tasks ?? []} />
             <Show when={!current().task.deletedAt}>
               <ReactionBar targetKind="task" targetID={current().task.id}
-                reactions={current().task.reactions} onChange={refetch} />
+                reactions={current().task.reactions}
+                configuredEmojis={currentSettings().settings.reactionEmojis} onChange={refetch} />
             </Show>
             <div class="detail-grid">
               <Show when={editing()} fallback={<section class="task-document">
@@ -410,13 +416,15 @@ export function TaskView() {
             <div class="split lower">
               <section>
                 <SectionTitle title="Comments" />
-                <CommentThread comments={current().comments} taskID={current().task.id} onChange={refetch} />
+                <CommentThread comments={current().comments} taskID={current().task.id}
+                  configuredEmojis={currentSettings().settings.reactionEmojis} onChange={refetch} />
               </section>
               <ArtifactPanel artifacts={current().artifacts} relationType="task" relationID={current().task.id} onChange={refetch} />
             </div>
           </>
           );
-        }}
+          }}
+        </Load>}
       </Load>
     </div>
   );

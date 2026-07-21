@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -205,6 +206,101 @@ func TestHistoryFiltersAndPagesWorkflowRunProjection(t *testing.T) {
 			}
 			seen[id] = true
 		}
+	}
+}
+
+func TestProjectionUpgradeDefaultsHistoricalSettingsReactionEmojis(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "factory.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSettings := json.RawMessage(`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":4}`)
+	if _, err := store.Append(state.SettingsUpdated, oldSettings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE settings SET data = ? WHERE id = 1`, []byte(oldSettings)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE projection_meta SET version = 1 WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	settings, err := reopened.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := state.DefaultSettings()
+	want.Harness, want.Model, want.Reasoning, want.WorkflowCapacity = state.Claude, "sonnet", "high", 4
+	if !reflect.DeepEqual(settings, want) {
+		t.Fatalf("rebuilt settings = %#v, want %#v", settings, want)
+	}
+}
+
+func TestConfiguredReactionSettingsAndRetiredOrderSurviveRestartAndReplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "factory.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskEvent, err := store.Append(state.TaskCreated, state.TaskData{
+		Title: "Replay reactions", Status: state.Todo, ProjectID: 99,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := state.DefaultSettings()
+	settings.ReactionEmojis = []string{"🤔", "🎉", "👍🏻"}
+	if _, err := store.Append(state.SettingsUpdated, settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, emoji := range []string{"🎉", "🤔", "👍🏻"} {
+		if _, err := store.Append(state.ReactionUpdated, state.ReactionUpdatedData{
+			TargetType: "task", TargetID: taskEvent.ID, Emoji: emoji, Active: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settings.ReactionEmojis = []string{"🎉"}
+	if _, err := store.Append(state.SettingsUpdated, settings); err != nil {
+		t.Fatal(err)
+	}
+	wantTask, found, err := store.Task(taskEvent.ID)
+	if err != nil || !found || !slices.Equal(wantTask.Reactions, []string{"🎉", "🤔", "👍🏻"}) {
+		t.Fatalf("projected task = %#v, %v, %v", wantTask, found, err)
+	}
+	wantSettings, err := store.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE projection_meta SET version = 1 WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	gotSettings, err := reopened.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTask, found, err := reopened.Task(taskEvent.ID)
+	if err != nil || !found || !reflect.DeepEqual(gotSettings, wantSettings) || !reflect.DeepEqual(gotTask, wantTask) {
+		t.Fatalf("replayed settings/task = %#v / %#v, want %#v / %#v, found=%v err=%v",
+			gotSettings, gotTask, wantSettings, wantTask, found, err)
 	}
 }
 

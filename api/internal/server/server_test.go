@@ -530,26 +530,30 @@ func TestReactionAPIUpdatesTasksRootCommentsRepliesAndGatePrompts(t *testing.T) 
 		RelationType: "workflow", RelationID: 88, Author: "user", Content: "Revise it",
 	})
 	handler := testServer(t, wire).Handler()
+	if response := requestJSON(t, handler, http.MethodPut, "/api/settings",
+		`{"harness":"codex","model":"gpt-5.6-sol","reasoning":"low","workflowCapacity":6,"reactionEmojis":["🧑🏽‍💻","🤔","🎯","✅"]}`); response.Code != http.StatusOK {
+		t.Fatalf("settings = %d %s", response.Code, response.Body)
+	}
 
 	createdComments := eventCount(wire.Events(0), state.CommentCreated)
-	first := requestJSON(t, handler, http.MethodPut, "/api/tasks/1/reactions", `{"emoji":"❤️","active":true}`)
+	first := requestJSON(t, handler, http.MethodPut, "/api/tasks/1/reactions", `{"emoji":"🧑🏽‍💻","active":true}`)
 	if first.Code != http.StatusOK {
 		t.Fatalf("first task reaction = %d %s", first.Code, first.Body)
 	}
 	var firstTask state.Task
 	if err := json.Unmarshal(first.Body.Bytes(), &firstTask); err != nil ||
-		!slices.Equal(firstTask.Reactions, []string{"❤️"}) {
+		!slices.Equal(firstTask.Reactions, []string{"🧑🏽‍💻"}) {
 		t.Fatalf("first task reaction = %#v, %v", firstTask, err)
 	}
 	firstUpdatedAt := firstTask.UpdatedAt
 
-	repeated := requestJSON(t, handler, http.MethodPut, "/api/tasks/1/reactions", `{"emoji":"❤️","active":true}`)
+	repeated := requestJSON(t, handler, http.MethodPut, "/api/tasks/1/reactions", `{"emoji":"🧑🏽‍💻","active":true}`)
 	var repeatedTask state.Task
 	if repeated.Code != http.StatusOK || json.Unmarshal(repeated.Body.Bytes(), &repeatedTask) != nil ||
-		!repeatedTask.UpdatedAt.After(firstUpdatedAt) || !slices.Equal(repeatedTask.Reactions, []string{"❤️"}) {
+		!repeatedTask.UpdatedAt.After(firstUpdatedAt) || !slices.Equal(repeatedTask.Reactions, []string{"🧑🏽‍💻"}) {
 		t.Fatalf("repeated task reaction = %d %s", repeated.Code, repeated.Body)
 	}
-	cleared := requestJSON(t, handler, http.MethodPut, "/api/tasks/1/reactions", `{"emoji":"❤️","active":false}`)
+	cleared := requestJSON(t, handler, http.MethodPut, "/api/tasks/1/reactions", `{"emoji":"🧑🏽‍💻","active":false}`)
 	var clearedTask state.Task
 	if cleared.Code != http.StatusOK || json.Unmarshal(cleared.Body.Bytes(), &clearedTask) != nil ||
 		clearedTask.Reactions == nil || len(clearedTask.Reactions) != 0 {
@@ -560,7 +564,7 @@ func TestReactionAPIUpdatesTasksRootCommentsRepliesAndGatePrompts(t *testing.T) 
 		id    int64
 		emoji string
 	}{
-		{root.ID, "👍"}, {reply.ID, "🎉"}, {gate.ID, "👀"},
+		{root.ID, "🤔"}, {reply.ID, "🎯"}, {gate.ID, "✅"},
 	} {
 		response := requestJSON(t, handler, http.MethodPut,
 			fmt.Sprintf("/api/comments/%d/reactions", target.id),
@@ -572,7 +576,7 @@ func TestReactionAPIUpdatesTasksRootCommentsRepliesAndGatePrompts(t *testing.T) 
 	last := wire.Events(0)[len(wire.Events(0))-1]
 	var payload state.ReactionUpdatedData
 	if last.Type != state.ReactionUpdated || json.Unmarshal(last.Data, &payload) != nil ||
-		payload != (state.ReactionUpdatedData{TargetType: "comment", TargetID: gate.ID, Emoji: "👀", Active: true}) {
+		payload != (state.ReactionUpdatedData{TargetType: "comment", TargetID: gate.ID, Emoji: "✅", Active: true}) {
 		t.Fatalf("last reaction event = %#v, payload = %#v", last, payload)
 	}
 	if eventCount(wire.Events(0), state.CommentCreated) != createdComments {
@@ -606,14 +610,14 @@ func TestReactionAPIUpdatesTasksRootCommentsRepliesAndGatePrompts(t *testing.T) 
 		Replies []state.Comment `json:"replies"`
 	}
 	if commentDetail.Code != http.StatusOK || json.Unmarshal(commentDetail.Body.Bytes(), &commentEnvelope) != nil ||
-		!slices.Equal(commentEnvelope.Comment.Reactions, []string{"🎉"}) ||
+		!slices.Equal(commentEnvelope.Comment.Reactions, []string{"🎯"}) ||
 		commentEnvelope.Comment.DeletedAt == nil || commentEnvelope.Replies == nil || len(commentEnvelope.Replies) != 0 {
 		t.Fatalf("comment detail reactions = %d %s", commentDetail.Code, commentDetail.Body)
 	}
 
 	lastID := wire.LastID()
 	unsupported := requestJSON(t, handler, http.MethodPut,
-		fmt.Sprintf("/api/comments/%d/reactions", workflowComment.ID), `{"emoji":"👍","active":true}`)
+		fmt.Sprintf("/api/comments/%d/reactions", workflowComment.ID), `{"emoji":"🤔","active":true}`)
 	if unsupported.Code != http.StatusBadRequest || wire.LastID() != lastID {
 		t.Fatalf("workflow reaction = %d %s, last ID = %d", unsupported.Code, unsupported.Body, wire.LastID())
 	}
@@ -664,6 +668,72 @@ func TestReactionAPIRejectsInvalidRequestsWithoutAppendingEvents(t *testing.T) {
 					response.Code, response.Body, wire.LastID(), test.status, lastID)
 			}
 		})
+	}
+}
+
+func TestReactionAPIUsesConfiguredOrderAndKeepsRetiredActiveValuesClearable(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	task, _ := wire.Publish(state.TaskCreated, state.TaskData{
+		Title: "Configured reactions", Status: state.Todo, ProjectID: 99,
+	})
+	comment, _ := wire.Publish(state.CommentCreated, state.CommentData{
+		RelationType: "task", RelationID: task.ID, Author: "user", Content: "Try it",
+	})
+	handler := testServer(t, wire).Handler()
+	settingsBody := `{"harness":"codex","model":"gpt-5.6-sol","reasoning":"low","workflowCapacity":6,"reactionEmojis":["🤔","🎉","👍🏻"]}`
+	if response := requestJSON(t, handler, http.MethodPut, "/api/settings", settingsBody); response.Code != http.StatusOK {
+		t.Fatalf("settings = %d %s", response.Code, response.Body)
+	}
+
+	for _, emoji := range []string{"🎉", "🤔"} {
+		response := requestJSON(t, handler, http.MethodPut, fmt.Sprintf("/api/tasks/%d/reactions", task.ID),
+			fmt.Sprintf(`{"emoji":%q,"active":true}`, emoji))
+		if response.Code != http.StatusOK {
+			t.Fatalf("add %s = %d %s", emoji, response.Code, response.Body)
+		}
+	}
+	taskView, _, _ := wire.Task(task.ID)
+	if !slices.Equal(taskView.Reactions, []string{"🤔", "🎉"}) {
+		t.Fatalf("configured order = %v", taskView.Reactions)
+	}
+	if response := requestJSON(t, handler, http.MethodPut, fmt.Sprintf("/api/comments/%d/reactions", comment.ID),
+		`{"emoji":"👍🏻","active":true}`); response.Code != http.StatusOK {
+		t.Fatalf("skin-tone configured reaction = %d %s", response.Code, response.Body)
+	}
+
+	lastID := wire.LastID()
+	if response := requestJSON(t, handler, http.MethodPut, fmt.Sprintf("/api/tasks/%d/reactions", task.ID),
+		`{"emoji":"👍","active":true}`); response.Code != http.StatusBadRequest || wire.LastID() != lastID {
+		t.Fatalf("unconfigured add = %d %s, last ID = %d", response.Code, response.Body, wire.LastID())
+	}
+	if response := requestJSON(t, handler, http.MethodPut, fmt.Sprintf("/api/comments/%d/reactions", comment.ID),
+		`{"emoji":"🎉","active":false}`); response.Code != http.StatusOK || wire.LastID() != lastID+1 {
+		t.Fatalf("configured no-op clear = %d %s, last ID = %d", response.Code, response.Body, wire.LastID())
+	}
+
+	taskView, _, _ = wire.Task(task.ID)
+	beforeSettingsUpdate := taskView.UpdatedAt
+	if response := requestJSON(t, handler, http.MethodPut, "/api/settings",
+		`{"harness":"codex","model":"gpt-5.6-sol","reasoning":"low","workflowCapacity":6,"reactionEmojis":["🎉"]}`); response.Code != http.StatusOK {
+		t.Fatalf("retire settings = %d %s", response.Code, response.Body)
+	}
+	taskView, _, _ = wire.Task(task.ID)
+	if !slices.Equal(taskView.Reactions, []string{"🎉", "🤔"}) || taskView.UpdatedAt != beforeSettingsUpdate {
+		t.Fatalf("retired reactions = %v at %s, want unchanged %s", taskView.Reactions, taskView.UpdatedAt, beforeSettingsUpdate)
+	}
+
+	if response := requestJSON(t, handler, http.MethodPut, fmt.Sprintf("/api/tasks/%d/reactions", task.ID),
+		`{"emoji":"🤔","active":false}`); response.Code != http.StatusOK {
+		t.Fatalf("retired clear = %d %s", response.Code, response.Body)
+	}
+	lastID = wire.LastID()
+	for _, active := range []bool{false, true} {
+		response := requestJSON(t, handler, http.MethodPut, fmt.Sprintf("/api/tasks/%d/reactions", task.ID),
+			fmt.Sprintf(`{"emoji":"🤔","active":%t}`, active))
+		if response.Code != http.StatusBadRequest || wire.LastID() != lastID {
+			t.Fatalf("retired active=%t = %d %s, last ID = %d", active, response.Code, response.Body, wire.LastID())
+		}
 	}
 }
 
@@ -719,6 +789,78 @@ func TestReactionAndDeletionAreOrderedByTheWire(t *testing.T) {
 			(reactionIndex >= 0) != (codes[http.StatusOK] == 1) {
 			t.Fatalf("iteration %d event order reaction=%d delete=%d, codes=%#v, events=%#v",
 				iteration, reactionIndex, deleteIndex, codes, wire.Events(0))
+		}
+		wire.Close()
+	}
+}
+
+func TestReactionAndSettingsUpdatesFollowDurableWireOrder(t *testing.T) {
+	for iteration := 0; iteration < 20; iteration++ {
+		wire := openWire(t)
+		task, _ := wire.Publish(state.TaskCreated, state.TaskData{
+			Title: "Concurrent settings", Status: state.Todo, ProjectID: 99,
+		})
+		handler := testServer(t, wire).Handler()
+		start := make(chan struct{})
+		type result struct {
+			kind string
+			code int
+		}
+		responses := make(chan result, 2)
+		var workers sync.WaitGroup
+		workers.Add(2)
+		go func() {
+			defer workers.Done()
+			<-start
+			request := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(
+				`{"harness":"codex","model":"gpt-5.6-sol","reasoning":"low","workflowCapacity":6,"reactionEmojis":["🎉"]}`,
+			))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			responses <- result{kind: "settings", code: response.Code}
+		}()
+		go func() {
+			defer workers.Done()
+			<-start
+			request := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/tasks/%d/reactions", task.ID),
+				strings.NewReader(`{"emoji":"👍","active":true}`))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			responses <- result{kind: "reaction", code: response.Code}
+		}()
+		close(start)
+		workers.Wait()
+		close(responses)
+
+		codes := make(map[string]int)
+		for response := range responses {
+			codes[response.kind] = response.code
+		}
+		events := wire.Events(0)
+		reactionIndex, settingsIndex := -1, -1
+		for index, event := range events {
+			switch event.Type {
+			case state.ReactionUpdated:
+				reactionIndex = index
+			case state.SettingsUpdated:
+				settingsIndex = index
+			}
+		}
+		taskView, _, err := wire.Task(task.ID)
+		if err != nil || codes["settings"] != http.StatusOK || settingsIndex < 0 {
+			t.Fatalf("iteration %d settings result=%#v indexes=%d/%d err=%v", iteration, codes, reactionIndex, settingsIndex, err)
+		}
+		switch codes["reaction"] {
+		case http.StatusOK:
+			if reactionIndex < 0 || reactionIndex >= settingsIndex || !slices.Equal(taskView.Reactions, []string{"👍"}) {
+				t.Fatalf("iteration %d accepted order reaction=%d settings=%d task=%#v", iteration, reactionIndex, settingsIndex, taskView)
+			}
+		case http.StatusBadRequest:
+			if reactionIndex >= 0 || len(taskView.Reactions) != 0 {
+				t.Fatalf("iteration %d rejected order reaction=%d settings=%d task=%#v", iteration, reactionIndex, settingsIndex, taskView)
+			}
+		default:
+			t.Fatalf("iteration %d reaction code = %d", iteration, codes["reaction"])
 		}
 		wire.Close()
 	}
@@ -1434,16 +1576,32 @@ func TestSettingsAPIUpdatesHarnessSelection(t *testing.T) {
 	defer wire.Close()
 	handler := testServer(t, wire).Handler()
 	response := requestJSON(t, handler, http.MethodGet, "/api/settings", "")
-	if response.Code != http.StatusOK ||
-		!strings.Contains(response.Body.String(), `"harness":"codex"`) ||
-		!strings.Contains(response.Body.String(), `"workflowCapacity":6`) ||
-		!strings.Contains(response.Body.String(), `"name":"Claude Code"`) {
+	var detail struct {
+		Settings  state.Settings        `json:"settings"`
+		Harnesses []state.HarnessOption `json:"harnesses"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &detail) != nil ||
+		!reflect.DeepEqual(detail.Settings, state.DefaultSettings()) || len(detail.Harnesses) != 2 {
 		t.Fatalf("default settings = %d %s", response.Code, response.Body)
 	}
+	beforeUpdate := wire.LastID()
 	response = requestJSON(t, handler, http.MethodPut, "/api/settings",
-		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":4}`)
-	if response.Code != http.StatusOK {
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":4,"reactionEmojis":["🎉","👍🏻","plain text"]}`)
+	var selected state.Settings
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &selected) != nil ||
+		!slices.Equal(selected.ReactionEmojis, []string{"🎉", "👍🏻", "plain text"}) ||
+		wire.LastID() != beforeUpdate+1 {
 		t.Fatalf("update settings = %d %s", response.Code, response.Body)
+	}
+	event := wire.Events(beforeUpdate)[0]
+	var eventSettings state.Settings
+	if event.Type != state.SettingsUpdated || json.Unmarshal(event.Data, &eventSettings) != nil ||
+		!reflect.DeepEqual(eventSettings, selected) {
+		t.Fatalf("settings event = %#v, data = %#v", event, eventSettings)
+	}
+	response = requestJSON(t, handler, http.MethodGet, "/api/settings", "")
+	if json.Unmarshal(response.Body.Bytes(), &detail) != nil || !reflect.DeepEqual(detail.Settings, selected) {
+		t.Fatalf("saved settings = %d %s", response.Code, response.Body)
 	}
 	health := requestJSON(t, handler, http.MethodGet, "/api/health", "")
 	if !strings.Contains(health.Body.String(), `"harness":"claude"`) ||
@@ -1451,22 +1609,25 @@ func TestSettingsAPIUpdatesHarnessSelection(t *testing.T) {
 		t.Fatalf("health = %s", health.Body)
 	}
 	response = requestJSON(t, handler, http.MethodPut, "/api/settings",
-		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":0}`)
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":0,"reactionEmojis":["🎉"]}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("pause settings = %d %s", response.Code, response.Body)
 	}
-	response = requestJSON(t, handler, http.MethodPut, "/api/settings",
-		`{"harness":"claude","model":"gpt-5.6-sol","reasoning":"high","workflowCapacity":4}`)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("invalid settings = %d %s", response.Code, response.Body)
-	}
 	for _, body := range []string{
+		`{"harness":"claude","model":"gpt-5.6-sol","reasoning":"high","workflowCapacity":4,"reactionEmojis":["👍"]}`,
 		`{"harness":"claude","model":"sonnet","reasoning":"high"}`,
-		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":11}`,
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":4}`,
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":4,"reactionEmojis":null}`,
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":4,"reactionEmojis":[]}`,
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":4,"reactionEmojis":["👍","👍"]}`,
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":4,"reactionEmojis":[" 👍"]}`,
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":4,"reactionEmojis":["👍\n"]}`,
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":11,"reactionEmojis":["👍"]}`,
 	} {
+		lastID := wire.LastID()
 		response = requestJSON(t, handler, http.MethodPut, "/api/settings", body)
-		if response.Code != http.StatusBadRequest {
-			t.Fatalf("invalid capacity settings = %d %s", response.Code, response.Body)
+		if response.Code != http.StatusBadRequest || wire.LastID() != lastID {
+			t.Fatalf("invalid settings = %d %s, last ID = %d", response.Code, response.Body, wire.LastID())
 		}
 	}
 }

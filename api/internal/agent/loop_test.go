@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -176,7 +177,8 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	selected := state.Settings{Harness: state.Claude, Model: "sonnet", Reasoning: "high"}
+	selected := state.DefaultSettings()
+	selected.Harness, selected.Model, selected.Reasoning = state.Claude, "sonnet", "high"
 	if _, err := wire.Publish(state.SettingsUpdated, selected); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +212,7 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	if len(workflows.validations) != 1 || workflows.validations[0] != workflows.LocalPath(created.ID) {
 		t.Fatalf("workflow validations = %#v", workflows.validations)
 	}
-	if len(runner.settings) != 1 || runner.settings[0] != selected {
+	if len(runner.settings) != 1 || !reflect.DeepEqual(runner.settings[0], selected) {
 		t.Fatalf("authoring settings = %#v", runner.settings)
 	}
 	view, _, err := wire.Snapshot()
@@ -530,7 +532,7 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	if len(workflows.runs) != 1 || workflows.runs[0].source != sourcePath || workflows.runs[0].directory != "" {
 		t.Fatalf("trigger did not run: %#v", workflows.runs)
 	}
-	if workflows.runs[0].settings != state.DefaultSettings {
+	if !reflect.DeepEqual(workflows.runs[0].settings, state.DefaultSettings()) {
 		t.Fatalf("trigger settings = %#v", workflows.runs[0].settings)
 	}
 	var args struct {
@@ -948,7 +950,7 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 func TestLoopRunsTriggersUpToWorkflowCapacity(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
-	settings := state.DefaultSettings
+	settings := state.DefaultSettings()
 	settings.WorkflowCapacity = 2
 	wire.Publish(state.SettingsUpdated, settings)
 	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
@@ -1174,7 +1176,7 @@ func TestQuiescenceReleaseWakesPendingDispatchWithoutAnotherWireEvent(t *testing
 func TestLoopPausesTriggerDispatchAtZeroCapacity(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
-	settings := state.DefaultSettings
+	settings := state.DefaultSettings()
 	settings.WorkflowCapacity = 0
 	wire.Publish(state.SettingsUpdated, settings)
 	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})
@@ -1385,7 +1387,7 @@ func TestDisableWinsAgainstStaleTriggerAdmission(t *testing.T) {
 func TestLoopRunCancelsAndWaitsForActiveWorkflows(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
-	settings := state.DefaultSettings
+	settings := state.DefaultSettings()
 	settings.WorkflowCapacity = 2
 	wire.Publish(state.SettingsUpdated, settings)
 	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "review"})

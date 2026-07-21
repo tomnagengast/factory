@@ -229,7 +229,7 @@ func TestSettingsUseSingletonAPI(t *testing.T) {
 	}
 	updateRequest, err := parse([]string{
 		"settings", "update",
-		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6}`,
+		`{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6,"reactionEmojis":["👍","🎉"]}`,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -38,7 +38,7 @@ func (s *Store) Snapshot() (state.Snapshot, int64, error) {
 		return state.Snapshot{}, 0, err
 	}
 	defer tx.Rollback()
-	view := state.Snapshot{Settings: state.DefaultSettings}
+	view := state.Snapshot{Settings: state.DefaultSettings()}
 	if view.Projects, err = queryJSON[state.Project](tx, `SELECT data FROM projects ORDER BY id`); err != nil {
 		return state.Snapshot{}, 0, err
 	}
@@ -105,7 +105,7 @@ func (s *Store) Settings() (state.Settings, error) {
 		return state.Settings{}, err
 	}
 	if !found {
-		return state.DefaultSettings, nil
+		return state.DefaultSettings(), nil
 	}
 	return value, nil
 }
@@ -121,17 +121,10 @@ func (s *Store) Task(id int64) (state.Task, bool, error) {
 	return queryOneJSON[state.Task](s.db, `SELECT data FROM tasks WHERE id = ?`, id)
 }
 
-func (s *Store) TaskWithCheckpoint(id int64) (state.Task, int64, bool, error) {
-	return entityWithCheckpoint[state.Task](s.db, `SELECT data FROM tasks WHERE id = ?`, id)
-}
-
 func (s *Store) Comment(id int64) (state.Comment, bool, error) {
 	return queryOneJSON[state.Comment](s.db, `SELECT data FROM comments WHERE id = ?`, id)
 }
 
-func (s *Store) CommentWithCheckpoint(id int64) (state.Comment, int64, bool, error) {
-	return entityWithCheckpoint[state.Comment](s.db, `SELECT data FROM comments WHERE id = ?`, id)
-}
 func (s *Store) Artifact(id int64) (state.Artifact, bool, error) {
 	return queryOneJSON[state.Artifact](s.db, `SELECT data FROM artifacts WHERE id = ?`, id)
 }
@@ -187,25 +180,49 @@ func (s *Store) Workflows() ([]state.Workflow, error) {
 	return queryJSON[state.Workflow](s.db, `SELECT data FROM workflows WHERE deleted = 0 ORDER BY name, id`)
 }
 
-func entityWithCheckpoint[T any](db *sql.DB, query string, args ...any) (T, int64, bool, error) {
-	var zero T
-	tx, err := db.Begin()
+type ReactionTarget struct {
+	Task     *state.Task
+	Comment  *state.Comment
+	Settings state.Settings
+}
+
+func (s *Store) ReactionTargetWithSettings(targetType string, id int64) (ReactionTarget, int64, bool, error) {
+	tx, err := s.db.Begin()
 	if err != nil {
-		return zero, 0, false, err
+		return ReactionTarget{}, 0, false, err
 	}
 	defer tx.Rollback()
-	value, found, err := queryOneJSON[T](tx, query, args...)
-	if err != nil {
-		return zero, 0, false, err
+	target := ReactionTarget{Settings: state.DefaultSettings()}
+	found := false
+	switch targetType {
+	case "task":
+		value, selected, err := queryOneJSON[state.Task](tx, `SELECT data FROM tasks WHERE id = ?`, id)
+		if err != nil {
+			return ReactionTarget{}, 0, false, err
+		}
+		target.Task, found = &value, selected
+	case "comment":
+		value, selected, err := queryOneJSON[state.Comment](tx, `SELECT data FROM comments WHERE id = ?`, id)
+		if err != nil {
+			return ReactionTarget{}, 0, false, err
+		}
+		target.Comment, found = &value, selected
+	default:
+		return ReactionTarget{}, 0, false, fmt.Errorf("unknown reaction target type %q", targetType)
+	}
+	if selected, exists, err := settingsQuery(tx); err != nil {
+		return ReactionTarget{}, 0, false, err
+	} else if exists {
+		target.Settings = selected
 	}
 	var checkpoint int64
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM events`).Scan(&checkpoint); err != nil {
-		return zero, 0, false, err
+		return ReactionTarget{}, 0, false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return zero, 0, false, err
+		return ReactionTarget{}, 0, false, err
 	}
-	return value, checkpoint, found, nil
+	return target, checkpoint, found, nil
 }
 
 func (s *Store) Run(id int64) (state.WorkflowRun, bool, error) {

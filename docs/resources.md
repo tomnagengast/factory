@@ -67,7 +67,7 @@ Creating or updating a project creates its local `path` if needed.
 | `parentTaskId` | integer or null | no |
 | `status` | string | no, defaults to `backlog` |
 | `projectId` | integer | yes |
-| `reactions` | string array | response only; fixed palette order |
+| `reactions` | string array | response only; configured active values, then retired active values |
 
 Allowed status values:
 
@@ -221,7 +221,7 @@ can reply to another comment.
 | `label` | string or omitted | Tool or harness-specific label |
 | `final` | boolean | Whether an agent comment answers its parent user comment |
 | `content` | string | Comment text |
-| `reactions` | string array | Fixed palette order; empty for workflow comments |
+| `reactions` | string array | Configured active values, then retired active values; empty for workflow comments |
 
 User comments are non-final. Workflow authoring progress comments use the root
 user request as their parent and remain non-final. The one terminal agent
@@ -285,17 +285,20 @@ PUT /api/tasks/{id}/reactions
 PUT /api/comments/{id}/reactions
 ```
 
-Both routes accept only `emoji` and the required boolean `active`. The exact
-palette is:
+Both routes accept only `emoji` and the required boolean `active`. Before the
+first settings update, the configured choices are:
 
 ```text
 👍 👎 ❤️ 🎉 😂 👀
 ```
 
-Factory matches the decoded emoji string exactly. It does not trim, normalize,
-accept aliases, or accept skin-tone variants. Responses return the updated task
-or comment. Reaction arrays always follow palette order and serialize as `[]`
-when empty. Because tasks and comments use shared record shapes, `reactions`
+`reactionEmojis` in [Settings](#settings) replaces that ordered set. Factory
+matches the decoded string exactly and accepts any configured Unicode string,
+including skin-tone variants, multi-codepoint emoji, and text. It does not
+trim, normalize, or resolve aliases. Responses return the updated task or
+comment. Reaction arrays list configured active values in current settings
+order, followed by active values removed from settings in their existing
+relative order. Empty arrays serialize as `[]`. Because tasks and comments use shared record shapes, `reactions`
 also appears in task lists, project detail, task detail, comment detail, and
 workflow conversation responses. Workflow comments always carry an empty
 array and cannot receive reactions.
@@ -305,7 +308,10 @@ replies at any depth, and agent gate prompts are supported. Deleting a task
 alone does not disable reactions on its active comments. Deleting a comment
 soft-deletes its full reply subtree, and later reaction writes to any member
 of that subtree return `404`. Other missing or deleted targets also return
-`404`; unsupported emoji and workflow comments return `400`.
+`404`. Adding an unconfigured value and reacting to a workflow comment return
+`400`. An active value removed from settings remains visible and can be
+cleared. Once cleared, it cannot be added or cleared again unless settings
+include it again.
 
 Every accepted request appends one `reaction.updated` event and advances the
 target's `updatedAt`, even when the requested state already matches the current
@@ -770,6 +776,7 @@ Settings are one global projection rather than an ID-addressed resource.
 | `model` | string | Must belong to the selected harness |
 | `reasoning` | string | Must be supported by the selected model |
 | `workflowCapacity` | integer | Concurrent triggered runs, from `0` through `10` |
+| `reactionEmojis` | string array | Required ordered canned-reaction choices |
 
 ```sh
 factory settings get
@@ -777,7 +784,8 @@ factory settings update '{
   "harness":"claude",
   "model":"sonnet",
   "reasoning":"high",
-  "workflowCapacity":6
+  "workflowCapacity":6,
+  "reactionEmojis":["🎉","👍","🤔"]
 }'
 ```
 
@@ -789,10 +797,18 @@ PUT /api/settings
 ```
 
 The GET response contains `settings` and a `harnesses` option catalog used by
-the web form. An update appends `settings.updated`; the settings projection keeps the latest
-selection. Codex, `gpt-5.6-sol`, `low`, and workflow capacity `6` are the
-defaults before the first update. Capacity zero pauses new event and cron
-trigger runs. Lowering it does not cancel active runs.
+the web form. An update replaces the complete settings value through one
+`settings.updated` event. `reactionEmojis` must be a nonempty array of exact,
+unique strings. Each entry must be valid UTF-8, nonempty, already trimmed, and
+contain no carriage return or line feed. Factory performs no semantic emoji validation,
+Unicode normalization, or count limit. Array order is significant.
+
+Codex, `gpt-5.6-sol`, `low`, workflow capacity `6`, and `👍, 👎, ❤️, 🎉, 😂, 👀`
+are the defaults before the first update. The `/settings` form edits reactions
+as one value per line. Capacity zero pauses new event and cron trigger runs.
+Lowering it does not cancel active runs. Changing reaction settings reorders
+projected active reactions but does not delete them, change task or comment
+timestamps, or append synthetic reaction events.
 
 ## Workflow quiescence
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/tomnagengast/factory/api/internal/eventwire"
@@ -132,8 +133,12 @@ func applyProjection(tx *sql.Tx, event eventwire.Event) error {
 		if err := decodeEvent(event, &data); err != nil {
 			return err
 		}
-		if data.TargetID < 1 || !state.ValidReactionEmoji(data.Emoji) {
+		if data.TargetID < 1 {
 			return nil
+		}
+		settings, err := settingsTx(tx)
+		if err != nil {
+			return err
 		}
 		switch data.TargetType {
 		case "task":
@@ -141,7 +146,10 @@ func applyProjection(tx *sql.Tx, event eventwire.Event) error {
 			if err != nil || !found || value.DeletedAt != nil {
 				return err
 			}
-			value.Reactions = updateReactions(value.Reactions, data.Emoji, data.Active)
+			if !reactionUpdateAllowed(value.Reactions, settings.ReactionEmojis, data.Emoji, data.Active) {
+				return nil
+			}
+			value.Reactions = updateReactions(value.Reactions, settings.ReactionEmojis, data.Emoji, data.Active)
 			value.UpdatedAt = event.At
 			return putTask(tx, value)
 		case "comment":
@@ -149,7 +157,10 @@ func applyProjection(tx *sql.Tx, event eventwire.Event) error {
 			if err != nil || !found || value.DeletedAt != nil || value.RelationType != "task" {
 				return err
 			}
-			value.Reactions = updateReactions(value.Reactions, data.Emoji, data.Active)
+			if !reactionUpdateAllowed(value.Reactions, settings.ReactionEmojis, data.Emoji, data.Active) {
+				return nil
+			}
+			value.Reactions = updateReactions(value.Reactions, settings.ReactionEmojis, data.Emoji, data.Active)
 			value.UpdatedAt = event.At
 			return putComment(tx, value)
 		}
@@ -273,7 +284,7 @@ func applyProjection(tx *sql.Tx, event eventwire.Event) error {
 		return putWorkflow(tx, value)
 
 	case state.SettingsUpdated:
-		value := state.DefaultSettings
+		value := state.DefaultSettings()
 		if err := decodeEvent(event, &value); err != nil {
 			return err
 		}
@@ -284,8 +295,10 @@ func applyProjection(tx *sql.Tx, event eventwire.Event) error {
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(`INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`, encoded)
-		return err
+		if _, err = tx.Exec(`INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`, encoded); err != nil {
+			return err
+		}
+		return reorderReactionProjections(tx, value.ReactionEmojis)
 
 	case state.CronFired:
 		var data state.CronData
@@ -515,19 +528,75 @@ func taskIDForEvent(event eventwire.Event) (int64, error) {
 	return 0, nil
 }
 
-func updateReactions(current []string, emoji string, active bool) []string {
+func reactionUpdateAllowed(current, configured []string, emoji string, active bool) bool {
+	return state.ReactionEmojiConfigured(configured, emoji) || !active && slices.Contains(current, emoji)
+}
+
+func updateReactions(current, configured []string, emoji string, active bool) []string {
 	selected := make(map[string]bool, len(current)+1)
 	for _, value := range current {
 		selected[value] = true
 	}
 	selected[emoji] = active
-	result := make([]string, 0, len(state.ReactionEmojis))
-	for _, value := range state.ReactionEmojis {
+	return orderedReactions(current, configured, selected)
+}
+
+func reorderReactions(current, configured []string) []string {
+	selected := make(map[string]bool, len(current))
+	for _, value := range current {
+		selected[value] = true
+	}
+	return orderedReactions(current, configured, selected)
+}
+
+func orderedReactions(current, configured []string, selected map[string]bool) []string {
+	result := make([]string, 0, len(selected))
+	for _, value := range configured {
 		if selected[value] {
 			result = append(result, value)
 		}
 	}
+	for _, value := range current {
+		if selected[value] && !state.ReactionEmojiConfigured(configured, value) && !slices.Contains(result, value) {
+			result = append(result, value)
+		}
+	}
 	return result
+}
+
+func settingsTx(tx *sql.Tx) (state.Settings, error) {
+	settings, found, err := settingsQuery(tx)
+	if err != nil {
+		return state.Settings{}, err
+	}
+	if !found {
+		return state.DefaultSettings(), nil
+	}
+	return settings, nil
+}
+
+func reorderReactionProjections(tx *sql.Tx, configured []string) error {
+	tasks, err := queryJSON[state.Task](tx, `SELECT data FROM tasks ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		task.Reactions = reorderReactions(task.Reactions, configured)
+		if err := putTask(tx, task); err != nil {
+			return err
+		}
+	}
+	comments, err := queryJSON[state.Comment](tx, `SELECT data FROM comments WHERE relation_type = 'task' ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	for _, comment := range comments {
+		comment.Reactions = reorderReactions(comment.Reactions, configured)
+		if err := putComment(tx, comment); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func deleteCommentTree(tx *sql.Tx, rootID int64, at time.Time) error {

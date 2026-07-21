@@ -132,7 +132,9 @@ The response should contain `"status":"ok"` and `"harness":"codex"`.
 If you want Claude Code, open **Settings** and select its model and reasoning
 level before starting workflow collaboration or publishing a triggered event.
 The same page controls workflow capacity from zero through ten; the default is
-six.
+six. It also controls the ordered canned reactions shown on every task and
+task comment. Enter one exact value per line; the defaults are
+`👍, 👎, ❤️, 🎉, 😂, 👀`.
 
 ### 4. Create the first resources
 
@@ -256,7 +258,7 @@ Common operations:
 ./factory history list
 ./factory history get 30
 ./factory settings get
-./factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6}'
+./factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6,"reactionEmojis":["👍","🎉","🤔"]}'
 ```
 
 Pass request JSON inline or from a file:
