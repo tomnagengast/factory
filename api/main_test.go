@@ -9,9 +9,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -96,11 +98,14 @@ func TestDeploymentStartupBlocksHTTPUntilRecoveryAndResumption(t *testing.T) {
 	mediaPath := filepath.Join(directory, "media")
 	entered := filepath.Join(directory, "discovery-entered")
 	release := filepath.Join(directory, "release-discovery")
+	if err := syscall.Mkfifo(release, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	workflowCommand := filepath.Join(directory, "workflow")
 	script := "#!/bin/sh\n" +
 		"if [ \"$3\" = \"list\" ]; then " +
-		"touch \"" + entered + "\"; " +
-		"while [ ! -f \"" + release + "\" ]; do sleep 0.01; done; " +
+		"exec 3<> \"" + release + "\"; touch \"" + entered + "\"; " +
+		"IFS= read -r ignored <&3; " +
 		"printf '[]'; exit 0; fi\n" +
 		"exit 1\n"
 	if err := os.WriteFile(workflowCommand, []byte(script), 0o755); err != nil {
@@ -141,8 +146,24 @@ func TestDeploymentStartupBlocksHTTPUntilRecoveryAndResumption(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	healthResult := make(chan httpResult, 1)
 	quiescenceResult := make(chan httpResult, 1)
+	healthConnected := make(chan struct{}, 1)
+	quiescenceConnected := make(chan struct{}, 1)
 	go func() {
-		response, requestErr := client.Get("http://" + address + "/api/health")
+		request, requestErr := http.NewRequest(http.MethodGet, "http://"+address+"/api/health", nil)
+		if requestErr == nil {
+			request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
+				GotConn: func(httptrace.GotConnInfo) {
+					select {
+					case healthConnected <- struct{}{}:
+					default:
+					}
+				},
+			}))
+		}
+		var response *http.Response
+		if requestErr == nil {
+			response, requestErr = client.Do(request)
+		}
 		healthResult <- httpResult{response: response, err: requestErr}
 	}()
 	go func() {
@@ -151,15 +172,28 @@ func TestDeploymentStartupBlocksHTTPUntilRecoveryAndResumption(t *testing.T) {
 			quiescenceResult <- httpResult{err: requestErr}
 			return
 		}
+		request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
+			GotConn: func(httptrace.GotConnInfo) {
+				select {
+				case quiescenceConnected <- struct{}{}:
+				default:
+				}
+			},
+		}))
 		response, requestErr := client.Do(request)
 		quiescenceResult <- httpResult{response: response, err: requestErr}
 	}()
+	waitForConnection(t, healthConnected, "health")
+	waitForConnection(t, quiescenceConnected, "quiescence")
 	select {
 	case result := <-healthResult:
 		t.Fatalf("health responded before startup completed: %#v", result)
+	default:
+	}
+	select {
 	case result := <-quiescenceResult:
 		t.Fatalf("quiescence responded before startup completed: %#v", result)
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 	blockedStore, err := store.Open(dataPath)
 	if err != nil {
@@ -176,7 +210,15 @@ func TestDeploymentStartupBlocksHTTPUntilRecoveryAndResumption(t *testing.T) {
 	if err := blockedStore.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(release, []byte("ready"), 0o644); err != nil {
+	releaseFile, err := os.OpenFile(release, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := releaseFile.WriteString("ready\n"); err != nil {
+		releaseFile.Close()
+		t.Fatal(err)
+	}
+	if err := releaseFile.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -322,6 +364,15 @@ func receiveHTTPResult(t *testing.T, results <-chan httpResult, label string) *h
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for %s response", label)
 		return nil
+	}
+}
+
+func waitForConnection(t *testing.T, connected <-chan struct{}, label string) {
+	t.Helper()
+	select {
+	case <-connected:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s connection", label)
 	}
 }
 
