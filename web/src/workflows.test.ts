@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Workflow } from "./types";
-import { sortWorkflowsByUsage } from "./workflows";
+import { sortWorkflowsByUsage } from "./workflow-helpers";
 
 function workflow(id: number, name: string, runCount: number): Workflow {
   return {
