@@ -65,7 +65,7 @@ export function mutation() {
 export function liveRefetch(types: string[], refetch: () => unknown) {
   let source: EventSource | undefined;
   onMount(async () => {
-    const initial = await get<{ events: Event[] }>("/api/events");
+    const initial = await get<{ events: Event[] }>("/api/events?limit=1");
     source = new EventSource(`/api/events/stream?after=${initial.events[0]?.id ?? 0}`);
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as Event;

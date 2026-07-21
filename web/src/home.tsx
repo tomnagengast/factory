@@ -12,13 +12,13 @@ export function Home() {
       get<Health>("/api/health"),
       get<{ projects: Project[] }>("/api/projects"),
       get<TaskListResponse>("/api/tasks"),
-      get<{ events: Event[] }>("/api/events"),
+      get<{ events: Event[] }>("/api/events?limit=6"),
     ]);
     return {
       health,
       projects: projects.projects.slice(0, 4),
       tasks: tasks.tasks.slice(0, 5),
-      events: events.events.slice(0, 6),
+      events: events.events,
       checkpointEventId: Math.min(tasks.checkpointEventId, health.checkpointEventId),
     };
   });
