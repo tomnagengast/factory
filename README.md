@@ -100,7 +100,7 @@ Immutable media blobs default to `~/.local/share/factory/media`.
 /tasks/new                             create task
 /tasks/:task                           view and edit task, comments, artifacts
 /tasks/:task/comments/:comment         directly address a comment
-/events                                live event wire
+/events                                filterable live event wire
 /events/:event                         directly address an event
 /triggers                              filterable trigger list with enabled state
 /triggers/new                          create trigger

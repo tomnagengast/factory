@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Project, Task } from "./types";
+import { taskStatuses, type Project, type Task } from "./types";
 import {
   filterTasks,
   loadTaskViewPreferences,
@@ -246,6 +246,49 @@ describe("filterTasks", () => {
   test("returns no tasks when nothing matches and clearing restores all tasks", () => {
     expect(filterTasks(tasks, { statuses: ["backlog"], projectIds: [] })).toEqual([]);
     expect(filterTasks(tasks, { statuses: [], projectIds: [] }).map(({ id }) => id)).toEqual([9, 7, 4, 2]);
+  });
+});
+
+describe("task filter bulk states", () => {
+  test("every status remains canonical through query and storage and includes all represented statuses", () => {
+    const preferences: TaskViewPreferences = {
+      ...taskViewDefaults,
+      statuses: [...taskStatuses],
+      projectIds: [],
+    };
+    const storage = memoryStorage();
+
+    expect(filterTasks(tasks, preferences).map(({ id }) => id)).toEqual([9, 7, 4, 2]);
+    expect(taskViewSearchParams(preferences).status).toEqual([...taskStatuses]);
+    expect(parseTaskViewSearchParams(taskViewSearchParams(preferences)).statuses).toEqual([...taskStatuses]);
+    saveTaskViewPreferences(preferences, storage);
+    expect(loadTaskViewPreferences(storage).statuses).toEqual([...taskStatuses]);
+  });
+
+  test("every current project remains canonical and includes all represented projects", () => {
+    const preferences: TaskViewPreferences = {
+      ...taskViewDefaults,
+      statuses: [],
+      projectIds: [30, 12, 24],
+    };
+
+    expect(filterTasks(tasks, preferences).map(({ id }) => id)).toEqual([9, 7, 4, 2]);
+    expect(taskViewSearchParams(preferences).project).toEqual(["12", "24", "30"]);
+    expect(parseTaskViewSearchParams(taskViewSearchParams(preferences), [12, 24, 30]).projectIds)
+      .toEqual([12, 24, 30]);
+  });
+
+  test("clearing either complete selection restores that dimension to unrestricted", () => {
+    expect(filterTasks(tasks, { statuses: [], projectIds: [24] }).map(({ id }) => id)).toEqual([9, 7]);
+    expect(filterTasks(tasks, { statuses: ["todo"], projectIds: [] }).map(({ id }) => id)).toEqual([7]);
+    expect(filterTasks(tasks, { statuses: [], projectIds: [] }).map(({ id }) => id)).toEqual([9, 7, 4, 2]);
+  });
+
+  test("a full selection in one dimension still combines with a partial selection in the other", () => {
+    expect(filterTasks(tasks, { statuses: [...taskStatuses], projectIds: [24] }).map(({ id }) => id))
+      .toEqual([9, 7]);
+    expect(filterTasks(tasks, { statuses: ["done"], projectIds: [12, 24, 30] }).map(({ id }) => id))
+      .toEqual([4]);
   });
 });
 
