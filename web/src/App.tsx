@@ -865,12 +865,17 @@ function FilterFieldActions(props: {
 function TaskRow(props: { task: TaskSummary; projects: Project[] }) {
   return (
     <A href={`/tasks/${props.task.id}`} class="task-row">
-      <span class="task-row-meta" role="group" aria-label={`Status: ${props.task.status}`}
+      <span class="task-row-status" role="group" aria-label={`Status: ${props.task.status}`}
         title={`Status: ${props.task.status}`}>
         <TaskStatusIcon status={props.task.status} />
-        <span class="task-id">#{props.task.id}</span>
       </span>
-      <span class="task-title"><strong>{props.task.title}</strong><small>{projectName(props.task.projectId, props.projects)}</small></span>
+      <span class="task-title">
+        <strong>{props.task.title}</strong>
+        <small>
+          <span>{projectName(props.task.projectId, props.projects)}</span>
+          <span class="task-id">#{props.task.id}</span>
+        </small>
+      </span>
       <span class="task-row-signals">
         <WorkflowStatusIndicators runs={props.task.workflowRuns} />
         <CommentCount count={props.task.commentCount} />

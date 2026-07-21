@@ -205,7 +205,7 @@ main { min-width: 0; }
 
 .rows, .wire-list { border-top: 1px solid var(--color-border); }
 .task-row {
-  min-height: 64px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 64px; display: grid; grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center; gap: 14px; padding: 10px 12px; border-bottom: 1px solid var(--color-border); text-decoration: none;
 }
 .trigger-row {
@@ -213,7 +213,7 @@ main { min-width: 0; }
   padding: 10px 12px; border-bottom: 1px solid var(--color-border); text-decoration: none;
 }
 .task-row:hover, .trigger-row:hover, .history-row:hover, .event-row:hover { background: var(--color-surface-hover); }
-.task-row-meta { display: inline-flex; align-items: center; gap: 5px; color: var(--color-text-muted); }
+.task-row-status { display: inline-flex; align-items: center; color: var(--color-text-muted); }
 .task-status-icon {
   width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-linecap: round;
   stroke-linejoin: round; stroke-width: 1.7;
@@ -226,7 +226,10 @@ main { min-width: 0; }
 .task-id { color: var(--color-text-muted); font: 10px var(--mono); }
 .task-title { min-width: 0; }
 .task-title strong { display: block; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 14px; }
-.task-title small { display: block; margin-top: 4px; color: var(--color-text-muted); font-size: 11px; }
+.task-title small {
+  display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 4px;
+  color: var(--color-text-muted); font-size: 11px;
+}
 .task-row time, .event-row time { color: var(--color-text-muted); font-size: 11px; text-align: right; }
 .task-row-signals {
   width: 250px; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
@@ -692,7 +695,7 @@ label small { color: var(--color-text-muted); font-weight: 400; }
   .page { padding-inline: 16px; }
   .page-header { align-items: flex-start; flex-direction: column; }
   .card-grid, .field-pair { grid-template-columns: 1fr; }
-  .task-row { grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 7px 10px; }
+  .task-row { grid-template-columns: 16px minmax(0, 1fr); align-items: start; gap: 7px 10px; }
   .task-row-signals {
     width: 100%; grid-column: 2; grid-template-columns: minmax(0, 1fr) auto; justify-self: stretch;
   }
