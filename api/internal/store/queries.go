@@ -211,27 +211,45 @@ func (s *Store) Run(id int64) (state.WorkflowRun, bool, error) {
 	return restoreRun(value), true, nil
 }
 
-func (s *Store) History(before int64, limit int) ([]state.WorkflowRun, error) {
+func (s *Store) History(status string, before int64, limit int) ([]state.WorkflowRun, int64, error) {
 	if limit <= 0 {
 		limit = 200
 	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, 0, err
+	}
+	defer tx.Rollback()
 	query := `SELECT data FROM workflow_runs`
 	args := []any{}
+	where := " WHERE"
+	if status != "" {
+		query += where + ` status = ?`
+		args = append(args, status)
+		where = " AND"
+	}
 	if before > 0 {
-		query += ` WHERE id < ?`
+		query += where + ` id < ?`
 		args = append(args, before)
 	}
 	query += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)
-	values, err := queryJSON[runProjection](s.db, query, args...)
+	values, err := queryJSON[runProjection](tx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	runs := make([]state.WorkflowRun, 0, len(values))
 	for _, value := range values {
 		runs = append(runs, restoreRun(value))
 	}
-	return runs, nil
+	var checkpoint int64
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM events`).Scan(&checkpoint); err != nil {
+		return nil, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, 0, err
+	}
+	return runs, checkpoint, nil
 }
 
 func (s *Store) RunEvents(runID, before int64, limit int) ([]state.WorkflowRunEvent, error) {

@@ -654,9 +654,27 @@ GET /api/history
 GET /api/history/{id}
 ```
 
-Both routes return 200 events by default. `before=<id>` loads the next older
-page and `limit` selects a positive page size. Run event pages remain in
-chronological order.
+`GET /api/history` returns runs newest first by run ID and includes the event
+checkpoint captured with that page:
+
+```json
+{
+  "history": [],
+  "checkpointEventId": 123
+}
+```
+
+The optional `status` query accepts only `running`, `waiting`, `failed`, or
+`completed`. `before=<run-id>` uses an exclusive cursor and `limit` selects a
+positive page size. The indexed `workflow_runs` SQLite projection applies the
+status predicate, cursor, ordering, and limit before rows reach either client.
+The web overview requests the newest five runs for each status. Its linked
+status pages request 25 at a time as the reader scrolls. `factory history list`
+keeps the unfiltered collection request, which defaults to 200 runs.
+
+`GET /api/history/{id}` remains numeric run detail. Its semantic event pages
+default to 200, use the same `before` and `limit` controls, and are restored to
+chronological order in each response.
 
 ## Settings
 

@@ -15,7 +15,18 @@ import { ListTodo, Play, Trash2 } from "lucide-solid";
 import "highlight.js/styles/github-dark.css";
 import { get, optional, optionalID, post, put, remove, uploadMedia } from "./api";
 import { bindNewestFollower, type NewestFollower } from "./follow-newest";
-import { historyResourceLink } from "./history";
+import {
+  HISTORY_OVERVIEW_LIMIT,
+  HISTORY_PAGE_SIZE,
+  canLoadHistoryPage,
+  historyPageRequestIsCurrent,
+  historyPageURL,
+  historyResourceLink,
+  historyRunHref,
+  historyStatuses,
+  mergeHistoryRuns,
+  observeHistorySentinel,
+} from "./history";
 import { renderMarkdown } from "./markdown";
 import { insertMediaMarkup, mediaAccept, mediaFiles, mediaKind, mediaMarkup } from "./media";
 import {
@@ -39,6 +50,7 @@ import {
   type Event,
   type Health,
   type HistoryDetail,
+  type HistoryListResponse,
   type Project,
   type ProjectDetail,
   type SettingsDetail,
@@ -52,6 +64,7 @@ import {
   type Workflow,
   type WorkflowDetail,
   type WorkflowRun,
+  type WorkflowRunStatus,
 } from "./types";
 import { sortWorkflowsByUsage } from "./workflows";
 import { workflowCommentPresentation, workflowConversationWorking } from "./workflow-conversation";
@@ -80,6 +93,10 @@ export function App() {
       <Route path="/workflows/new" component={WorkflowNew} />
       <Route path="/workflows/:workflow" component={WorkflowView} />
       <Route path="/history" component={History} />
+      <Route path="/history/running" component={() => <HistoryStatusPage status="running" label="Running" />} />
+      <Route path="/history/waiting" component={() => <HistoryStatusPage status="waiting" label="Waiting" />} />
+      <Route path="/history/failed" component={() => <HistoryStatusPage status="failed" label="Failed" />} />
+      <Route path="/history/completed" component={() => <HistoryStatusPage status="completed" label="Completed" />} />
       <Route path="/history/:item" component={HistoryView} />
       <Route path="/settings" component={SettingsPage} />
     </Router>
@@ -1232,45 +1249,149 @@ function EventView() {
 }
 
 function History() {
-	const [data, { refetch }] = createResource(() => get<{ history: WorkflowRun[] }>("/api/history"));
-	const [olderRuns, setOlderRuns] = createSignal<WorkflowRun[]>([]);
-	const [hasOlder, setHasOlder] = createSignal(false);
-	const older = mutation();
-	createEffect(() => {
-		const latest = data()?.history;
-		if (latest && olderRuns().length === 0) setHasOlder(latest.length === PAGE_SIZE);
-	});
-	const runs = createMemo(() => uniqueByID([...(data()?.history ?? []), ...olderRuns()]));
-  liveRefetch([
-    "workflow.run.started", "workflow.run.event", "workflow.run.waiting",
-    "workflow.run.resumed", "workflow.run.completed", "workflow.run.failed",
-  ], refetch);
+  const [data, { refetch }] = createResource(async () => {
+    const sections = await Promise.all(historyStatuses.map(async (section) => ({
+      ...section,
+      response: await get<HistoryListResponse>(historyPageURL(section.status, HISTORY_OVERVIEW_LIMIT)),
+    })));
+    return {
+      sections: sections.map(({ response, ...section }) => ({
+        ...section, runs: response.history.filter((run) => run.status === section.status),
+      })),
+      checkpointEventId: Math.min(...sections.map((section) => section.response.checkpointEventId)),
+    };
+  });
+  liveHistoryRows(() => data()?.checkpointEventId, refetch);
   return (
     <div class="page">
       <PageHeader title="Workflow history"
-        description="Live, waiting, and completed workflow runs, newest first." />
+        description="Running, waiting, failed, and completed workflow runs, newest first." />
       <Load data={data} error={() => data.error}>
-		{() => <Show when={runs().length} fallback={<Empty>No workflows have run yet.</Empty>}>
-		  <div class="rows">
-			<For each={runs()}>{(run) => <A class="history-row" href={`/history/${run.id}`}>
-              <span class={`run-status ${run.status}`}>{run.status}</span>
-              <span class="run-title"><strong>{run.workflowName || `Workflow ${run.workflowId}`}</strong>
-                <small>Event #{run.sourceEventId} · Trigger #{run.triggerId}</small></span>
-              <span class="id">#{run.id}</span>
-              <time>{date(run.createdAt)}</time>
-            </A>}</For>
-		  </div>
-		  <Show when={hasOlder()}>
-			<button class="button quiet" disabled={older.pending()} onClick={() => older.run(async () => {
-			  const before = runs().at(-1)?.id;
-			  if (!before) return;
-			  const page = await get<{ history: WorkflowRun[] }>(`/api/history?before=${before}`);
-			  setOlderRuns((current) => uniqueByID([...current, ...page.history]));
-			  setHasOlder(page.history.length === PAGE_SIZE);
-			})}>{older.pending() ? "Loading…" : "Load older runs"}</button>
-		  </Show>
-		</Show>}
+        {(value) => <div class="history-sections">
+          <For each={data()?.sections ?? value.sections}>{(section) => <section class="history-section">
+            <SectionTitle title={section.label} href={section.href} />
+            <Show when={section.runs.length} fallback={<Empty>No {section.label.toLowerCase()} runs.</Empty>}>
+              <div class="rows">
+                <For each={section.runs}>{(run) => <HistoryRow run={run} />}</For>
+              </div>
+            </Show>
+          </section>}</For>
+        </div>}
       </Load>
+    </div>
+  );
+}
+
+function HistoryRow(props: { run: WorkflowRun }) {
+  return (
+    <A class="history-row" href={historyRunHref(props.run.id)!}>
+      <span class={`run-status ${props.run.status}`}>{props.run.status}</span>
+      <span class="run-title"><strong>{props.run.workflowName || `Workflow ${props.run.workflowId}`}</strong>
+        <small>Event #{props.run.sourceEventId} · Trigger #{props.run.triggerId}</small></span>
+      <span class="id">#{props.run.id}</span>
+      <time>{date(props.run.createdAt)}</time>
+    </A>
+  );
+}
+
+function HistoryStatusPage(props: { status: WorkflowRunStatus; label: string }) {
+  const [runs, setRuns] = createSignal<WorkflowRun[]>([]);
+  const [checkpoint, setCheckpoint] = createSignal<number>();
+  const [loaded, setLoaded] = createSignal(false);
+  const [refreshing, setRefreshing] = createSignal(false);
+  const [latestError, setLatestError] = createSignal("");
+  const [hasOlder, setHasOlder] = createSignal(false);
+  const [olderPending, setOlderPending] = createSignal(false);
+  const [olderError, setOlderError] = createSignal("");
+  const [olderSentinel, setOlderSentinel] = createSignal<HTMLDivElement>();
+  let generation = 0;
+
+  const replaceLatest = async () => {
+    const requestGeneration = ++generation;
+    setRefreshing(true);
+    setLatestError("");
+    setHasOlder(false);
+    setOlderPending(false);
+    setOlderError("");
+    try {
+      const response = await get<HistoryListResponse>(historyPageURL(props.status, HISTORY_PAGE_SIZE));
+      if (requestGeneration !== generation) return;
+      setRuns(response.history.filter((run) => run.status === props.status));
+      setHasOlder(response.history.length === HISTORY_PAGE_SIZE);
+      setCheckpoint(response.checkpointEventId);
+      setLoaded(true);
+    } catch (caught) {
+      if (requestGeneration === generation) setLatestError(errorMessage(caught));
+    } finally {
+      if (requestGeneration === generation) setRefreshing(false);
+    }
+  };
+
+  const loadOlder = () => {
+    const cursor = runs().at(-1)?.id;
+    if (!cursor || !canLoadHistoryPage({
+      hasOlder: hasOlder(), pending: olderPending(), refreshing: refreshing(), error: Boolean(olderError()),
+    })) return;
+    const request = { generation, cursor };
+    setOlderPending(true);
+    void get<HistoryListResponse>(historyPageURL(props.status, HISTORY_PAGE_SIZE, cursor))
+      .then((response) => {
+        if (!historyPageRequestIsCurrent(request, generation, runs().at(-1)?.id)) return;
+        setRuns((current) => mergeHistoryRuns(current, response.history, props.status));
+        setHasOlder(response.history.length === HISTORY_PAGE_SIZE);
+      })
+      .catch((caught) => {
+        if (request.generation === generation) setOlderError(errorMessage(caught));
+      })
+      .finally(() => {
+        if (request.generation === generation) setOlderPending(false);
+      });
+  };
+
+  const retryOlder = () => {
+    setOlderError("");
+    loadOlder();
+  };
+
+  createEffect(() => {
+    const sentinel = olderSentinel();
+    if (!sentinel) return;
+    const disconnect = observeHistorySentinel(sentinel, loadOlder);
+    onCleanup(disconnect);
+  });
+  onMount(() => void replaceLatest());
+  liveHistoryRows(checkpoint, () => void replaceLatest());
+
+  return (
+    <div class="page">
+      <PageHeader eyebrow="Workflow history" title={`${props.label} runs`}
+        description={`Newest ${props.status} workflow runs first.`}
+        actions={<A class="button" href="/history">Back to history</A>} />
+      <Show when={loaded()} fallback={<div class="state">
+        <Show when={latestError()} fallback="Loading…">
+          <span class="form-error">{latestError()}</span>
+          <button type="button" class="button quiet" onClick={() => void replaceLatest()}>Retry</button>
+        </Show>
+      </div>}>
+        <Show when={runs().length} fallback={<Empty>No {props.status} runs.</Empty>}>
+          <div class="rows"><For each={runs()}>{(run) => <HistoryRow run={run} />}</For></div>
+        </Show>
+        <Show when={latestError()}>
+          <div class="history-loader">
+            <span class="form-error">{latestError()}</span>
+            <button type="button" class="button quiet" onClick={() => void replaceLatest()}>Retry latest page</button>
+          </div>
+        </Show>
+        <Show when={hasOlder() || olderPending() || olderError()}>
+          <div ref={(element) => setOlderSentinel(element)} class="history-loader" aria-live="polite">
+            <Show when={olderPending()}>Loading {HISTORY_PAGE_SIZE} older runs…</Show>
+            <Show when={olderError()}>
+              <span class="form-error">{olderError()}</span>
+              <button type="button" class="button quiet" onClick={retryOlder}>Retry</button>
+            </Show>
+          </div>
+        </Show>
+      </Show>
     </div>
   );
 }
@@ -1799,6 +1920,25 @@ function liveTaskRows(checkpoint: () => number | undefined, refetch: () => unkno
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as Event;
       if (types.includes(event.type)) refetch();
+    };
+  });
+  onCleanup(() => source?.close());
+}
+
+function liveHistoryRows(checkpoint: () => number | undefined, refresh: () => unknown) {
+  const types = [
+    "workflow.run.started", "workflow.run.waiting", "workflow.run.resumed",
+    "workflow.run.completed", "workflow.run.failed",
+  ];
+  let source: EventSource | undefined;
+  createEffect(() => {
+    const after = checkpoint();
+    if (after == null) return;
+    source?.close();
+    source = new EventSource(`/api/events/stream?after=${after}`);
+    source.onmessage = (message) => {
+      const event = JSON.parse(message.data) as Event;
+      if (types.includes(event.type)) refresh();
     };
   });
   onCleanup(() => source?.close());

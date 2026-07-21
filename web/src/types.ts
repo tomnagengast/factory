@@ -96,6 +96,9 @@ export type Workflow = Record & {
   taskCount: number;
 };
 
+export const workflowRunStatuses = ["running", "waiting", "failed", "completed"] as const;
+export type WorkflowRunStatus = (typeof workflowRunStatuses)[number];
+
 export type WorkflowRun = {
   id: number;
   createdAt: string;
@@ -106,7 +109,7 @@ export type WorkflowRun = {
   workflowPhases: string[];
   sourceEventId: number;
   taskId?: number;
-  status: "running" | "waiting" | "completed" | "failed";
+  status: WorkflowRunStatus;
   waitingGate?: {
     workflow: string;
     phase?: string;
@@ -177,6 +180,7 @@ export type HarnessOption = {
 };
 
 export type SettingsDetail = { settings: Settings; harnesses: HarnessOption[] };
+export type HistoryListResponse = { history: WorkflowRun[]; checkpointEventId: number };
 export type HistoryDetail = { run: WorkflowRun; events: WorkflowRunEvent[] };
 export type ProjectDetail = { project: Project; tasks: TaskSummary[]; checkpointEventId: number };
 export type TaskDetail = { task: Task; comments: Comment[]; artifacts: Artifact[] };

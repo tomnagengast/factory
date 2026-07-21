@@ -906,12 +906,19 @@ func (s *Server) history(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	runs, err := s.store.History(before, limit)
+	status := request.URL.Query().Get("status")
+	if status != "" && !slices.Contains([]string{"running", "waiting", "failed", "completed"}, status) {
+		writeError(writer, http.StatusBadRequest, errors.New("unknown workflow run status"))
+		return
+	}
+	runs, checkpoint, err := s.store.History(status, before, limit)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"history": runs})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"history": runs, "checkpointEventId": checkpoint,
+	})
 }
 
 func (s *Server) historyItem(writer http.ResponseWriter, request *http.Request) {
