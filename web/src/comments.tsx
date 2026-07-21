@@ -1,6 +1,6 @@
 import { A, useNavigate, useParams } from "@solidjs/router";
-import { createEffect, createResource, createSignal, For, Show } from "solid-js";
-import { Trash2 } from "lucide-solid";
+import { createEffect, createResource, createSignal, For, Show, type JSX } from "solid-js";
+import { MoreHorizontal, Reply, Send, Smile, Trash2, X } from "lucide-solid";
 import {
   errorMessage,
   get,
@@ -23,38 +23,67 @@ export function ReactionBar(props: {
   targetID: number;
   reactions: string[];
   onChange: () => unknown;
+  compact?: boolean;
 }) {
   const action = mutation();
   const targetLabel = () => `${props.targetKind} ${props.targetID}`;
+  const reactionButton = (emoji: string, menu = false) => {
+    const active = () => props.reactions.includes(emoji);
+    const label = () => `${active() ? "Clear" : "Add"} ${emoji} reaction ${active() ? "from" : "to"} ${targetLabel()}`;
+    return <button type="button" classList={{ "reaction-button": true, selected: active(), "menu-item": menu }}
+      aria-pressed={active()} aria-label={label()} title={label()} disabled={action.pending()}
+      onClick={() => action.run(async () => {
+        await put(`/api/${props.targetKind}s/${props.targetID}/reactions`, {
+          emoji, active: !active(),
+        });
+        await props.onChange();
+      })}>{emoji}</button>;
+  };
   return (
-    <div class="reaction-control">
-      <div classList={{ "reaction-bar": true, pending: action.pending() }}
-        role="group" aria-label={`Reactions for ${targetLabel()}`}>
-        <For each={REACTION_EMOJIS}>{(emoji) => {
-          const active = () => props.reactions.includes(emoji);
-          const label = () => `${active() ? "Clear" : "Add"} ${emoji} reaction ${active() ? "from" : "to"} ${targetLabel()}`;
-          return <button type="button" classList={{ "reaction-button": true, selected: active() }}
-            aria-pressed={active()} aria-label={label()} title={label()} disabled={action.pending()}
-            onClick={() => action.run(async () => {
-              await put(`/api/${props.targetKind}s/${props.targetID}/reactions`, {
-                emoji, active: !active(),
-              });
-              await props.onChange();
-            })}>{emoji}</button>;
-        }}</For>
-      </div>
+    <div classList={{ "reaction-control": true, compact: props.compact }}>
+      <Show when={props.compact} fallback={
+        <div classList={{ "reaction-bar": true, pending: action.pending() }}
+          role="group" aria-label={`Reactions for ${targetLabel()}`}>
+          <For each={REACTION_EMOJIS}>{(emoji) => reactionButton(emoji)}</For>
+        </div>
+      }>
+        <div classList={{ "reaction-bar": true, pending: action.pending() }}
+          role="group" aria-label={`Reactions for ${targetLabel()}`}>
+          <details class="reaction-menu">
+            <summary aria-label={`Add a reaction to ${targetLabel()}`} title="Add reaction">
+              <Smile aria-hidden="true" />
+            </summary>
+            <div class="reaction-menu-panel" role="group" aria-label={`Choose a reaction for ${targetLabel()}`}>
+              <For each={REACTION_EMOJIS}>{(emoji) => reactionButton(emoji, true)}</For>
+            </div>
+          </details>
+          <For each={props.reactions}>{(emoji) => reactionButton(emoji)}</For>
+        </div>
+      </Show>
       <Show when={action.error()}><span class="form-error" role="alert">{action.error()}</span></Show>
     </div>
   );
 }
 export function CommentThread(props: { comments: Comment[]; taskID: number; onChange: () => void }) {
   const roots = () => props.comments.filter((comment) => !comment.parentCommentId);
+  const [replyTarget, setReplyTarget] = createSignal<number>();
+  createEffect(() => {
+    const target = replyTarget();
+    if (target && !props.comments.some((comment) => comment.id === target)) setReplyTarget();
+  });
   return (
     <div class="comments">
-      <CommentForm taskID={props.taskID} onChange={props.onChange} />
-      <Show when={roots().length} fallback={<Empty>No comments yet.</Empty>}>
-        <CommentBranch comments={props.comments} nodes={roots()} taskID={props.taskID} onChange={props.onChange} />
+      <Show when={roots().length} fallback={<p class="comment-empty">No comments yet. Start the conversation below.</p>}>
+        <div class="comment-thread-list">
+          <For each={roots()}>{(root) => <div class="comment-group">
+            <CommentBranch comments={props.comments} nodes={[root]} taskID={props.taskID}
+              activeReplyID={replyTarget()} onReply={(commentID) =>
+                setReplyTarget((current) => current === commentID ? undefined : commentID)}
+              onChange={props.onChange} />
+          </div>}</For>
+        </div>
       </Show>
+      <CommentForm taskID={props.taskID} onChange={props.onChange} />
     </div>
   );
 }
@@ -70,9 +99,66 @@ function CommentDeleteButton(props: { commentID: number; onDeleted: () => unknow
           await props.onDeleted();
         })}>
         <Trash2 aria-hidden="true" />
+        <span>Delete</span>
       </button>
       <Show when={action.error()}><span class="form-error" role="alert">{action.error()}</span></Show>
     </span>
+  );
+}
+
+function CommentEntry(props: {
+  comment: Comment;
+  taskID: number;
+  activeReplyID?: number;
+  featured?: boolean;
+  onReply?: (commentID: number) => void;
+  onChange: () => unknown;
+  onDeleted?: () => unknown;
+}) {
+  const authorLabel = () => props.comment.author === "agent" ? "Agent" : "User";
+  const replying = () => props.activeReplyID === props.comment.id;
+  return (
+    <article classList={{ "comment-entry": true, featured: props.featured }}>
+      <span class={`comment-avatar ${props.comment.author}`} role="img" aria-label={`${authorLabel()} comment`}>
+        {props.comment.author === "agent" ? "A" : "U"}
+      </span>
+      <div class="comment-content">
+        <header class="comment-meta">
+          <strong>{authorLabel()}</strong>
+          <A href={`/tasks/${props.taskID}/comments/${props.comment.id}`}>#{props.comment.id}</A>
+          <time datetime={props.comment.createdAt} title={date(props.comment.createdAt)}>
+            {relativeDate(props.comment.createdAt)}
+          </time>
+        </header>
+        <div class="comment-body"><Markdown content={props.comment.content} /></div>
+        <Show when={!props.comment.deletedAt}>
+          <div class="comment-actions">
+            <ReactionBar compact targetKind="comment" targetID={props.comment.id}
+              reactions={props.comment.reactions} onChange={props.onChange} />
+            <Show when={props.onReply}>
+              <button type="button" classList={{ "comment-action": true, active: replying() }}
+                aria-label={`Reply to comment #${props.comment.id}`} aria-pressed={replying()}
+                title="Reply" onClick={() => props.onReply?.(props.comment.id)}>
+                <Reply aria-hidden="true" />
+              </button>
+            </Show>
+            <details class="comment-overflow">
+              <summary aria-label={`More actions for comment #${props.comment.id}`} title="More actions">
+                <MoreHorizontal aria-hidden="true" />
+              </summary>
+              <div class="comment-overflow-panel">
+                <CommentDeleteButton commentID={props.comment.id} onDeleted={props.onDeleted ?? props.onChange} />
+              </div>
+            </details>
+          </div>
+          <Show when={replying()}>
+            <CommentForm taskID={props.taskID} parentCommentID={props.comment.id}
+              onCancel={() => props.onReply?.(props.comment.id)}
+              onSubmitted={() => props.onReply?.(props.comment.id)} onChange={props.onChange} />
+          </Show>
+        </Show>
+      </div>
+    </article>
   );
 }
 
@@ -80,34 +166,25 @@ export function CommentBranch(props: {
   comments: Comment[];
   nodes: Comment[];
   taskID: number;
-  onChange: () => void;
+  activeReplyID?: number;
+  onReply: (commentID: number) => void;
+  onChange: () => unknown;
 }) {
   return (
     <For each={props.nodes}>
-      {(comment) => (
-        <article class="comment">
-          <header>
-            <strong>{comment.author}</strong>
-            <A href={`/tasks/${props.taskID}/comments/${comment.id}`}>#{comment.id}</A>
-            <time>{date(comment.createdAt)}</time>
-            <CommentDeleteButton commentID={comment.id} onDeleted={props.onChange} />
-          </header>
-          <Markdown content={comment.content} />
-          <Show when={!comment.deletedAt}>
-            <ReactionBar targetKind="comment" targetID={comment.id}
-              reactions={comment.reactions} onChange={props.onChange} />
+      {(comment) => {
+        const replies = () => props.comments.filter((candidate) => candidate.parentCommentId === comment.id);
+        return <div class="comment-branch">
+          <CommentEntry comment={comment} taskID={props.taskID} activeReplyID={props.activeReplyID}
+            onReply={props.onReply} onChange={props.onChange} />
+          <Show when={replies().length}>
+            <div class="comment-children">
+              <CommentBranch comments={props.comments} nodes={replies()} taskID={props.taskID}
+                activeReplyID={props.activeReplyID} onReply={props.onReply} onChange={props.onChange} />
+            </div>
           </Show>
-          <CommentForm taskID={props.taskID} parentCommentID={comment.id} compact onChange={props.onChange} />
-          <div class="replies">
-            <CommentBranch
-              comments={props.comments}
-              nodes={props.comments.filter((candidate) => candidate.parentCommentId === comment.id)}
-              taskID={props.taskID}
-              onChange={props.onChange}
-            />
-          </div>
-        </article>
-      )}
+        </div>;
+      }}
     </For>
   );
 }
@@ -115,14 +192,16 @@ export function CommentBranch(props: {
 export function CommentForm(props: {
   taskID: number;
   parentCommentID?: number;
-  compact?: boolean;
-  onChange: () => void;
+  onCancel?: () => void;
+  onSubmitted?: () => void;
+  onChange: () => unknown;
 }) {
   const action = mutation();
   const [uploading, setUploading] = createSignal(false);
   const [reset, setReset] = createSignal(0);
+  const reply = () => props.parentCommentID != null;
   return (
-    <form classList={{ "comment-form": true, compact: props.compact }} onSubmit={(event) => {
+    <form classList={{ "comment-form": true, reply: reply(), root: !reply() }} onSubmit={(event) => {
       event.preventDefault();
       if (uploading()) return;
       const form = event.currentTarget;
@@ -133,14 +212,27 @@ export function CommentForm(props: {
           parentCommentId: props.parentCommentID,
         });
         setReset((value) => value + 1);
-        props.onChange();
+        await props.onChange();
+        props.onSubmitted?.();
       });
     }}>
-      <MediaTextarea name="content" required rows={props.compact ? 1 : 3}
-        placeholder={props.compact ? "Reply…" : "Add a comment…"} disabled={action.pending()}
-        reset={reset()} onUploadingChange={setUploading} />
-      <button class="button quiet" disabled={action.pending() || uploading()}>{props.compact ? "Reply" : "Comment"}</button>
-      <Show when={action.error()}><span class="form-error">{action.error()}</span></Show>
+      <MediaTextarea name="content" required rows={reply() ? 1 : 2}
+        placeholder={reply() ? "Write a reply…" : "Add a comment…"} disabled={action.pending()}
+        reset={reset()} onUploadingChange={setUploading}
+        toolbarActions={<div class="composer-toolbar-actions">
+          <Show when={props.onCancel}>
+            <button type="button" class="composer-action" aria-label="Cancel reply" title="Cancel reply"
+              disabled={action.pending() || uploading()} onClick={props.onCancel}>
+              <X aria-hidden="true" />
+            </button>
+          </Show>
+          <button type="submit" class="composer-action send"
+            aria-label={action.pending() ? "Sending comment" : reply() ? "Send reply" : "Send comment"}
+            title={reply() ? "Send reply" : "Send comment"} disabled={action.pending() || uploading()}>
+            <Send aria-hidden="true" />
+          </button>
+        </div>} />
+      <Show when={action.error()}><span class="form-error" role="alert">{action.error()}</span></Show>
     </form>
   );
 }
@@ -155,6 +247,7 @@ export function MediaTextarea(props: {
   disabled?: boolean;
   reset?: number;
   onUploadingChange?: (uploading: boolean) => void;
+  toolbarActions?: JSX.Element;
 }) {
   const [value, setValue] = createSignal(props.initialValue ?? "");
   const [uploading, setUploading] = createSignal(false);
@@ -264,6 +357,7 @@ export function MediaTextarea(props: {
           <Show when={uploading()}>
             <small class="upload-status" aria-live="polite">Uploading {progress()} of {total()}…</small>
           </Show>
+          {props.toolbarActions}
         </div>
       </div>
       <Show when={error()}><small class="form-error" role="alert">{error()}</small></Show>
@@ -284,33 +378,16 @@ export function CommentView() {
           return <>
             <PageHeader eyebrow={`Task ${params.task}`} title={`Comment ${current().comment.id}`}
               actions={<A class="button" href={`/tasks/${params.task}`}>Back to task</A>} />
-            <article class="comment featured">
-              <header>
-                <strong>{current().comment.author}</strong>
-                <time>{date(current().comment.createdAt)}</time>
-                <Show when={!current().comment.deletedAt}>
-                  <CommentDeleteButton commentID={current().comment.id}
-                    onDeleted={() => navigate(`/tasks/${params.task}`)} />
-                </Show>
-              </header>
-              <Markdown content={current().comment.content} />
-              <Show when={!current().comment.deletedAt}>
-                <ReactionBar targetKind="comment" targetID={current().comment.id}
-                  reactions={current().comment.reactions} onChange={refetch} />
-              </Show>
-            </article>
+            <div class="comment-group featured">
+              <CommentEntry featured comment={current().comment} taskID={Number(params.task)} onChange={refetch}
+                onDeleted={() => navigate(`/tasks/${params.task}`)} />
+            </div>
             <Show when={current().replies.length}>
               <section><SectionTitle title="Direct replies" />
-                <div class="comments"><For each={current().replies}>{(reply) => <article class="comment"><header>
-                  <strong>{reply.author}</strong><A href={`/tasks/${params.task}/comments/${reply.id}`}>#{reply.id}</A>
-                  <time>{date(reply.createdAt)}</time>
-                  <CommentDeleteButton commentID={reply.id} onDeleted={refetch} />
-                </header><Markdown content={reply.content} />
-                  <Show when={!reply.deletedAt}>
-                    <ReactionBar targetKind="comment" targetID={reply.id}
-                      reactions={reply.reactions} onChange={refetch} />
-                  </Show>
-                </article>}</For></div>
+                <div class="comment-group comment-detail-replies">
+                  <For each={current().replies}>{(reply) => <CommentEntry comment={reply}
+                    taskID={Number(params.task)} onChange={refetch} />}</For>
+                </div>
               </section>
             </Show>
             <ArtifactPanel artifacts={current().artifacts} relationType="comment" relationID={current().comment.id} onChange={refetch} />
@@ -366,4 +443,21 @@ export function ArtifactPanel(props: {
       </form>
     </section>
   );
+}
+
+function relativeDate(value: string) {
+  const elapsedSeconds = Math.round((new Date(value).getTime() - Date.now()) / 1000);
+  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  const intervals: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+    ["year", 60 * 60 * 24 * 365],
+    ["month", 60 * 60 * 24 * 30],
+    ["week", 60 * 60 * 24 * 7],
+    ["day", 60 * 60 * 24],
+    ["hour", 60 * 60],
+    ["minute", 60],
+  ];
+  for (const [unit, seconds] of intervals) {
+    if (Math.abs(elapsedSeconds) >= seconds) return formatter.format(Math.round(elapsedSeconds / seconds), unit);
+  }
+  return formatter.format(0, "second");
 }
