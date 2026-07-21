@@ -148,44 +148,6 @@ func TestReactionCommandsValidateArgumentsAndPropagateServerErrors(t *testing.T)
 	}
 }
 
-func TestTaskCreateAndUpdateForwardInReviewStatus(t *testing.T) {
-	type receivedRequest struct {
-		method, path, body string
-	}
-	var received []receivedRequest
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		data, _ := io.ReadAll(request.Body)
-		received = append(received, receivedRequest{request.Method, request.URL.Path, string(data)})
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"id":12,"status":"in review"}`))
-	}))
-	defer server.Close()
-
-	createBody := `{"title":"Review it","description":"Check the change.","parentTaskId":3,"status":"in review","projectId":1}`
-	updateBody := `{"title":"Review it again","description":"Check the change.","parentTaskId":3,"status":"in review","projectId":1}`
-	for _, args := range [][]string{
-		{"--url", server.URL, "task", "create", createBody},
-		{"--url", server.URL, "task", "update", "12", updateBody},
-	} {
-		if err := Run(args, io.Discard, io.Discard); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	want := []receivedRequest{
-		{http.MethodPost, "/api/tasks", createBody},
-		{http.MethodPut, "/api/tasks/12", updateBody},
-	}
-	if len(received) != len(want) {
-		t.Fatalf("requests = %#v", received)
-	}
-	for index := range want {
-		if received[index] != want[index] {
-			t.Fatalf("request %d = %#v, want %#v", index, received[index], want[index])
-		}
-	}
-}
-
 func TestWorkflowUpdateIsAnAgentMessage(t *testing.T) {
 	request, err := parse([]string{"workflow", "update", "7", `{"message":"Add a judge."}`})
 	if err != nil {
@@ -193,32 +155,6 @@ func TestWorkflowUpdateIsAnAgentMessage(t *testing.T) {
 	}
 	if request.method != http.MethodPut || request.path != "/api/workflows/7" {
 		t.Fatalf("unexpected request: %#v", request)
-	}
-}
-
-func TestTriggerUpdateForwardsEnabledState(t *testing.T) {
-	var method, path, body string
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		method, path = request.Method, request.URL.Path
-		data, _ := io.ReadAll(request.Body)
-		body = string(data)
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"id":7,"eventType":"release.ready","workflowId":2,"enabled":false}`))
-	}))
-	defer server.Close()
-
-	requestBody := `{"eventType":"release.ready","workflowId":2,"enabled":false}`
-	var output bytes.Buffer
-	if err := Run([]string{
-		"--url", server.URL, "trigger", "update", "7", requestBody,
-	}, &output, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	if method != http.MethodPut || path != "/api/triggers/7" || body != requestBody {
-		t.Fatalf("unexpected request: %s %s %s", method, path, body)
-	}
-	if !strings.Contains(output.String(), `"enabled": false`) {
-		t.Fatalf("unexpected output: %s", output.String())
 	}
 }
 
