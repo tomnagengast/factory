@@ -13,18 +13,18 @@ import {
 
 class TestFrames {
   private nextID = 1;
-  private callbacks = new Map<number, () => void>();
+  private callbacks = new Map<number, FrameRequestCallback>();
   private cancelled = new Set<number>();
 
-  request = (callback: () => void) => {
+  requestAnimationFrame(callback: FrameRequestCallback) {
     const id = this.nextID++;
     this.callbacks.set(id, callback);
     return id;
-  };
+  }
 
-  cancel = (id: number) => {
+  cancelAnimationFrame(id: number) {
     this.cancelled.add(id);
-  };
+  }
 
   active() {
     return [...this.callbacks.keys()].filter((id) => !this.cancelled.has(id));
@@ -34,7 +34,7 @@ class TestFrames {
     const callback = this.callbacks.get(id);
     if (!callback) throw new Error(`Frame ${id} does not exist.`);
     this.callbacks.delete(id);
-    if (force || !this.cancelled.has(id)) callback();
+    if (force || !this.cancelled.has(id)) callback(0);
   }
 
   runNext() {
@@ -159,6 +159,16 @@ describe("prepend transactions", () => {
 });
 
 describe("correction scheduler", () => {
+  test("calls frame methods through their owning receiver", () => {
+    const frames = new TestFrames();
+    const scheduler = createCorrectionScheduler(frames, () => {}, () => {});
+
+    scheduler.request();
+    expect(frames.active()).toHaveLength(1);
+    scheduler.cancel();
+    expect(frames.active()).toEqual([]);
+  });
+
   test("keeps the original apply deadline while requests coalesce", () => {
     const frames = new TestFrames();
     const applied: number[] = [];

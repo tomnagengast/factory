@@ -85,10 +85,7 @@ export type NewestFollower = {
   dispose(): void;
 };
 
-type FrameClock = {
-  request(callback: () => void): number;
-  cancel(frame: number): void;
-};
+type FrameClock = Pick<Window, "requestAnimationFrame" | "cancelAnimationFrame">;
 
 export type CorrectionScheduler = {
   request(): void;
@@ -106,15 +103,15 @@ export function createCorrectionScheduler(
   let settleSlot: (FrameSlot & { generation: number }) | undefined;
 
   const cancelSlot = (slot: FrameSlot | undefined) => {
-    if (slot?.frame != null) clock.cancel(slot.frame);
+    if (slot?.frame != null) clock.cancelAnimationFrame(slot.frame);
   };
 
   const scheduleSettlement = (appliedGeneration: number) => {
     const slot: FrameSlot & { generation: number } = { generation: appliedGeneration };
     settleSlot = slot;
-    slot.frame = clock.request(() => {
+    slot.frame = clock.requestAnimationFrame(() => {
       if (settleSlot !== slot || generation !== appliedGeneration) return;
-      slot.frame = clock.request(() => {
+      slot.frame = clock.requestAnimationFrame(() => {
         if (settleSlot !== slot || generation !== appliedGeneration) return;
         settleSlot = undefined;
         settle(appliedGeneration);
@@ -131,9 +128,9 @@ export function createCorrectionScheduler(
 
       const slot: FrameSlot = {};
       applySlot = slot;
-      slot.frame = clock.request(() => {
+      slot.frame = clock.requestAnimationFrame(() => {
         if (applySlot !== slot) return;
-        slot.frame = clock.request(() => {
+        slot.frame = clock.requestAnimationFrame(() => {
           if (applySlot !== slot) return;
           applySlot = undefined;
           const appliedGeneration = generation;
@@ -225,7 +222,7 @@ export function bindNewestFollower(options: NewestFollowerOptions): NewestFollow
   };
 
   const correctionScheduler = createCorrectionScheduler(
-    { request: requestAnimationFrame, cancel: cancelAnimationFrame },
+    window,
     applyCorrection,
     () => {
       if (disposed) return;
