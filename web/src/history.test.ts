@@ -18,6 +18,7 @@ describe("workflow history routes", () => {
     expect(historyStatuses).toEqual([
       { status: "running", label: "Running", href: "/history/running" },
       { status: "waiting", label: "Waiting", href: "/history/waiting" },
+      { status: "retrying", label: "Retrying", href: "/history/retrying" },
       { status: "failed", label: "Failed", href: "/history/failed" },
       { status: "completed", label: "Completed", href: "/history/completed" },
     ]);
@@ -31,6 +32,8 @@ describe("workflow history routes", () => {
       .toBe("/api/history?status=completed&limit=25");
     expect(historyPageURL("failed", HISTORY_PAGE_SIZE, 175))
       .toBe("/api/history?status=failed&limit=25&before=175");
+    expect(historyPageURL("retrying", HISTORY_PAGE_SIZE))
+      .toBe("/api/history?status=retrying&limit=25");
   });
 
   test.each([1, 42, 9700])("links run %d to numeric detail", (id) => {

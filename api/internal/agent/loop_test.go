@@ -577,6 +577,176 @@ func TestLoopRunsMatchingEventTrigger(t *testing.T) {
 	}
 }
 
+func TestLoopRetriesFailedRunFromItsDurableJournal(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	sourcePath := "/workflows/retry.js"
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{
+		Name: "retry", Path: &sourcePath, Phases: []string{"Work"},
+	})
+	triggerEvent, _ := wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: "release.ready", WorkflowID: workflowEvent.ID, Enabled: true,
+	})
+	wire.Publish("release.ready", map[string]bool{"ready": true})
+
+	workflows := newFakeWorkflows()
+	workflows.runEvents = [][]string{
+		{
+			`{"sequence":1,"at":"2026-07-21T12:00:00Z","type":"runtime.started","workflow":"retry","backend":"codex"}`,
+			`{"sequence":2,"at":"2026-07-21T12:00:01Z","type":"step.completed","workflow":"retry","phase":"Work","stepId":1,"key":"done","kind":"agent","result":"kept"}`,
+			`{"sequence":3,"at":"2026-07-21T12:00:02Z","type":"runtime.failed","workflow":"retry","phase":"Work","error":"usage limit"}`,
+		},
+		{
+			`{"sequence":4,"at":"2026-07-21T12:01:00Z","type":"runtime.resumed","workflow":"retry","backend":"codex"}`,
+			`{"sequence":5,"at":"2026-07-21T12:01:01Z","type":"step.cached","workflow":"retry","phase":"Work","stepId":1,"key":"done","kind":"agent","result":"kept"}`,
+			`{"sequence":6,"at":"2026-07-21T12:01:02Z","type":"runtime.completed","workflow":"retry","result":"complete"}`,
+		},
+	}
+	workflows.runErrors = []error{errors.New("usage limit"), nil}
+	loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
+
+	worked, _, err := loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("initial dispatch = %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "failed workflow start")
+	waitForSignal(t, workflows.finished, "failed workflow finish")
+	waitForActiveCount(t, loop, 0)
+	view, _, err := wire.Snapshot()
+	if err != nil || len(view.Runs) != 1 || view.Runs[0].Status != "failed" {
+		t.Fatalf("failed run = %#v, %v", view.Runs, err)
+	}
+	runID := view.Runs[0].ID
+	if _, err := wire.Publish(state.WorkflowRunRetryRequested, state.WorkflowRunStateData{RunID: runID}); err != nil {
+		t.Fatal(err)
+	}
+	retrying, found, err := wire.Run(runID)
+	if err != nil || !found || retrying.Status != "retrying" || retrying.Error != "" || retrying.Output != "" {
+		t.Fatalf("retry request = %#v, found=%v err=%v", retrying, found, err)
+	}
+	if _, err := wire.Publish(state.WorkflowRunRetryRequested, state.WorkflowRunStateData{RunID: runID}); !errors.Is(err, store.ErrWorkflowRunNotRetryable) {
+		t.Fatalf("duplicate retry error = %v", err)
+	}
+	settings := state.DefaultSettings()
+	settings.WorkflowCapacity = 0
+	if _, err := wire.Publish(state.SettingsUpdated, settings); err != nil {
+		t.Fatal(err)
+	}
+	worked, _, err = loop.step(context.Background())
+	if err != nil || worked {
+		t.Fatalf("capacity-zero retry dispatch = %v, %v", worked, err)
+	}
+	if runs, _ := workflows.snapshot(); runs != 1 {
+		t.Fatalf("capacity-zero retry started runner: %d runs", runs)
+	}
+	settings.WorkflowCapacity = state.DefaultWorkflowCapacity
+	if _, err := wire.Publish(state.SettingsUpdated, settings); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := loop.admission.Acquire(context.Background(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worked, _, err = loop.step(context.Background())
+	if err != nil || worked {
+		t.Fatalf("quiescent retry dispatch = %v, %v", worked, err)
+	}
+	if released, err := loop.admission.Release(lease.Token); err != nil || !released {
+		t.Fatalf("release retry admission = %v, %v", released, err)
+	}
+
+	worked, _, err = loop.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("retry dispatch = %v, %v", worked, err)
+	}
+	waitForSignal(t, workflows.started, "retry workflow start")
+	waitForSignal(t, workflows.finished, "retry workflow finish")
+	waitForActiveCount(t, loop, 0)
+	view, _, err = wire.Snapshot()
+	if err != nil || len(view.Runs) != 1 || view.Runs[0].ID != runID ||
+		view.Runs[0].Status != "completed" || view.Workflows[0].RunCount != 1 {
+		t.Fatalf("completed retry = %#v, workflows=%#v err=%v", view.Runs, view.Workflows, err)
+	}
+	workflows.mu.Lock()
+	if len(workflows.runs) != 2 || len(workflows.runs[1].resume) != 3 ||
+		workflows.runs[1].source != sourcePath ||
+		string(workflows.runs[1].resume[1]) != workflows.runEvents[0][1] {
+		workflows.mu.Unlock()
+		t.Fatalf("retry request = %#v", workflows.runs)
+	}
+	workflows.mu.Unlock()
+	events, err := wire.RunEvents(runID, 0, 200)
+	if err != nil || len(events) != 6 || events[4].Type != "step.cached" {
+		t.Fatalf("retry journal = %#v, %v", events, err)
+	}
+	if eventTypeCount(wire.Events(0), state.WorkflowRunStarted) != 1 ||
+		eventTypeCount(wire.Events(0), state.WorkflowRunRetryRequested) != 1 ||
+		eventTypeCount(wire.Events(0), state.WorkflowRunResumed) != 1 {
+		t.Fatalf("retry lifecycle = %#v", wire.Events(0))
+	}
+	if view.Runs[0].TriggerID != triggerEvent.ID {
+		t.Fatalf("retry changed trigger: %#v", view.Runs[0])
+	}
+}
+
+func TestLoopRejectsRetryWithoutUsableContinuationState(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		context   bool
+		journal   string
+		wantError string
+	}{
+		{name: "missing context", wantError: "missing durable continuation context"},
+		{
+			name: "noncontiguous journal", context: true,
+			journal:   `{"sequence":2,"at":"2026-07-21T12:00:00Z","type":"runtime.failed","workflow":"retry"}`,
+			wantError: "invalid journal after sequence 0",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wire := openWire(t)
+			defer wire.Close()
+			workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "retry"})
+			source, _ := wire.Publish("retry.source", map[string]bool{"ready": true})
+			claim := state.WorkflowRunData{TriggerID: 1, WorkflowID: workflowEvent.ID, SourceEventID: source.ID}
+			if test.context {
+				settings := state.DefaultSettings()
+				claim.Source, claim.Settings, claim.Arguments = "/workflows/retry.js", &settings, json.RawMessage(`{"runId":3}`)
+			}
+			started, err := wire.Publish(state.WorkflowRunStarted, claim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.journal != "" {
+				if _, err := wire.Publish(state.WorkflowRunEventRecorded, state.WorkflowRunEventData{
+					RunID: started.ID, Event: json.RawMessage(test.journal),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := wire.Publish(state.WorkflowRunFailed, claim); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := wire.Publish(state.WorkflowRunRetryRequested, state.WorkflowRunStateData{RunID: started.ID}); err != nil {
+				t.Fatal(err)
+			}
+			workflows := newFakeWorkflows()
+			loop, _ := newTestLoop(wire, &fakeAgent{}, workflows)
+			worked, _, err := loop.step(context.Background())
+			if err != nil || !worked {
+				t.Fatalf("retry validation = %v, %v", worked, err)
+			}
+			run, found, err := wire.Run(started.ID)
+			if err != nil || !found || run.Status != "failed" || !strings.Contains(run.Error, test.wantError) {
+				t.Fatalf("rejected retry = %#v, found=%v err=%v", run, found, err)
+			}
+			if runs, _ := workflows.snapshot(); runs != 0 {
+				t.Fatalf("invalid retry started %d runners", runs)
+			}
+		})
+	}
+}
+
 func TestReactionTriggerHasNoTaskContext(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()

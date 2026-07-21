@@ -435,7 +435,8 @@ function TaskWorkflowRuns(props: { runs: TaskWorkflowRun[] }) {
   let timer: number | undefined;
 
   createEffect(() => {
-    const hasActiveRun = props.runs.some((run) => run.status === "running" || run.status === "waiting");
+    const hasActiveRun = props.runs.some((run) =>
+      run.status === "running" || run.status === "waiting" || run.status === "retrying");
     if (hasActiveRun && timer == null) {
       setNow(Date.now());
       timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -544,7 +545,7 @@ export function liveTaskRows(checkpoint: () => number | undefined, refetch: () =
   const types = [
     "task.created", "task.updated", "task.deleted", "comment.created", "comment.deleted",
     "reaction.updated",
-    "workflow.run.started", "workflow.run.waiting", "workflow.run.resumed",
+    "workflow.run.started", "workflow.run.waiting", "workflow.run.retry.requested", "workflow.run.resumed",
     "workflow.run.completed", "workflow.run.failed",
   ];
   let source: EventSource | undefined;

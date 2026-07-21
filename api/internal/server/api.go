@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tomnagengast/factory/api/internal/state"
+	"github.com/tomnagengast/factory/api/internal/store"
 )
 
 func (s *Server) settings(writer http.ResponseWriter, _ *http.Request) {
@@ -892,7 +893,7 @@ func (s *Server) history(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	status := request.URL.Query().Get("status")
-	if status != "" && !slices.Contains([]string{"running", "waiting", "failed", "completed"}, status) {
+	if status != "" && !slices.Contains([]string{"running", "waiting", "retrying", "failed", "completed"}, status) {
 		writeError(writer, http.StatusBadRequest, errors.New("unknown workflow run status"))
 		return
 	}
@@ -932,6 +933,42 @@ func (s *Server) historyItem(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"run": run, "events": events})
+}
+
+func (s *Server) historyRetry(writer http.ResponseWriter, request *http.Request) {
+	id, err := pathID(request, "item")
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	if _, found, err := s.store.Run(id); err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	} else if !found {
+		writeError(writer, http.StatusNotFound, errors.New("workflow run not found"))
+		return
+	}
+	if _, err := s.store.Append(state.WorkflowRunRetryRequested, state.WorkflowRunStateData{RunID: id}); err != nil {
+		switch {
+		case errors.Is(err, store.ErrWorkflowRunNotFound):
+			writeError(writer, http.StatusNotFound, err)
+		case errors.Is(err, store.ErrWorkflowRunNotRetryable):
+			writeError(writer, http.StatusConflict, err)
+		default:
+			writeError(writer, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	run, found, err := s.store.Run(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	if !found {
+		writeError(writer, http.StatusNotFound, errors.New("workflow run not found"))
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, run)
 }
 
 func messageBody(request *http.Request) (string, error) {

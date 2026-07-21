@@ -192,6 +192,27 @@ describe("workflowRunPhases", () => {
     expect(activities(changed[0].blocks)[0].summary).toBe(group.summary);
   });
 
+  test("keeps failed work in the first attempt and retry cache hits in the second", () => {
+    const events = [
+      runEvent(1, { type: "runtime.started", phase: "Work" }),
+      runEvent(2, { type: "step.completed", phase: "Work", stepId: 1, key: "done", agentId: "first", kind: "agent", result: "kept" }),
+      runEvent(3, { type: "step.failed", phase: "Work", stepId: 2, key: "unfinished", agentId: "second", kind: "agent", error: "limit" }),
+      runEvent(4, { type: "runtime.failed", phase: "Work", error: "limit" }),
+      runEvent(5, { type: "runtime.resumed", phase: "Work" }),
+      runEvent(6, { type: "step.cached", phase: "Work", stepId: 1, key: "done", agentId: "first", kind: "agent", result: "kept" }),
+      runEvent(7, { type: "step.completed", phase: "Work", stepId: 2, key: "unfinished", agentId: "second", kind: "agent", result: "finished" }),
+      runEvent(8, { type: "runtime.completed", phase: "Work", result: "complete" }),
+    ];
+    const entries = activities(workflowRunPhases(events)[0].blocks)[0].entries;
+
+    expect(metadata(entries[1], "Attempt")).toBe("Attempt 1");
+    expect(metadata(entries[2], "Attempt")).toBe("Attempt 1");
+    expect(metadata(entries[5], "Attempt")).toBe("Attempt 2");
+    expect(metadata(entries[6], "Attempt")).toBe("Attempt 2");
+    expect(entries[1].observationId).not.toBe(entries[5].observationId);
+    expect(entries[2].observationId).not.toBe(entries[6].observationId);
+  });
+
   test("summarizes host actions, nested workflows, gates, and unknown updates", () => {
     const events = [
       runEvent(1, { type: "runtime.started", phase: "Execute" }),

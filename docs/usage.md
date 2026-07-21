@@ -257,6 +257,7 @@ Common operations:
 ./factory workflow comment 24 '{"message":"Add a test-coverage reviewer."}'
 ./factory history list
 ./factory history get 30
+./factory history retry 30
 ./factory settings get
 ./factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6,"reactionEmojis":["👍","🎉","🤔"]}'
 ```

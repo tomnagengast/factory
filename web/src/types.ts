@@ -30,7 +30,7 @@ export type TaskWorkflowRun = {
   triggerId: number;
   workflowId: number;
   workflowName: string;
-  status: "running" | "waiting" | "completed" | "failed";
+  status: "running" | "waiting" | "retrying" | "completed" | "failed";
   createdAt: string;
   updatedAt: string;
 };
@@ -98,7 +98,7 @@ export type Workflow = Record & {
   taskCount: number;
 };
 
-export const workflowRunStatuses = ["running", "waiting", "failed", "completed"] as const;
+export const workflowRunStatuses = ["running", "waiting", "retrying", "failed", "completed"] as const;
 export type WorkflowRunStatus = (typeof workflowRunStatuses)[number];
 
 export type WorkflowRun = {

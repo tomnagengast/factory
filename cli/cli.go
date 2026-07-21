@@ -87,8 +87,8 @@ func parse(args []string) (command, error) {
 		}
 		return mediaCreateCommand(args[2])
 	}
-	if resource == "history" && action != "list" && action != "get" {
-		return command{}, errors.New("history supports list and get")
+	if resource == "history" && action != "list" && action != "get" && action != "retry" {
+		return command{}, errors.New("history supports list, get, and retry")
 	}
 	if resource == "settings" {
 		switch {
@@ -124,6 +124,15 @@ func parse(args []string) (command, error) {
 			return command{}, err
 		}
 		return command{method: http.MethodGet, path: "/api/" + plural + "/" + id}, nil
+	case "retry":
+		if resource != "history" || len(args) != 3 {
+			return command{}, errors.New("usage: factory history retry <id>")
+		}
+		id, err := argumentID(args, 2)
+		if err != nil {
+			return command{}, err
+		}
+		return command{method: http.MethodPost, path: "/api/history/" + id + "/retry"}, nil
 	case "create":
 		if resource == "comment" {
 			return command{}, errors.New("comments are created through task comment or workflow comment")
@@ -288,7 +297,7 @@ Resources:
   event     list, get, create
   trigger   list, get, create, update, delete
   workflow  list, get, create, update, delete, comment
-  history   list, get
+  history   list, get, retry
   settings  get, update
 
 Examples:
@@ -302,5 +311,6 @@ Examples:
   factory workflow create '{"message":"Build a review-panel workflow."}'
   factory workflow update 24 '{"message":"Add a security reviewer."}'
   factory history get 30
+  factory history retry 30
   factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6,"reactionEmojis":["👍","🎉"]}'`)
 }

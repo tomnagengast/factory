@@ -110,6 +110,84 @@ func TestWorkflowHistoryFiltersPagesAndMovesMembership(t *testing.T) {
 	}
 }
 
+func TestWorkflowHistoryRetryRequestsTheSameFailedRun(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{Name: "retry"})
+	newRun := func(triggerID int64) (state.WorkflowRunData, int64) {
+		source, _ := wire.Publish("history.source", map[string]int64{"triggerId": triggerID})
+		claim := state.WorkflowRunData{
+			TriggerID: triggerID, WorkflowID: workflowEvent.ID, WorkflowName: "retry",
+			SourceEventID: source.ID, Output: "partial", Error: "transient",
+		}
+		started, err := wire.Publish(state.WorkflowRunStarted, claim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return claim, started.ID
+	}
+	failedClaim, failedID := newRun(1)
+	if _, err := wire.Publish(state.WorkflowRunWaiting, state.WorkflowRunStateData{
+		RunID: failedID, Gate: &state.WorkflowGate{Workflow: "retry", StepID: 1}, GateCommentID: 12,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wire.Publish(state.WorkflowRunFailed, failedClaim); err != nil {
+		t.Fatal(err)
+	}
+	runningClaim, runningID := newRun(2)
+	completedClaim, completedID := newRun(3)
+	if _, err := wire.Publish(state.WorkflowRunCompleted, completedClaim); err != nil {
+		t.Fatal(err)
+	}
+	waitingClaim, waitingID := newRun(4)
+	if _, err := wire.Publish(state.WorkflowRunWaiting, state.WorkflowRunStateData{RunID: waitingID}); err != nil {
+		t.Fatal(err)
+	}
+	_ = runningClaim
+	_ = waitingClaim
+
+	handler := testServer(t, wire).Handler()
+	response := requestJSON(t, handler, http.MethodPost, fmt.Sprintf("/api/history/%d/retry", failedID), `{}`)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("retry = %d %s", response.Code, response.Body)
+	}
+	var retried state.WorkflowRun
+	if err := json.Unmarshal(response.Body.Bytes(), &retried); err != nil {
+		t.Fatal(err)
+	}
+	if retried.ID != failedID || retried.Status != "retrying" || retried.Output != "" || retried.Error != "" ||
+		retried.WaitingGate != nil || retried.GateCommentID != 0 || retried.ResponseCommentID != 0 {
+		t.Fatalf("retry response = %#v", retried)
+	}
+	event, found := wire.Event(wire.LastID())
+	if !found || event.Type != state.WorkflowRunRetryRequested ||
+		string(event.Data) != fmt.Sprintf(`{"runId":%d}`, failedID) {
+		t.Fatalf("retry event = %#v", event)
+	}
+	filtered := requestJSON(t, handler, http.MethodGet, "/api/history?status=retrying", "")
+	var collection historyCollectionResponse
+	if filtered.Code != http.StatusOK || json.Unmarshal(filtered.Body.Bytes(), &collection) != nil ||
+		len(collection.History) != 1 || collection.History[0].ID != failedID {
+		t.Fatalf("retrying history = %d %s", filtered.Code, filtered.Body)
+	}
+	for _, test := range []struct {
+		id   int64
+		want int
+	}{
+		{failedID, http.StatusConflict},
+		{runningID, http.StatusConflict},
+		{waitingID, http.StatusConflict},
+		{completedID, http.StatusConflict},
+		{99999, http.StatusNotFound},
+	} {
+		response := requestJSON(t, handler, http.MethodPost, fmt.Sprintf("/api/history/%d/retry", test.id), `{}`)
+		if response.Code != test.want {
+			t.Fatalf("retry %d = %d %s, want %d", test.id, response.Code, response.Body, test.want)
+		}
+	}
+}
+
 type historyCollectionResponse struct {
 	History           []state.WorkflowRun `json:"history"`
 	CheckpointEventID int64               `json:"checkpointEventId"`

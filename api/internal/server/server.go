@@ -117,6 +117,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/history", s.history)
 	mux.HandleFunc("GET /api/history/{item}", s.historyItem)
+	mux.HandleFunc("POST /api/history/{item}/retry", s.historyRetry)
 
 	mux.HandleFunc("GET /assets/{file}", func(writer http.ResponseWriter, request *http.Request) {
 		file := request.PathValue("file")
