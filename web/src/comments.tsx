@@ -80,13 +80,11 @@ export function CommentThread(props: {
     <div class="comments">
       <Show when={roots().length} fallback={<p class="comment-empty">No comments yet. Start the conversation below.</p>}>
         <div class="comment-thread-list">
-          <For each={roots()}>{(root) => <div class="comment-group">
-            <CommentBranch comments={props.comments} nodes={[root]} taskID={props.taskID}
+          <For each={roots()}>{(root) => <CommentBranch comments={props.comments} nodes={[root]} taskID={props.taskID}
               configuredEmojis={props.configuredEmojis}
               activeReplyID={replyTarget()} onReply={(commentID) =>
                 setReplyTarget((current) => current === commentID ? undefined : commentID)}
-              onChange={props.onChange} />
-          </div>}</For>
+              onChange={props.onChange} />}</For>
         </div>
       </Show>
       <CommentForm taskID={props.taskID} onChange={props.onChange} />
@@ -392,14 +390,14 @@ export function CommentView() {
             return <>
               <PageHeader eyebrow={`Task ${params.task}`} title={`Comment ${current().comment.id}`}
                 actions={<A class="button" href={`/tasks/${params.task}`}>Back to task</A>} />
-              <div class="comment-group featured">
+              <section class="comment-featured" aria-label={`Comment ${current().comment.id}`}>
                 <CommentEntry featured comment={current().comment} taskID={Number(params.task)}
                   configuredEmojis={currentSettings().settings.reactionEmojis} onChange={refetch}
                   onDeleted={() => navigate(`/tasks/${params.task}`)} />
-              </div>
+              </section>
               <Show when={current().replies.length}>
-                <section><SectionTitle title="Direct replies" />
-                  <div class="comment-group comment-detail-replies">
+                <section class="comment-detail-section"><SectionTitle title="Direct replies" />
+                  <div class="comment-detail-replies">
                     <For each={current().replies}>{(reply) => <CommentEntry comment={reply}
                       taskID={Number(params.task)} configuredEmojis={currentSettings().settings.reactionEmojis}
                       onChange={refetch} />}</For>

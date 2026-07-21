@@ -17,14 +17,18 @@ export function Projects() {
       <Load data={data} error={() => data.error}>
         {(value) => (
           <Show when={value.projects.length} fallback={<Empty>No projects yet.</Empty>}>
-            <div class="card-grid">
+            <div class="resource-list">
               <For each={value.projects}>
                 {(project) => (
-                  <A class="project-card" href={`/projects/${project.id}`}>
-                    <span class="id">#{project.id}</span>
-                    <h2>{project.name}</h2>
-                    <p>{project.description || "No description"}</p>
-                    <small>Updated {date(project.updatedAt)}</small>
+                  <A class="resource-row" href={`/projects/${project.id}`}>
+                    <div class="resource-copy">
+                      <h2>{project.name}</h2>
+                      <p>{project.description || "No description"}</p>
+                    </div>
+                    <div class="resource-details">
+                      <span class="id">#{project.id}</span>
+                      <small>Updated {date(project.updatedAt)}</small>
+                    </div>
                   </A>
                 )}
               </For>
