@@ -16,7 +16,10 @@ mechanisms:
 Projects, tasks, comments, artifacts, media metadata, triggers, and workflow metadata are
 transactional projections of one event table in SQLite. The Solid web app and `factory` CLI use the
 same HTTP API. No authentication, permissions, policy engine, migration
-framework, or deployment lifecycle lives in the application.
+framework, or deployment engine lives in the application. Factory records the
+process and workflow-admission deployment boundaries it can observe. Nags
+still owns builds, process replacement, health verification, rollback, and
+deployment receipts.
 
 Immutable media bytes live beside the wire in a configured local directory.
 Task descriptions and task comments refer to them through `/api/media/{id}`.
@@ -240,6 +243,12 @@ resumes that same journal from the next root comment or direct reply.
 Workflow conversations remain sequential. Triggered workflows run in parallel
 up to the configured capacity, which defaults to six and can be set from zero
 through ten in `/settings`.
+
+Factory records `deployment.started`, `deployment.quiescing`,
+`deployment.quiesced`, and `deployment.resumed` on the generic event wire.
+These facts correlate the current health release identity with process startup,
+workflow drain, and admission resumption. They do not claim that Factory built,
+verified, or deployed its own release.
 
 ## Verify
 

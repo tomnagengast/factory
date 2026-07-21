@@ -329,9 +329,13 @@ curl -fsS -X POST http://127.0.0.1:8092/api/quiescence
 ```
 
 The request stops new workflow admission and returns only after active
-authoring and workflow runs have recorded terminal events. Its response
-contains a 15-minute opaque `lease`. If deployment stops before replacing the
-Factory process, reopen admission with:
+controller slots drain. Factory appends `deployment.quiescing` when admission
+closes and `deployment.quiesced` after the count reaches zero. Published
+authoring and workflow operations write their terminal facts before freeing
+their slots, though a stale conditional claim can free a slot without
+publishing workflow lifecycle facts. Its response contains a 15-minute opaque
+`lease`. If deployment stops before replacing the Factory process, reopen
+admission with:
 
 ```sh
 curl -fsS -X DELETE \
@@ -339,17 +343,30 @@ curl -fsS -X DELETE \
 ```
 
 Deployment automation must release the lease on every failed or aborted path.
-A successful process replacement clears the in-memory lease.
+That release appends `deployment.resumed` with reason `released` before new
+admission. Lease expiry uses reason `expired`. Canceling an acquisition uses
+reason `canceled`. If cancellation or expiry happens before drain completion,
+there is no `deployment.quiesced`, the resumed event can report a positive
+`workflowActive`, and older work can finish after admission reopens. Factory
+keeps admission closed if a required deployment event cannot be written. A
+successful process replacement clears the old process's in-memory lease.
 
 Restarting with the same `-data`, `-media`, and `-workflow-workspace` values
 preserves resources, comments, media, events, triggers, workflow run history,
-and generated workflow files. Startup appends a failure event for any earlier
-run still projected as `running`, such as a process interrupted by a crash or
-service replacement.
+and generated workflow files. Each process appends `deployment.started` after
+opening the wire. It then discovers workflows and appends a failure event for
+any earlier run still projected as `running`, such as a process interrupted by
+a crash or service replacement. Finally it appends `deployment.resumed` with
+reason `startup` before it serves HTTP or starts scheduler admission. Waiting
+human gates and pending events remain eligible after that boundary; active
+workflow processes do not continue across replacement.
 
 Nags deployments run the signed API and CLI from stable paths in
 `~/.local/share/factory/bin`. This lets macOS reuse Factory's privacy grants
-after a new immutable release replaces the prior build.
+after a new immutable release replaces the prior build. Nags still owns the
+build, replacement, health verification, rollback, and receipt. Factory's
+deployment events report only the process and coordinator boundaries it can
+observe.
 
 Every semantic workflow event is part of the same durable wire. Restarting
 does not depend on temporary journal files or terminal logs to rebuild run

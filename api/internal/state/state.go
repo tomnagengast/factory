@@ -36,6 +36,10 @@ const (
 	WorkflowRunCompleted     = "workflow.run.completed"
 	WorkflowRunFailed        = "workflow.run.failed"
 	SettingsUpdated          = "settings.updated"
+	DeploymentStarted        = "deployment.started"
+	DeploymentQuiescing      = "deployment.quiescing"
+	DeploymentQuiesced       = "deployment.quiesced"
+	DeploymentResumed        = "deployment.resumed"
 )
 
 const (
@@ -209,6 +213,24 @@ type Settings struct {
 	Model            string `json:"model"`
 	Reasoning        string `json:"reasoning"`
 	WorkflowCapacity int    `json:"workflowCapacity"`
+}
+
+type ReleaseIdentity struct {
+	Commit          string `json:"commit"`
+	Tree            string `json:"tree"`
+	BuildID         string `json:"buildId"`
+	DeploymentID    string `json:"deploymentId"`
+	ContractVersion string `json:"contractVersion"`
+}
+
+type DeploymentData struct {
+	Commit          string `json:"commit"`
+	Tree            string `json:"tree"`
+	BuildID         string `json:"buildId"`
+	DeploymentID    string `json:"deploymentId"`
+	ContractVersion string `json:"contractVersion"`
+	WorkflowActive  int    `json:"workflowActive"`
+	Reason          string `json:"reason,omitempty"`
 }
 
 type ModelOption struct {

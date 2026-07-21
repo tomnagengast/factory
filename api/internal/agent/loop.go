@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -27,14 +28,17 @@ const (
 )
 
 type Loop struct {
-	store     *store.Store
-	agent     Runner
-	workflows workflow.Runner
-	admission *quiescence.Controller
-	active    int
-	completed chan error
-	authoring bool
-	authored  chan error
+	store       *store.Store
+	agent       Runner
+	workflows   workflow.Runner
+	admission   *quiescence.Controller
+	active      int
+	completed   chan error
+	authoring   bool
+	authored    chan error
+	initMu      sync.Mutex
+	initTried   bool
+	initialized bool
 }
 
 func NewLoop(
@@ -53,17 +57,34 @@ func NewLoop(
 	}, nil
 }
 
-// Run owns Factory's coordinator. Workflow conversations remain sequential,
-// while event and cron trigger runs are dispatched up to the selected capacity.
-func (l *Loop) Run(ctx context.Context) error {
-	runContext, cancel := context.WithCancel(ctx)
-	defer cancel()
-	if err := l.syncWorkflows(runContext); err != nil {
+func (l *Loop) Initialize(ctx context.Context) error {
+	l.initMu.Lock()
+	defer l.initMu.Unlock()
+	if l.initTried {
+		return errors.New("workflow coordinator initialization already attempted")
+	}
+	l.initTried = true
+	if err := l.syncWorkflows(ctx); err != nil {
 		return err
 	}
 	if err := l.recoverInterruptedRuns(); err != nil {
 		return err
 	}
+	l.initialized = true
+	return nil
+}
+
+// Run owns Factory's initialized coordinator. Workflow conversations remain
+// sequential, while event and cron trigger runs dispatch up to the selected capacity.
+func (l *Loop) Run(ctx context.Context) error {
+	l.initMu.Lock()
+	initialized := l.initialized
+	l.initMu.Unlock()
+	if !initialized {
+		return errors.New("workflow coordinator is not initialized")
+	}
+	runContext, cancel := context.WithCancel(ctx)
+	defer cancel()
 	for {
 		after, err := l.store.LastID()
 		if err != nil {

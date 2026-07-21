@@ -366,6 +366,13 @@ types run from the configured workflow workspace. This includes
 `reaction.updated`: it is observable and triggerable, but a run started from it
 has no task ID or project working directory.
 
+The four `deployment.*` event types are also generic, triggerable wire facts.
+Events received while workflow admission is closed remain pending. On startup,
+workflow discovery and interrupted-run recovery finish before
+`deployment.resumed`, and scheduler dispatch begins only after that event.
+Release, expiry, and cancellation also append `deployment.resumed` before new
+admission.
+
 ## Cron triggers
 
 Cron is represented as the event type `cron`:
@@ -416,12 +423,22 @@ fill the new slots. There is no separate queue or retry service.
 
 Deployment code can acquire `POST /api/quiescence` before replacing the
 Factory process. The coordinator first closes all workflow admission, including
-authoring and human-gate resumes, and then waits until admitted work has
-recorded its terminal wire events. A successful response contains an opaque
-lease that keeps admission closed. `DELETE /api/quiescence/{lease}` reopens it.
-The lease expires after 15 minutes, and a canceled acquisition releases its
-claim. Process replacement also clears this in-memory state. Only one
-quiescence acquisition can exist at a time.
+authoring and human-gate resumes, records `deployment.quiescing`, and then
+waits until every admitted controller slot calls `Done`. A successfully
+published operation records its terminal event before `Done`, but a trigger or
+resume attempt whose conditional start is invalidated by the deployment event
+publishes no workflow lifecycle facts. A terminal event racing with acquisition
+can also appear immediately before `deployment.quiescing` while its slot still
+counts active.
+
+A completed drain records `deployment.quiesced` and returns an opaque lease
+that keeps admission closed. `DELETE /api/quiescence/{lease}` records
+`deployment.resumed` and reopens admission. Expiry and canceled acquisition do
+the same with their own reason. If either happens before drain completion,
+there is no quiesced event, resumption can report active older slots, and new
+work can start before those older operations finish. Process replacement
+clears the old in-memory lease. Only one quiescence acquisition can exist at a
+time, and a required boundary-write failure keeps admission closed.
 
 Failures remain observable:
 

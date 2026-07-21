@@ -489,7 +489,9 @@ func testServerWithMedia(t *testing.T, wire *testStore, root string) *Server {
 		"assets/styles-b2.css": &fstest.MapFile{Data: []byte("body {}")},
 	}
 	var filesystem fs.FS = assets
-	server, err := New(wire.Store, filesystem, root, quiescence.New())
+	server, err := New(
+		wire.Store, filesystem, root, quiescence.New(quiescence.Hooks{}), state.ReleaseIdentity{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
