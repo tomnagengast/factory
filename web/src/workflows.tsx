@@ -30,22 +30,27 @@ export function Workflows() {
         actions={<A class="button primary" href="/workflows/new">New workflow</A>} />
       <Load data={data} error={() => data.error}>
         {(value) => <Show when={value.workflows.length} fallback={<Empty>No workflows discovered.</Empty>}>
-          <div class="card-grid workflows"><For each={workflows()}>{(workflow) => <A class="project-card" href={`/workflows/${workflow.id}`}>
-            <span class="id">#{workflow.id} · {workflow.scope || "factory"}</span>
-            <h2>{workflow.name}</h2><p>{workflow.description || "No description"}</p>
-            <div class="workflow-usage">
-              <span class="workflow-usage-item" role="group" title={`Total workflow runs: ${workflow.runCount}`}
-                aria-label={`Total workflow runs: ${workflow.runCount}`}>
-                <Play aria-hidden="true" />
-                <span>{workflow.runCount}</span>
-              </span>
-              <span class="workflow-usage-item" role="group" title={`Distinct tasks: ${workflow.taskCount}`}
-                aria-label={`Distinct tasks: ${workflow.taskCount}`}>
-                <ListTodo aria-hidden="true" />
-                <span>{workflow.taskCount}</span>
-              </span>
+          <div class="resource-list"><For each={workflows()}>{(workflow) => <A class="resource-row" href={`/workflows/${workflow.id}`}>
+            <div class="resource-copy">
+              <h2>{workflow.name}</h2>
+              <p>{workflow.description || "No description"}</p>
             </div>
-            <div class="phases"><For each={workflow.phases}>{(phase) => <span>{phase}</span>}</For></div>
+            <div class="resource-details">
+              <span class="id">#{workflow.id} · {workflow.scope || "factory"}</span>
+              <div class="workflow-usage">
+                <span class="workflow-usage-item" role="group" title={`Total workflow runs: ${workflow.runCount}`}
+                  aria-label={`Total workflow runs: ${workflow.runCount}`}>
+                  <Play aria-hidden="true" />
+                  <span>{workflow.runCount}</span>
+                </span>
+                <span class="workflow-usage-item" role="group" title={`Distinct tasks: ${workflow.taskCount}`}
+                  aria-label={`Distinct tasks: ${workflow.taskCount}`}>
+                  <ListTodo aria-hidden="true" />
+                  <span>{workflow.taskCount}</span>
+                </span>
+              </div>
+              <div class="phases"><For each={workflow.phases}>{(phase) => <span>{phase}</span>}</For></div>
+            </div>
           </A>}</For></div>
         </Show>}
       </Load>
