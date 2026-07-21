@@ -21,6 +21,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/tomnagengast/factory/api/internal/deployment"
 	"github.com/tomnagengast/factory/api/internal/eventwire"
 	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
@@ -986,6 +987,75 @@ func TestArbitraryEventIntakeAndTypes(t *testing.T) {
 	}
 }
 
+func TestDeploymentEventsUseGenericWireAPI(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "factory.db")
+	wire := openStoreAt(t, path)
+	identity := state.ReleaseIdentity{
+		Commit: "commit-1", Tree: "tree-1", BuildID: "build-1",
+		DeploymentID: "deployment-1", ContractVersion: "1",
+	}
+	recorder := deployment.NewRecorder(wire.Store, identity)
+	if err := recorder.Started(); err != nil {
+		t.Fatal(err)
+	}
+	started := wire.Events(0)[0]
+	if err := wire.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wire = openStoreAt(t, path)
+	defer wire.Close()
+	handler := testServerWithRelease(t, wire, identity).Handler()
+
+	list := requestJSON(t, handler, http.MethodGet, "/api/events", "")
+	var listed struct {
+		Events []eventwire.Event `json:"events"`
+	}
+	if list.Code != http.StatusOK || json.Unmarshal(list.Body.Bytes(), &listed) != nil ||
+		len(listed.Events) != 1 || !reflect.DeepEqual(listed.Events[0], started) {
+		t.Fatalf("list = %d %s", list.Code, list.Body)
+	}
+	detail := requestJSON(t, handler, http.MethodGet, fmt.Sprintf("/api/events/%d", started.ID), "")
+	var selected eventwire.Event
+	if detail.Code != http.StatusOK || json.Unmarshal(detail.Body.Bytes(), &selected) != nil ||
+		!reflect.DeepEqual(selected, started) {
+		t.Fatalf("detail = %d %s", detail.Code, detail.Body)
+	}
+	types := requestJSON(t, handler, http.MethodGet, "/api/events/types", "")
+	if types.Code != http.StatusOK || !strings.Contains(types.Body.String(), state.DeploymentStarted) {
+		t.Fatalf("types = %d %s", types.Code, types.Body)
+	}
+
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+	request, err := http.NewRequestWithContext(
+		t.Context(), http.MethodGet, httpServer.URL+"/api/events/stream?after=0", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	reader := bufio.NewReader(response.Body)
+	for _, expected := range []string{": connected\n", "\n"} {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil || line != expected {
+			t.Fatalf("stream opening = %q, %v", line, readErr)
+		}
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "data: ") {
+		t.Fatalf("stream event = %q, %v", line, err)
+	}
+	var streamed eventwire.Event
+	if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data: "))), &streamed) != nil ||
+		!reflect.DeepEqual(streamed, started) {
+		t.Fatalf("streamed event = %#v", streamed)
+	}
+}
+
 func TestUniversalIngress(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
@@ -1062,14 +1132,15 @@ func TestUniversalIngressSurvivesReplay(t *testing.T) {
 }
 
 func TestHealthIncludesReleaseIdentity(t *testing.T) {
-	t.Setenv("FACTORY_RELEASE_COMMIT", "commit-1")
-	t.Setenv("FACTORY_RELEASE_TREE", "tree-1")
-	t.Setenv("FACTORY_RELEASE_BUILD", "build-1")
-	t.Setenv("FACTORY_RELEASE_DEPLOYMENT", "deployment-1")
-	t.Setenv("FACTORY_RELEASE_CONTRACT", "1")
 	wire := openWire(t)
 	defer wire.Close()
-	response := requestJSON(t, testServer(t, wire).Handler(), http.MethodGet, "/api/health", "")
+	identity := state.ReleaseIdentity{
+		Commit: "commit-1", Tree: "tree-1", BuildID: "build-1",
+		DeploymentID: "deployment-1", ContractVersion: "1",
+	}
+	response := requestJSON(
+		t, testServerWithRelease(t, wire, identity).Handler(), http.MethodGet, "/api/health", "",
+	)
 	var health map[string]any
 	if err := json.Unmarshal(response.Body.Bytes(), &health); err != nil {
 		t.Fatal(err)
@@ -1142,7 +1213,7 @@ func TestHealthTracksRunningWorkflowLifecycle(t *testing.T) {
 func TestQuiescenceAPIStopsAdmissionDrainsAndReleases(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
-	admission := quiescence.New()
+	admission := quiescence.New(quiescence.Hooks{})
 	handler := testServerWithAdmission(t, wire, admission).Handler()
 	if !admission.TryStart() {
 		t.Fatal("active workflow admission was blocked")
@@ -1189,10 +1260,67 @@ func TestQuiescenceAPIStopsAdmissionDrainsAndReleases(t *testing.T) {
 	}
 }
 
+func TestDeploymentEventsBoundQuiescenceAPI(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	identity := state.ReleaseIdentity{Commit: "commit-1", DeploymentID: "deployment-1"}
+	recorder := deployment.NewRecorder(wire.Store, identity)
+	admission := quiescence.New(quiescence.Hooks{
+		Quiescing: recorder.Quiescing,
+		Quiesced:  recorder.Quiesced,
+		Resuming:  recorder.Resumed,
+	})
+	handler := testServerWithAdmissionAndRelease(t, wire, admission, identity).Handler()
+	if !admission.TryStart() {
+		t.Fatal("active workflow admission was blocked")
+	}
+
+	acquired := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		acquired <- requestJSON(t, handler, http.MethodPost, "/api/quiescence", "")
+	}()
+	waitForServerCondition(t, func() bool {
+		return eventCount(wire.Events(0), state.DeploymentQuiescing) == 1
+	}, "deployment quiescing event")
+	terminal, err := wire.Publish("workflow.authoring.completed", map[string]int64{"workflowId": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission.Done(nil)
+	response := receiveServerResponse(t, acquired, "quiescence response")
+	var lease quiescence.Lease
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &lease) != nil {
+		t.Fatalf("acquire = %d %s", response.Code, response.Body)
+	}
+	events := wire.Events(0)
+	quiescing := findEvent(t, events, state.DeploymentQuiescing)
+	quiesced := findEvent(t, events, state.DeploymentQuiesced)
+	var quiescingData state.DeploymentData
+	if json.Unmarshal(quiescing.Data, &quiescingData) != nil ||
+		quiescingData.WorkflowActive != 1 || quiescingData.Commit != identity.Commit ||
+		terminal.ID >= quiesced.ID {
+		t.Fatalf("quiescing=%#v data=%#v terminal=%#v quiesced=%#v", quiescing, quiescingData, terminal, quiesced)
+	}
+	release := requestJSON(t, handler, http.MethodDelete, "/api/quiescence/"+lease.Token, "")
+	if release.Code != http.StatusOK {
+		t.Fatalf("release = %d %s", release.Code, release.Body)
+	}
+	resumed := findEvent(t, wire.Events(0), state.DeploymentResumed)
+	var resumedData state.DeploymentData
+	if json.Unmarshal(resumed.Data, &resumedData) != nil || resumedData.Reason != quiescence.ReasonReleased ||
+		resumedData.WorkflowActive != 0 || resumed.ID <= quiesced.ID {
+		t.Fatalf("resumed = %#v data = %#v", resumed, resumedData)
+	}
+	health := requestJSON(t, handler, http.MethodGet, "/api/health", "")
+	if !strings.Contains(health.Body.String(), `"workflowQuiescing":false`) || resumed.ID != wire.LastID() {
+		t.Fatalf("health = %s, resumed = %d, checkpoint = %d", health.Body, resumed.ID, wire.LastID())
+	}
+}
+
 func TestQuiescenceAPIRejectsFailedDrain(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
-	admission := quiescence.New()
+	admission := quiescence.New(quiescence.Hooks{})
 	handler := testServerWithAdmission(t, wire, admission).Handler()
 	if !admission.TryStart() {
 		t.Fatal("active workflow admission was blocked")
@@ -1552,7 +1680,14 @@ func openWire(t *testing.T) *testStore {
 
 func testServer(t *testing.T, wire *testStore) *Server {
 	t.Helper()
-	return testServerWithAdmission(t, wire, quiescence.New())
+	return testServerWithRelease(t, wire, state.ReleaseIdentity{})
+}
+
+func testServerWithRelease(t *testing.T, wire *testStore, release state.ReleaseIdentity) *Server {
+	t.Helper()
+	return testServerWithAdmissionAndRelease(
+		t, wire, quiescence.New(quiescence.Hooks{}), release,
+	)
 }
 
 func testServerWithAdmission(
@@ -1561,13 +1696,23 @@ func testServerWithAdmission(
 	admission *quiescence.Controller,
 ) *Server {
 	t.Helper()
+	return testServerWithAdmissionAndRelease(t, wire, admission, state.ReleaseIdentity{})
+}
+
+func testServerWithAdmissionAndRelease(
+	t *testing.T,
+	wire *testStore,
+	admission *quiescence.Controller,
+	release state.ReleaseIdentity,
+) *Server {
+	t.Helper()
 	assets := fstest.MapFS{
 		"index.html":           &fstest.MapFile{Data: []byte("<html></html>")},
 		"assets/app-a1.js":     &fstest.MapFile{Data: []byte("export {};")},
 		"assets/styles-b2.css": &fstest.MapFile{Data: []byte("body {}")},
 	}
 	var filesystem fs.FS = assets
-	server, err := New(wire.Store, filesystem, t.TempDir(), admission)
+	server, err := New(wire.Store, filesystem, t.TempDir(), admission, release)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1612,4 +1757,15 @@ func eventCount(events []eventwire.Event, eventType string) int {
 		}
 	}
 	return count
+}
+
+func findEvent(t *testing.T, events []eventwire.Event, eventType string) eventwire.Event {
+	t.Helper()
+	for _, event := range events {
+		if event.Type == eventType {
+			return event
+		}
+	}
+	t.Fatalf("event %s missing from %#v", eventType, events)
+	return eventwire.Event{}
 }

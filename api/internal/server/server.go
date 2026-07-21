@@ -26,6 +26,7 @@ type Server struct {
 	assets    fs.FS
 	mediaRoot string
 	admission *quiescence.Controller
+	release   state.ReleaseIdentity
 }
 
 func New(
@@ -33,6 +34,7 @@ func New(
 	assets fs.FS,
 	mediaRoot string,
 	admission *quiescence.Controller,
+	release state.ReleaseIdentity,
 ) (*Server, error) {
 	if eventStore == nil || assets == nil || mediaRoot == "" || admission == nil {
 		return nil, errors.New("server requires an event store, frontend, media path, and workflow admission controller")
@@ -53,7 +55,7 @@ func New(
 		return nil, errors.New("media path must be a directory")
 	}
 	return &Server{
-		store: eventStore, assets: assets, mediaRoot: canonical, admission: admission,
+		store: eventStore, assets: assets, mediaRoot: canonical, admission: admission, release: release,
 	}, nil
 }
 
@@ -163,11 +165,11 @@ func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"status":            "ok",
 		"app":               "factory",
-		"commit":            os.Getenv("FACTORY_RELEASE_COMMIT"),
-		"tree":              os.Getenv("FACTORY_RELEASE_TREE"),
-		"buildId":           os.Getenv("FACTORY_RELEASE_BUILD"),
-		"deploymentId":      os.Getenv("FACTORY_RELEASE_DEPLOYMENT"),
-		"contractVersion":   os.Getenv("FACTORY_RELEASE_CONTRACT"),
+		"commit":            s.release.Commit,
+		"tree":              s.release.Tree,
+		"buildId":           s.release.BuildID,
+		"deploymentId":      s.release.DeploymentID,
+		"contractVersion":   s.release.ContractVersion,
 		"harness":           settings.Harness,
 		"workflowCapacity":  settings.WorkflowCapacity,
 		"workflowActive":    s.admission.Active(),
@@ -207,7 +209,12 @@ func (s *Server) quiescenceAcquire(writer http.ResponseWriter, request *http.Req
 }
 
 func (s *Server) quiescenceRelease(writer http.ResponseWriter, request *http.Request) {
-	if !s.admission.Release(request.PathValue("lease")) {
+	found, err := s.admission.Release(request.PathValue("lease"))
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, err)
+		return
+	}
+	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("quiescence lease not found"))
 		return
 	}

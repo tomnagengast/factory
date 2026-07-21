@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/api/internal/agent"
+	"github.com/tomnagengast/factory/api/internal/deployment"
 	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/server"
 	"github.com/tomnagengast/factory/api/internal/store"
@@ -125,6 +126,11 @@ func run(ctx context.Context, configuration config) error {
 		return err
 	}
 	defer eventStore.Close()
+	release := deployment.FromEnvironment()
+	deployments := deployment.NewRecorder(eventStore, release)
+	if err := deployments.Started(); err != nil {
+		return fmt.Errorf("record deployment start: %w", err)
+	}
 
 	workflowCLI := workflow.CLI{
 		Command: configuration.WorkflowCommand, Workspace: configuration.WorkflowWorkspace,
@@ -134,7 +140,11 @@ func run(ctx context.Context, configuration config) error {
 	if err := workflowCLI.Prepare(); err != nil {
 		return err
 	}
-	admission := quiescence.New()
+	admission := quiescence.New(quiescence.Hooks{
+		Quiescing: deployments.Quiescing,
+		Quiesced:  deployments.Quiesced,
+		Resuming:  deployments.Resumed,
+	})
 	loop, err := agent.NewLoop(eventStore, agent.CommandRunner{
 		CodexCommand: configuration.CodexCommand, ClaudeCommand: configuration.ClaudeCommand,
 		Workspace:      configuration.WorkflowWorkspace,
@@ -147,7 +157,7 @@ func run(ctx context.Context, configuration config) error {
 	if err != nil {
 		return fmt.Errorf("open embedded web bundle: %w", err)
 	}
-	app, err := server.New(eventStore, assets, configuration.MediaPath, admission)
+	app, err := server.New(eventStore, assets, configuration.MediaPath, admission, release)
 	if err != nil {
 		return err
 	}
@@ -156,6 +166,12 @@ func run(ctx context.Context, configuration config) error {
 		return fmt.Errorf("listen on %s: %w", configuration.Address, err)
 	}
 	defer listener.Close()
+	if err := loop.Initialize(ctx); err != nil {
+		return fmt.Errorf("initialize workflow coordinator: %w", err)
+	}
+	if err := deployments.Resumed("startup", 0); err != nil {
+		return fmt.Errorf("record deployment resumption: %w", err)
+	}
 
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()

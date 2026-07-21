@@ -164,14 +164,44 @@ to finish before dispatching more. There is no queue service or distributed
 worker pool.
 
 Controlled service replacement uses the coordinator's in-memory quiescence
-lease. Acquiring the lease atomically stops new authoring, resume, event, and
-cron admission, then waits for every admitted operation to record its terminal
-wire event. Admission remains closed until the holder releases the opaque
-lease, the 15-minute lease expires, or the process exits. A failed acquisition
-reopens admission unless the coordinator itself failed; a coordinator failure
-blocks further work and rejects quiescence so deployment cannot hide a missing
-terminal event. This gives deployment code a drain boundary without changing
-trigger state or adding a queue.
+lease and four durable deployment facts. `deployment.started` records that a
+process opened the wire. `deployment.quiescing` records the admission closure
+and the number of controller slots whose owners have not called `Done`.
+`deployment.quiesced` records that the current lease reached zero slots.
+`deployment.resumed` records that admission reopened or startup initialization
+completed.
+
+Acquiring a lease atomically closes new authoring, human-gate resume, event,
+and cron admission, then waits for every admitted slot. A slot belongs to an
+operation, not necessarily a published workflow run. A trigger or resume
+attempt acquires a slot before its conditional start event. If
+`deployment.quiescing` advances the wire first, that conditional append is
+stale and the attempt can call `Done(nil)` without any workflow lifecycle fact.
+
+An operation that published its start boundary appends its terminal fact
+before it calls `Done`. The event append and controller count use separate
+locks, so a terminal fact can commit immediately before
+`deployment.quiescing` while its slot still appears in `workflowActive`.
+`deployment.quiescing` therefore marks admission closure, not a promise that
+it precedes every terminal fact. `deployment.quiesced` proves that no slot
+remains and follows the terminal facts of published operations that drained
+successfully. It does not prove one terminal fact per earlier slot.
+
+A completed drain follows this order:
+
+```text
+deployment.quiescing
+... terminal facts from published admitted operations ...
+deployment.quiesced
+```
+
+The opaque lease keeps admission closed after that sequence. Explicit release
+or expiry appends `deployment.resumed` with `workflowActive: 0` before it
+reopens admission. If the acquisition is canceled or expires before drain
+completion, Factory appends no `deployment.quiesced`. It instead appends
+`deployment.resumed` with a positive `workflowActive`; earlier admitted work
+can finish after new admission begins. A deployment-boundary append failure
+keeps admission closed and rejects later work.
 
 The coordinator records progress back on the same wire:
 
@@ -205,10 +235,12 @@ Historical workflow agent replies with a parent that predate the final marker
 are still treated as final responses.
 
 Graceful shutdown records active runs as failed after canceling their
-processes. At startup, the coordinator also closes any projected `running`
-run that lacks a terminal event. This keeps history honest after a crash or
-process replacement without rewriting the wire. Waiting runs have no live
-workflow process and survive restart until a user responds on the task.
+processes. At startup, Factory appends `deployment.started`, discovers
+workflows, and closes any projected `running` run that lacks a terminal event.
+It then appends `deployment.resumed` with reason `startup` before HTTP handlers
+or scheduler admission become available. Waiting runs have no live workflow
+process and survive restart until a user responds on the task. Pending events
+and human responses can dispatch only after the startup resumption fact.
 
 ## Workflow source and metadata
 

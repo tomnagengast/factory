@@ -484,6 +484,38 @@ If filtering leaves the older-page marker visible, raw paging continues across
 consecutive pages with no matching rows until the marker leaves the viewport,
 history ends, or a request fails.
 
+Factory reserves four projection-free deployment event types. They use the
+same list, detail, type, SSE, CLI, trigger, and web event views as every other
+wire fact:
+
+```text
+deployment.started
+deployment.quiescing
+deployment.quiesced
+deployment.resumed
+```
+
+Each carries one flat payload:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `commit` | string | Emitting process release commit |
+| `tree` | string | Emitting process release tree |
+| `buildId` | string | Emitting process build ID |
+| `deploymentId` | string | Emitting process deployment ID |
+| `contractVersion` | string | Emitting process release contract |
+| `workflowActive` | integer | Controller slots whose owners have not called `Done` |
+| `reason` | string or omitted | `startup`, `released`, `expired`, or `canceled` on `deployment.resumed` |
+
+The five release fields equal the matching fields in `/api/health` for the
+process that wrote the event. Empty fields are kept on local starts.
+`workflowActive` counts admission slots, not projected runs, and can include a
+conditional trigger or resume claim that publishes no workflow facts. A
+positive value on `deployment.resumed` means cancellation or expiry reopened
+admission before older work finished. `deployment.quiesced` appears only after
+a completed drain and proves zero slots, not one terminal fact per counted
+slot. Every deployment event remains triggerable.
+
 Universal ingress records any HTTP request without validating or normalizing
 its payload:
 
@@ -772,8 +804,9 @@ DELETE /api/quiescence/{lease}
 ```
 
 `POST` atomically stops new workflow authoring, resume, event, and cron
-admission, then waits for every admitted operation to record its terminal wire
-event. A successful response keeps admission closed:
+admission, appends `deployment.quiescing`, then waits for every admitted slot.
+A successful drain appends `deployment.quiesced` before the response and keeps
+admission closed:
 
 ```json
 {
@@ -784,10 +817,15 @@ event. A successful response keeps admission closed:
 ```
 
 The lease lasts 15 minutes. Canceling the request before the drain completes
-releases its claim. A concurrent `POST` returns `409`; expiry before the drain
-completes or a coordinator failure returns `503`. `DELETE` with the current lease returns
-`{"status":"released"}` and reopens admission. An unknown or expired lease
-returns `404`. Replacing the Factory process clears the lease.
+appends `deployment.resumed` with reason `canceled` and no quiesced fact.
+Expiry uses reason `expired`; explicit `DELETE` uses `released`. The resumption
+event commits before admission reopens and records the active slot count at
+that boundary. A concurrent `POST` returns `409`; expiry before the drain
+completes or a coordinator failure returns `503`. `DELETE` with the current
+lease returns `{"status":"released"}`. An unknown or expired lease returns
+`404`. Replacing the Factory process clears the lease. Any required deployment
+event write failure keeps admission closed and returns `503` where a caller is
+waiting.
 
 ## Health
 
