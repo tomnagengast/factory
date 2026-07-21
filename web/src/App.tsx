@@ -58,6 +58,7 @@ import { workflowCommentPresentation, workflowConversationWorking } from "./work
 
 const REACTION_EMOJIS = ["👍", "👎", "❤️", "🎉", "😂", "👀"] as const;
 const PAGE_SIZE = 200;
+const EVENT_PAGE_SIZE = 25;
 
 export function App() {
   return (
@@ -1116,14 +1117,25 @@ function ArtifactPanel(props: {
 }
 
 function Events() {
-	const [events, setEvents] = createSignal<Event[]>([]);
-	const [error, setError] = createSignal("");
-	const [connected, setConnected] = createSignal(false);
-	const [hasOlder, setHasOlder] = createSignal(false);
-	const older = mutation();
+  const [events, setEvents] = createSignal<Event[]>([]);
+  const [error, setError] = createSignal("");
+  const [connected, setConnected] = createSignal(false);
+  const [hasOlder, setHasOlder] = createSignal(false);
+  const older = mutation();
   const [wireContent, setWireContent] = createSignal<HTMLDivElement>();
+  const [olderSentinel, setOlderSentinel] = createSignal<HTMLDivElement>();
   let follower: NewestFollower | undefined;
   let source: EventSource | undefined;
+  const loadOlder = () => {
+    if (!hasOlder() || older.pending()) return;
+    void older.run(async () => {
+      const before = events().at(-1)?.id;
+      if (!before) return;
+      const page = await get<{ events: Event[] }>(`/api/events?before=${before}&limit=${EVENT_PAGE_SIZE}`);
+      setEvents((current) => uniqueByID([...current, ...page.events]));
+      setHasOlder(page.events.length === EVENT_PAGE_SIZE);
+    });
+  };
   createEffect(() => {
     const content = wireContent();
     if (!content) return;
@@ -1139,19 +1151,28 @@ function Events() {
       if (follower === currentFollower) follower = undefined;
     });
   });
+  createEffect(() => {
+    const sentinel = olderSentinel();
+    if (!sentinel) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) loadOlder();
+    });
+    observer.observe(sentinel);
+    onCleanup(() => observer.disconnect());
+  });
   onMount(async () => {
     try {
-		const initial = await get<{ events: Event[] }>("/api/events");
-		setEvents(initial.events);
-		setHasOlder(initial.events.length === PAGE_SIZE);
-		const after = initial.events[0]?.id ?? 0;
+      const initial = await get<{ events: Event[] }>(`/api/events?limit=${EVENT_PAGE_SIZE}`);
+      setEvents(initial.events);
+      setHasOlder(initial.events.length === EVENT_PAGE_SIZE);
+      const after = initial.events[0]?.id ?? 0;
       source = new EventSource(`/api/events/stream?after=${after}`);
       source.onopen = () => setConnected(true);
       source.onerror = () => setConnected(false);
       source.onmessage = (message) => {
         const event = JSON.parse(message.data) as Event;
         follower?.beforePrepend();
-			setEvents((current) => [event, ...current.filter((item) => item.id !== event.id)]);
+        setEvents((current) => [event, ...current.filter((item) => item.id !== event.id)]);
       };
     } catch (caught) {
       setError(errorMessage(caught));
@@ -1165,20 +1186,19 @@ function Events() {
       <Show when={!error()} fallback={<div class="state">{error()}</div>}>
         <Show when={events().length} fallback={<Empty>The wire is quiet.</Empty>}>
           <div ref={(element) => setWireContent(element)} class="wire-table">
-			<For each={events()}>{(event) => <EventRow event={event} expanded />}</For>
-		  </div>
-		</Show>
-		<Show when={hasOlder()}>
-		  <button class="button quiet" disabled={older.pending()} onClick={() => older.run(async () => {
-			const before = events().at(-1)?.id;
-			if (!before) return;
-			const page = await get<{ events: Event[] }>(`/api/events?before=${before}`);
-			setEvents((current) => [...current, ...page.events]);
-			setHasOlder(page.events.length === PAGE_SIZE);
-		  })}>{older.pending() ? "Loading…" : "Load older events"}</button>
-		</Show>
-		<Show when={older.error()}><span class="form-error">{older.error()}</span></Show>
-	  </Show>
+            <For each={events()}>{(event) => <EventRow event={event} expanded />}</For>
+          </div>
+        </Show>
+        <Show when={hasOlder()}>
+          <div ref={(element) => setOlderSentinel(element)} class="wire-loader" aria-live="polite">
+            <Show when={older.pending()}>Loading {EVENT_PAGE_SIZE} older events…</Show>
+            <Show when={older.error()}>
+              <span class="form-error">{older.error()}</span>
+              <button type="button" class="button quiet" onClick={loadOlder}>Retry</button>
+            </Show>
+          </div>
+        </Show>
+      </Show>
     </div>
   );
 }
