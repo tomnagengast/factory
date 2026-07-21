@@ -348,6 +348,13 @@ main { min-width: 0; }
 .task-properties a:hover { border-color: var(--color-border-hover); }
 .task-properties + .reaction-control { margin: -12px 0 28px; }
 .task-document { min-width: 0; padding: 6px 2px 28px; }
+.task-workflow-runs { margin-top: 42px; }
+.task-workflow-run {
+  min-height: 64px; display: grid; grid-template-columns: 92px minmax(0, 1fr) 54px;
+  align-items: center; gap: 14px; padding: 10px 12px; border-bottom: 1px solid var(--color-border);
+  text-decoration: none;
+}
+.task-workflow-run:hover { background: var(--color-surface-hover); }
 .muted { color: var(--color-text-muted); }
 .form-panel, .composer, .artifact-form, .comment-form {
   padding: 24px; display: grid; gap: 18px; border: 1px solid var(--color-border); background: var(--color-surface);

@@ -35,9 +35,50 @@ export type TaskProjectOption = {
   label: string;
 };
 
+type TaskViewStorage = Pick<Storage, "getItem" | "setItem">;
+
+const taskViewStorageKey = "factory.tasks.view";
 const taskViewQueryKeys = ["sort", "direction", "group", "status", "project"] as const;
 const taskFieldValues = new Set<string>(taskFields.map(([field]) => field));
 const taskStatusValues = new Set<string>(taskStatuses);
+
+export function loadTaskViewPreferences(
+  storage: TaskViewStorage | undefined = browserStorage(),
+): TaskViewPreferences {
+  if (!storage) return { ...taskViewDefaults };
+  try {
+    const stored = storage.getItem(taskViewStorageKey);
+    if (stored === null) return { ...taskViewDefaults };
+    const value: unknown = JSON.parse(stored);
+    if (!isObject(value)) return { ...taskViewDefaults };
+    return {
+      sortField: isTaskField(value.sortField) ? value.sortField : taskViewDefaults.sortField,
+      direction: isDirection(value.direction) ? value.direction : taskViewDefaults.direction,
+      groupField: isGroupField(value.groupField) ? value.groupField : taskViewDefaults.groupField,
+      statuses: Array.isArray(value.statuses)
+        ? canonicalStatuses(value.statuses.filter(isTaskStatus))
+        : [],
+      projectIds: Array.isArray(value.projectIds)
+        ? canonicalProjectIds(value.projectIds.filter((id): id is number => typeof id === "number"))
+        : [],
+    };
+  } catch {
+    return { ...taskViewDefaults };
+  }
+}
+
+export function saveTaskViewPreferences(
+  preferences: TaskViewPreferences,
+  storage: TaskViewStorage | undefined = browserStorage(),
+): void {
+  if (!storage) return;
+  try {
+    const canonical = parseTaskViewSearchParams(taskViewSearchParams(preferences));
+    storage.setItem(taskViewStorageKey, JSON.stringify(canonical));
+  } catch {
+    // Browser storage can be disabled or full. The URL view still works.
+  }
+}
 
 export function parseTaskViewSearchParams(
   searchParams: TaskViewSearchParams,
@@ -82,6 +123,10 @@ export function taskViewSearchParamsAreCanonical(
     const expected = values(canonical[key]);
     return current.length === expected.length && current.every((value, index) => value === expected[index]);
   });
+}
+
+export function taskViewSearchParamsHaveOwnedKeys(searchParams: TaskViewSearchParams): boolean {
+  return taskViewQueryKeys.some((key) => searchParams[key] !== undefined);
 }
 
 export function taskProjectOptions(
@@ -145,4 +190,20 @@ function isDirection(value: unknown): value is TaskViewPreferences["direction"] 
 
 function isTaskStatus(value: string): value is TaskStatus {
   return taskStatusValues.has(value);
+}
+
+function isGroupField(value: unknown): value is TaskViewPreferences["groupField"] {
+  return value === "" || isTaskField(value);
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function browserStorage(): TaskViewStorage | undefined {
+  try {
+    return typeof localStorage === "undefined" ? undefined : localStorage;
+  } catch {
+    return undefined;
+  }
 }

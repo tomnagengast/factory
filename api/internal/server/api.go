@@ -201,51 +201,29 @@ func taskListItems(view state.Snapshot, tasks []state.Task) []taskListItem {
 		}
 	}
 
-	runsByTask := make(map[int64]map[int64][]state.WorkflowRun)
+	runsByTask := make(map[int64][]state.WorkflowRun)
 	for _, run := range view.Runs {
 		if run.TaskID < 1 {
 			continue
 		}
-		if runsByTask[run.TaskID] == nil {
-			runsByTask[run.TaskID] = make(map[int64][]state.WorkflowRun)
-		}
-		runsByTask[run.TaskID][run.WorkflowID] = append(
-			runsByTask[run.TaskID][run.WorkflowID], run,
-		)
+		runsByTask[run.TaskID] = append(runsByTask[run.TaskID], run)
 	}
 
 	items := make([]taskListItem, 0, len(tasks))
 	for _, task := range tasks {
-		workflowRuns := make([]taskWorkflowRun, 0)
-		groups := runsByTask[task.ID]
-		workflowIDs := make([]int64, 0, len(groups))
-		for workflowID := range groups {
-			workflowIDs = append(workflowIDs, workflowID)
-		}
-		slices.Sort(workflowIDs)
-		for _, workflowID := range workflowIDs {
-			runs := groups[workflowID]
-			sort.SliceStable(runs, func(i, j int) bool { return runs[i].ID < runs[j].ID })
-			activeRuns := make([]state.WorkflowRun, 0, len(runs))
-			var newestTerminal *state.WorkflowRun
-			for index := range runs {
-				run := runs[index]
-				if run.Status == "running" || run.Status == "waiting" {
-					activeRuns = append(activeRuns, run)
-				} else if run.Status == "completed" || run.Status == "failed" {
-					newestTerminal = &runs[index]
-				}
+		runs := runsByTask[task.ID]
+		sort.SliceStable(runs, func(i, j int) bool {
+			if runs[i].WorkflowID != runs[j].WorkflowID {
+				return runs[i].WorkflowID < runs[j].WorkflowID
 			}
-			selected := activeRuns
-			if len(selected) == 0 && newestTerminal != nil {
-				selected = []state.WorkflowRun{*newestTerminal}
-			}
-			for _, run := range selected {
-				workflowRuns = append(workflowRuns, taskWorkflowRun{
-					RunID: run.ID, TriggerID: run.TriggerID, WorkflowID: run.WorkflowID,
-					WorkflowName: run.WorkflowName, Status: run.Status,
-				})
-			}
+			return runs[i].ID < runs[j].ID
+		})
+		workflowRuns := make([]taskWorkflowRun, 0, len(runs))
+		for _, run := range runs {
+			workflowRuns = append(workflowRuns, taskWorkflowRun{
+				RunID: run.ID, TriggerID: run.TriggerID, WorkflowID: run.WorkflowID,
+				WorkflowName: run.WorkflowName, Status: run.Status,
+			})
 		}
 		items = append(items, taskListItem{
 			Task: task, CommentCount: commentCounts[task.ID], WorkflowRuns: workflowRuns,
@@ -260,27 +238,20 @@ func (s *Server) task(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	task, found, err := s.store.Task(id)
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, err)
+	view, checkpoint, ok := s.snapshotWithCheckpoint(writer)
+	if !ok {
 		return
 	}
+	task, found := view.Task(id)
 	if !found {
 		writeError(writer, http.StatusNotFound, errors.New("task not found"))
 		return
 	}
-	comments, err := s.store.CommentsFor("task", id)
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, err)
-		return
-	}
-	artifacts, err := s.store.Artifacts("task", id)
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, err)
-		return
-	}
+	summary := taskListItems(view, []state.Task{task})[0]
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"task": task, "comments": comments, "artifacts": artifacts,
+		"task": task, "comments": view.CommentsFor("task", id),
+		"artifacts": view.ArtifactsFor("task", id), "workflowRuns": summary.WorkflowRuns,
+		"checkpointEventId": checkpoint,
 	})
 }
 

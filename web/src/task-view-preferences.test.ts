@@ -2,12 +2,15 @@ import { describe, expect, test } from "bun:test";
 import type { Project, Task } from "./types";
 import {
   filterTasks,
+  loadTaskViewPreferences,
   parseTaskViewSearchParams,
+  saveTaskViewPreferences,
   taskFields,
   taskProjectOptions,
   taskViewDefaults,
   taskViewSearchParams,
   taskViewSearchParamsAreCanonical,
+  taskViewSearchParamsHaveOwnedKeys,
   type TaskViewPreferences,
 } from "./task-view-preferences";
 
@@ -39,6 +42,14 @@ const tasks = [
   task(4, "done", 12),
   task(2, "canceled", 30),
 ];
+
+function memoryStorage(initial: string | null = null) {
+  let value = initial;
+  return {
+    getItem: () => value,
+    setItem: (_key: string, next: string) => { value = next; },
+  };
+}
 
 describe("task view query preferences", () => {
   test("uses defaults when query parameters are absent", () => {
@@ -151,6 +162,61 @@ describe("task view query preferences", () => {
       { status: ["done", "todo"] },
       taskViewSearchParams({ ...taskViewDefaults, statuses: ["todo", "done"], projectIds: [] }),
     )).toBe(false);
+  });
+
+  test("distinguishes an explicit task view from a bare route", () => {
+    expect(taskViewSearchParamsHaveOwnedKeys({})).toBe(false);
+    expect(taskViewSearchParamsHaveOwnedKeys({ unrelated: "kept" })).toBe(false);
+    expect(taskViewSearchParamsHaveOwnedKeys({ group: "status" })).toBe(true);
+    expect(taskViewSearchParamsHaveOwnedKeys({ group: "" })).toBe(true);
+  });
+});
+
+describe("remembered task view", () => {
+  test("round trips the complete canonical view", () => {
+    const storage = memoryStorage();
+    const preferences: TaskViewPreferences = {
+      sortField: "updatedAt",
+      direction: "asc",
+      groupField: "status",
+      statuses: ["done", "todo", "done"],
+      projectIds: [24, 12, 24],
+    };
+
+    saveTaskViewPreferences(preferences, storage);
+
+    expect(loadTaskViewPreferences(storage)).toEqual({
+      sortField: "updatedAt",
+      direction: "asc",
+      groupField: "status",
+      statuses: ["todo", "done"],
+      projectIds: [12, 24],
+    });
+  });
+
+  test("restores the former sort and grouping-only storage shape", () => {
+    expect(loadTaskViewPreferences(memoryStorage(JSON.stringify({
+      sortField: "title", direction: "asc", groupField: "projectId",
+    })))).toEqual({
+      sortField: "title",
+      direction: "asc",
+      groupField: "projectId",
+      statuses: [],
+      projectIds: [],
+    });
+  });
+
+  test("falls back safely when storage is malformed or unavailable", () => {
+    expect(loadTaskViewPreferences(memoryStorage("{"))).toEqual(taskViewDefaults);
+    expect(loadTaskViewPreferences()).toEqual(taskViewDefaults);
+    expect(loadTaskViewPreferences({
+      getItem: () => { throw new Error("storage disabled"); },
+      setItem: () => {},
+    })).toEqual(taskViewDefaults);
+    expect(saveTaskViewPreferences(taskViewDefaults, {
+      getItem: () => null,
+      setItem: () => { throw new Error("quota exceeded"); },
+    })).toBeUndefined();
   });
 });
 

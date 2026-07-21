@@ -36,11 +36,14 @@ import {
 } from "./task-creation-preferences";
 import {
   filterTasks,
+  loadTaskViewPreferences,
   parseTaskViewSearchParams,
+  saveTaskViewPreferences,
   taskFields,
   taskProjectOptions,
   taskViewSearchParams,
   taskViewSearchParamsAreCanonical,
+  taskViewSearchParamsHaveOwnedKeys,
   type TaskField,
   type TaskProjectOption,
   type TaskViewPreferences,
@@ -530,6 +533,10 @@ function ProjectForm(props: {
 
 function Tasks() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const rememberedSearchParams = taskViewSearchParams(loadTaskViewPreferences());
+  const [restoreRememberedView, setRestoreRememberedView] = createSignal(
+    !taskViewSearchParamsHaveOwnedKeys(searchParams),
+  );
   const [data, { refetch }] = createResource(async () => {
     const [tasks, projects] = await Promise.all([
       get<TaskListResponse>("/api/tasks"), get<{ projects: Project[] }>("/api/projects"),
@@ -541,21 +548,27 @@ function Tasks() {
   liveTaskRows(() => data()?.checkpointEventId, refetch);
   const projectOptions = createMemo(() => taskProjectOptions(data()?.tasks ?? [], data()?.projects ?? []));
   const preferences = createMemo(() => parseTaskViewSearchParams(
-    searchParams,
+    restoreRememberedView() ? rememberedSearchParams : searchParams,
     data() ? projectOptions().map((project) => project.id) : undefined,
   ));
   const updateView = (updates: Partial<TaskViewPreferences>) => {
-    setSearchParams(taskViewSearchParams({ ...preferences(), ...updates }));
+    const updated = { ...preferences(), ...updates };
+    setRestoreRememberedView(false);
+    saveTaskViewPreferences(updated);
+    setSearchParams(taskViewSearchParams(updated));
   };
   const clearFilters = () => updateView({ statuses: [], projectIds: [] });
   const filtered = createMemo(() => filterTasks(data()?.tasks ?? [], preferences()));
   const activeFilterCount = createMemo(() => preferences().statuses.length + preferences().projectIds.length);
   createEffect(() => {
     if (!data()) return;
-    const canonical = taskViewSearchParams(preferences());
+    const current = preferences();
+    const canonical = taskViewSearchParams(current);
+    if (restoreRememberedView()) setRestoreRememberedView(false);
     if (!taskViewSearchParamsAreCanonical(searchParams, canonical)) {
       setSearchParams(canonical, { replace: true });
     }
+    saveTaskViewPreferences(current);
   });
   const groups = createMemo(() => {
     const value = data();
@@ -783,7 +796,7 @@ function TaskView() {
   const params = useParams();
   const navigate = useNavigate();
   const [data, { refetch }] = createResource(() => get<TaskDetail>(`/api/tasks/${params.task}`));
-  liveRefetch(["comment.created", "comment.deleted", "reaction.updated"], refetch);
+  liveTaskRows(() => data()?.checkpointEventId, refetch);
   const [options] = createResource(async () => {
     const [projects, tasks] = await Promise.all([
       get<{ projects: Project[] }>("/api/projects"), get<TaskListResponse>("/api/tasks"),
@@ -832,6 +845,7 @@ function TaskView() {
                 })}>Delete task</button>
               </aside>
             </div>
+            <TaskWorkflowRuns runs={current().workflowRuns} />
             <div class="split lower">
               <section>
                 <SectionTitle title="Comments" />
@@ -844,6 +858,26 @@ function TaskView() {
         }}
       </Load>
     </div>
+  );
+}
+
+function TaskWorkflowRuns(props: { runs: TaskWorkflowRun[] }) {
+  return (
+    <section class="task-workflow-runs">
+      <SectionTitle title="Workflow runs" />
+      <Show when={props.runs.length} fallback={<Empty>No workflow runs for this task.</Empty>}>
+        <div class="rows">
+          <For each={props.runs}>{(run) => <A class="task-workflow-run" href={`/history/${run.runId}`}>
+            <span class={`run-status ${run.status}`}>{run.status}</span>
+            <span class="run-title">
+              <strong>{run.workflowName || `Workflow ${run.workflowId}`}</strong>
+              <small>Workflow #{run.workflowId} · Trigger #{run.triggerId}</small>
+            </span>
+            <span class="id">#{run.runId}</span>
+          </A>}</For>
+        </div>
+      </Show>
+    </section>
   );
 }
 
@@ -2008,6 +2042,7 @@ function liveRefetch(types: string[], refetch: () => unknown) {
 function liveTaskRows(checkpoint: () => number | undefined, refetch: () => unknown) {
   const types = [
     "task.created", "task.updated", "task.deleted", "comment.created", "comment.deleted",
+    "reaction.updated",
     "workflow.run.started", "workflow.run.waiting", "workflow.run.resumed",
     "workflow.run.completed", "workflow.run.failed",
   ];

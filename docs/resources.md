@@ -130,13 +130,13 @@ shape. The list and project-detail response also includes
 
 `commentCount` counts all active comments related to the task, including
 roots, replies, user comments, and agent comments. Deleted comments do not
-count, and zero is explicit. `workflowRuns` groups task-associated runs by
-workflow. A group includes every active `running` or `waiting` run. When no
-run in that workflow remains active, it includes only the run with the newest
-run ID in `completed` or `failed` state. Waiting means that a human gate has
-suspended the run; completed reports workflow lifecycle completion and does
-not imply that the workflow changed the task. Workflow groups sort by workflow
-ID, and concurrent runs sort by run ID. Empty summaries are `[]`.
+count, and zero is explicit. `workflowRuns` includes every task-associated
+run, including earlier terminal runs followed by a retry or no-op success.
+Waiting means that a human gate has suspended the run; completed reports
+workflow lifecycle completion and does not imply that the workflow changed
+the task. Runs sort by workflow ID and then run ID. Empty summaries are `[]`.
+Task detail returns the same complete `workflowRuns` array and a
+`checkpointEventId` for live updates.
 
 Clients that need live summaries should open
 `GET /api/events/stream?after=<checkpointEventId>` with the checkpoint from
@@ -153,16 +153,18 @@ state from an API response with no tasks.
 
 The complete task-list view lives in the `/tasks` query string. Its owned keys
 are `sort`, `direction`, `group`, repeated `status`, and repeated `project`.
-The bare route means ID descending, no grouping, and no filters, so default
-and empty values are omitted. Status values use the allowed status catalog;
-project values are positive integer IDs available from active projects or
-represented tasks. Repeated statuses follow catalog order, and repeated
-projects sort by ID to keep copied links stable. Invalid, duplicate, and
-unavailable values are removed from the canonical URL without disturbing
+Default and empty values are omitted. Status values use the allowed status
+catalog; project values are positive integer IDs available from active
+projects or represented tasks. Repeated statuses follow catalog order, and
+repeated projects sort by ID to keep copied links stable. Invalid, duplicate,
+and unavailable values are removed from the canonical URL without disturbing
 unrelated query keys. View changes add browser-history entries, so back and
-forward restore earlier filters, sorting, and grouping. This URL contract
-replaces the former `factory.tasks.view` browser-storage preference. Live
-task, comment, and workflow-run refetches keep applying the current URL view.
+forward restore earlier filters, sorting, and grouping. The browser also
+saves the latest complete view under `factory.tasks.view`. Opening a bare
+`/tasks` route on a later visit restores that view and writes its canonical
+query parameters. An explicit task-view query takes priority and becomes the
+new saved view. Live task, comment, reaction, and workflow-run refetches keep
+applying the current view.
 
 After a task is created successfully, the web application also remembers its
 project in the browser. Later task creation forms restore that project while
@@ -176,6 +178,9 @@ full `PUT`.
 
 The web task detail is rendered by default and enters its form only after
 selecting **Edit task**. Save persists the task; cancel discards the form.
+It lists every associated workflow run between the task metadata and comments.
+Each row links to run history and updates when the run starts, waits, resumes,
+completes, or fails.
 Task titles use inline Markdown, while descriptions and comments use full
 trusted Markdown or HTML with syntax-highlighted code blocks. Links created
 from Markdown syntax open in a new tab with `noreferrer`; trusted raw HTML

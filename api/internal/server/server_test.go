@@ -310,6 +310,16 @@ func TestTaskListSummariesProjectCommentsAndWorkflowRuns(t *testing.T) {
 	wire.Publish(state.WorkflowRunFailed, state.WorkflowRunData{
 		TriggerID: 60, SourceEventID: secondUpdate.ID, Error: "failed",
 	})
+	verifyRetrySource, _ := wire.Publish(state.TaskUpdated, state.TaskData{
+		ID: task.ID, Title: "Improve the list", Status: state.InProgress, ProjectID: project.ID,
+	})
+	verifyRetry, _ := wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
+		TriggerID: 60, WorkflowID: verify.ID, WorkflowName: "verify",
+		SourceEventID: verifyRetrySource.ID,
+	})
+	wire.Publish(state.WorkflowRunCompleted, state.WorkflowRunData{
+		TriggerID: 60, SourceEventID: verifyRetrySource.ID, Output: "no changes needed",
+	})
 	custom, _ := wire.Publish("release.ready", map[string]int64{"taskId": task.ID})
 	wire.Publish(state.WorkflowRunStarted, state.WorkflowRunData{
 		TriggerID: 70, WorkflowID: review.ID, WorkflowName: "review", SourceEventID: custom.ID,
@@ -327,9 +337,11 @@ func TestTaskListSummariesProjectCommentsAndWorkflowRuns(t *testing.T) {
 		t.Fatalf("comment count = %d, want 3", active.CommentCount)
 	}
 	wantRuns := []taskWorkflowRun{
+		{RunID: createdRun.ID, TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", Status: "completed"},
 		{RunID: firstActive.ID, TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", Status: "running"},
 		{RunID: secondActive.ID, TriggerID: 50, WorkflowID: review.ID, WorkflowName: "review", Status: "waiting"},
 		{RunID: verifyRun.ID, TriggerID: 60, WorkflowID: verify.ID, WorkflowName: "verify", Status: "failed"},
+		{RunID: verifyRetry.ID, TriggerID: 60, WorkflowID: verify.ID, WorkflowName: "verify", Status: "completed"},
 	}
 	if !reflect.DeepEqual(active.WorkflowRuns, wantRuns) {
 		t.Fatalf("active workflow runs = %#v, want %#v", active.WorkflowRuns, wantRuns)
@@ -351,27 +363,38 @@ func TestTaskListSummariesProjectCommentsAndWorkflowRuns(t *testing.T) {
 		projectDetail.Tasks[1].ID != emptyTask.ID {
 		t.Fatalf("project task order = %#v", projectDetail.Tasks)
 	}
+	taskDetailResponse := requestJSON(t, handler, http.MethodGet, fmt.Sprintf("/api/tasks/%d", task.ID), "")
+	var taskDetail struct {
+		WorkflowRuns      []taskWorkflowRun `json:"workflowRuns"`
+		CheckpointEventID int64             `json:"checkpointEventId"`
+	}
+	if taskDetailResponse.Code != http.StatusOK ||
+		json.Unmarshal(taskDetailResponse.Body.Bytes(), &taskDetail) != nil ||
+		taskDetail.CheckpointEventID != global.CheckpointEventID ||
+		!reflect.DeepEqual(taskDetail.WorkflowRuns, wantRuns) {
+		t.Fatalf("task detail workflow runs = %d %s", taskDetailResponse.Code, taskDetailResponse.Body)
+	}
 
 	wire.Publish(state.WorkflowRunResumed, state.WorkflowRunStateData{RunID: secondActive.ID})
 	resumed := findTask(readList("/api/tasks").Tasks, task.ID)
-	if len(resumed.WorkflowRuns) < 2 || resumed.WorkflowRuns[1].Status != "running" {
+	if len(resumed.WorkflowRuns) != len(wantRuns) || resumed.WorkflowRuns[2].Status != "running" {
 		t.Fatalf("resumed workflow runs = %#v", resumed.WorkflowRuns)
 	}
 	wire.Publish(state.WorkflowRunCompleted, state.WorkflowRunData{
 		TriggerID: 50, SourceEventID: firstUpdate.ID, Output: "done",
 	})
 	remaining := findTask(readList("/api/tasks").Tasks, task.ID)
-	if len(remaining.WorkflowRuns) < 1 || remaining.WorkflowRuns[0].RunID != secondActive.ID ||
-		remaining.WorkflowRuns[0].Status != "running" {
-		t.Fatalf("remaining active workflow runs = %#v", remaining.WorkflowRuns)
+	if len(remaining.WorkflowRuns) != len(wantRuns) ||
+		remaining.WorkflowRuns[1].Status != "completed" || remaining.WorkflowRuns[2].Status != "running" {
+		t.Fatalf("updated workflow runs = %#v", remaining.WorkflowRuns)
 	}
 	wire.Publish(state.WorkflowRunFailed, state.WorkflowRunData{
 		TriggerID: 50, SourceEventID: secondUpdate.ID, Error: "failed",
 	})
 	failed := findTask(readList("/api/tasks").Tasks, task.ID)
-	if len(failed.WorkflowRuns) < 1 || failed.WorkflowRuns[0].RunID != secondActive.ID ||
-		failed.WorkflowRuns[0].Status != "failed" {
-		t.Fatalf("failed terminal fallback = %#v", failed.WorkflowRuns)
+	if len(failed.WorkflowRuns) != len(wantRuns) || failed.WorkflowRuns[2].RunID != secondActive.ID ||
+		failed.WorkflowRuns[2].Status != "failed" {
+		t.Fatalf("failed workflow runs = %#v", failed.WorkflowRuns)
 	}
 }
 

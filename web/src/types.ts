@@ -184,7 +184,13 @@ export type SettingsDetail = { settings: Settings; harnesses: HarnessOption[] };
 export type HistoryListResponse = { history: WorkflowRun[]; checkpointEventId: number };
 export type HistoryDetail = { run: WorkflowRun; events: WorkflowRunEvent[] };
 export type ProjectDetail = { project: Project; tasks: TaskSummary[]; checkpointEventId: number };
-export type TaskDetail = { task: Task; comments: Comment[]; artifacts: Artifact[] };
+export type TaskDetail = {
+  task: Task;
+  comments: Comment[];
+  artifacts: Artifact[];
+  workflowRuns: TaskWorkflowRun[];
+  checkpointEventId: number;
+};
 export type CommentDetail = { comment: Comment; replies: Comment[]; artifacts: Artifact[] };
 export type WorkflowDetail = {
   workflow: Workflow;
