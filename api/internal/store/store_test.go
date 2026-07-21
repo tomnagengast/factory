@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -118,6 +119,101 @@ func TestPendingTriggerUsesEventBoundaryAndClaim(t *testing.T) {
 	if _, _, _, found, err := store.PendingTrigger(); err != nil || found {
 		t.Fatalf("claimed trigger pending = %v, %v", found, err)
 	}
+}
+
+func TestHistoryFiltersAndPagesWorkflowRunProjection(t *testing.T) {
+	store := openTestStore(t)
+	workflow, err := store.Append(state.WorkflowDiscovered, state.WorkflowData{Name: "history-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := []string{"running", "waiting", "failed", "completed"}
+	expected := make(map[string][]int64, len(statuses))
+	for index := 0; index < 26; index++ {
+		for statusIndex, status := range statuses {
+			source, err := store.Append("history.source", map[string]int{"index": index, "status": statusIndex})
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim := state.WorkflowRunData{
+				TriggerID: int64(statusIndex + 1), WorkflowID: workflow.ID,
+				WorkflowName: "history-test", SourceEventID: source.ID,
+			}
+			started, err := store.Append(state.WorkflowRunStarted, claim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected[status] = append(expected[status], started.ID)
+			switch status {
+			case "waiting":
+				_, err = store.Append(state.WorkflowRunWaiting, state.WorkflowRunStateData{RunID: started.ID})
+			case "failed":
+				_, err = store.Append(state.WorkflowRunFailed, claim)
+			case "completed":
+				if _, err = store.Append(state.WorkflowRunWaiting, state.WorkflowRunStateData{RunID: started.ID}); err == nil {
+					_, err = store.Append(state.WorkflowRunResumed, state.WorkflowRunStateData{RunID: started.ID})
+				}
+				if err == nil {
+					_, err = store.Append(state.WorkflowRunCompleted, claim)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	checkpoint, err := store.LastID()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, status := range statuses {
+		want := slices.Clone(expected[status])
+		slices.Reverse(want)
+		page, pageCheckpoint, err := store.History(status, 0, 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pageCheckpoint != checkpoint {
+			t.Fatalf("%s checkpoint = %d, want %d", status, pageCheckpoint, checkpoint)
+		}
+		if got := runIDs(page); !slices.Equal(got, want[:5]) {
+			t.Fatalf("%s newest IDs = %v, want %v", status, got, want[:5])
+		}
+		for _, run := range page {
+			if run.Status != status {
+				t.Fatalf("%s query returned run %d with status %q", status, run.ID, run.Status)
+			}
+		}
+
+		first, _, err := store.History(status, 0, 25)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, _, err := store.History(status, first[len(first)-1].ID, 25)
+		if err != nil {
+			t.Fatal(err)
+		}
+		combined := append(runIDs(first), runIDs(second)...)
+		if !slices.Equal(combined, want) {
+			t.Fatalf("%s paged IDs = %v, want %v", status, combined, want)
+		}
+		seen := make(map[int64]bool, len(combined))
+		for _, id := range combined {
+			if seen[id] {
+				t.Fatalf("%s pagination duplicated run %d", status, id)
+			}
+			seen[id] = true
+		}
+	}
+}
+
+func runIDs(runs []state.WorkflowRun) []int64 {
+	ids := make([]int64, len(runs))
+	for index, run := range runs {
+		ids[index] = run.ID
+	}
+	return ids
 }
 
 func openTestStore(t *testing.T) *Store {

@@ -308,17 +308,22 @@ prompt, or another task comment appends `reaction.updated`, not
 `comment.created`. The coordinator selects only a later active user task
 comment at the root or a direct reply to the gate prompt.
 
-`/history` lists every projected run and `/history/{id}` displays the distinct
-events chronologically in contiguous phase groups. Run content renders as
-Markdown: prose wraps within the page, while code blocks and tables scroll
-horizontally. Links created from Markdown syntax open in a new tab with
-`noreferrer`; trusted raw HTML keeps its authored link behavior. A
-task-triggered run links back to its task, including a
+`/history` groups the newest five projected runs under Running, Waiting,
+Failed, and Completed, in that order. Each section links to its canonical
+status path, which loads matching runs newest first in 25-run pages as the
+reader scrolls. Lifecycle events move a run between these views without a page
+reload. Every row links straight to its numeric `/history/{id}` detail.
+
+Run detail displays distinct events chronologically in contiguous phase
+groups. Run content renders as Markdown: prose wraps within the page, while
+code blocks and tables scroll horizontally. Links created from Markdown syntax
+open in a new tab with `noreferrer`; trusted raw HTML keeps its authored link
+behavior. A task-triggered run links back to its task, including a
 `task.deleted` run because the task remains replayable after soft deletion.
 The run detail opens at its latest event or final result and follows later
 content while the reader remains at the bottom. Scrolling up pauses that
-following until the reader returns to the bottom. Both views update from the
-same server-sent event stream as the event wire.
+following until the reader returns to the bottom. History views update from
+the same server-sent event stream as the event wire.
 
 ### Task event triggers
 

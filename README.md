@@ -108,13 +108,18 @@ Immutable media blobs default to `~/.local/share/factory/media`.
 /workflows                             discovered workflow list
 /workflows/new                         create through agent chat
 /workflows/:workflow                   chat beside the live workflow source
-/history                               live, waiting, and completed workflow runs
+/history                               running, waiting, failed, and completed run overview
+/history/running                       running runs, loaded 25 at a time
+/history/waiting                       waiting runs, loaded 25 at a time
+/history/failed                        failed runs, loaded 25 at a time
+/history/completed                     completed runs, loaded 25 at a time
 /history/:item                         phase-grouped semantic event timeline
 /settings                              select harness, model, reasoning, and run capacity
 ```
 
-All route IDs are integers. Deletion is soft and list routes omit deleted
-records.
+Resource and detail route IDs are integers. The four history status routes use
+the canonical persisted status names. Deletion is soft and list routes omit
+deleted records.
 
 ## Resource API
 

@@ -180,10 +180,12 @@ The coordinator records progress back on the same wire:
 - cron ticks as targeted `cron` events.
 
 The event page therefore shows both user intake and the coordinator's response.
-The history pages project those wire events into live, waiting, and completed
-workflow runs without a separate log store. Each semantic runtime event
-remains one distinct wire record; the projection never collapses lifecycle
-pairs.
+The history overview projects those wire events into Running, Waiting, Failed,
+and Completed sections, in that order, with five runs per section. Each linked
+status page reads 25 matching rows at a time from the indexed SQLite
+projection. It does not load and filter the full run set in the browser or use
+a separate log store. Each semantic runtime event remains one distinct wire
+record; the projection never collapses lifecycle pairs.
 
 Authoring comments use the same rule. Reasoning, tool use, tool output, agent
 messages, errors, and unknown semantic harness events remain distinct and in
