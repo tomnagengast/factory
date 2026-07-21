@@ -111,11 +111,14 @@ that following until the reader returns to the bottom. Refreshing the page
 replays the same comments in wire order.
 
 Use `/settings` or `factory settings update` to select the harness, model,
-reasoning level, and workflow capacity. The API supplies the supported option
-catalog, so changing a harness also changes the available models and reasoning
-levels. Capacity accepts zero through ten and defaults to six. The newest
-`settings.updated` event applies when the coordinator next chooses work. It
-does not alter a process already running.
+reasoning level, workflow capacity, and ordered canned reactions. The API
+supplies the supported harness option catalog, so changing a harness also
+changes the available models and reasoning levels. Capacity accepts zero
+through ten and defaults to six. Reactions default to
+`👍, 👎, ❤️, 🎉, 😂, 👀` and the web form edits one exact value per line. The
+newest `settings.updated` event applies when the coordinator next chooses work
+and updates open task and comment reaction controls. It does not alter a
+process already running.
 
 Revising a discovered user workflow creates or updates the Factory-owned
 local copy. The original resolved source is provided to the agent as context,

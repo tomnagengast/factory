@@ -1,5 +1,6 @@
-import { createMemo, createResource, createSignal, For } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For } from "solid-js";
 import { get, mutation, put } from "./api";
+import { parseReactionEmojis, reactionEmojisText } from "./reactions";
 import type { SettingsDetail } from "./types";
 import { FormFooter, Load, PageHeader } from "./ui";
 
@@ -11,7 +12,7 @@ export function SettingsPage() {
       <PageHeader
         eyebrow="Factory"
         title="Settings"
-        description="Harness selection applies to new work. Workflow capacity controls how many triggered runs may execute at once."
+        description="Choose the agent harness, workflow capacity, and canned reactions used across tasks and comments."
       />
       <Load data={data} error={() => data.error}>
         {(value) => (
@@ -39,6 +40,8 @@ function SettingsForm(props: {
   const [model, setModel] = createSignal(props.detail.settings.model);
   const [reasoning, setReasoning] = createSignal(props.detail.settings.reasoning);
   const [workflowCapacity, setWorkflowCapacity] = createSignal(props.detail.settings.workflowCapacity);
+  const [reactionEmojis, setReactionEmojis] = createSignal(reactionEmojisText(props.detail.settings.reactionEmojis));
+  createEffect(() => setReactionEmojis(reactionEmojisText(props.detail.settings.reactionEmojis)));
   const selectedHarness = createMemo(() =>
     props.detail.harnesses.find((option) => option.id === harness()) ?? props.detail.harnesses[0]);
   const selectedModel = createMemo(() =>
@@ -60,6 +63,7 @@ function SettingsForm(props: {
       props.onSave({
         harness: harness(), model: model(), reasoning: reasoning(),
         workflowCapacity: workflowCapacity(),
+        reactionEmojis: parseReactionEmojis(reactionEmojis()),
       });
     }}>
       <label>Harness<select name="harness" value={harness()}
@@ -78,6 +82,10 @@ function SettingsForm(props: {
         value={workflowCapacity()}
         onInput={(event) => setWorkflowCapacity(event.currentTarget.valueAsNumber)} />
         <small>Maximum triggered workflow runs at once. Set to 0 to pause new runs.</small>
+      </label>
+      <label>Canned reactions<textarea class="reaction-emojis-input" name="reactionEmojis" rows="6" required
+        value={reactionEmojis()} onInput={(event) => setReactionEmojis(event.currentTarget.value)} />
+        <small>Enter one value per line. Order controls reaction choices across tasks and comments.</small>
       </label>
       <FormFooter pending={props.pending} error={props.error} label="Save settings" />
     </form>

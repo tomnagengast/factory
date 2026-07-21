@@ -31,10 +31,11 @@ func (s *Server) settings(writer http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) settingsUpdate(writer http.ResponseWriter, request *http.Request) {
 	var input struct {
-		Harness          string `json:"harness"`
-		Model            string `json:"model"`
-		Reasoning        string `json:"reasoning"`
-		WorkflowCapacity *int   `json:"workflowCapacity"`
+		Harness          string    `json:"harness"`
+		Model            string    `json:"model"`
+		Reasoning        string    `json:"reasoning"`
+		WorkflowCapacity *int      `json:"workflowCapacity"`
+		ReactionEmojis   *[]string `json:"reactionEmojis"`
 	}
 	if err := decodeJSON(request, &input); err != nil {
 		writeError(writer, http.StatusBadRequest, err)
@@ -44,15 +45,20 @@ func (s *Server) settingsUpdate(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusBadRequest, errors.New("workflow capacity is required"))
 		return
 	}
+	if input.ReactionEmojis == nil {
+		writeError(writer, http.StatusBadRequest, errors.New("reaction emojis are required"))
+		return
+	}
 	settings := state.Settings{
 		Harness: input.Harness, Model: input.Model, Reasoning: input.Reasoning,
 		WorkflowCapacity: *input.WorkflowCapacity,
+		ReactionEmojis:   slices.Clone(*input.ReactionEmojis),
 	}
 	if !state.ValidSettings(settings) {
 		writeError(
 			writer,
 			http.StatusBadRequest,
-			errors.New("unknown harness, model, reasoning level, or workflow capacity"),
+			errors.New("unknown harness, model, reasoning level, workflow capacity, or reaction emoji settings"),
 		)
 		return
 	}
@@ -480,10 +486,6 @@ func (s *Server) reactionUpdate(
 		writeError(writer, http.StatusBadRequest, errors.New("reaction active state is required"))
 		return
 	}
-	if !state.ValidReactionEmoji(input.Emoji) {
-		writeError(writer, http.StatusBadRequest, errors.New("unsupported reaction emoji"))
-		return
-	}
 	data := state.ReactionUpdatedData{
 		TargetType: targetType, TargetID: targetID, Emoji: input.Emoji, Active: *input.Active,
 	}
@@ -491,7 +493,7 @@ func (s *Server) reactionUpdate(
 		if request.Context().Err() != nil {
 			return
 		}
-		checkpoint, status, err := s.reactionTarget(targetType, targetID)
+		checkpoint, status, err := s.reactionTarget(targetType, targetID, input.Emoji, *input.Active)
 		if err != nil {
 			writeError(writer, status, err)
 			return
@@ -523,26 +525,34 @@ func (s *Server) reactionUpdate(
 	}
 }
 
-func (s *Server) reactionTarget(targetType string, targetID int64) (int64, int, error) {
-	if targetType == "task" {
-		task, checkpoint, found, err := s.store.TaskWithCheckpoint(targetID)
-		if err != nil {
-			return 0, http.StatusInternalServerError, err
-		}
-		if !found || task.DeletedAt != nil {
-			return 0, http.StatusNotFound, errors.New("task not found")
-		}
-		return checkpoint, 0, nil
-	}
-	comment, checkpoint, found, err := s.store.CommentWithCheckpoint(targetID)
+func (s *Server) reactionTarget(
+	targetType string,
+	targetID int64,
+	emoji string,
+	active bool,
+) (int64, int, error) {
+	target, checkpoint, found, err := s.store.ReactionTargetWithSettings(targetType, targetID)
 	if err != nil {
 		return 0, http.StatusInternalServerError, err
 	}
-	if !found || comment.DeletedAt != nil {
-		return 0, http.StatusNotFound, errors.New("comment not found")
+	var reactions []string
+	if targetType == "task" {
+		if !found || target.Task.DeletedAt != nil {
+			return 0, http.StatusNotFound, errors.New("task not found")
+		}
+		reactions = target.Task.Reactions
+	} else {
+		if !found || target.Comment.DeletedAt != nil {
+			return 0, http.StatusNotFound, errors.New("comment not found")
+		}
+		if target.Comment.RelationType != "task" {
+			return 0, http.StatusBadRequest, errors.New("reactions are supported only on task comments")
+		}
+		reactions = target.Comment.Reactions
 	}
-	if comment.RelationType != "task" {
-		return 0, http.StatusBadRequest, errors.New("reactions are supported only on task comments")
+	configured := state.ReactionEmojiConfigured(target.Settings.ReactionEmojis, emoji)
+	if active && !configured || !active && !configured && !slices.Contains(reactions, emoji) {
+		return 0, http.StatusBadRequest, errors.New("unsupported reaction emoji")
 	}
 	return checkpoint, 0, nil
 }

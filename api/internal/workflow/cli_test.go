@@ -57,8 +57,8 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 		t.Fatalf("unexpected definitions: %#v", definitions)
 	}
 	for _, settings := range []state.Settings{
-		{Harness: state.Codex, Model: "gpt-5.6-sol", Reasoning: "high"},
-		{Harness: state.Claude, Model: "sonnet", Reasoning: "medium"},
+		{Harness: state.Codex, Model: "gpt-5.6-sol", Reasoning: "high", ReactionEmojis: []string{"👍"}},
+		{Harness: state.Claude, Model: "sonnet", Reasoning: "medium", ReactionEmojis: []string{"👍"}},
 	} {
 		var events []Event
 		output, err := cli.Run(context.Background(), RunRequest{
@@ -163,7 +163,7 @@ func TestCLICancelsWorkflowWhenEventCannotBeRecorded(t *testing.T) {
 	}
 	_, err := cli.Run(
 		context.Background(), RunRequest{
-			Source: filepath.Join(directory, "demo.js"), Settings: state.DefaultSettings,
+			Source: filepath.Join(directory, "demo.js"), Settings: state.DefaultSettings(),
 		},
 		func(Event) error { return errors.New("wire unavailable") },
 	)
@@ -200,7 +200,7 @@ func TestCLIResumesFromPriorJournalWithoutForwardingItAgain(t *testing.T) {
 	}
 	var events []Event
 	output, err := cli.Run(context.Background(), RunRequest{
-		Source: filepath.Join(directory, "demo.js"), Settings: state.DefaultSettings,
+		Source: filepath.Join(directory, "demo.js"), Settings: state.DefaultSettings(),
 		Resume: prior,
 	}, func(event Event) error {
 		events = append(events, event)
@@ -241,7 +241,7 @@ func TestCLIReturnsHumanReviewSentinelForExit75(t *testing.T) {
 	}
 	var events []Event
 	_, err := cli.Run(context.Background(), RunRequest{
-		Source: filepath.Join(directory, "demo.js"), Settings: state.DefaultSettings,
+		Source: filepath.Join(directory, "demo.js"), Settings: state.DefaultSettings(),
 	}, func(event Event) error {
 		events = append(events, event)
 		return nil

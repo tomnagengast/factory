@@ -414,6 +414,7 @@ main { min-width: 0; }
   border-radius: var(--radius-panel); background: var(--color-surface);
 }
 .form-panel label, .form-field > label { display: grid; gap: 7px; color: var(--color-text-label); font-size: 12px; font-weight: 700; }
+.reaction-emojis-input { min-height: 150px; resize: vertical; }
 .form-field { display: grid; gap: 7px; }
 input, textarea, select {
   width: 100%; border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); padding: 10px 11px;

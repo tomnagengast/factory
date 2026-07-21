@@ -13,15 +13,15 @@ import {
   uploadMedia,
 } from "./api";
 import { insertMediaMarkup, mediaAccept, mediaFiles, mediaKind, mediaMarkup } from "./media";
-import type { Artifact, Comment, CommentDetail } from "./types";
+import { reactionOptions } from "./reactions";
+import type { Artifact, Comment, CommentDetail, SettingsDetail } from "./types";
 import { date, Empty, Load, Markdown, PageHeader, SectionTitle } from "./ui";
-
-const REACTION_EMOJIS = ["👍", "👎", "❤️", "🎉", "😂", "👀"] as const;
 
 export function ReactionBar(props: {
   targetKind: "task" | "comment";
   targetID: number;
   reactions: string[];
+  configuredEmojis: string[];
   onChange: () => unknown;
   compact?: boolean;
 }) {
@@ -44,7 +44,7 @@ export function ReactionBar(props: {
       <Show when={props.compact} fallback={
         <div classList={{ "reaction-bar": true, pending: action.pending() }}
           role="group" aria-label={`Reactions for ${targetLabel()}`}>
-          <For each={REACTION_EMOJIS}>{(emoji) => reactionButton(emoji)}</For>
+          <For each={reactionOptions(props.configuredEmojis, props.reactions)}>{(emoji) => reactionButton(emoji)}</For>
         </div>
       }>
         <div classList={{ "reaction-bar": true, pending: action.pending() }}
@@ -54,7 +54,7 @@ export function ReactionBar(props: {
               <Smile aria-hidden="true" />
             </summary>
             <div class="reaction-menu-panel" role="group" aria-label={`Choose a reaction for ${targetLabel()}`}>
-              <For each={REACTION_EMOJIS}>{(emoji) => reactionButton(emoji, true)}</For>
+              <For each={props.configuredEmojis}>{(emoji) => reactionButton(emoji, true)}</For>
             </div>
           </details>
           <For each={props.reactions}>{(emoji) => reactionButton(emoji)}</For>
@@ -64,7 +64,12 @@ export function ReactionBar(props: {
     </div>
   );
 }
-export function CommentThread(props: { comments: Comment[]; taskID: number; onChange: () => void }) {
+export function CommentThread(props: {
+  comments: Comment[];
+  taskID: number;
+  configuredEmojis: string[];
+  onChange: () => void;
+}) {
   const roots = () => props.comments.filter((comment) => !comment.parentCommentId);
   const [replyTarget, setReplyTarget] = createSignal<number>();
   createEffect(() => {
@@ -77,6 +82,7 @@ export function CommentThread(props: { comments: Comment[]; taskID: number; onCh
         <div class="comment-thread-list">
           <For each={roots()}>{(root) => <div class="comment-group">
             <CommentBranch comments={props.comments} nodes={[root]} taskID={props.taskID}
+              configuredEmojis={props.configuredEmojis}
               activeReplyID={replyTarget()} onReply={(commentID) =>
                 setReplyTarget((current) => current === commentID ? undefined : commentID)}
               onChange={props.onChange} />
@@ -111,6 +117,7 @@ function CommentEntry(props: {
   taskID: number;
   activeReplyID?: number;
   featured?: boolean;
+  configuredEmojis: string[];
   onReply?: (commentID: number) => void;
   onChange: () => unknown;
   onDeleted?: () => unknown;
@@ -134,7 +141,8 @@ function CommentEntry(props: {
         <Show when={!props.comment.deletedAt}>
           <div class="comment-actions">
             <ReactionBar compact targetKind="comment" targetID={props.comment.id}
-              reactions={props.comment.reactions} onChange={props.onChange} />
+              reactions={props.comment.reactions} configuredEmojis={props.configuredEmojis}
+              onChange={props.onChange} />
             <Show when={props.onReply}>
               <button type="button" classList={{ "comment-action": true, active: replying() }}
                 aria-label={`Reply to comment #${props.comment.id}`} aria-pressed={replying()}
@@ -166,6 +174,7 @@ export function CommentBranch(props: {
   comments: Comment[];
   nodes: Comment[];
   taskID: number;
+  configuredEmojis: string[];
   activeReplyID?: number;
   onReply: (commentID: number) => void;
   onChange: () => unknown;
@@ -176,11 +185,12 @@ export function CommentBranch(props: {
         const replies = () => props.comments.filter((candidate) => candidate.parentCommentId === comment.id);
         return <div class="comment-branch">
           <CommentEntry comment={comment} taskID={props.taskID} activeReplyID={props.activeReplyID}
-            onReply={props.onReply} onChange={props.onChange} />
+            configuredEmojis={props.configuredEmojis} onReply={props.onReply} onChange={props.onChange} />
           <Show when={replies().length}>
             <div class="comment-children">
               <CommentBranch comments={props.comments} nodes={replies()} taskID={props.taskID}
-                activeReplyID={props.activeReplyID} onReply={props.onReply} onChange={props.onChange} />
+                configuredEmojis={props.configuredEmojis} activeReplyID={props.activeReplyID}
+                onReply={props.onReply} onChange={props.onChange} />
             </div>
           </Show>
         </div>;
@@ -369,30 +379,38 @@ export function CommentView() {
   const params = useParams();
   const navigate = useNavigate();
   const [data, { refetch }] = createResource(() => get<CommentDetail>(`/api/comments/${params.comment}`));
+  const [settings, { refetch: refetchSettings }] = createResource(() => get<SettingsDetail>("/api/settings"));
   liveRefetch(["comment.deleted", "reaction.updated"], refetch);
+  liveRefetch(["settings.updated"], refetchSettings);
   return (
     <div class="page narrow">
-      <Load data={data} error={() => data.error}>
-        {(value) => {
-          const current = () => data() ?? value;
-          return <>
-            <PageHeader eyebrow={`Task ${params.task}`} title={`Comment ${current().comment.id}`}
-              actions={<A class="button" href={`/tasks/${params.task}`}>Back to task</A>} />
-            <div class="comment-group featured">
-              <CommentEntry featured comment={current().comment} taskID={Number(params.task)} onChange={refetch}
-                onDeleted={() => navigate(`/tasks/${params.task}`)} />
-            </div>
-            <Show when={current().replies.length}>
-              <section><SectionTitle title="Direct replies" />
-                <div class="comment-group comment-detail-replies">
-                  <For each={current().replies}>{(reply) => <CommentEntry comment={reply}
-                    taskID={Number(params.task)} onChange={refetch} />}</For>
-                </div>
-              </section>
-            </Show>
-            <ArtifactPanel artifacts={current().artifacts} relationType="comment" relationID={current().comment.id} onChange={refetch} />
-          </>;
-        }}
+      <Load data={settings} error={() => settings.error}>
+        {(settingsValue) => <Load data={data} error={() => data.error}>
+          {(value) => {
+            const current = () => data() ?? value;
+            const currentSettings = () => settings() ?? settingsValue;
+            return <>
+              <PageHeader eyebrow={`Task ${params.task}`} title={`Comment ${current().comment.id}`}
+                actions={<A class="button" href={`/tasks/${params.task}`}>Back to task</A>} />
+              <div class="comment-group featured">
+                <CommentEntry featured comment={current().comment} taskID={Number(params.task)}
+                  configuredEmojis={currentSettings().settings.reactionEmojis} onChange={refetch}
+                  onDeleted={() => navigate(`/tasks/${params.task}`)} />
+              </div>
+              <Show when={current().replies.length}>
+                <section><SectionTitle title="Direct replies" />
+                  <div class="comment-group comment-detail-replies">
+                    <For each={current().replies}>{(reply) => <CommentEntry comment={reply}
+                      taskID={Number(params.task)} configuredEmojis={currentSettings().settings.reactionEmojis}
+                      onChange={refetch} />}</For>
+                  </div>
+                </section>
+              </Show>
+              <ArtifactPanel artifacts={current().artifacts} relationType="comment"
+                relationID={current().comment.id} onChange={refetch} />
+            </>;
+          }}
+        </Load>}
       </Load>
     </div>
   );

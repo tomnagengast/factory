@@ -3,7 +3,9 @@ package state
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -81,12 +83,6 @@ const (
 )
 
 var TaskStatuses = []TaskStatus{Backlog, Todo, InProgress, InReview, Done, Canceled}
-
-var ReactionEmojis = []string{"👍", "👎", "❤️", "🎉", "😂", "👀"}
-
-func ValidReactionEmoji(emoji string) bool {
-	return slices.Contains(ReactionEmojis, emoji)
-}
 
 type Task struct {
 	Record
@@ -209,10 +205,11 @@ type WorkflowRunEvent struct {
 }
 
 type Settings struct {
-	Harness          string `json:"harness"`
-	Model            string `json:"model"`
-	Reasoning        string `json:"reasoning"`
-	WorkflowCapacity int    `json:"workflowCapacity"`
+	Harness          string   `json:"harness"`
+	Model            string   `json:"model"`
+	Reasoning        string   `json:"reasoning"`
+	WorkflowCapacity int      `json:"workflowCapacity"`
+	ReactionEmojis   []string `json:"reactionEmojis"`
 }
 
 type ReleaseIdentity struct {
@@ -245,33 +242,40 @@ type HarnessOption struct {
 	Models []ModelOption `json:"models"`
 }
 
-var (
-	DefaultSettings = Settings{
+var Harnesses = []HarnessOption{
+	{ID: Codex, Name: "Codex", Models: []ModelOption{
+		{ID: "gpt-5.6-sol", Reasoning: []string{"low", "medium", "high", "xhigh", "max", "ultra"}, DefaultReasoning: "low"},
+		{ID: "gpt-5.6-terra", Reasoning: []string{"low", "medium", "high", "xhigh", "max", "ultra"}, DefaultReasoning: "medium"},
+		{ID: "gpt-5.6-luna", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "medium"},
+		{ID: "gpt-5.5", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "medium"},
+		{ID: "gpt-5.4", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "medium"},
+		{ID: "gpt-5.4-mini", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "medium"},
+		{ID: "gpt-5.3-codex-spark", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "high"},
+	}},
+	{ID: Claude, Name: "Claude Code", Models: []ModelOption{
+		{ID: "sonnet", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "high"},
+		{ID: "fable", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "high"},
+		{ID: "opus", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "high"},
+		{ID: "haiku", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "medium"},
+	}},
+}
+
+func DefaultSettings() Settings {
+	return Settings{
 		Harness: Codex, Model: "gpt-5.6-sol", Reasoning: "low",
 		WorkflowCapacity: DefaultWorkflowCapacity,
+		ReactionEmojis:   []string{"👍", "👎", "❤️", "🎉", "😂", "👀"},
 	}
-	Harnesses = []HarnessOption{
-		{ID: Codex, Name: "Codex", Models: []ModelOption{
-			{ID: "gpt-5.6-sol", Reasoning: []string{"low", "medium", "high", "xhigh", "max", "ultra"}, DefaultReasoning: "low"},
-			{ID: "gpt-5.6-terra", Reasoning: []string{"low", "medium", "high", "xhigh", "max", "ultra"}, DefaultReasoning: "medium"},
-			{ID: "gpt-5.6-luna", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "medium"},
-			{ID: "gpt-5.5", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "medium"},
-			{ID: "gpt-5.4", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "medium"},
-			{ID: "gpt-5.4-mini", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "medium"},
-			{ID: "gpt-5.3-codex-spark", Reasoning: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "high"},
-		}},
-		{ID: Claude, Name: "Claude Code", Models: []ModelOption{
-			{ID: "sonnet", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "high"},
-			{ID: "fable", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "high"},
-			{ID: "opus", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "high"},
-			{ID: "haiku", Reasoning: []string{"low", "medium", "high", "xhigh", "max"}, DefaultReasoning: "medium"},
-		}},
-	}
-)
+}
+
+func ReactionEmojiConfigured(emojis []string, emoji string) bool {
+	return slices.Contains(emojis, emoji)
+}
 
 func ValidSettings(settings Settings) bool {
 	if settings.WorkflowCapacity < MinWorkflowCapacity ||
-		settings.WorkflowCapacity > MaxWorkflowCapacity {
+		settings.WorkflowCapacity > MaxWorkflowCapacity ||
+		!validReactionEmojis(settings.ReactionEmojis) {
 		return false
 	}
 	for _, harness := range Harnesses {
@@ -285,6 +289,23 @@ func ValidSettings(settings Settings) bool {
 		}
 	}
 	return false
+}
+
+func validReactionEmojis(emojis []string) bool {
+	if len(emojis) == 0 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(emojis))
+	for _, emoji := range emojis {
+		if emoji == "" || !utf8.ValidString(emoji) || emoji != strings.TrimSpace(emoji) || strings.ContainsAny(emoji, "\r\n") {
+			return false
+		}
+		if _, found := seen[emoji]; found {
+			return false
+		}
+		seen[emoji] = struct{}{}
+	}
+	return true
 }
 
 type ProjectData struct {

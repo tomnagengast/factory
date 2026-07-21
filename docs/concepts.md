@@ -85,10 +85,12 @@ media metadata is not trusted for file access or response headers. Retrieval
 rechecks the hash, direct-child path, regular-file status, content type, size,
 and safe inline filename before serving a blob.
 
-Agent settings select a harness, model, reasoning level, and workflow
-capacity. They default to Codex and six concurrent workflow runs, and change
-through one `settings.updated` event. New authoring sessions and trigger runs
-read the latest projection when they start.
+Agent settings select a harness, model, reasoning level, workflow capacity,
+and one ordered set of canned reactions. They default to Codex, six concurrent
+workflow runs, and `👍, 👎, ❤️, 🎉, 😂, 👀`. One `settings.updated` event replaces
+the complete value. New authoring sessions and trigger runs read the latest
+projection when they start, while task and comment controls use the latest
+reaction set.
 
 Every project has a required local path. The API creates that directory when
 the project is created or updated.
@@ -100,11 +102,12 @@ This gives Factory a deliberately simple write path:
 3. return the projected resource.
 
 Reaction writes use the same path with one ordering guard. A client supplies
-an exact emoji and desired `active` state. Factory reads the target and event
-checkpoint in one transaction, then appends `reaction.updated` only if that
-checkpoint is still current. If another fact landed first, Factory reads the
-target again. Every accepted request remains a fact, including one that
-repeats the current desired state.
+an exact value and desired `active` state. Factory reads the target, settings,
+and event checkpoint in one transaction, then appends `reaction.updated` only
+if that checkpoint is still current. If another fact landed first, Factory
+reads all three again. Additions must use a currently configured value. A
+removed value remains clearable while active. Every accepted request remains
+a fact, including one that repeats the current desired state.
 
 Deletes are soft. A deletion event sets `deletedAt`; list routes hide deleted
 records, but historical events remain on the wire.
@@ -127,9 +130,12 @@ editing a task does not automatically invoke an agent. The task intake
 mechanism is simply the shared API and wire path through which humans and
 agents record work.
 
-Tasks and task comments can also carry any subset of the fixed reaction
-palette. Reactions use one shared implicit reactor and project in palette order.
-They remain separate from comment records, so reacting to an agent gate prompt
+Tasks and task comments can also carry any subset of the configured reaction
+set. Reactions use one shared implicit reactor. Projections put configured
+active values in current settings order, followed by active values removed
+from settings in their prior relative order. A settings update reorders but
+does not delete those values or change task and comment timestamps. Reactions
+remain separate from comment records, so reacting to an agent gate prompt
 cannot become a human-review response.
 
 In the web application, local images, animated GIFs, and browser-playable

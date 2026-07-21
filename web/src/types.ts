@@ -169,6 +169,7 @@ export type Settings = {
   model: string;
   reasoning: string;
   workflowCapacity: number;
+  reactionEmojis: string[];
 };
 
 export type ModelOption = {

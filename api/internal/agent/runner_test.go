@@ -20,7 +20,7 @@ func TestCommandRunnerNormalizesSelectedHarness(t *testing.T) {
 		final    string
 	}{
 		{
-			settings: state.Settings{Harness: state.Codex, Model: "gpt-5.6-sol", Reasoning: "high"},
+			settings: state.Settings{Harness: state.Codex, Model: "gpt-5.6-sol", Reasoning: "high", ReactionEmojis: []string{"👍"}},
 			stream: strings.Join([]string{
 				`{"type":"thread.started","thread_id":"thread-1"}`,
 				`{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"I will inspect the workflow."}}`,
@@ -41,7 +41,7 @@ func TestCommandRunnerNormalizesSelectedHarness(t *testing.T) {
 			final: "Created and validated the workflow.",
 		},
 		{
-			settings: state.Settings{Harness: state.Claude, Model: "sonnet", Reasoning: "medium"},
+			settings: state.Settings{Harness: state.Claude, Model: "sonnet", Reasoning: "medium", ReactionEmojis: []string{"👍"}},
 			stream: strings.Join([]string{
 				`{"type":"system","subtype":"init"}`,
 				`{"type":"system","subtype":"api_retry","attempt":2}`,
@@ -133,7 +133,7 @@ func TestCommandRunnerEmitsBeforeProcessExits(t *testing.T) {
 	finished := make(chan error, 1)
 	go func() {
 		_, err := testRunner(directory, command, filepath.Join(directory, "factory")).Run(
-			context.Background(), state.DefaultSettings, "Build it",
+			context.Background(), state.DefaultSettings(), "Build it",
 			func(step AgentStep) error {
 				stepReceived <- step
 				return nil
@@ -176,7 +176,7 @@ func TestCommandRunnerPreservesLargeToolOutput(t *testing.T) {
 			"printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"message-1\",\"type\":\"agent_message\",\"text\":\"Done\"}}'\n")
 	var steps []AgentStep
 	_, err := testRunner(directory, command, filepath.Join(directory, "factory")).Run(
-		context.Background(), state.DefaultSettings, "Build it",
+		context.Background(), state.DefaultSettings(), "Build it",
 		func(step AgentStep) error {
 			steps = append(steps, step)
 			return nil
@@ -198,12 +198,12 @@ func TestCommandRunnerReturnsSemanticHarnessFailure(t *testing.T) {
 		want     AgentStep
 	}{
 		{
-			name: "codex", settings: state.DefaultSettings,
+			name: "codex", settings: state.DefaultSettings(),
 			stream: `{"type":"item.completed","item":{"id":"error-1","type":"error","message":"usage limit reached"}}`,
 			want:   AgentStep{Kind: "error", Label: "codex", Content: "usage limit reached"},
 		},
 		{
-			name: "claude", settings: state.Settings{Harness: state.Claude, Model: "sonnet", Reasoning: "high"},
+			name: "claude", settings: state.Settings{Harness: state.Claude, Model: "sonnet", Reasoning: "high", ReactionEmojis: []string{"👍"}},
 			stream: `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"usage limit reached"}`,
 			want:   AgentStep{Kind: "error", Label: "error_during_execution", Content: "usage limit reached"},
 		},
@@ -267,7 +267,7 @@ func TestCommandRunnerStopsOnStreamAndProcessFailures(t *testing.T) {
 			finished := make(chan error, 1)
 			go func() {
 				_, err := testRunner(directory, command, filepath.Join(directory, "factory")).Run(
-					ctx, state.DefaultSettings, "Build it", emit,
+					ctx, state.DefaultSettings(), "Build it", emit,
 				)
 				finished <- err
 			}()
