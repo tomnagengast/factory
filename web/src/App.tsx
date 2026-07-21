@@ -12,11 +12,11 @@ import {
 } from "solid-js";
 import hljs from "highlight.js/lib/common";
 import { ListTodo, Play, Trash2 } from "lucide-solid";
-import { marked } from "marked";
 import "highlight.js/styles/github-dark.css";
 import { get, optional, optionalID, post, put, remove, uploadMedia } from "./api";
 import { bindNewestFollower, type NewestFollower } from "./follow-newest";
 import { historyResourceLink } from "./history";
+import { renderMarkdown } from "./markdown";
 import { insertMediaMarkup, mediaAccept, mediaFiles, mediaKind, mediaMarkup } from "./media";
 import {
   activeTaskCreationProjectId,
@@ -171,9 +171,7 @@ function Empty(props: { children: JSX.Element }) {
 
 function Markdown(props: { content?: string; inline?: boolean }) {
   let body: HTMLDivElement | undefined;
-  const html = createMemo(() => props.inline
-    ? marked.parseInline(props.content ?? "", { async: false, gfm: true, breaks: true })
-    : marked.parse(props.content ?? "", { async: false, gfm: true, breaks: true }));
+  const html = createMemo(() => renderMarkdown(props.content ?? "", props.inline));
   createEffect(() => {
     html();
     if (!props.inline) queueMicrotask(() =>
