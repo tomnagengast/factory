@@ -240,7 +240,7 @@ func TestSettingsUseSingletonAPI(t *testing.T) {
 	}
 }
 
-func TestHistoryIsReadOnly(t *testing.T) {
+func TestHistorySupportsRetryButNotGeneralMutations(t *testing.T) {
 	list, err := parse([]string{"history", "list"})
 	if err != nil {
 		t.Fatal(err)
@@ -249,11 +249,21 @@ func TestHistoryIsReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if list.path != "/api/history" || item.path != "/api/history/12" {
-		t.Fatalf("unexpected history requests: %#v %#v", list, item)
+	retry, err := parse([]string{"history", "retry", "12"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.path != "/api/history" || item.path != "/api/history/12" ||
+		retry.method != http.MethodPost || retry.path != "/api/history/12/retry" || len(retry.body) != 0 {
+		t.Fatalf("unexpected history requests: %#v %#v %#v", list, item, retry)
 	}
 	if _, err := parse([]string{"history", "delete", "12"}); err == nil {
 		t.Fatal("history delete was accepted")
+	}
+	for _, args := range [][]string{{"history", "retry"}, {"history", "retry", "zero"}, {"history", "update", "12", `{}`}} {
+		if _, err := parse(args); err == nil {
+			t.Fatalf("invalid history command was accepted: %v", args)
+		}
 	}
 }
 

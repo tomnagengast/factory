@@ -261,7 +261,9 @@ The workflow receives `args.event`, `args.trigger`, and its integer
    process is active,
 3. `workflow.run.waiting` and `workflow.run.resumed` preserve human review
    pauses without holding a process or capacity slot,
-4. `workflow.run.completed` or `workflow.run.failed` closes the run.
+4. `workflow.run.retry.requested` projects a failed run as `retrying`, and the
+   next admitted attempt appends `workflow.run.resumed`,
+5. `workflow.run.completed` or `workflow.run.failed` closes the run.
 
 Workflow usage counts each `workflow.run.started` event once, regardless of
 whether the run remains active, waits for a human, completes, or fails. Its
@@ -277,6 +279,48 @@ durably forwards each event without parsing
 stderr, filtering fields, or collapsing lifecycle pairs. A wire write failure
 cancels the workflow. The temporary file is removed only after the follower
 finishes.
+
+### Retrying a failed run
+
+Retry is a manual same-run operation:
+
+```sh
+factory history retry 30
+```
+
+`POST /api/history/{id}/retry` accepts only a run currently projected as
+`failed`. It appends `workflow.run.retry.requested`, clears the old projected
+output, error, and gate fields, and returns the same run as `retrying`. A
+duplicate request, or a request for a running, retrying, waiting, or completed
+run, returns a conflict and appends nothing.
+
+The coordinator admits requested retries after answered human gates and before
+new event triggers. It starts the same run with its complete durable journal as
+both `--resume` and `--journal`. The external workflow runtime turns prior
+successful steps into `step.cached` events, skips their backend calls, and
+continues unfinished work. Failed steps are not cache entries. The new attempt
+keeps the original run ID, `args.runId`, settings, arguments, working directory,
+and workflow source path. Factory reads the current file at that captured path.
+It does not snapshot workflow source or project files.
+
+Each retry appends `workflow.run.resumed` before process start and ends in
+waiting, completed, or failed. A retry that reaches a human gate uses the same
+task-comment path described below. Repeated manual retries are allowed after
+each later failure. They do not append another `workflow.run.started`, add a
+task run row, or increment workflow usage. `runtime.started` and each later
+`runtime.resumed` journal event remain the attempt boundaries in run detail.
+
+A `retrying` request survives restart. Capacity zero or closed deployment
+admission leaves it pending without a process. A crash after
+`workflow.run.resumed` leaves a running run, which startup changes to failed as
+usual. Missing captured context or an invalid journal returns the retry to
+failed without starting the workflow. A wire write failure still cancels the
+process and ends the run as failed.
+
+Factory does not classify transient errors, retry automatically, add backoff,
+or run a separate retry service. The version-pinned coordinator integration
+test exercises this cache contract through the official workflow CLI v0.0.6,
+which remains the minimum supported version.
 
 ### Human review gates
 
@@ -317,7 +361,7 @@ prompt, or another task comment appends `reaction.updated`, not
 comment at the root or a direct reply to the gate prompt.
 
 `/history` groups the newest five projected runs under Running, Waiting,
-Failed, and Completed, in that order. Each section links to its canonical
+Retrying, Failed, and Completed, in that order. Each section links to its canonical
 status path, which loads matching runs newest first in 25-run pages as the
 reader scrolls. Lifecycle events move a run between these views without a page
 reload. Every row links straight to its numeric `/history/{id}` detail.
@@ -409,7 +453,8 @@ Only cron triggers need a schedule. Non-cron triggers ignore it operationally.
 ## Ordering and failures
 
 One coordinator starts pending workflow conversations in a sequential authoring
-lane, then prioritizes answered human gates, event triggers, and due cron ticks.
+lane, then prioritizes answered human gates, requested retries, event triggers,
+and due cron ticks.
 The authoring lane does not hold up those dispatch checks. The coordinator
 claims matching trigger and source event pairs in wire order and starts
 workflow processes until it reaches the configured capacity.
@@ -419,14 +464,14 @@ already has a `workflow.run.started` event. Conditional wire appends resolve a
 concurrent disable and dispatch by durable order: disable first blocks the
 stale start, while start first allows that active run to finish.
 
-Capacity zero pauses new event and cron dispatch while leaving authoring
-available. Lowering capacity does not cancel active runs; new runs wait until
+Capacity zero pauses retries, new event dispatch, and cron dispatch while
+leaving authoring available. Lowering capacity does not cancel active runs; new attempts wait until
 the active count falls below the new value. Raising it lets the coordinator
-fill the new slots. There is no separate queue or retry service.
+fill the new slots. Retrying is a durable run state, not a separate queue or service.
 
 Deployment code can acquire `POST /api/quiescence` before replacing the
 Factory process. The coordinator first closes all workflow admission, including
-authoring and human-gate resumes, records `deployment.quiescing`, and then
+authoring, human-gate resumes, and failed-run retries, records `deployment.quiescing`, and then
 waits until every admitted controller slot calls `Done`. A successfully
 published operation records its terminal event before `Done`, but a trigger or
 resume attempt whose conditional start is invalidated by the deployment event
@@ -452,11 +497,12 @@ Failures remain observable:
 - startup appends `workflow.run.failed` for a prior run left `running`
   without a terminal event,
 - waiting human gates survive restart because they have no active process,
+- retrying requests survive restart and wait for normal admission,
 - the history detail and event detail contain the recorded error,
 - the server terminal contains process-level diagnostics.
 
-There is no retry queue. A human can continue a failed workflow conversation
-with another comment or publish another event after correcting the cause.
+There is no retry queue. A human can retry a failed run from its history detail
+or with `factory history retry <id>` after correcting the cause.
 
 ## Trust boundary
 
@@ -468,3 +514,7 @@ option.
 Treat every prompt, workflow, event payload, and referenced repository as
 trusted input. Keep Factory on loopback and do not use it as a multi-user or
 internet-facing service.
+
+Retrying a mutating workflow trusts the workflow CLI journal cache. Successful
+cached steps are not dispatched again, but failed and unfinished work can
+observe project files or other external state changed by the prior attempt.

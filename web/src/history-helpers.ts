@@ -6,6 +6,7 @@ export const HISTORY_PAGE_SIZE = 25;
 export const historyStatuses = [
   { status: "running", label: "Running", href: "/history/running" },
   { status: "waiting", label: "Waiting", href: "/history/waiting" },
+  { status: "retrying", label: "Retrying", href: "/history/retrying" },
   { status: "failed", label: "Failed", href: "/history/failed" },
   { status: "completed", label: "Completed", href: "/history/completed" },
 ] as const satisfies ReadonlyArray<{

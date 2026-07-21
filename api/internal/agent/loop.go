@@ -156,6 +156,16 @@ func (l *Loop) step(ctx context.Context) (bool, time.Time, error) {
 			started, err := l.startResume(ctx, run, response, checkpoint)
 			return started, time.Time{}, err
 		}
+		if run, found, err := l.store.PendingRetry(); err != nil {
+			return false, time.Time{}, err
+		} else if found {
+			checkpoint, err := l.store.LastID()
+			if err != nil {
+				return false, time.Time{}, err
+			}
+			started, err := l.startRetry(ctx, run, checkpoint)
+			return started, time.Time{}, err
+		}
 		trigger, source, checkpoint, found, err := l.store.PendingTrigger()
 		if err != nil {
 			return false, time.Time{}, err
@@ -508,23 +518,11 @@ func (l *Loop) startResume(
 		_, err := l.store.Append(state.WorkflowRunFailed, terminal)
 		return true, err
 	}
-	events, err := l.store.RunJournal(run.ID)
+	resume, err := l.resumeJournal(run.ID)
 	if err != nil {
 		return false, err
 	}
-	sequence := int64(0)
-	resume := make([]json.RawMessage, 0, len(events)+1)
-	for _, rawEvent := range events {
-		var event workflow.Event
-		if err := json.Unmarshal(rawEvent, &event); err != nil {
-			return false, fmt.Errorf("decode run %d journal after sequence %d: %w", run.ID, sequence, err)
-		}
-		if event.Sequence != sequence+1 || len(rawEvent) == 0 {
-			return false, fmt.Errorf("run %d has invalid journal after sequence %d", run.ID, sequence)
-		}
-		sequence = event.Sequence
-		resume = append(resume, append(json.RawMessage(nil), rawEvent...))
-	}
+	sequence := int64(len(resume))
 	gate := run.WaitingGate
 	completed := workflow.Event{
 		Sequence: sequence + 1, At: time.Now().UTC(), Type: "step.completed",
@@ -574,6 +572,84 @@ func (l *Loop) startResume(
 		l.admission.Done(executionErr)
 	}()
 	return true, nil
+}
+
+func (l *Loop) startRetry(
+	ctx context.Context,
+	run state.WorkflowRun,
+	expectedLastID int64,
+) (startedRun bool, err error) {
+	if run.Settings == nil || strings.TrimSpace(run.Source) == "" || len(run.Arguments) == 0 {
+		return l.failRetry(run, "failed workflow is missing durable continuation context")
+	}
+	resume, err := l.resumeJournal(run.ID)
+	if err != nil {
+		return l.failRetry(run, "failed workflow journal cannot be resumed: "+err.Error())
+	}
+	if !l.admission.TryStart() {
+		return false, nil
+	}
+	releaseAdmission := true
+	defer func() {
+		if releaseAdmission {
+			l.admission.Done(err)
+		}
+	}()
+	_, published, err := l.store.AppendIfCurrent(
+		expectedLastID,
+		state.WorkflowRunResumed,
+		state.WorkflowRunStateData{RunID: run.ID},
+	)
+	if err != nil || !published {
+		return published, err
+	}
+	l.active++
+	request := workflow.RunRequest{
+		Directory: run.Directory,
+		Source:    run.Source,
+		Settings:  *run.Settings,
+		Arguments: append(json.RawMessage(nil), run.Arguments...),
+		Resume:    resume,
+	}
+	terminal := workflowRunData(run)
+	releaseAdmission = false
+	go func() {
+		executionErr := l.executeRun(ctx, run.ID, request, terminal)
+		l.completed <- executionErr
+		l.admission.Done(executionErr)
+	}()
+	return true, nil
+}
+
+func (l *Loop) failRetry(run state.WorkflowRun, message string) (bool, error) {
+	terminal := workflowRunData(run)
+	terminal.Error = message
+	_, err := l.store.Append(state.WorkflowRunFailed, terminal)
+	return true, err
+}
+
+func (l *Loop) resumeJournal(runID int64) ([]json.RawMessage, error) {
+	events, err := l.store.RunJournal(runID)
+	if err != nil {
+		return nil, err
+	}
+	sequence := int64(0)
+	resume := make([]json.RawMessage, 0, len(events))
+	for _, rawEvent := range events {
+		if len(rawEvent) == 0 {
+			return nil, fmt.Errorf("run %d has invalid journal after sequence %d", runID, sequence)
+		}
+		var event workflow.Event
+		if err := json.Unmarshal(rawEvent, &event); err != nil {
+			return nil, fmt.Errorf("decode run %d journal after sequence %d: %w", runID, sequence, err)
+		}
+		if event.Sequence != sequence+1 {
+			return nil, fmt.Errorf("run %d has invalid journal after sequence %d", runID, sequence)
+		}
+		sequence = event.Sequence
+		resume = append(resume, append(json.RawMessage(nil), rawEvent...))
+	}
+	return resume, nil
 }
 
 func workflowRunData(run state.WorkflowRun) state.WorkflowRunData {

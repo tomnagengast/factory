@@ -111,16 +111,17 @@ Immutable media blobs default to `~/.local/share/factory/media`.
 /workflows                             discovered workflow list
 /workflows/new                         create through agent chat
 /workflows/:workflow                   chat beside the live workflow source
-/history                               running, waiting, failed, and completed run overview
+/history                               running, waiting, retrying, failed, and completed run overview
 /history/running                       running runs, loaded 25 at a time
 /history/waiting                       waiting runs, loaded 25 at a time
+/history/retrying                      retry requests waiting for admission
 /history/failed                        failed runs, loaded 25 at a time
 /history/completed                     completed runs, loaded 25 at a time
 /history/:item                         phase-grouped semantic event timeline
 /settings                              select harness, model, reasoning, run capacity, and canned reactions
 ```
 
-Resource and detail route IDs are integers. The four history status routes use
+Resource and detail route IDs are integers. The five history status routes use
 the canonical persisted status names. Deletion is soft and list routes omit
 deleted records.
 
@@ -138,7 +139,7 @@ media        POST one multipart file, GET immutable bytes by ID
 events       GET / POST, GET by ID, GET types, SSE stream
 triggers     GET / POST, GET / PUT / DELETE by ID
 workflows    GET / POST, GET / PUT / DELETE by ID
-history      GET list, GET run and event detail by ID
+history      GET list, GET run and event detail by ID, POST retry by ID
 settings     GET / PUT singleton selection and option catalog
 ingress      ANY request at /api/ingest or a path beneath it
 ```
@@ -191,6 +192,7 @@ factory workflow update 24 '{"message":"Add a security reviewer."}'
 factory event create '{"type":"release.ready","data":{"version":"1.0"}}'
 factory trigger update 41 '{"eventType":"release.ready","workflowId":24,"enabled":false}'
 factory history get 30
+factory history retry 30
 factory settings update '{"harness":"claude","model":"sonnet","reasoning":"high","workflowCapacity":6,"reactionEmojis":["👍","🎉","🤔"]}'
 ```
 
@@ -240,6 +242,9 @@ Workflow runs stream every ordered semantic journal event onto the durable
 wire for the live and historical views. A task-triggered human gate posts its
 prompt as a task comment, leaves the run waiting without a live process, and
 resumes that same journal from the next root comment or direct reply.
+Failed runs can be retried manually from history. Factory resumes the same run
+and journal, so successful steps become cache hits and unfinished work
+continues without increasing the workflow run count.
 Workflow conversations remain sequential. Triggered workflows run in parallel
 up to the configured capacity, which defaults to six and can be set from zero
 through ten in `/settings`. The same page configures the ordered canned

@@ -344,6 +344,26 @@ func applyProjection(tx *sql.Tx, event eventwire.Event) error {
 		value.Run.WaitingGate, value.Run.GateCommentID = data.Gate, data.GateCommentID
 		value.Run.ResponseCommentID = 0
 		return putRun(tx, value)
+	case state.WorkflowRunRetryRequested:
+		var data state.WorkflowRunStateData
+		if err := decodeEvent(event, &data); err != nil {
+			return err
+		}
+		value, found, err := runTx(tx, data.RunID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("%w: %d", ErrWorkflowRunNotFound, data.RunID)
+		}
+		if value.Run.Status != "failed" {
+			return fmt.Errorf("%w: run %d is %s", ErrWorkflowRunNotRetryable, data.RunID, value.Run.Status)
+		}
+		value.Run.UpdatedAt, value.Run.Status = event.At, "retrying"
+		value.Run.Output, value.Run.Error = "", ""
+		value.Run.WaitingGate = nil
+		value.Run.GateCommentID, value.Run.ResponseCommentID = 0, 0
+		return putRun(tx, value)
 	case state.WorkflowRunResumed:
 		var data state.WorkflowRunStateData
 		if err := decodeEvent(event, &data); err != nil {
@@ -352,6 +372,9 @@ func applyProjection(tx *sql.Tx, event eventwire.Event) error {
 		value, found, err := runTx(tx, data.RunID)
 		if err != nil || !found {
 			return err
+		}
+		if value.Run.Status != "waiting" && value.Run.Status != "retrying" {
+			return fmt.Errorf("workflow run %d cannot resume from %s", data.RunID, value.Run.Status)
 		}
 		value.Run.UpdatedAt, value.Run.Status = event.At, "running"
 		value.Run.WaitingGate = nil

@@ -416,6 +416,14 @@ func (s *Store) PendingHumanResponse() (state.WorkflowRun, state.Comment, bool, 
 	return state.WorkflowRun{}, state.Comment{}, false, nil
 }
 
+func (s *Store) PendingRetry() (state.WorkflowRun, bool, error) {
+	value, found, err := queryOneJSON[runProjection](s.db, `SELECT data FROM workflow_runs WHERE status = 'retrying' ORDER BY id LIMIT 1`)
+	if err != nil || !found {
+		return state.WorkflowRun{}, found, err
+	}
+	return restoreRun(value), true, nil
+}
+
 func (s *Store) PendingTrigger() (state.Trigger, eventwire.Event, int64, bool, error) {
 	tx, err := s.db.Begin()
 	if err != nil {

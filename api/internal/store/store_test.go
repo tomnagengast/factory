@@ -209,6 +209,73 @@ func TestHistoryFiltersAndPagesWorkflowRunProjection(t *testing.T) {
 	}
 }
 
+func TestWorkflowRunRetryRequestIsDurableAndAtomic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "factory.db")
+	value, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowEvent, _ := value.Append(state.WorkflowDiscovered, state.WorkflowData{Name: "retry"})
+	source, _ := value.Append("release.ready", map[string]bool{"ready": true})
+	settings := state.DefaultSettings()
+	claim := state.WorkflowRunData{
+		TriggerID: 7, WorkflowID: workflowEvent.ID, SourceEventID: source.ID,
+		Directory: "/project", Source: "/workflows/retry.js", Settings: &settings,
+		Arguments: json.RawMessage(`{"runId":3}`), Output: "partial", Error: "transient",
+	}
+	started, err := value.Append(state.WorkflowRunStarted, claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := value.Append(state.WorkflowRunWaiting, state.WorkflowRunStateData{
+		RunID: started.ID, Gate: &state.WorkflowGate{Workflow: "retry", StepID: 1}, GateCommentID: 9,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := value.Append(state.WorkflowRunFailed, claim); err != nil {
+		t.Fatal(err)
+	}
+	requested, err := value.Append(state.WorkflowRunRetryRequested, state.WorkflowRunStateData{RunID: started.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, found, err := value.Run(started.ID)
+	if err != nil || !found || run.Status != "retrying" || run.Output != "" || run.Error != "" ||
+		run.WaitingGate != nil || run.GateCommentID != 0 || run.ResponseCommentID != 0 {
+		t.Fatalf("retrying run = %#v, found=%v err=%v", run, found, err)
+	}
+	pending, found, err := value.PendingRetry()
+	if err != nil || !found || pending.ID != started.ID {
+		t.Fatalf("pending retry = %#v, found=%v err=%v", pending, found, err)
+	}
+	if _, err := value.Append(state.WorkflowRunRetryRequested, state.WorkflowRunStateData{RunID: started.ID}); !errors.Is(err, ErrWorkflowRunNotRetryable) {
+		t.Fatalf("duplicate retry error = %v", err)
+	}
+	lastID, _ := value.LastID()
+	if lastID != requested.ID {
+		t.Fatalf("invalid retry advanced wire to %d from %d", lastID, requested.ID)
+	}
+	if _, err := value.Append(state.WorkflowRunRetryRequested, state.WorkflowRunStateData{RunID: 999}); !errors.Is(err, ErrWorkflowRunNotFound) {
+		t.Fatalf("missing retry error = %v", err)
+	}
+	if _, err := value.db.Exec(`UPDATE projection_meta SET version = 1 WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := value.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	rebuilt, found, err := reopened.Run(started.ID)
+	if err != nil || !found || !reflect.DeepEqual(rebuilt, run) {
+		t.Fatalf("rebuilt retrying run = %#v, want %#v, found=%v err=%v", rebuilt, run, found, err)
+	}
+}
+
 func TestProjectionUpgradeDefaultsHistoricalSettingsReactionEmojis(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "factory.db")
 	store, err := Open(path)

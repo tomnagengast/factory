@@ -9,7 +9,7 @@ import {
   onMount,
   Show,
 } from "solid-js";
-import { errorMessage, get, liveRefetch, mutation } from "./api";
+import { errorMessage, get, liveRefetch, mutation, post } from "./api";
 import { uniqueByID } from "./events";
 import { bindNewestFollower } from "./follow-newest";
 import {
@@ -54,7 +54,7 @@ export function History() {
   return (
     <div class="page">
       <PageHeader title="Workflow history"
-        description="Running, waiting, failed, and completed workflow runs, newest first." />
+        description="Running, waiting, retrying, failed, and completed workflow runs, newest first." />
       <Load data={data} error={() => data.error}>
         {(value) => <div class="history-sections">
           <For each={data()?.sections ?? value.sections}>{(section) => <section class="history-section">
@@ -193,6 +193,7 @@ export function HistoryView() {
 	const [expandedGroups, setExpandedGroups] = createSignal(new Set<string>());
 	const [expandedEntries, setExpandedEntries] = createSignal(new Set<string>());
 	const older = mutation();
+	const retry = mutation();
 	const toggleGroup = (id: string) => setExpandedGroups((current) => toggledSet(current, id));
 	const toggleEntry = (id: string) => setExpandedEntries((current) => toggledSet(current, id));
 	createEffect(() => {
@@ -207,7 +208,7 @@ export function HistoryView() {
     onCleanup(() => follower.dispose());
   });
   liveRefetch([
-    "workflow.run.event", "workflow.run.waiting", "workflow.run.resumed",
+    "workflow.run.event", "workflow.run.waiting", "workflow.run.retry.requested", "workflow.run.resumed",
     "workflow.run.completed", "workflow.run.failed",
   ], refetch);
   return (
@@ -224,7 +225,16 @@ export function HistoryView() {
             <PageHeader eyebrow={`Run ${value.run.id}`}
               title={value.run.workflowName || `Workflow ${value.run.workflowId}`}
               description={`Started from event ${value.run.sourceEventId}`}
-              actions={<A class="button" href="/history">Back to history</A>} />
+              actions={<>
+                <Show when={current().run.status === "failed"}>
+                  <button class="button primary" disabled={retry.pending()} onClick={() => retry.run(async () => {
+                    await post<WorkflowRun>(`/api/history/${current().run.id}/retry`, {});
+                    await refetch();
+                  })}>{retry.pending() ? "Retrying…" : "Retry workflow"}</button>
+                </Show>
+                <A class="button" href="/history">Back to history</A>
+              </>} />
+            <Show when={retry.error()}><p class="form-error">{retry.error()}</p></Show>
             <div class="run-summary">
               <span class={`run-status ${current().run.status}`}>{current().run.status}</span>
               <A href={`/workflows/${value.run.workflowId}`}>Workflow #{value.run.workflowId}</A>
@@ -241,6 +251,8 @@ export function HistoryView() {
                 ? "Waiting for the first workflow event…"
                 : current().run.status === "waiting"
                   ? "Waiting for a human response on the task…"
+                  : current().run.status === "retrying"
+                    ? "Waiting for workflow capacity or admission…"
                   : "No workflow events were recorded for this run."}
             </Empty>}>
               <div class="run-phases">
@@ -284,7 +296,7 @@ export function HistoryView() {
 
 function liveHistoryRows(checkpoint: () => number | undefined, refresh: () => unknown) {
   const types = [
-    "workflow.run.started", "workflow.run.waiting", "workflow.run.resumed",
+    "workflow.run.started", "workflow.run.waiting", "workflow.run.retry.requested", "workflow.run.resumed",
     "workflow.run.completed", "workflow.run.failed",
   ];
   let source: EventSource | undefined;

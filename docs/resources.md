@@ -133,7 +133,7 @@ shape. The list and project-detail response also includes
 `commentCount` counts all active comments related to the task, including
 roots, replies, user comments, and agent comments. Deleted comments do not
 count, and zero is explicit. `workflowRuns` includes every task-associated
-run, including earlier terminal runs followed by a retry or no-op success.
+run. A retry updates the same row and preserves the same run ID.
 Waiting means that a human gate has suspended the run; completed reports
 workflow lifecycle completion and does not imply that the workflow changed
 the task. Runs sort by workflow ID and then run ID. Empty summaries are `[]`.
@@ -141,7 +141,7 @@ Task detail returns the same complete `workflowRuns` array and a
 `checkpointEventId` for live updates. Each run includes its start time in
 `createdAt` and its latest lifecycle event time in `updatedAt`. The web task
 detail shows elapsed wall time. Completed and failed run lengths stop at
-`updatedAt`; running and waiting lengths continue from the browser clock.
+`updatedAt`; running, waiting, and retrying lengths continue from the browser clock.
 
 Clients that need live summaries should open
 `GET /api/events/stream?after=<checkpointEventId>` with the checkpoint from
@@ -186,8 +186,8 @@ full `PUT`.
 The web task detail is rendered by default and enters its form only after
 selecting **Edit task**. Save persists the task; cancel discards the form.
 It lists every associated workflow run between the task metadata and comments.
-Each row links to run history and updates when the run starts, waits, resumes,
-completes, or fails.
+Each row links to run history and updates when the run starts, waits, requests
+a retry, resumes, completes, or fails.
 Task titles use inline Markdown, while descriptions and comments use full
 trusted Markdown or HTML with syntax-highlighted code blocks. Links created
 from Markdown syntax open in a new tab with `noreferrer`; trusted raw HTML
@@ -687,8 +687,9 @@ or `task.deleted`.
 
 ## Workflow history
 
-Workflow history is read-only and projected from workflow run events. A run
-ID is its `workflow.run.started` event ID.
+Workflow history is projected from workflow run events. A run ID is its
+`workflow.run.started` event ID. The one supported mutation requests a retry
+of a failed run without creating a new run.
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -701,7 +702,7 @@ ID is its `workflow.run.started` event ID.
 | `workflowPhases` | string array | Phases captured when the run started |
 | `sourceEventId` | integer | Event matched by the trigger |
 | `taskId` | integer or omitted | Task associated with a task-triggered run; omitted for other runs |
-| `status` | string | `running`, `waiting`, `completed`, or `failed`; interrupted running runs become `failed` |
+| `status` | string | `running`, `waiting`, `retrying`, `completed`, or `failed`; interrupted running runs become `failed` |
 | `waitingGate` | object or omitted | Current human gate prompt and journal identity |
 | `gateCommentId` | integer or omitted | Agent task comment that requested review |
 | `responseCommentId` | integer or omitted | User comment used for the latest resume |
@@ -735,6 +736,7 @@ open for a task comment.
 ```sh
 factory history list
 factory history get 30
+factory history retry 30
 ```
 
 Routes:
@@ -742,6 +744,7 @@ Routes:
 ```text
 GET /api/history
 GET /api/history/{id}
+POST /api/history/{id}/retry
 ```
 
 `GET /api/history` returns runs newest first by run ID and includes the event
@@ -754,8 +757,8 @@ checkpoint captured with that page:
 }
 ```
 
-The optional `status` query accepts only `running`, `waiting`, `failed`, or
-`completed`. `before=<run-id>` uses an exclusive cursor and `limit` selects a
+The optional `status` query accepts only `running`, `waiting`, `retrying`,
+`failed`, or `completed`. `before=<run-id>` uses an exclusive cursor and `limit` selects a
 positive page size. The indexed `workflow_runs` SQLite projection applies the
 status predicate, cursor, ordering, and limit before rows reach either client.
 The web overview requests the newest five runs for each status. Its linked
@@ -765,6 +768,15 @@ keeps the unfiltered collection request, which defaults to 200 runs.
 `GET /api/history/{id}` remains numeric run detail. Its semantic event pages
 default to 200, use the same `before` and `limit` controls, and are restored to
 chronological order in each response.
+
+`POST /api/history/{id}/retry` has no request fields. It returns `202 Accepted`
+with the same run projected as `retrying`, `404 Not Found` for an unknown run,
+and `409 Conflict` unless the current state is `failed`. The request clears
+projected terminal output, error, and stale gate fields while the earlier
+terminal event and complete journal remain on the wire. Admission appends
+`workflow.run.resumed` and replays that journal under the original context.
+Retries do not increment workflow `runCount` or add another task-associated
+run. A later matching source event still creates a distinct run.
 
 ## Settings
 
@@ -854,7 +866,7 @@ resource counts, workflow state, and release identity when deployment
 environment variables are set.
 
 `workflowRunning` is the number of durable workflow-run projections whose
-status is exactly `running`. Waiting, completed, and failed runs do not count.
+status is exactly `running`. Waiting, retrying, completed, and failed runs do not count.
 This differs from `workflowActive`, which counts work admitted by the
 in-memory coordinator, including workflow authoring, for quiescence and
 deployment observability. `workflowQuiescing` reports whether that coordinator
@@ -879,7 +891,7 @@ media     create <file>
 event     list, get, create
 trigger   list, get, create, update, delete
 workflow  list, get, create, update, delete, comment
-history   list, get
+history   list, get, retry
 settings  get, update
 ```
 

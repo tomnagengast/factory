@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -196,7 +197,7 @@ func TestCLIResumesFromPriorJournalWithoutForwardingItAgain(t *testing.T) {
 	}
 	prior := []json.RawMessage{
 		json.RawMessage(`{"sequence":1,"at":"2026-07-19T12:00:00Z","type":"runtime.started","workflow":"demo"}`),
-		json.RawMessage(`{"sequence":2,"at":"2026-07-19T12:00:01Z","type":"runtime.suspended","workflow":"demo"}`),
+		json.RawMessage(`{"sequence":2,"at":"2026-07-19T12:00:01Z","type":"runtime.failed","workflow":"demo","error":"transient"}`),
 	}
 	var events []Event
 	output, err := cli.Run(context.Background(), RunRequest{
@@ -216,7 +217,10 @@ func TestCLIResumesFromPriorJournalWithoutForwardingItAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(args), "--resume") {
+	fields := strings.Fields(string(args))
+	journalIndex, resumeIndex := slices.Index(fields, "--journal"), slices.Index(fields, "--resume")
+	if journalIndex < 0 || resumeIndex < 0 || journalIndex+1 >= len(fields) || resumeIndex+1 >= len(fields) ||
+		fields[journalIndex+1] != fields[resumeIndex+1] {
 		t.Fatalf("resume flag missing: %s", args)
 	}
 }

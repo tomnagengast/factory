@@ -32,6 +32,7 @@ export function App() {
       <Route path="/history" component={History} />
       <Route path="/history/running" component={() => <HistoryStatusPage status="running" label="Running" />} />
       <Route path="/history/waiting" component={() => <HistoryStatusPage status="waiting" label="Waiting" />} />
+      <Route path="/history/retrying" component={() => <HistoryStatusPage status="retrying" label="Retrying" />} />
       <Route path="/history/failed" component={() => <HistoryStatusPage status="failed" label="Failed" />} />
       <Route path="/history/completed" component={() => <HistoryStatusPage status="completed" label="Completed" />} />
       <Route path="/history/:item" component={HistoryView} />

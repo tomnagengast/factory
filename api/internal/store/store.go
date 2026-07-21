@@ -20,7 +20,11 @@ import (
 
 const projectionVersion = 2
 
-var ErrClosed = errors.New("event store is closed")
+var (
+	ErrClosed                  = errors.New("event store is closed")
+	ErrWorkflowRunNotFound     = errors.New("workflow run not found")
+	ErrWorkflowRunNotRetryable = errors.New("workflow run is not failed")
+)
 
 type Store struct {
 	db       *sql.DB
