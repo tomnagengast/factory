@@ -2,6 +2,7 @@
 
 ARG CLOUDFLARED_VERSION=2026.7.3
 ARG CLOUDFLARED_SOURCE_SHA=8e452b1630064f5951e18a2537e66274e006eb2e83daa0d42a0adb3fab3ee788
+ARG GH_VERSION=2.93.0
 
 FROM oven/bun:1.3.11 AS web-build
 WORKDIR /src/web
@@ -10,10 +11,18 @@ RUN bun install --frozen-lockfile
 COPY web/ ./
 RUN bun run typecheck && bun run build
 
-FROM golang:1.26.5-bookworm AS go-build
+FROM golang:1.26.5-bookworm AS go-base
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
+
+FROM go-base AS github-auth-build
+COPY cmd/ cmd/
+COPY internal/ internal/
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/github-token-broker ./cmd/github-token-broker \
+    && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/github-token-client ./cmd/github-token-client
+
+FROM go-base AS go-build
 COPY api/ api/
 COPY cli/ cli/
 COPY --from=web-build /src/web/dist/ api/dist/
@@ -34,6 +43,27 @@ RUN curl -fsSL "https://github.com/cloudflare/cloudflared/archive/refs/tags/${CL
        go build -mod=mod -trimpath -buildvcs=false \
        -ldflags="-s -w -X main.Version=${CLOUDFLARED_VERSION}" \
        -o /out/cloudflared ./cmd/cloudflared
+
+FROM --platform=$BUILDPLATFORM golang:1.26.5-bookworm AS gh-build
+ARG TARGETARCH
+ARG GH_VERSION
+WORKDIR /src
+# Build the tagged CLI with patched dependency versions so the runtime image
+# does not inherit known CVEs from the upstream prebuilt binary.
+RUN go mod download "github.com/cli/cli/v2@v${GH_VERSION}" \
+    && cp -R "/go/pkg/mod/github.com/cli/cli/v2@v${GH_VERSION}/." . \
+    && chmod -R u+w . \
+    && go get \
+       github.com/in-toto/in-toto-golang@v0.11.0 \
+       github.com/sigstore/rekor@v1.5.2 \
+       github.com/sigstore/sigstore-go@v1.2.1 \
+       github.com/sigstore/timestamp-authority/v2@v2.1.2 \
+       golang.org/x/text@v0.39.0 \
+       google.golang.org/grpc@v1.82.1 \
+    && CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" \
+       go build -mod=mod -trimpath -buildvcs=false \
+       -ldflags="-s -w -X github.com/cli/cli/v2/internal/build.Version=${GH_VERSION}" \
+       -o /out/gh ./cmd/gh
 
 FROM debian:bookworm-slim AS tools
 ARG TARGETARCH
@@ -72,15 +102,29 @@ RUN apt-get update \
     && mv /tmp/claude /out/claude \
     && chmod 0755 /out/workflow /out/codex /out/claude /out/cloudflared
 
-FROM cgr.dev/chainguard/wolfi-base:latest@sha256:ca263a0360cca48e8fe3f86c8af61c6d5b85e484809fe187440a4206a50efc06
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:ca263a0360cca48e8fe3f86c8af61c6d5b85e484809fe187440a4206a50efc06 AS github-token-broker
+RUN apk add --no-cache ca-certificates \
+    && addgroup -g 10001 broker \
+    && adduser -D -H -u 10001 -G broker -h /var/empty broker
+COPY --from=github-auth-build /out/github-token-broker /usr/local/bin/github-token-broker
+EXPOSE 8787
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/github-token-broker"]
+CMD ["-listen", "0.0.0.0:8787"]
+
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:ca263a0360cca48e8fe3f86c8af61c6d5b85e484809fe187440a4206a50efc06 AS factory
 RUN apk add --no-cache bash ca-certificates curl git openssh-client \
     && addgroup -g 10001 factory \
     && adduser -D -H -u 10001 -G factory -h /var/lib/factory/home factory \
     && mkdir -p /home/repos /var/lib/factory/home /var/lib/factory/codex /var/lib/factory/projects /var/lib/factory/workflows \
     && chown -R factory:factory /home/repos /var/lib/factory
 COPY --from=go-build /out/factory-api /out/factory /usr/local/bin/
+COPY --from=github-auth-build /out/github-token-client /usr/local/bin/github-token-client
 COPY --from=tools /out/workflow /out/codex /out/claude /out/cloudflared /usr/local/bin/
+COPY --from=gh-build /out/gh /usr/local/libexec/gh
+COPY --chmod=0755 github-auth/gh-wrapper.sh /usr/local/bin/gh
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint
+RUN ln -s /usr/local/bin/github-token-client /usr/local/bin/git-credential-github-app
 ENV SHELL=/bin/bash \
     HOME=/var/lib/factory/home \
     CODEX_HOME=/var/lib/factory/codex \

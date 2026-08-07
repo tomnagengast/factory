@@ -1,6 +1,8 @@
 .git
 .gitignore
 .DS_Store
+**/*.key
+**/*.pem
 factory
 factory-api
 api/dist
