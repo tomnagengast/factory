@@ -143,6 +143,11 @@ editing a task does not automatically invoke an agent. The task intake
 mechanism is simply the shared API and wire path through which humans and
 agents record work.
 
+Task discussion and workflow authoring use distinct wire facts. A task
+comment appends `task.comment.created`; a workflow conversation message or
+authoring step appends `workflow.comment.created`. A trigger for task
+discussion therefore cannot consume the agent's workflow-authoring transcript.
+
 Tasks and task comments can also carry any subset of the configured reaction
 set. Reactions use one shared implicit reactor. Projections put configured
 active values in current settings order, followed by active values removed
@@ -225,8 +230,8 @@ keeps admission closed and rejects later work.
 The coordinator records progress back on the same wire:
 
 - workflow authoring started, completed, or failed,
-- each exposed authoring step as its own typed workflow comment,
-- one final workflow comment that answers each user request,
+- each exposed authoring step as its own `workflow.comment.created` event,
+- one final `workflow.comment.created` event that answers each user request,
 - every ordered runtime, phase, log, diagnostic, agent, gate, cache, nested
   workflow, result, and failure event emitted by a workflow run,
 - workflow runs waiting for human review, resumed, completed, or failed,

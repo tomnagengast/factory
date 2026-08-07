@@ -658,7 +658,17 @@ func (s *Server) createComment(writer http.ResponseWriter, data state.CommentDat
 		writeError(writer, http.StatusBadRequest, errors.New("comment content is required"))
 		return
 	}
-	event, err := s.store.Append(state.CommentCreated, data)
+	var eventType string
+	switch data.RelationType {
+	case "task":
+		eventType = state.TaskCommentCreated
+	case "workflow":
+		eventType = state.WorkflowCommentCreated
+	default:
+		writeError(writer, http.StatusBadRequest, errors.New("comment relation type must be task or workflow"))
+		return
+	}
+	event, err := s.store.Append(eventType, data)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
@@ -942,7 +952,7 @@ func (s *Server) workflowCreate(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := s.store.Append(state.CommentCreated, state.CommentData{
+	if _, err := s.store.Append(state.WorkflowCommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: created.ID, Author: "user", Content: message,
 	}); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)

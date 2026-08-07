@@ -542,7 +542,7 @@ function TaskForm(props: {
 
 export function liveTaskRows(checkpoint: () => number | undefined, refetch: () => unknown) {
   const types = [
-    "task.created", "task.updated", "task.deleted", "comment.created", "comment.deleted",
+    "task.created", "task.updated", "task.deleted", "task.comment.created", "comment.deleted",
     "reaction.updated",
     "workflow.run.started", "workflow.run.waiting", "workflow.run.resumed",
     "workflow.run.completed", "workflow.run.failed",

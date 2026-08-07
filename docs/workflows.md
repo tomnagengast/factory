@@ -73,11 +73,12 @@ The coordinator's sequential authoring path:
 2. assigns `<workflow-workspace>/.claude/workflows/workflow-<id>.js`,
 3. appends `workflow.authoring.started`,
 4. runs the selected unrestricted harness with its model and reasoning level,
-5. appends each completed semantic harness step as a non-final agent comment,
+5. appends each completed semantic harness step as a non-final
+   `workflow.comment.created` event,
 6. asks the workflow CLI to validate the complete written file and persist it to S3,
 7. asks the workflow CLI to rediscover the validated file,
 8. appends a completed or failed event,
-9. appends one final agent comment.
+9. appends one final `workflow.comment.created` event.
 
 Codex runs with JSONL output and Claude Code runs with verbose `stream-json`
 output. Factory normalizes exposed reasoning or thinking, agent messages, tool
@@ -326,7 +327,7 @@ thread replies do not resume the run.
 
 Emoji reactions never resume a human gate. Reacting to the task, the gate
 prompt, or another task comment appends `reaction.updated`, not
-`comment.created`. The coordinator selects only a later active user task
+`task.comment.created`. The coordinator selects only a later active user task
 comment at the root or a direct reply to the gate prompt.
 
 `/history` groups the newest five projected runs under Running, Waiting,

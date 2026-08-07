@@ -268,6 +268,12 @@ PUT    /api/comments/{id}/reactions
 Task comment bodies use `content`; workflow conversation bodies use
 `message`.
 
+Creation uses relation-specific wire types. Task roots, replies, and agent gate
+prompts append `task.comment.created`. Workflow user messages, authoring steps,
+and final author replies append `workflow.comment.created`. The projection
+rejects an event whose type and `relationType` disagree. This separation keeps
+task-comment triggers from running on workflow-authoring traffic.
+
 Deleting a comment soft-deletes that comment and every descendant reply.
 Ancestors, sibling branches, unrelated comments, artifacts, and media remain
 unchanged. The wire records one `comment.deleted` event for the selected

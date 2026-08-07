@@ -306,7 +306,7 @@ func (l *Loop) authorWorkflow(ctx context.Context, settings state.Settings, comm
 		authorPrompt(selected, comments, target),
 		func(step AgentStep) error {
 			final := false
-			_, err := l.store.Append(state.CommentCreated, state.CommentData{
+			_, err := l.store.Append(state.WorkflowCommentCreated, state.CommentData{
 				RelationType: "workflow", RelationID: selected.ID, ParentCommentID: &comment.ID,
 				Author: "agent", Kind: step.Kind, Label: step.Label, Final: &final,
 				Content: step.Content,
@@ -340,7 +340,7 @@ func (l *Loop) authorWorkflow(ctx context.Context, settings state.Settings, comm
 		return err
 	}
 	final := true
-	_, err = l.store.Append(state.CommentCreated, state.CommentData{
+	_, err = l.store.Append(state.WorkflowCommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: selected.ID, ParentCommentID: &comment.ID,
 		Author: "agent", Kind: kind, Final: &final, Content: response,
 	})
@@ -471,7 +471,7 @@ func (l *Loop) suspendRun(runID int64, run state.WorkflowRunData, event workflow
 	if len(event.Schema) > 0 {
 		content += "\n\nReply with JSON matching this schema:\n" + string(event.Schema)
 	}
-	comment, err := l.store.Append(state.CommentCreated, state.CommentData{
+	comment, err := l.store.Append(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: run.TaskID, Author: "agent", Content: content,
 	})
 	if err != nil {
@@ -497,7 +497,7 @@ func (l *Loop) startResume(
 ) (startedRun bool, err error) {
 	result, err := humanResult(response.Content, run.WaitingGate.Schema)
 	if err != nil {
-		_, publishErr := l.store.Append(state.CommentCreated, state.CommentData{
+		_, publishErr := l.store.Append(state.TaskCommentCreated, state.CommentData{
 			RelationType: "task", RelationID: run.TaskID, ParentCommentID: &response.ID,
 			Author: "agent", Content: "I could not use this review response: " + err.Error(),
 		})

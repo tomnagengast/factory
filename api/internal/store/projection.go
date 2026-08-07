@@ -92,10 +92,17 @@ func applyProjection(tx *transaction, event eventwire.Event) error {
 		deleteRecord(&value.Record, event.At)
 		return putTask(tx, value)
 
-	case state.CommentCreated:
+	case state.TaskCommentCreated, state.WorkflowCommentCreated:
 		var data state.CommentData
 		if err := decodeEvent(event, &data); err != nil {
 			return err
+		}
+		expectedRelationType := "task"
+		if event.Type == state.WorkflowCommentCreated {
+			expectedRelationType = "workflow"
+		}
+		if data.RelationType != expectedRelationType {
+			return fmt.Errorf("%s requires relationType %q", event.Type, expectedRelationType)
 		}
 		kind := data.Kind
 		if kind == "" {

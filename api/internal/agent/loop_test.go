@@ -174,7 +174,7 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := wire.Publish(state.CommentCreated, state.CommentData{
+	if _, err := wire.Publish(state.WorkflowCommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: created.ID, Author: "user", Content: "Build a review panel",
 	}); err != nil {
 		t.Fatal(err)
@@ -231,7 +231,7 @@ func TestLoopAnswersWorkflowConversation(t *testing.T) {
 	if authored.Path == nil || *authored.Path != workflows.LocalPath(created.ID) {
 		t.Fatalf("workflow path = %v, want live authoring target", authored.Path)
 	}
-	if _, err := wire.Publish(state.CommentCreated, state.CommentData{
+	if _, err := wire.Publish(state.WorkflowCommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: created.ID, Author: "user", Content: "Revise the panel",
 	}); err != nil {
 		t.Fatal(err)
@@ -267,7 +267,7 @@ func TestLoopPersistsProgressBeforeAuthoringCompletes(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
 	created, _ := wire.Publish(state.WorkflowCreated, state.WorkflowData{Name: "Draft"})
-	user, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	user, _ := wire.Publish(state.WorkflowCommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: created.ID, Author: "user", Content: "Build it",
 	})
 	runner := &fakeAgent{
@@ -336,7 +336,7 @@ func TestLoopPersistsProgressBeforeAuthoringCompletes(t *testing.T) {
 			}
 		case authoringCompleted:
 			completedIndex = index
-		case state.CommentCreated:
+		case state.WorkflowCommentCreated:
 			if event.ID == comments[5].ID {
 				finalIndex = index
 			}
@@ -352,7 +352,7 @@ func TestWorkflowAuthoringDoesNotBlockTriggeredRuns(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
 	draft, _ := wire.Publish(state.WorkflowCreated, state.WorkflowData{Name: "Draft"})
-	wire.Publish(state.CommentCreated, state.CommentData{
+	wire.Publish(state.WorkflowCommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: draft.ID, Author: "user", Content: "Build it",
 	})
 	sourcePath := "/workflows/review.js"
@@ -382,6 +382,35 @@ func TestWorkflowAuthoringDoesNotBlockTriggeredRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForActiveCount(t, loop, 0)
+}
+
+func TestWorkflowAuthoringCommentsDoNotMatchTaskCommentTrigger(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	responderPath := "/workflows/responder.js"
+	responder, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{
+		Name: "responder", Path: &responderPath,
+	})
+	wire.Publish(state.TriggerCreated, state.TriggerData{
+		EventType: state.TaskCommentCreated, WorkflowID: responder.ID, Enabled: true,
+	})
+	draft, _ := wire.Publish(state.WorkflowCreated, state.WorkflowData{Name: "Draft"})
+	wire.Publish(state.WorkflowCommentCreated, state.CommentData{
+		RelationType: "workflow", RelationID: draft.ID, Author: "user", Content: "Build it",
+	})
+	loop, err := newTestLoop(wire, &fakeAgent{output: "Created."}, newFakeWorkflows())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, _, err := loop.step(context.Background()); err != nil || !worked {
+		t.Fatalf("authoring dispatch = %v, %v", worked, err)
+	}
+	if err := finishAuthoring(t, loop); err != nil {
+		t.Fatal(err)
+	}
+	if worked, _, err := loop.step(context.Background()); err != nil || worked {
+		t.Fatalf("task comment trigger matched authoring event: worked=%v err=%v", worked, err)
+	}
 }
 
 func TestAuthorPromptExcludesProgressComments(t *testing.T) {
@@ -415,7 +444,7 @@ func TestLoopRejectsInvalidAuthoredWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := wire.Publish(state.CommentCreated, state.CommentData{
+	if _, err := wire.Publish(state.WorkflowCommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: created.ID, Author: "user", Content: "Build it",
 	}); err != nil {
 		t.Fatal(err)
@@ -462,7 +491,7 @@ func TestLoopRecordsRunnerAndDiscoveryFailuresAfterProgress(t *testing.T) {
 			wire := openWire(t)
 			defer wire.Close()
 			created, _ := wire.Publish(state.WorkflowCreated, state.WorkflowData{Name: "Draft"})
-			wire.Publish(state.CommentCreated, state.CommentData{
+			wire.Publish(state.WorkflowCommentCreated, state.CommentData{
 				RelationType: "workflow", RelationID: created.ID, Author: "user", Content: "Build it",
 			})
 			runner := &fakeAgent{
@@ -677,7 +706,7 @@ func TestLoopWaitsForHumanTaskCommentAndResumesTheSameRun(t *testing.T) {
 		comments[0].Content != "Should this ship?" {
 		t.Fatalf("gate comment = %#v", comments)
 	}
-	response, err := wire.Publish(state.CommentCreated, state.CommentData{
+	response, err := wire.Publish(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: task.ID, Author: "user", Content: "Yes, ship it.",
 	})
 	if err != nil {
@@ -788,7 +817,7 @@ func TestLoopPreservesWaitingRunsAcrossRestart(t *testing.T) {
 		TriggerID: 2, WorkflowID: 1, WorkflowName: "review",
 		SourceEventID: 3, TaskID: 3,
 	})
-	comment, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	comment, _ := wire.Publish(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: 3, Author: "agent", Content: "Review it?",
 	})
 	wire.Publish(state.WorkflowRunWaiting, state.WorkflowRunStateData{
@@ -1090,7 +1119,7 @@ func TestQuiescenceDrainsWorkflowAuthoring(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
 	created, _ := wire.Publish(state.WorkflowCreated, state.WorkflowData{Name: "Draft"})
-	wire.Publish(state.CommentCreated, state.CommentData{
+	wire.Publish(state.WorkflowCommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: created.ID, Author: "user", Content: "Build it",
 	})
 	runner := &fakeAgent{
