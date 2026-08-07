@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,35 +15,67 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/tomnagengast/factory/api/internal/eventwire"
+	"github.com/tomnagengast/factory/api/internal/objectstore"
 	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
 	"github.com/tomnagengast/factory/api/internal/store"
+	"github.com/tomnagengast/factory/api/internal/testpostgres"
 )
+
+var testCredentialsKey = base64.StdEncoding.EncodeToString(make([]byte, 32))
 
 type httpResult struct {
 	response *http.Response
 	err      error
 }
 
-func TestParseConfigAcceptsExplicitMediaPath(t *testing.T) {
+func TestParseConfigAcceptsManagedState(t *testing.T) {
+	setRequiredConfigEnv(t)
 	var output bytes.Buffer
 	configuration, err := parseConfig([]string{
-		"-data", "/tmp/factory.db",
-		"-media", "/tmp/factory-media",
 		"-workflow-workspace", "/tmp/factory-workflows",
 	}, &output)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if configuration.MediaPath != "/tmp/factory-media" {
-		t.Fatalf("media path = %q", configuration.MediaPath)
+	if configuration.DatabaseURL != "postgres://factory:test@database/factory" || configuration.S3Bucket != "factory-bucket" ||
+		configuration.S3Prefix != "services/factory" || configuration.S3Region != "us-west-2" ||
+		configuration.WorkflowWorkspace != "/tmp/factory-workflows" {
+		t.Fatalf("configuration = %#v", configuration)
 	}
 }
 
-func TestParseConfigRejectsEmptyMediaPath(t *testing.T) {
-	if _, err := parseConfig([]string{"-media", ""}, io.Discard); err == nil {
-		t.Fatal("empty media path was accepted")
+func TestParseConfigRequiresManagedState(t *testing.T) {
+	for _, name := range []string{"DATABASE_URL", "FACTORY_CREDENTIALS_KEY", "S3_BUCKET", "S3_PREFIX", "S3_REGION"} {
+		t.Run(name, func(t *testing.T) {
+			setRequiredConfigEnv(t)
+			t.Setenv(name, "")
+			if _, err := parseConfig(nil, io.Discard); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("missing %s error = %v", name, err)
+			}
+		})
+	}
+}
+
+func TestLocalServerURL(t *testing.T) {
+	tests := map[string]string{
+		"127.0.0.1:8092": "http://127.0.0.1:8092",
+		"0.0.0.0:8092":   "http://127.0.0.1:8092",
+		":8092":          "http://127.0.0.1:8092",
+		"[::]:8092":      "http://[::1]:8092",
+	}
+	for address, want := range tests {
+		t.Run(address, func(t *testing.T) {
+			got, err := localServerURL(address)
+			if err != nil || got != want {
+				t.Fatalf("localServerURL(%q) = %q, %v, want %q", address, got, err, want)
+			}
+		})
+	}
+	if _, err := localServerURL("not-an-address"); err == nil {
+		t.Fatal("localServerURL accepted an invalid address")
 	}
 }
 
@@ -91,9 +123,8 @@ func TestHTTPServerCancelsStreamingRequestsBeforeShutdown(t *testing.T) {
 
 func TestDeploymentStartupBlocksHTTPUntilRecoveryAndResumption(t *testing.T) {
 	directory := t.TempDir()
-	dataPath := filepath.Join(directory, "factory.db")
+	databaseURL := testpostgres.URL(t)
 	workflowWorkspace := filepath.Join(directory, "workflows")
-	mediaPath := filepath.Join(directory, "media")
 	entered := filepath.Join(directory, "discovery-entered")
 	release := filepath.Join(directory, "release-discovery")
 	workflowCommand := filepath.Join(directory, "workflow")
@@ -107,7 +138,7 @@ func TestDeploymentStartupBlocksHTTPUntilRecoveryAndResumption(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	eventStore, err := store.Open(dataPath)
+	eventStore, err := store.Open(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,9 +162,10 @@ func TestDeploymentStartupBlocksHTTPUntilRecoveryAndResumption(t *testing.T) {
 	stopped := make(chan error, 1)
 	go func() {
 		stopped <- run(ctx, config{
-			Address: address, DataPath: dataPath, MediaPath: mediaPath,
+			Address: address, DatabaseURL: databaseURL, CredentialsKey: testCredentialsKey,
 			WorkflowWorkspace: workflowWorkspace, WorkflowCommand: workflowCommand,
 			CodexCommand: "codex", ClaudeCommand: "claude", FactoryCommand: "factory",
+			Objects: objectstore.NewMemory(),
 		})
 	}()
 	waitForFile(t, entered)
@@ -161,7 +193,7 @@ func TestDeploymentStartupBlocksHTTPUntilRecoveryAndResumption(t *testing.T) {
 		t.Fatalf("quiescence responded before startup completed: %#v", result)
 	case <-time.After(50 * time.Millisecond):
 	}
-	blockedStore, err := store.Open(dataPath)
+	blockedStore, err := store.Open(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +227,7 @@ func TestDeploymentStartupBlocksHTTPUntilRecoveryAndResumption(t *testing.T) {
 		t.Fatalf("quiescence = %d %#v", quiescenceResponse.StatusCode, lease)
 	}
 
-	finalStore, err := store.Open(dataPath)
+	finalStore, err := store.Open(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,44 +275,56 @@ func TestDeploymentStartupBlocksHTTPUntilRecoveryAndResumption(t *testing.T) {
 }
 
 func TestDeploymentStartedFailureStopsStartup(t *testing.T) {
-	dataPath := filepath.Join(t.TempDir(), "factory.db")
-	eventStore, err := store.Open(dataPath)
+	databaseURL := testpostgres.URL(t)
+	eventStore, err := store.Open(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := eventStore.Close(); err != nil {
 		t.Fatal(err)
 	}
-	database, err := sql.Open("sqlite", dataPath)
+	database, err := pgx.Connect(context.Background(), databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.Exec(`
-		CREATE TRIGGER reject_deployment_started
-		BEFORE INSERT ON events
-		WHEN NEW.type = 'deployment.started'
+	if _, err := database.Exec(context.Background(), `
+		CREATE FUNCTION reject_deployment_started() RETURNS trigger AS $$
 		BEGIN
-			SELECT RAISE(FAIL, 'deployment start rejected');
+			IF NEW.type = 'deployment.started' THEN
+				RAISE EXCEPTION 'deployment start rejected';
+			END IF;
+			RETURN NEW;
 		END;
+		$$ LANGUAGE plpgsql;
+		CREATE TRIGGER reject_deployment_started BEFORE INSERT ON events
+		FOR EACH ROW EXECUTE FUNCTION reject_deployment_started();
 	`); err != nil {
-		database.Close()
+		database.Close(context.Background())
 		t.Fatal(err)
 	}
-	if err := database.Close(); err != nil {
+	if err := database.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	directory := t.TempDir()
 	err = run(context.Background(), config{
-		Address: "127.0.0.1:0", DataPath: dataPath,
-		MediaPath:         filepath.Join(directory, "media"),
+		Address: "127.0.0.1:0", DatabaseURL: databaseURL, CredentialsKey: testCredentialsKey,
 		WorkflowWorkspace: filepath.Join(directory, "workflows"),
 		WorkflowCommand:   "workflow", CodexCommand: "codex", ClaudeCommand: "claude",
-		FactoryCommand: "factory",
+		FactoryCommand: "factory", Objects: objectstore.NewMemory(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "record deployment start") ||
 		!strings.Contains(err.Error(), "deployment start rejected") {
 		t.Fatalf("run error = %v", err)
 	}
+}
+
+func setRequiredConfigEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("DATABASE_URL", "postgres://factory:test@database/factory")
+	t.Setenv("FACTORY_CREDENTIALS_KEY", testCredentialsKey)
+	t.Setenv("S3_BUCKET", "factory-bucket")
+	t.Setenv("S3_PREFIX", "services/factory")
+	t.Setenv("S3_REGION", "us-west-2")
 }
 
 func availableAddress(t *testing.T) string {

@@ -1,0 +1,10 @@
+.git
+.gitignore
+.DS_Store
+factory
+factory-api
+api/dist
+web/dist
+web/node_modules
+tmp
+output

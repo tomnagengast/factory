@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -625,7 +626,11 @@ func (l *Loop) taskContext(event eventwire.Event) (string, int64, error) {
 	if !found || strings.TrimSpace(project.Path) == "" {
 		return "", taskID, errors.New("task project path is required")
 	}
-	return strings.TrimSpace(project.Path), taskID, nil
+	directory := strings.TrimSpace(project.Path)
+	if err := os.MkdirAll(directory, 0o777); err != nil {
+		return "", taskID, fmt.Errorf("create task project path: %w", err)
+	}
+	return directory, taskID, nil
 }
 
 func (l *Loop) syncWorkflows(ctx context.Context) error {

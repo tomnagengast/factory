@@ -34,6 +34,7 @@ type CommandRunner struct {
 	Workspace      string
 	FactoryCommand string
 	FactoryURL     string
+	Environment    func() []string
 }
 
 func (r CommandRunner) Run(
@@ -60,7 +61,6 @@ func (r CommandRunner) Run(
 			"--json",
 			"--ephemeral",
 			"--dangerously-bypass-approvals-and-sandbox",
-			"--dangerously-bypass-hook-trust",
 			"--ignore-rules",
 			"--skip-git-repo-check",
 			"--model", settings.Model,
@@ -83,7 +83,11 @@ func (r CommandRunner) Run(
 		return "", fmt.Errorf("unknown harness %q", settings.Harness)
 	}
 	command.Dir = r.Workspace
-	command.Env = append(os.Environ(), "FACTORY_CLI="+factory, "FACTORY_URL="+r.FactoryURL)
+	environment := os.Environ()
+	if r.Environment != nil {
+		environment = r.Environment()
+	}
+	command.Env = append(environment, "FACTORY_CLI="+factory, "FACTORY_URL="+r.FactoryURL)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return "", fmt.Errorf("agent stdout: %w", err)

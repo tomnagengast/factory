@@ -185,9 +185,16 @@ export type HarnessOption = {
 };
 
 export type SettingsDetail = { settings: Settings; harnesses: HarnessOption[] };
+export type CredentialEntryStatus = { configured: boolean; source?: "saved" | "environment" };
+export type CredentialStatus = { codex: CredentialEntryStatus; claude: CredentialEntryStatus };
 export type HistoryListResponse = { history: WorkflowRun[]; checkpointEventId: number };
 export type HistoryDetail = { run: WorkflowRun; events: WorkflowRunEvent[] };
-export type ProjectDetail = { project: Project; tasks: TaskSummary[]; checkpointEventId: number };
+export type ProjectDetail = {
+  project: Project;
+  tasks: TaskSummary[];
+  checkpointEventId: number;
+  repositorySyncAvailable: boolean;
+};
 export type TaskDetail = {
   task: Task;
   comments: Comment[];

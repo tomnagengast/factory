@@ -1,35 +1,100 @@
 import { createEffect, createMemo, createResource, createSignal, For } from "solid-js";
 import { get, mutation, put } from "./api";
 import { parseReactionEmojis, reactionEmojisText } from "./reactions";
-import type { SettingsDetail } from "./types";
-import { FormFooter, Load, PageHeader } from "./ui";
+import type { CredentialEntryStatus, CredentialStatus, SettingsDetail } from "./types";
+import { FormFooter, Load, PageHeader, SectionTitle } from "./ui";
 
 export function SettingsPage() {
   const [data, { refetch }] = createResource(() => get<SettingsDetail>("/api/settings"));
+  const [credentials, { refetch: refetchCredentials }] = createResource(() => get<CredentialStatus>("/api/credentials"));
   const action = mutation();
+  const credentialAction = mutation();
   return (
     <div class="page narrow">
       <PageHeader
         eyebrow="Factory"
         title="Settings"
-        description="Choose the agent harness, workflow capacity, and canned reactions used across tasks and comments."
+        description="Choose the agent harness, credentials, workflow capacity, and canned reactions used across tasks and comments."
       />
-      <Load data={data} error={() => data.error}>
-        {(value) => (
-          <SettingsForm
-            detail={value}
-            pending={action.pending()}
-            error={action.error()}
-            onSave={(body) => action.run(async () => {
-              await put("/api/settings", body);
-              await refetch();
-            })}
-          />
-        )}
-      </Load>
+      <div class="settings-sections">
+        <section>
+          <SectionTitle title="Agent defaults" />
+          <Load data={data} error={() => data.error}>
+            {(value) => (
+              <SettingsForm
+                detail={value}
+                pending={action.pending()}
+                error={action.error()}
+                onSave={(body) => action.run(async () => {
+                  await put("/api/settings", body);
+                  await refetch();
+                })}
+              />
+            )}
+          </Load>
+        </section>
+        <section>
+          <SectionTitle title="API credentials" />
+          <Load data={credentials} error={() => credentials.error}>
+            {(value) => (
+              <CredentialForm status={value} pending={credentialAction.pending()} error={credentialAction.error()}
+                onSave={async (body) => {
+                  let saved = false;
+                  await credentialAction.run(async () => {
+                    await put("/api/credentials", body);
+                    await refetchCredentials();
+                    saved = true;
+                  });
+                  return saved;
+                }} />
+            )}
+          </Load>
+        </section>
+      </div>
     </div>
   );
 }
+
+function CredentialForm(props: {
+  status: CredentialStatus;
+  pending: boolean;
+  error?: string;
+  onSave: (body: unknown) => Promise<boolean>;
+}) {
+  const [openAIAPIKey, setOpenAIAPIKey] = createSignal("");
+  const [anthropicAPIKey, setAnthropicAPIKey] = createSignal("");
+  const describe = (status: CredentialEntryStatus) => {
+    if (status.source === "saved") return "A saved API key will be used for new processes.";
+    if (status.source === "environment") return "The API key from the server environment will be used.";
+    return "No API key is configured. An existing CLI login may still work.";
+  };
+  return (
+    <form class="form-panel" onSubmit={async (event) => {
+      event.preventDefault();
+      const body: { openaiApiKey?: string; anthropicApiKey?: string } = {};
+      if (openAIAPIKey()) body.openaiApiKey = openAIAPIKey();
+      if (anthropicAPIKey()) body.anthropicApiKey = anthropicAPIKey();
+      if (await props.onSave(body)) {
+        setOpenAIAPIKey("");
+        setAnthropicAPIKey("");
+      }
+    }}>
+      <label>OpenAI API key<input name="openaiApiKey" type="password" autocomplete="off"
+        value={openAIAPIKey()} onInput={(event) => setOpenAIAPIKey(event.currentTarget.value)}
+        placeholder={props.status.codex.configured ? "Enter a replacement key" : "Enter an API key"} />
+        <small>{describe(props.status.codex)}</small>
+      </label>
+      <label>Anthropic API key<input name="anthropicApiKey" type="password" autocomplete="off"
+        value={anthropicAPIKey()} onInput={(event) => setAnthropicAPIKey(event.currentTarget.value)}
+        placeholder={props.status.claude.configured ? "Enter a replacement key" : "Enter an API key"} />
+        <small>{describe(props.status.claude)}</small>
+      </label>
+      <p class="form-note">Keys are stored outside the event wire and are never returned by the API. Blank fields keep their current value.</p>
+      <FormFooter pending={props.pending} error={props.error} label="Save credentials" />
+    </form>
+  );
+}
+
 function SettingsForm(props: {
   detail: SettingsDetail;
   pending: boolean;

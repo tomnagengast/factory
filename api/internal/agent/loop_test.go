@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
 	"github.com/tomnagengast/factory/api/internal/store"
+	"github.com/tomnagengast/factory/api/internal/testpostgres"
 	"github.com/tomnagengast/factory/api/internal/workflow"
 )
 
@@ -887,7 +889,7 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 		t.Run(eventType, func(t *testing.T) {
 			wire := openWire(t)
 			defer wire.Close()
-			path := t.TempDir()
+			path := filepath.Join(t.TempDir(), "project")
 			project, _ := wire.Publish(state.ProjectCreated, state.ProjectData{Name: "Factory", Path: path})
 			sourcePath := "/workflows/review.js"
 			workflowEvent, _ := wire.Publish(state.WorkflowDiscovered, state.WorkflowData{
@@ -917,6 +919,9 @@ func TestLoopRunsTaskTriggersInProjectPath(t *testing.T) {
 			waitForSignal(t, workflows.started, "workflow start")
 			waitForSignal(t, workflows.finished, "workflow finish")
 			waitForActiveCount(t, loop, 0)
+			if info, err := os.Stat(path); err != nil || !info.IsDir() {
+				t.Fatalf("project path was not restored: %v", err)
+			}
 			workflows.mu.Lock()
 			if !worked || len(workflows.runs) != 1 ||
 				workflows.runs[0].directory != path || workflows.runs[0].source != sourcePath {
@@ -1560,7 +1565,7 @@ func (s *testStore) LastID() int64 {
 
 func openWire(t *testing.T) *testStore {
 	t.Helper()
-	eventStore, err := store.Open(filepath.Join(t.TempDir(), "factory.db"))
+	eventStore, err := store.Open(testpostgres.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -21,7 +21,7 @@ type runProjection struct {
 	Arguments json.RawMessage   `json:"arguments,omitempty"`
 }
 
-func applyProjection(tx *sql.Tx, event eventwire.Event) error {
+func applyProjection(tx *transaction, event eventwire.Event) error {
 	switch event.Type {
 	case state.ProjectCreated:
 		var data state.ProjectData
@@ -357,7 +357,7 @@ func applyProjection(tx *sql.Tx, event eventwire.Event) error {
 		value.Run.WaitingGate = nil
 		value.Run.ResponseCommentID = data.ResponseCommentID
 		if data.ResponseCommentID > 0 {
-			if _, err := tx.Exec(`INSERT OR IGNORE INTO human_responses(comment_id) VALUES(?)`, data.ResponseCommentID); err != nil {
+			if _, err := tx.Exec(`INSERT INTO human_responses(comment_id) VALUES(?) ON CONFLICT DO NOTHING`, data.ResponseCommentID); err != nil {
 				return err
 			}
 		}
@@ -382,7 +382,7 @@ func applyProjection(tx *sql.Tx, event eventwire.Event) error {
 	return nil
 }
 
-func applyRunStarted(tx *sql.Tx, event eventwire.Event) error {
+func applyRunStarted(tx *transaction, event eventwire.Event) error {
 	var data state.WorkflowRunData
 	if err := decodeEvent(event, &data); err != nil {
 		return err
@@ -429,7 +429,7 @@ func applyRunStarted(tx *sql.Tx, event eventwire.Event) error {
 	}
 	workflowValue.RunCount++
 	if taskID > 0 {
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO workflow_tasks(workflow_id, task_id) VALUES(?, ?)`, data.WorkflowID, taskID); err != nil {
+		if _, err := tx.Exec(`INSERT INTO workflow_tasks(workflow_id, task_id) VALUES(?, ?) ON CONFLICT DO NOTHING`, data.WorkflowID, taskID); err != nil {
 			return err
 		}
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM workflow_tasks WHERE workflow_id = ?`, data.WorkflowID).Scan(&workflowValue.TaskCount); err != nil {
@@ -439,7 +439,7 @@ func applyRunStarted(tx *sql.Tx, event eventwire.Event) error {
 	return putWorkflow(tx, workflowValue)
 }
 
-func rebuildProjectionTx(tx *sql.Tx) error {
+func rebuildProjectionTx(tx *transaction) error {
 	var after int64
 	for {
 		rows, err := tx.Query(`SELECT id, type, at, data FROM events WHERE id > ? ORDER BY id LIMIT 500`, after)
@@ -484,6 +484,9 @@ func (s *Store) rebuildProjections(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(?)`, eventAppendLockID); err != nil {
+		return fmt.Errorf("lock projection rebuild: %w", err)
+	}
 	if _, err := tx.Exec(dropProjectionSchema); err != nil {
 		return fmt.Errorf("drop stale projections: %w", err)
 	}
@@ -564,7 +567,7 @@ func orderedReactions(current, configured []string, selected map[string]bool) []
 	return result
 }
 
-func settingsTx(tx *sql.Tx) (state.Settings, error) {
+func settingsTx(tx *transaction) (state.Settings, error) {
 	settings, found, err := settingsQuery(tx)
 	if err != nil {
 		return state.Settings{}, err
@@ -575,7 +578,7 @@ func settingsTx(tx *sql.Tx) (state.Settings, error) {
 	return settings, nil
 }
 
-func reorderReactionProjections(tx *sql.Tx, configured []string) error {
+func reorderReactionProjections(tx *transaction, configured []string) error {
 	tasks, err := queryJSON[state.Task](tx, `SELECT data FROM tasks ORDER BY id`)
 	if err != nil {
 		return err
@@ -599,7 +602,7 @@ func reorderReactionProjections(tx *sql.Tx, configured []string) error {
 	return nil
 }
 
-func deleteCommentTree(tx *sql.Tx, rootID int64, at time.Time) error {
+func deleteCommentTree(tx *transaction, rootID int64, at time.Time) error {
 	rows, err := tx.Query(`
 		WITH RECURSIVE descendants(id) AS (
 			SELECT id FROM comments WHERE id = ?
@@ -645,7 +648,7 @@ func marshal(value any) ([]byte, error) {
 	return encoded, nil
 }
 
-func getJSON[T any](tx *sql.Tx, query string, args ...any) (T, bool, error) {
+func getJSON[T any](tx *transaction, query string, args ...any) (T, bool, error) {
 	var zero T
 	var encoded []byte
 	err := tx.QueryRow(query, args...).Scan(&encoded)
@@ -661,29 +664,29 @@ func getJSON[T any](tx *sql.Tx, query string, args ...any) (T, bool, error) {
 	return zero, true, nil
 }
 
-func projectTx(tx *sql.Tx, id int64) (state.Project, bool, error) {
+func projectTx(tx *transaction, id int64) (state.Project, bool, error) {
 	return getJSON[state.Project](tx, `SELECT data FROM projects WHERE id = ?`, id)
 }
-func taskTx(tx *sql.Tx, id int64) (state.Task, bool, error) {
+func taskTx(tx *transaction, id int64) (state.Task, bool, error) {
 	return getJSON[state.Task](tx, `SELECT data FROM tasks WHERE id = ?`, id)
 }
-func commentTx(tx *sql.Tx, id int64) (state.Comment, bool, error) {
+func commentTx(tx *transaction, id int64) (state.Comment, bool, error) {
 	return getJSON[state.Comment](tx, `SELECT data FROM comments WHERE id = ?`, id)
 }
-func artifactTx(tx *sql.Tx, id int64) (state.Artifact, bool, error) {
+func artifactTx(tx *transaction, id int64) (state.Artifact, bool, error) {
 	return getJSON[state.Artifact](tx, `SELECT data FROM artifacts WHERE id = ?`, id)
 }
-func workflowTx(tx *sql.Tx, id int64) (state.Workflow, bool, error) {
+func workflowTx(tx *transaction, id int64) (state.Workflow, bool, error) {
 	return getJSON[state.Workflow](tx, `SELECT data FROM workflows WHERE id = ?`, id)
 }
-func runTx(tx *sql.Tx, id int64) (runProjection, bool, error) {
+func runTx(tx *transaction, id int64) (runProjection, bool, error) {
 	return getJSON[runProjection](tx, `SELECT data FROM workflow_runs WHERE id = ?`, id)
 }
-func runByClaimTx(tx *sql.Tx, triggerID, sourceEventID int64) (runProjection, bool, error) {
+func runByClaimTx(tx *transaction, triggerID, sourceEventID int64) (runProjection, bool, error) {
 	return getJSON[runProjection](tx, `SELECT data FROM workflow_runs WHERE trigger_id = ? AND source_event_id = ?`, triggerID, sourceEventID)
 }
 
-func eventTx(tx *sql.Tx, id int64) (eventwire.Event, bool, error) {
+func eventTx(tx *transaction, id int64) (eventwire.Event, bool, error) {
 	var event eventwire.Event
 	var at string
 	var data []byte
@@ -699,7 +702,7 @@ func eventTx(tx *sql.Tx, id int64) (eventwire.Event, bool, error) {
 	return event, true, err
 }
 
-func triggerTx(tx *sql.Tx, id int64) (state.Trigger, int64, *time.Time, bool, error) {
+func triggerTx(tx *transaction, id int64) (state.Trigger, int64, *time.Time, bool, error) {
 	var encoded []byte
 	var boundary int64
 	var raw sql.NullString
@@ -725,7 +728,7 @@ func triggerTx(tx *sql.Tx, id int64) (state.Trigger, int64, *time.Time, bool, er
 	return value, boundary, last, true, nil
 }
 
-func putProject(tx *sql.Tx, value state.Project) error {
+func putProject(tx *transaction, value state.Project) error {
 	data, err := marshal(value)
 	if err != nil {
 		return err
@@ -733,7 +736,7 @@ func putProject(tx *sql.Tx, value state.Project) error {
 	_, err = tx.Exec(`INSERT INTO projects(id, deleted, data) VALUES(?, ?, ?) ON CONFLICT(id) DO UPDATE SET deleted=excluded.deleted, data=excluded.data`, value.ID, boolInt(value.DeletedAt != nil), data)
 	return err
 }
-func putTask(tx *sql.Tx, value state.Task) error {
+func putTask(tx *transaction, value state.Task) error {
 	data, err := marshal(value)
 	if err != nil {
 		return err
@@ -741,7 +744,7 @@ func putTask(tx *sql.Tx, value state.Task) error {
 	_, err = tx.Exec(`INSERT INTO tasks(id, project_id, deleted, data) VALUES(?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, deleted=excluded.deleted, data=excluded.data`, value.ID, value.ProjectID, boolInt(value.DeletedAt != nil), data)
 	return err
 }
-func putComment(tx *sql.Tx, value state.Comment) error {
+func putComment(tx *transaction, value state.Comment) error {
 	data, err := marshal(value)
 	if err != nil {
 		return err
@@ -749,7 +752,7 @@ func putComment(tx *sql.Tx, value state.Comment) error {
 	_, err = tx.Exec(`INSERT INTO comments(id, relation_type, relation_id, parent_id, author, final, deleted, data) VALUES(?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET relation_type=excluded.relation_type, relation_id=excluded.relation_id, parent_id=excluded.parent_id, author=excluded.author, final=excluded.final, deleted=excluded.deleted, data=excluded.data`, value.ID, value.RelationType, value.RelationID, nullableInt(pointerValue(value.ParentCommentID)), value.Author, boolInt(value.Final), boolInt(value.DeletedAt != nil), data)
 	return err
 }
-func putArtifact(tx *sql.Tx, value state.Artifact) error {
+func putArtifact(tx *transaction, value state.Artifact) error {
 	data, err := marshal(value)
 	if err != nil {
 		return err
@@ -757,7 +760,7 @@ func putArtifact(tx *sql.Tx, value state.Artifact) error {
 	_, err = tx.Exec(`INSERT INTO artifacts(id, relation_type, relation_id, deleted, data) VALUES(?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET relation_type=excluded.relation_type, relation_id=excluded.relation_id, deleted=excluded.deleted, data=excluded.data`, value.ID, value.RelationType, value.RelationID, boolInt(value.DeletedAt != nil), data)
 	return err
 }
-func putMedia(tx *sql.Tx, value state.Media) error {
+func putMedia(tx *transaction, value state.Media) error {
 	data, err := marshal(value)
 	if err != nil {
 		return err
@@ -765,7 +768,7 @@ func putMedia(tx *sql.Tx, value state.Media) error {
 	_, err = tx.Exec(`INSERT INTO media(id, data) VALUES(?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data`, value.ID, data)
 	return err
 }
-func putTrigger(tx *sql.Tx, value state.Trigger, boundary int64, lastCron *time.Time) error {
+func putTrigger(tx *transaction, value state.Trigger, boundary int64, lastCron *time.Time) error {
 	data, err := marshal(value)
 	if err != nil {
 		return err
@@ -777,7 +780,7 @@ func putTrigger(tx *sql.Tx, value state.Trigger, boundary int64, lastCron *time.
 	_, err = tx.Exec(`INSERT INTO triggers(id, event_type, workflow_id, enabled, boundary_event_id, last_cron_at, deleted, data) VALUES(?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET event_type=excluded.event_type, workflow_id=excluded.workflow_id, enabled=excluded.enabled, boundary_event_id=excluded.boundary_event_id, last_cron_at=excluded.last_cron_at, deleted=excluded.deleted, data=excluded.data`, value.ID, value.EventType, value.WorkflowID, boolInt(value.Enabled), boundary, cron, boolInt(value.DeletedAt != nil), data)
 	return err
 }
-func putWorkflow(tx *sql.Tx, value state.Workflow) error {
+func putWorkflow(tx *transaction, value state.Workflow) error {
 	data, err := marshal(value)
 	if err != nil {
 		return err
@@ -785,7 +788,7 @@ func putWorkflow(tx *sql.Tx, value state.Workflow) error {
 	_, err = tx.Exec(`INSERT INTO workflows(id, name, path, deleted, data) VALUES(?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, path=excluded.path, deleted=excluded.deleted, data=excluded.data`, value.ID, value.Name, nullableString(value.Path), boolInt(value.DeletedAt != nil), data)
 	return err
 }
-func putRun(tx *sql.Tx, value runProjection) error {
+func putRun(tx *transaction, value runProjection) error {
 	value.Run.Directory = value.Directory
 	value.Run.Source = value.Source
 	value.Run.Settings = value.Settings

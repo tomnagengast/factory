@@ -35,8 +35,8 @@ brew install --cask workflow-cli
 # Codex
 brew install --cask codex
 
-# Claude Code, requiring Node.js 18 or newer
-npm install -g @anthropic-ai/claude-code
+# Claude Code
+curl -fsSL https://claude.ai/install.sh | bash
 ```
 
 The linked harness documentation covers other platforms and install methods.
@@ -99,6 +99,56 @@ go build -o factory ./cli
 The web build must be copied into `api/dist` before the API binary is built
 because Go embeds those files in `factory-api`.
 
+The repository also contains a production container build. It performs the
+same frozen frontend build, builds both Go binaries, installs pinned Linux
+releases of `workflow`, Codex, Claude Code, and Cloudflare Tunnel, and runs as a
+non-root user:
+
+```sh
+docker build -t factory .
+docker run --rm -p 8092:8092 \
+  -e DATABASE_URL -e S3_BUCKET -e S3_PREFIX -e S3_REGION \
+  -e FACTORY_CREDENTIALS_KEY factory
+```
+
+The image binds the HTTP server on all container interfaces while giving
+workflows the loopback server URL. It sets `SHELL=/bin/bash` for the bundled
+agent harnesses and makes `/home/repos` and `/var/lib/factory/projects`
+writable project roots. Durable state stays outside the container: Postgres
+holds the event wire, projections, and encrypted harness credentials; S3 holds
+media and validated Factory-authored workflow source. Local workflow, project,
+and agent directories are scratch space.
+
+For a hosted container platform, push the multi-platform image to a registry
+and create a service from its immutable image tag. Configure:
+
+- container port `8092`,
+- health check path `/api/health`,
+- managed Postgres and managed S3,
+- a stable `FACTORY_CREDENTIALS_KEY` secret, and
+- egress enabled for Codex, Claude Code, Git, and workflow network calls.
+
+Supply `DATABASE_URL`, `S3_BUCKET`, `S3_PREFIX`, and `S3_REGION` through the
+platform's normal secret and configuration system. No persistent filesystem is
+required. Open **Settings → API credentials** to save or replace
+`OPENAI_API_KEY` and `ANTHROPIC_API_KEY`.
+Factory encrypts the keys outside the event wire with AES-GCM, never returns
+their values, and passes both to authoring and workflow processes. Secret
+environment values remain valid alternatives. Keep `FACTORY_CREDENTIALS_KEY`
+stable across deployments or saved keys cannot be decrypted.
+
+To add an external intake, create a remotely managed Cloudflare Tunnel and set
+its token as the optional `TUNNEL_TOKEN` secret. Configure the tunnel with
+these ordered public application routes:
+
+1. the external hostname and path `^/api/ingest/external$`, served by
+   `http://127.0.0.1:8092`, and
+2. the same hostname served by `http_status:404`.
+
+The image starts `cloudflared` only when the token exists and stops the
+container if either Factory or the tunnel stops. Keep the normal private route
+on port `8092`; it remains the direct internal transport.
+
 ### 3. Start the server
 
 Before starting Factory, check whether another copy is already listening:
@@ -113,8 +163,8 @@ If the port is free:
 ./factory-api
 ```
 
-Leave that terminal open. Factory logs its listening address, event store path,
-media directory, and workflow workspace at startup.
+Leave that terminal open. Factory logs its listening address, managed storage
+types, and workflow workspace at startup.
 
 Open [http://127.0.0.1:8092](http://127.0.0.1:8092) in a browser. The overview
 should load and the lower-left status should say `Coordinator connected`.
@@ -131,6 +181,10 @@ curl -fsS http://127.0.0.1:8092/api/health
 The response should contain `"status":"ok"` and `"harness":"codex"`.
 If you want Claude Code, open **Settings** and select its model and reasoning
 level before starting workflow collaboration or publishing a triggered event.
+The same page accepts OpenAI and Anthropic API keys. A blank credential field
+keeps its current value, and the status beneath each field says whether a saved
+key or server environment value will be used. CLI login state may work even
+when no API key appears as configured.
 The same page controls workflow capacity from zero through ten; the default is
 six. It also controls the ordered canned reactions shown on every task and
 task comment. Enter one exact value per line; the defaults are
@@ -175,16 +229,18 @@ Every CLI response is JSON. Use the returned integer `id` for later `get`,
 
 ### 5. Connect an external producer
 
-Point any HTTP webhook or log drain at the universal ingress endpoint:
+Point any HTTP webhook or log drain at the universal ingress endpoint. A
+container deployment can use distinct paths to make the transport explicit:
 
 ```text
-http://127.0.0.1:8092/api/ingest?source=my-service
+https://events.example.com/api/ingest/external?source=my-service
+http://factory:8092/api/ingest/internal?source=my-service
 ```
 
 Factory records each request as `ingress.my-service`. The complete headers
 and body are retained, so credentials sent in headers are retained too. No
 signature verification, payload schema, deduplication, or provider adapter is
-involved.
+involved. Bodies larger than 32 MiB are rejected without appending an event.
 
 OTLP/HTTP exporters can use paths below the same endpoint:
 
@@ -227,7 +283,8 @@ Generated files live under:
 ```
 
 They are deliberately outside the Factory repository and are not committed
-to Git.
+to Git. This directory is a local cache: Factory restores it from S3 at
+startup and persists each successfully validated authored workflow back to S3.
 
 ## Everyday commands
 
@@ -289,21 +346,27 @@ The defaults are:
 | Setting | Default |
 | --- | --- |
 | Listen address | `127.0.0.1:$PORT`, or `127.0.0.1:8092` |
-| Event store | `~/.local/share/factory/factory.db` |
-| Media blobs | `~/.local/share/factory/media` |
+| `DATABASE_URL` | required Postgres connection URL |
+| `FACTORY_CREDENTIALS_KEY` | required stable base64-encoded 32-byte key |
+| `S3_BUCKET` | required managed bucket |
+| `S3_PREFIX` | required service-owned object prefix |
+| `S3_REGION` | required AWS region |
 | Workflow workspace | `~/.local/share/factory/workflow-workspace` |
 | Codex executable | `codex` |
 | Claude Code executable | `claude` |
 | Factory CLI exposed to workflow agents | `./factory` |
 | Workflow executable | `workflow` |
 
-Example with isolated state and a different port:
+Example with managed state and a different port:
 
 ```sh
+export DATABASE_URL='postgres://...'
+export FACTORY_CREDENTIALS_KEY='<stable base64-encoded 32-byte key>'
+export S3_BUCKET='...'
+export S3_PREFIX='factory/local'
+export S3_REGION='us-west-2'
 ./factory-api \
   -addr 127.0.0.1:9090 \
-  -data "$HOME/.local/share/factory-demo/factory.db" \
-  -media "$HOME/.local/share/factory-demo/media" \
   -workflow-workspace "$HOME/.local/share/factory-demo/workflows"
 ```
 
@@ -353,10 +416,11 @@ there is no `deployment.quiesced`, the resumed event can report a positive
 keeps admission closed if a required deployment event cannot be written. A
 successful process replacement clears the old process's in-memory lease.
 
-Restarting with the same `-data`, `-media`, and `-workflow-workspace` values
-preserves resources, comments, media, events, triggers, workflow run history,
-and generated workflow files. Each process appends `deployment.started` after
-opening the wire. It then discovers workflows and appends a failure event for
+Restarting against the same Postgres database and S3 prefix preserves
+resources, comments, media, events, triggers, workflow run history, encrypted
+API credentials, and validated workflow files. Each process appends
+`deployment.started` after opening the wire. It restores workflow source from
+S3, discovers workflows, and appends a failure event for
 any earlier run still projected as `running`, such as a process interrupted by
 a crash or service replacement. Finally it appends `deployment.resumed` with
 reason `startup` before it serves HTTP or starts scheduler admission. Waiting
@@ -374,21 +438,11 @@ Every semantic workflow event is part of the same durable wire. Restarting
 does not depend on temporary journal files or terminal logs to rebuild run
 history.
 
-Back up or restore the database and media directory together. The database identifies
-each media blob, while the blob bytes live only under `-media`. To begin with
-empty state, stop Factory and move all three paths aside:
-
-```sh
-mv "$HOME/.local/share/factory/factory.db" \
-  "$HOME/.local/share/factory/factory.backup.db"
-mv "$HOME/.local/share/factory/media" \
-  "$HOME/.local/share/factory/media.backup"
-mv "$HOME/.local/share/factory/workflow-workspace" \
-  "$HOME/.local/share/factory/workflow-workspace.backup"
-```
-
-Factory recreates the paths on the next start. Resource deletion in the UI
-or API is soft deletion and does not remove historical wire entries.
+Back up or restore Postgres and the service's S3 prefix together. Postgres
+identifies media and workflow records while their bytes live in S3. The local
+workflow workspace is a disposable cache and is replaced from S3 at startup.
+Resource deletion in the UI or API is soft deletion and does not remove
+historical wire entries.
 Finalized media is never deleted, including uploads left unreferenced by a
 canceled editor, failed task or comment save, or event publication failure.
 
@@ -396,8 +450,9 @@ canceled editor, failed task or comment save, or event publication failure.
 
 ### The server exits immediately
 
-Read the terminal error first. Startup requires a writable database path, the
-embedded frontend, and a working `workflow` command.
+Read the terminal error first. Startup requires Postgres, S3, a valid
+`FACTORY_CREDENTIALS_KEY`, the embedded frontend, and a working `workflow`
+command.
 
 Verify:
 

@@ -15,8 +15,11 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tomnagengast/factory/api/internal/credential"
 	"github.com/tomnagengast/factory/api/internal/state"
 )
+
+const maxIngressBodyBytes = 32 << 20
 
 func (s *Server) settings(writer http.ResponseWriter, _ *http.Request) {
 	settings, err := s.store.Settings()
@@ -69,6 +72,32 @@ func (s *Server) settingsUpdate(writer http.ResponseWriter, request *http.Reques
 	writeJSON(writer, http.StatusOK, settings)
 }
 
+func (s *Server) credentialsStatus(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, s.credentials.Status())
+}
+
+func (s *Server) credentialsUpdate(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		OpenAIAPIKey    *string `json:"openaiApiKey"`
+		AnthropicAPIKey *string `json:"anthropicApiKey"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.credentials.Update(credential.Update{
+		OpenAIAPIKey: input.OpenAIAPIKey, AnthropicAPIKey: input.AnthropicAPIKey,
+	}); err != nil {
+		if errors.Is(err, credential.ErrInvalid) {
+			writeError(writer, http.StatusBadRequest, err)
+		} else {
+			writeError(writer, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	writeJSON(writer, http.StatusOK, s.credentials.Status())
+}
+
 func (s *Server) projects(writer http.ResponseWriter, _ *http.Request) {
 	projects, err := s.store.Projects()
 	if err != nil {
@@ -99,8 +128,13 @@ func (s *Server) project(writer http.ResponseWriter, request *http.Request) {
 			tasks = append(tasks, task)
 		}
 	}
+	repositorySyncAvailable := false
+	if project.Repo != nil {
+		repositorySyncAvailable = projectRepositorySyncAvailable(*project.Repo, project.Path)
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"project": project, "tasks": taskListItems(view, tasks), "checkpointEventId": checkpoint,
+		"repositorySyncAvailable": repositorySyncAvailable,
 	})
 }
 
@@ -114,8 +148,24 @@ func (s *Server) projectCreate(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
+	cloned := false
+	if input.Repo == nil {
+		if err := createProjectPath(input.Path); err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
+	} else {
+		if err := s.cloneProject(request.Context(), *input.Repo, input.Path); err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
+		cloned = true
+	}
 	event, err := s.store.Append(state.ProjectCreated, input)
 	if err != nil {
+		if cloned {
+			_ = os.RemoveAll(input.Path)
+		}
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
@@ -143,6 +193,10 @@ func (s *Server) projectUpdate(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
+	if err := createProjectPath(input.Path); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
 	if _, err := s.store.Append(state.ProjectUpdated, input); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
@@ -163,12 +217,53 @@ func (s *Server) projectDelete(writer http.ResponseWriter, request *http.Request
 	s.delete(writer, request, "project", state.ProjectDeleted)
 }
 
+func (s *Server) projectSync(writer http.ResponseWriter, request *http.Request) {
+	id, err := pathID(request, "project")
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	project, found, err := s.store.Project(id)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	if !found {
+		writeError(writer, http.StatusNotFound, errors.New("project not found"))
+		return
+	}
+	if project.Repo == nil || strings.TrimSpace(*project.Repo) == "" {
+		writeError(writer, http.StatusBadRequest, errors.New("project repository is required"))
+		return
+	}
+	if err := s.syncProject(request.Context(), strings.TrimSpace(*project.Repo), strings.TrimSpace(project.Path)); err != nil {
+		writeError(writer, http.StatusConflict, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "cloned", "path": project.Path})
+}
+
 func prepareProject(input *state.ProjectData) error {
 	input.Name, input.Path = strings.TrimSpace(input.Name), strings.TrimSpace(input.Path)
 	if input.Name == "" || input.Path == "" {
 		return errors.New("project name and path are required")
 	}
-	if err := os.MkdirAll(input.Path, 0o777); err != nil {
+	if input.Repo != nil {
+		repository := strings.TrimSpace(*input.Repo)
+		if repository == "" {
+			input.Repo = nil
+		} else {
+			if err := validateProjectRepository(repository); err != nil {
+				return err
+			}
+			input.Repo = &repository
+		}
+	}
+	return nil
+}
+
+func createProjectPath(path string) error {
+	if err := os.MkdirAll(path, 0o777); err != nil {
 		return fmt.Errorf("create project path: %w", err)
 	}
 	return nil
@@ -1024,8 +1119,13 @@ func (s *Server) eventCreate(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (s *Server) ingest(writer http.ResponseWriter, request *http.Request) {
-	body, err := io.ReadAll(request.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, maxIngressBodyBytes))
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(writer, http.StatusRequestEntityTooLarge, errors.New("ingress body exceeds the 32 MiB limit"))
+			return
+		}
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
@@ -1056,6 +1156,15 @@ func (s *Server) ingest(writer http.ResponseWriter, request *http.Request) {
 	default:
 		writer.WriteHeader(http.StatusOK)
 	}
+}
+
+func (s *Server) externalIngest(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		writeError(writer, http.StatusMethodNotAllowed, errors.New("external ingress requires POST"))
+		return
+	}
+	s.ingest(writer, request)
 }
 
 func (s *Server) stream(writer http.ResponseWriter, request *http.Request) {

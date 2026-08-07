@@ -75,12 +75,16 @@ func TestCommandRunnerNormalizesSelectedHarness(t *testing.T) {
 			stdinPath := filepath.Join(directory, "stdin")
 			command := writeScript(t, directory, test.settings.Harness,
 				"printf '%s\\n' \"$@\" > "+shellQuote(argsPath)+"\n"+
-					"printf '%s\\n%s\\n' \"$FACTORY_CLI\" \"$FACTORY_URL\" > "+shellQuote(envPath)+"\n"+
+					"printf '%s\\n%s\\n%s\\n%s\\n' \"$FACTORY_CLI\" \"$FACTORY_URL\" \"$OPENAI_API_KEY\" \"$ANTHROPIC_API_KEY\" > "+shellQuote(envPath)+"\n"+
 					"cat > "+shellQuote(stdinPath)+"\n"+
 					"printf '%s' "+shellQuote(test.stream)+"\n")
 			factory := filepath.Join(directory, "factory")
+			runner := testRunner(directory, command, factory)
+			runner.Environment = func() []string {
+				return []string{"PATH=" + os.Getenv("PATH"), "OPENAI_API_KEY=openai-secret", "ANTHROPIC_API_KEY=anthropic-secret"}
+			}
 			var steps []AgentStep
-			output, err := testRunner(directory, command, factory).Run(
+			output, err := runner.Run(
 				context.Background(), test.settings, "Build a workflow",
 				func(step AgentStep) error {
 					steps = append(steps, step)
@@ -105,13 +109,16 @@ func TestCommandRunnerNormalizesSelectedHarness(t *testing.T) {
 			if test.settings.Harness == state.Codex && !strings.Contains(string(args), "--json") {
 				t.Fatalf("Codex JSON mode missing: %s", args)
 			}
+			if test.settings.Harness == state.Codex && strings.Contains(string(args), "--dangerously-bypass-hook-trust") {
+				t.Fatalf("Codex hook-trust bypass emits a terminal warning: %s", args)
+			}
 			if test.settings.Harness == state.Claude &&
 				(!strings.Contains(string(args), "stream-json") || !strings.Contains(string(args), "--verbose") ||
 					!strings.Contains(string(args), "Build a workflow")) {
 				t.Fatalf("Claude stream arguments missing: %s", args)
 			}
 			environment, _ := os.ReadFile(envPath)
-			if string(environment) != factory+"\nhttp://127.0.0.1:8092\n" {
+			if string(environment) != factory+"\nhttp://127.0.0.1:8092\nopenai-secret\nanthropic-secret\n" {
 				t.Fatalf("unexpected Factory environment: %s", environment)
 			}
 			stdin, _ := os.ReadFile(stdinPath)

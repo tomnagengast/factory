@@ -12,9 +12,9 @@ Everything else exists to make those mechanisms visible and usable.
 
 ```text
 Web UI ─┐
-        ├─> resource API ───────> SQLite event store
+        ├─> resource API ───────> Postgres event store
 CLI ────┘        │                     │
-                 └─> immutable blobs   │
+                 └─> S3 objects        │
                                       ├─> projected resources
                                       ├─> live event stream
                                       └─> one coordinator
@@ -30,7 +30,7 @@ There is no queue service, permission layer, or embedded workflow engine.
 
 ## Event wire
 
-The wire is one append-only SQLite event table. Every accepted fact has:
+The wire is one append-only Postgres event table. Every accepted fact has:
 
 | Field | Meaning |
 | --- | --- |
@@ -51,7 +51,8 @@ events because reserved event data is interpreted by the projection.
 provider adapter. Factory records the method, URL, headers, and exact body as
 one event. UTF-8 bodies remain text and other bytes use base64. A `source`
 query value selects an automatically namespaced event type such as
-`ingress.github`; requests without one use `ingress.received`.
+`ingress.github`; requests without one use `ingress.received`. Bodies larger
+than 32 MiB are rejected before an event is appended.
 
 `GET /api/events/stream` exposes new events as server-sent events. The web
 event page and detail views use that stream to update without a page reload.
@@ -75,15 +76,15 @@ version change rebuilds those tables by scanning events in fixed-size pages.
 
 Media is the one split resource. A `media.created` event stores its name,
 allowed content type, size, and SHA-256 storage key. The immutable bytes live
-under the configured media directory, not in SQLite. Task and comment events
+under the service's S3 prefix, not in Postgres. Task and comment events
 contain short `/api/media/{id}` references instead of repeated binary data.
 Factory keeps finalized blobs even when no task or comment refers to them and
 after a related record is deleted.
 
 Generic event intake can also append a `media.created` event, so projected
 media metadata is not trusted for file access or response headers. Retrieval
-rechecks the hash, direct-child path, regular-file status, content type, size,
-and safe inline filename before serving a blob.
+rechecks the object hash, content type, size, and safe inline filename before
+serving a blob.
 
 Agent settings select a harness, model, reasoning level, workflow capacity,
 and one ordered set of canned reactions. They default to Codex, six concurrent
@@ -92,8 +93,20 @@ the complete value. New authoring sessions and trigger runs read the latest
 projection when they start, while task and comment controls use the latest
 reaction set.
 
-Every project has a required local path. The API creates that directory when
-the project is created or updated.
+Harness API keys are not agent settings and never enter the event wire. Factory
+stores replacement OpenAI and Anthropic keys as one AES-GCM encrypted Postgres
+value, reports only configured status and source, and adds both keys to each
+new authoring or workflow process. `FACTORY_CREDENTIALS_KEY` supplies the
+stable encryption key and never enters the wire. A saved key takes precedence
+over the matching server environment value.
+
+Every project has a required local path. On creation, the API clones a supplied
+public GitHub HTTPS repository into a new path or creates an empty path when no
+repository is supplied. Updates create a missing path but never change its
+contents. The coordinator recreates it before a task-triggered workflow so
+scratch project paths survive container replacement.
+An explicit project sync clones into a missing or empty path without
+overwriting local contents. The UI hides that action once the path is non-empty.
 
 This gives Factory a deliberately simple write path:
 
@@ -222,7 +235,7 @@ The coordinator records progress back on the same wire:
 The event page therefore shows both user intake and the coordinator's response.
 The history overview projects those wire events into Running, Waiting, Failed,
 and Completed sections, in that order, with five runs per section. Each linked
-status page reads 25 matching rows at a time from the indexed SQLite
+status page reads 25 matching rows at a time from the indexed Postgres
 projection. It does not load and filter the full run set in the browser or use
 a separate log store. Each semantic runtime event remains one distinct wire
 record; the projection never collapses lifecycle pairs. The web detail groups
@@ -250,8 +263,9 @@ and human responses can dispatch only after the startup resumption fact.
 
 ## Workflow source and metadata
 
-The wire stores workflow metadata and conversation events. Workflow source is
-an external file discovered by the `workflow` CLI.
+The wire stores workflow metadata and conversation events. S3 stores validated
+Factory-authored workflow source. At startup Factory replaces the local cache
+from S3, then the `workflow` CLI discovers those files.
 
 Factory-created files live in:
 
@@ -271,7 +285,8 @@ conversation can inspect resources or configure a trigger when the user asks.
 
 After authoring, Factory asks the workflow CLI to rediscover definitions and
 projects the resolved name, description, phases, scope, path, and mutating
-flag onto the wire.
+flag onto the wire. A successful validation writes the source to S3 before
+rediscovery, so a new container can restore it.
 
 ## Triggers
 

@@ -155,6 +155,18 @@ func parse(args []string) (command, error) {
 			return command{}, err
 		}
 		return command{method: http.MethodDelete, path: "/api/" + plural + "/" + id}, nil
+	case "sync":
+		if resource != "project" || len(args) != 3 {
+			return command{}, errors.New("usage: factory project sync <id>")
+		}
+		id, err := argumentID(args, 2)
+		if err != nil {
+			return command{}, err
+		}
+		return command{
+			method: http.MethodPost, path: "/api/projects/" + id + "/sync",
+			body: []byte("{}"), contentType: "application/json",
+		}, nil
 	case "comment":
 		if resource != "task" && resource != "workflow" {
 			return command{}, fmt.Errorf("%s does not accept comments", resource)
@@ -280,7 +292,7 @@ Usage:
   factory [--url URL] <resource> <action> [id] [json|@file]
 
 Resources:
-  project   list, get, create, update, delete
+  project   list, get, create, update, delete, sync
   task      list, get, create, update, delete, comment, react
   comment   get, update, delete, react
   artifact  list, get, create, update, delete
@@ -293,6 +305,7 @@ Resources:
 
 Examples:
   factory project create '{"name":"Factory","path":"/path/to/factory"}'
+  factory project sync 1
   factory task create '{"title":"Review the PR","status":"todo","projectId":1}'
   factory task comment 12 '{"content":"The build passed."}'
   factory task react 12 '{"emoji":"👍","active":true}'

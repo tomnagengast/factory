@@ -29,7 +29,7 @@ Every projected resource includes:
 | --- | --- | --- |
 | `name` | string | yes |
 | `description` | string or null | no |
-| `repo` | string or null | no |
+| `repo` | public GitHub HTTPS URL or null | no |
 | `path` | string | yes |
 | `url` | string or null | no |
 
@@ -37,7 +37,7 @@ Every projected resource includes:
 factory project create '{
   "name":"Example",
   "description":"Example project",
-  "repo":"tomnagengast/example",
+  "repo":"https://github.com/tomnagengast/example",
   "path":"/Users/me/repos/example",
   "url":"https://github.com/tomnagengast/example"
 }'
@@ -51,12 +51,23 @@ POST   /api/projects
 GET    /api/projects/{id}
 PUT    /api/projects/{id}
 DELETE /api/projects/{id}
+POST   /api/projects/{id}/sync
 ```
 
-Project detail includes the project's active tasks. Its task objects use the
+Project detail includes the project's active tasks and a
+`repositorySyncAvailable` boolean. It is true only when the project has a valid
+repository and its local path is missing or empty. Its task objects use the
 same list summaries and snapshot checkpoint as `GET /api/tasks`, described
 below.
-Creating or updating a project creates its local `path` if needed.
+Creating a project with a `repo` clones that public GitHub repository into its
+local `path`. The path must not already exist. Without a `repo`, creation makes
+an empty path. Updating a project makes its path if needed but never clones or
+changes its contents.
+
+`POST /api/projects/{id}/sync` clones the configured repository when the path
+is missing or empty and refuses to overwrite any non-empty path. The project
+page shows **Sync** only while this action is available. The same action is
+available as `factory project sync <id>`.
 
 ## Tasks
 
@@ -322,8 +333,8 @@ count reactions.
 ## Media
 
 Media records are immutable. Their creation event ID is also the media ID.
-The wire stores metadata only; bytes are stored under the server's configured
-`-media` directory with their SHA-256 value as the filename.
+The wire stores metadata only; bytes are stored under the managed S3 prefix
+with their SHA-256 value as the object key.
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -473,6 +484,7 @@ GET  /api/events/types
 GET  /api/events/stream
 ANY  /api/ingest
 ANY  /api/ingest/{remaining-path...}
+POST /api/ingest/external
 ```
 
 `GET /api/events` returns the newest 200 events. `before=42` returns the next
@@ -542,8 +554,17 @@ no source       -> ingress.received
 
 Event data contains `method`, `url`, `headers`, `bodyEncoding`, and `body`.
 Valid UTF-8 bodies use `utf-8`; all other bytes use lossless `base64`. Headers
-are stored without redaction. Every receipt, including a producer retry,
-becomes a separate event.
+are stored without redaction. Bodies larger than 32 MiB return `413` without
+appending an event. Every accepted receipt, including a producer retry, becomes
+a separate event.
+
+Container deployments can give the same wire two ingress transports. A
+remotely managed Cloudflare Tunnel routes one public hostname and only
+`POST /api/ingest/external` to Factory. Producers that can reach Factory on its
+private network call `/api/ingest/internal` directly. The suffix records the
+transport in the event's `url`; both paths otherwise share this handler and the
+same provider-neutral `ingress.<source>` type. The external path rejects every
+method except `POST` even when called without the tunnel.
 
 The handler accepts configured paths beneath `/api/ingest` and returns an
 empty successful OTLP/HTTP response for protobuf or `{}` for JSON. It does not
@@ -756,7 +777,7 @@ checkpoint captured with that page:
 
 The optional `status` query accepts only `running`, `waiting`, `failed`, or
 `completed`. `before=<run-id>` uses an exclusive cursor and `limit` selects a
-positive page size. The indexed `workflow_runs` SQLite projection applies the
+positive page size. The indexed `workflow_runs` Postgres projection applies the
 status predicate, cursor, ordering, and limit before rows reach either client.
 The web overview requests the newest five runs for each status. Its linked
 status pages request 25 at a time as the reader scrolls. `factory history list`
@@ -809,6 +830,25 @@ as one value per line. Capacity zero pauses new event and cron trigger runs.
 Lowering it does not cancel active runs. Changing reaction settings reorders
 projected active reactions but does not delete them, change task or comment
 timestamps, or append synthetic reaction events.
+
+### Harness credentials
+
+Harness credentials are private process configuration, not event-sourced
+resources. Their routes are:
+
+```text
+GET /api/credentials
+PUT /api/credentials
+```
+
+GET returns only configured status and `saved` or `environment` source for
+`codex` and `claude`; it never returns a key. PUT accepts at least one nonempty
+`openaiApiKey` or `anthropicApiKey`. Omitted fields keep their current saved
+value. Saved values replace matching `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`
+environment values for new authoring and workflow processes. Factory writes
+the keys atomically to the configured private credential path with mode `0600`
+and appends no event. Existing Codex or Claude CLI login state can still be
+used when no API key is configured.
 
 ## Workflow quiescence
 

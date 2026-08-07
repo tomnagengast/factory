@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -9,7 +11,6 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -79,18 +80,9 @@ func (s *Server) storeMedia(request *http.Request) (state.Media, error) {
 		return state.Media{}, err
 	}
 
-	temporary, err := os.CreateTemp(s.mediaRoot, ".upload-*")
-	if err != nil {
-		return state.Media{}, fmt.Errorf("create media temporary file: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	defer func() {
-		_ = temporary.Close()
-		_ = os.Remove(temporaryPath)
-	}()
-
+	var content bytes.Buffer
 	hash := sha256.New()
-	size, err := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(part, maxMediaSize+1))
+	size, err := io.Copy(io.MultiWriter(&content, hash), io.LimitReader(part, maxMediaSize+1))
 	if err != nil {
 		return state.Media{}, badMediaRequest(http.StatusBadRequest, "read uploaded media")
 	}
@@ -109,24 +101,9 @@ func (s *Server) storeMedia(request *http.Request) (state.Media, error) {
 	} else if !errors.Is(nextErr, io.EOF) {
 		return state.Media{}, badMediaRequest(http.StatusBadRequest, "finish multipart request")
 	}
-	if err := temporary.Sync(); err != nil {
-		return state.Media{}, fmt.Errorf("sync uploaded media: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return state.Media{}, fmt.Errorf("close uploaded media: %w", err)
-	}
-
 	sha := hex.EncodeToString(hash.Sum(nil))
-	finalPath := filepath.Join(s.mediaRoot, sha)
-	if err := os.Link(temporaryPath, finalPath); err != nil {
-		if !errors.Is(err, os.ErrExist) {
-			return state.Media{}, fmt.Errorf("finalize uploaded media: %w", err)
-		}
-		existing, verifyErr := verifiedMediaFile(finalPath, size, sha)
-		if verifyErr != nil {
-			return state.Media{}, errors.New("existing media blob is invalid")
-		}
-		_ = existing.Close()
+	if err := s.objects.Put(request.Context(), "media/"+sha, content.Bytes(), contentType); err != nil {
+		return state.Media{}, fmt.Errorf("store uploaded media: %w", err)
 	}
 
 	event, err := s.store.Append(state.MediaCreated, state.MediaData{
@@ -156,21 +133,19 @@ func (s *Server) media(writer http.ResponseWriter, request *http.Request) {
 		http.NotFound(writer, request)
 		return
 	}
-	file, disposition, err := s.openMedia(mediaFile)
+	content, disposition, err := s.openMedia(request.Context(), mediaFile)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, errors.New("media is unavailable"))
 		return
 	}
-	defer file.Close()
-
 	writer.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	writer.Header().Set("Content-Disposition", disposition)
 	writer.Header().Set("Content-Type", mediaFile.ContentType)
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
-	http.ServeContent(writer, request, mediaFile.Name, mediaFile.CreatedAt, file)
+	http.ServeContent(writer, request, mediaFile.Name, mediaFile.CreatedAt, bytes.NewReader(content))
 }
 
-func (s *Server) openMedia(mediaFile state.Media) (*os.File, string, error) {
+func (s *Server) openMedia(ctx context.Context, mediaFile state.Media) ([]byte, string, error) {
 	if len(mediaFile.SHA256) != sha256.Size*2 || strings.ToLower(mediaFile.SHA256) != mediaFile.SHA256 {
 		return nil, "", errors.New("invalid media hash")
 	}
@@ -188,49 +163,15 @@ func (s *Server) openMedia(mediaFile state.Media) (*os.File, string, error) {
 		return nil, "", errors.New("invalid media disposition")
 	}
 
-	candidate := filepath.Join(s.mediaRoot, mediaFile.SHA256)
-	if filepath.Dir(candidate) != s.mediaRoot {
-		return nil, "", errors.New("invalid media path")
-	}
-	info, err := os.Lstat(candidate)
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, "", errors.New("invalid media blob")
-	}
-	resolved, err := filepath.EvalSymlinks(candidate)
-	if err != nil || filepath.Dir(resolved) != s.mediaRoot || filepath.Base(resolved) != mediaFile.SHA256 {
-		return nil, "", errors.New("invalid media blob path")
-	}
-	file, err := verifiedMediaFile(candidate, mediaFile.Size, mediaFile.SHA256)
-	if err != nil {
+	content, err := s.objects.Get(ctx, "media/"+mediaFile.SHA256)
+	if err != nil || int64(len(content)) != mediaFile.Size {
 		return nil, "", errors.New("media blob does not match metadata")
 	}
-	return file, disposition, nil
-}
-
-func verifiedMediaFile(path string, expectedSize int64, expectedSHA string) (*os.File, error) {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, errors.New("media blob is not a regular file")
+	hash := sha256.Sum256(content)
+	if hex.EncodeToString(hash[:]) != mediaFile.SHA256 {
+		return nil, "", errors.New("media blob does not match metadata")
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	opened, err := file.Stat()
-	if err != nil || !opened.Mode().IsRegular() || opened.Size() != expectedSize || !os.SameFile(info, opened) {
-		_ = file.Close()
-		return nil, errors.New("media blob size or identity does not match")
-	}
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil || hex.EncodeToString(hash.Sum(nil)) != expectedSHA {
-		_ = file.Close()
-		return nil, errors.New("media blob hash does not match")
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	return file, nil
+	return content, disposition, nil
 }
 
 func mediaContentType(part *multipart.Part, name string) (string, error) {

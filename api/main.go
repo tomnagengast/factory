@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"github.com/tomnagengast/factory/api/internal/agent"
+	"github.com/tomnagengast/factory/api/internal/credential"
 	"github.com/tomnagengast/factory/api/internal/deployment"
+	"github.com/tomnagengast/factory/api/internal/objectstore"
 	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/server"
 	"github.com/tomnagengast/factory/api/internal/store"
@@ -30,13 +32,17 @@ var frontend embed.FS
 
 type config struct {
 	Address           string
-	DataPath          string
-	MediaPath         string
+	DatabaseURL       string
+	CredentialsKey    string
+	S3Bucket          string
+	S3Prefix          string
+	S3Region          string
 	WorkflowWorkspace string
 	CodexCommand      string
 	ClaudeCommand     string
 	FactoryCommand    string
 	WorkflowCommand   string
+	Objects           objectstore.Store
 }
 
 type componentResult struct {
@@ -75,19 +81,12 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 	flags := flag.NewFlagSet("factory-api", flag.ContinueOnError)
 	flags.SetOutput(output)
 	var configuration config
+	configuration.DatabaseURL = os.Getenv("DATABASE_URL")
+	configuration.CredentialsKey = os.Getenv("FACTORY_CREDENTIALS_KEY")
+	configuration.S3Bucket = os.Getenv("S3_BUCKET")
+	configuration.S3Prefix = os.Getenv("S3_PREFIX")
+	configuration.S3Region = os.Getenv("S3_REGION")
 	flags.StringVar(&configuration.Address, "addr", "127.0.0.1:"+port, "HTTP listen address")
-	flags.StringVar(
-		&configuration.DataPath,
-		"data",
-		filepath.Join(home, ".local", "share", "factory", "factory.db"),
-		"SQLite event store path",
-	)
-	flags.StringVar(
-		&configuration.MediaPath,
-		"media",
-		filepath.Join(home, ".local", "share", "factory", "media"),
-		"immutable media blob directory",
-	)
 	flags.StringVar(
 		&configuration.WorkflowWorkspace,
 		"workflow-workspace",
@@ -111,21 +110,36 @@ func parseConfig(arguments []string, output io.Writer) (config, error) {
 	if flags.NArg() != 0 {
 		return config{}, errors.New("factory-api accepts options only")
 	}
-	if configuration.Address == "" || configuration.DataPath == "" || configuration.MediaPath == "" ||
-		configuration.WorkflowWorkspace == "" || configuration.CodexCommand == "" ||
+	if configuration.Address == "" || configuration.DatabaseURL == "" || configuration.CredentialsKey == "" ||
+		configuration.S3Bucket == "" || configuration.S3Prefix == "" || configuration.S3Region == "" || configuration.WorkflowWorkspace == "" || configuration.CodexCommand == "" ||
 		configuration.ClaudeCommand == "" ||
 		configuration.FactoryCommand == "" || configuration.WorkflowCommand == "" {
-		return config{}, errors.New("all serve options require values")
+		return config{}, errors.New("DATABASE_URL, FACTORY_CREDENTIALS_KEY, S3_BUCKET, S3_PREFIX, S3_REGION, and all serve options require values")
 	}
 	return configuration, nil
 }
 
 func run(ctx context.Context, configuration config) error {
-	eventStore, err := store.Open(configuration.DataPath)
+	factoryURL, err := localServerURL(configuration.Address)
+	if err != nil {
+		return err
+	}
+	eventStore, err := store.Open(configuration.DatabaseURL)
 	if err != nil {
 		return err
 	}
 	defer eventStore.Close()
+	credentials, err := credential.Open(eventStore, configuration.CredentialsKey)
+	if err != nil {
+		return err
+	}
+	objects := configuration.Objects
+	if objects == nil {
+		objects, err = objectstore.OpenS3(ctx, configuration.S3Bucket, configuration.S3Prefix, configuration.S3Region)
+		if err != nil {
+			return err
+		}
+	}
 	release := deployment.FromEnvironment()
 	deployments := deployment.NewRecorder(eventStore, release)
 	if err := deployments.Started(); err != nil {
@@ -135,9 +149,11 @@ func run(ctx context.Context, configuration config) error {
 	workflowCLI := workflow.CLI{
 		Command: configuration.WorkflowCommand, Workspace: configuration.WorkflowWorkspace,
 		CodexCommand: configuration.CodexCommand, ClaudeCommand: configuration.ClaudeCommand,
-		FactoryCommand: configuration.FactoryCommand, FactoryURL: "http://" + configuration.Address,
+		FactoryCommand: configuration.FactoryCommand, FactoryURL: factoryURL,
+		Environment: credentials.Environment,
+		Objects:     objects,
 	}
-	if err := workflowCLI.Prepare(); err != nil {
+	if err := workflowCLI.Prepare(ctx); err != nil {
 		return err
 	}
 	admission := quiescence.New(quiescence.Hooks{
@@ -148,7 +164,8 @@ func run(ctx context.Context, configuration config) error {
 	loop, err := agent.NewLoop(eventStore, agent.CommandRunner{
 		CodexCommand: configuration.CodexCommand, ClaudeCommand: configuration.ClaudeCommand,
 		Workspace:      configuration.WorkflowWorkspace,
-		FactoryCommand: configuration.FactoryCommand, FactoryURL: "http://" + configuration.Address,
+		FactoryCommand: configuration.FactoryCommand, FactoryURL: factoryURL,
+		Environment: credentials.Environment,
 	}, workflowCLI, admission)
 	if err != nil {
 		return err
@@ -157,7 +174,7 @@ func run(ctx context.Context, configuration config) error {
 	if err != nil {
 		return fmt.Errorf("open embedded web bundle: %w", err)
 	}
-	app, err := server.New(eventStore, assets, configuration.MediaPath, admission, release)
+	app, err := server.New(eventStore, credentials, assets, objects, admission, release)
 	if err != nil {
 		return err
 	}
@@ -183,8 +200,8 @@ func run(ctx context.Context, configuration config) error {
 	slog.Info(
 		"factory listening",
 		"address", "http://"+listener.Addr().String(),
-		"store", configuration.DataPath,
-		"media", configuration.MediaPath,
+		"store", "postgres",
+		"media", "s3",
 		"workflowWorkspace", configuration.WorkflowWorkspace,
 	)
 
@@ -204,6 +221,20 @@ func run(ctx context.Context, configuration config) error {
 		return fmt.Errorf("stop HTTP server: %w", shutdownErr)
 	}
 	return nil
+}
+
+func localServerURL(address string) (string, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", fmt.Errorf("resolve local server URL from %s: %w", address, err)
+	}
+	switch host {
+	case "", "0.0.0.0":
+		host = "127.0.0.1"
+	case "::":
+		host = "::1"
+	}
+	return "http://" + net.JoinHostPort(host, port), nil
 }
 
 func newHTTPServer(handler http.Handler, baseContext context.Context) *http.Server {

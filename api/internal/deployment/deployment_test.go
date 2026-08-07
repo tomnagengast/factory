@@ -3,12 +3,12 @@ package deployment
 import (
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/tomnagengast/factory/api/internal/state"
 	"github.com/tomnagengast/factory/api/internal/store"
+	"github.com/tomnagengast/factory/api/internal/testpostgres"
 )
 
 func TestFromEnvironmentAndRecorderPayloads(t *testing.T) {
@@ -58,8 +58,8 @@ func TestFromEnvironmentAndRecorderPayloads(t *testing.T) {
 }
 
 func TestDeploymentStartedSurvivesStoreReopen(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "factory.db")
-	eventStore, err := store.Open(path)
+	dsn := testpostgres.URL(t)
+	eventStore, err := store.Open(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestDeploymentStartedSurvivesStoreReopen(t *testing.T) {
 	if err := eventStore.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := store.Open(path)
+	reopened, err := store.Open(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestRecorderReturnsRequiredBoundaryWriteFailure(t *testing.T) {
 
 func openTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	eventStore, err := store.Open(filepath.Join(t.TempDir(), "factory.db"))
+	eventStore, err := store.Open(testpostgres.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

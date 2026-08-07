@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/tomnagengast/factory/api/internal/eventwire"
 	"github.com/tomnagengast/factory/api/internal/state"
+	"github.com/tomnagengast/factory/api/internal/testpostgres"
 )
 
 func TestAppendProjectsAtomicallyAndPreservesConditionalOrder(t *testing.T) {
@@ -46,6 +47,33 @@ func TestAppendProjectsAtomicallyAndPreservesConditionalOrder(t *testing.T) {
 	lastID, _ = store.LastID()
 	if lastID != 2 {
 		t.Fatalf("failed projection advanced wire to %d", lastID)
+	}
+}
+
+func TestConcurrentOpenPreparesOnePostgresSchema(t *testing.T) {
+	dsn := testpostgres.URL(t)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var wait sync.WaitGroup
+	for range 2 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			value, err := Open(dsn)
+			if err == nil {
+				err = value.Close()
+			}
+			results <- err
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -210,8 +238,8 @@ func TestHistoryFiltersAndPagesWorkflowRunProjection(t *testing.T) {
 }
 
 func TestProjectionUpgradeDefaultsHistoricalSettingsReactionEmojis(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "factory.db")
-	store, err := Open(path)
+	dsn := testpostgres.URL(t)
+	store, err := Open(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +257,7 @@ func TestProjectionUpgradeDefaultsHistoricalSettingsReactionEmojis(t *testing.T)
 		t.Fatal(err)
 	}
 
-	reopened, err := Open(path)
+	reopened, err := Open(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,8 +274,8 @@ func TestProjectionUpgradeDefaultsHistoricalSettingsReactionEmojis(t *testing.T)
 }
 
 func TestConfiguredReactionSettingsAndRetiredOrderSurviveRestartAndReplay(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "factory.db")
-	store, err := Open(path)
+	dsn := testpostgres.URL(t)
+	store, err := Open(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +316,7 @@ func TestConfiguredReactionSettingsAndRetiredOrderSurviveRestartAndReplay(t *tes
 		t.Fatal(err)
 	}
 
-	reopened, err := Open(path)
+	reopened, err := Open(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +342,7 @@ func runIDs(runs []state.WorkflowRun) []int64 {
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	value, err := Open(filepath.Join(t.TempDir(), "factory.db"))
+	value, err := Open(testpostgres.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

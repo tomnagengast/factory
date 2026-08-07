@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -21,12 +23,17 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/tomnagengast/factory/api/internal/credential"
 	"github.com/tomnagengast/factory/api/internal/deployment"
 	"github.com/tomnagengast/factory/api/internal/eventwire"
+	"github.com/tomnagengast/factory/api/internal/objectstore"
 	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
 	"github.com/tomnagengast/factory/api/internal/store"
+	"github.com/tomnagengast/factory/api/internal/testpostgres"
 )
+
+var testCredentialKey = base64.StdEncoding.EncodeToString(make([]byte, 32))
 
 func TestProjectTaskCommentAndArtifactAPI(t *testing.T) {
 	wire := openWire(t)
@@ -71,8 +78,8 @@ func TestProjectTaskCommentAndArtifactAPI(t *testing.T) {
 }
 
 func TestCommentDeleteCascadesAndSurvivesReplay(t *testing.T) {
-	wirePath := filepath.Join(t.TempDir(), "factory.db")
-	wire := openStoreAt(t, wirePath)
+	wireURL := testpostgres.URL(t)
+	wire := openStoreAt(t, wireURL)
 	defer func() { _ = wire.Close() }()
 	handler := testServer(t, wire).Handler()
 	projectPath := filepath.Join(t.TempDir(), "factory")
@@ -162,7 +169,7 @@ func TestCommentDeleteCascadesAndSurvivesReplay(t *testing.T) {
 	if err := wire.Close(); err != nil {
 		t.Fatal(err)
 	}
-	wire = openStoreAt(t, wirePath)
+	wire = openStoreAt(t, wireURL)
 	handler = testServer(t, wire).Handler()
 	assertTaskComments(handler)
 }
@@ -425,6 +432,259 @@ func TestProjectRequiresAndCreatesPath(t *testing.T) {
 	}
 	if info, err := os.Stat(updatedPath); err != nil || !info.IsDir() {
 		t.Fatalf("updated project path was not created: %v", err)
+	}
+}
+
+func TestProjectCreateClonesPublicGitHubRepository(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	server := testServer(t, wire)
+	path := filepath.Join(t.TempDir(), "factory")
+	clones := 0
+	server.cloneProject = func(_ context.Context, repository, destination string) error {
+		clones++
+		if repository != "https://github.com/tomnagengast/factory" {
+			t.Fatalf("repository = %q", repository)
+		}
+		if destination != path {
+			t.Fatalf("destination = %q", destination)
+		}
+		if err := os.MkdirAll(destination, 0o777); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(destination, "README.md"), []byte("Factory"), 0o666)
+	}
+
+	response := requestJSON(t, server.Handler(), http.MethodPost, "/api/projects", fmt.Sprintf(
+		`{"name":"Factory","repo":"  https://github.com/tomnagengast/factory  ","path":%q}`,
+		path,
+	))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", response.Code, response.Body)
+	}
+	if clones != 1 {
+		t.Fatalf("clone count = %d", clones)
+	}
+	if data, err := os.ReadFile(filepath.Join(path, "README.md")); err != nil || string(data) != "Factory" {
+		t.Fatalf("cloned README = %q, %v", data, err)
+	}
+	var project state.Project
+	if err := json.Unmarshal(response.Body.Bytes(), &project); err != nil {
+		t.Fatal(err)
+	}
+	if project.Repo == nil || *project.Repo != "https://github.com/tomnagengast/factory" {
+		t.Fatalf("project repository = %#v", project.Repo)
+	}
+
+	updatedPath := filepath.Join(t.TempDir(), "factory-updated")
+	response = requestJSON(t, server.Handler(), http.MethodPut, "/api/projects/1", fmt.Sprintf(
+		`{"name":"Factory","repo":"https://github.com/tomnagengast/factory","path":%q}`,
+		updatedPath,
+	))
+	if response.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body = %s", response.Code, response.Body)
+	}
+	if clones != 1 {
+		t.Fatalf("clone count after update = %d", clones)
+	}
+	if info, err := os.Stat(updatedPath); err != nil || !info.IsDir() {
+		t.Fatalf("updated project path was not created: %v", err)
+	}
+}
+
+func TestProjectCreateRejectsNonPublicGitHubRepository(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	server := testServer(t, wire)
+	server.cloneProject = func(context.Context, string, string) error {
+		t.Fatal("clone should not be called")
+		return nil
+	}
+
+	path := filepath.Join(t.TempDir(), "factory")
+	response := requestJSON(t, server.Handler(), http.MethodPost, "/api/projects", fmt.Sprintf(
+		`{"name":"Factory","repo":"git@github.com:tomnagengast/factory.git","path":%q}`,
+		path,
+	))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("create status = %d, body = %s", response.Code, response.Body)
+	}
+	if events := wire.Events(0); len(events) != 0 {
+		t.Fatalf("events = %#v", events)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("project path exists after rejection: %v", err)
+	}
+}
+
+func TestProjectCreateDoesNotRecordCloneFailure(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	server := testServer(t, wire)
+	server.cloneProject = func(context.Context, string, string) error {
+		return errors.New("repository not found")
+	}
+
+	path := filepath.Join(t.TempDir(), "factory")
+	response := requestJSON(t, server.Handler(), http.MethodPost, "/api/projects", fmt.Sprintf(
+		`{"name":"Factory","repo":"https://github.com/tomnagengast/missing","path":%q}`,
+		path,
+	))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("create status = %d, body = %s", response.Code, response.Body)
+	}
+	if events := wire.Events(0); len(events) != 0 {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestCloneProjectRepositoryRequiresMissingPath(t *testing.T) {
+	err := cloneProjectRepository(
+		context.Background(),
+		"https://github.com/tomnagengast/factory",
+		t.TempDir(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "local path already exists") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestProjectSyncUsesStoredRepositoryAndPath(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	path := t.TempDir()
+	repository := "https://github.com/tomnagengast/factory"
+	project, _ := wire.Publish(state.ProjectCreated, state.ProjectData{
+		Name: "Factory", Repo: &repository, Path: path,
+	})
+	server := testServer(t, wire)
+	server.syncProject = func(_ context.Context, gotRepository, gotPath string) error {
+		if gotRepository != repository || gotPath != path {
+			t.Fatalf("sync = %q %q", gotRepository, gotPath)
+		}
+		return os.WriteFile(filepath.Join(path, "README.md"), []byte("Factory"), 0o666)
+	}
+	readAvailability := func() bool {
+		t.Helper()
+		response := requestJSON(
+			t, server.Handler(), http.MethodGet, fmt.Sprintf("/api/projects/%d", project.ID), "",
+		)
+		var detail struct {
+			RepositorySyncAvailable bool `json:"repositorySyncAvailable"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &detail) != nil {
+			t.Fatalf("project detail = %d, %s", response.Code, response.Body)
+		}
+		return detail.RepositorySyncAvailable
+	}
+	if !readAvailability() {
+		t.Fatal("sync should be available for an empty path")
+	}
+
+	response := requestJSON(
+		t, server.Handler(), http.MethodPost, fmt.Sprintf("/api/projects/%d/sync", project.ID), `{}`,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("sync status = %d, body = %s", response.Code, response.Body)
+	}
+	var result map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["status"] != "cloned" || result["path"] != path {
+		t.Fatalf("sync result = %#v", result)
+	}
+	if data, err := os.ReadFile(filepath.Join(path, "README.md")); err != nil || string(data) != "Factory" {
+		t.Fatalf("synced README = %q, %v", data, err)
+	}
+	if readAvailability() {
+		t.Fatal("sync should be hidden after the path is populated")
+	}
+}
+
+func TestProjectSyncRequiresRepositoryAndPreservesUnrelatedPath(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	path := t.TempDir()
+	project, _ := wire.Publish(state.ProjectCreated, state.ProjectData{Name: "Factory", Path: path})
+	server := testServer(t, wire)
+	server.syncProject = func(context.Context, string, string) error {
+		t.Fatal("sync should not be called")
+		return nil
+	}
+
+	response := requestJSON(
+		t, server.Handler(), http.MethodPost, fmt.Sprintf("/api/projects/%d/sync", project.ID), `{}`,
+	)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("sync status = %d, body = %s", response.Code, response.Body)
+	}
+
+	repository := "https://github.com/tomnagengast/factory"
+	if err := os.WriteFile(filepath.Join(path, "notes.txt"), []byte("keep"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	err := syncProjectRepository(context.Background(), repository, path)
+	if err == nil || !strings.Contains(err.Error(), "not empty") {
+		t.Fatalf("sync error = %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(path, "notes.txt")); err != nil || string(data) != "keep" {
+		t.Fatalf("unrelated file = %q, %v", data, err)
+	}
+}
+
+func TestProjectSyncClonesEmptyPathOnlyOnce(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "source")
+	runTestGit(t, "init", "--quiet", source)
+	readme := filepath.Join(source, "README.md")
+	commit := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(readme, []byte(content), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		runTestGit(t, "-C", source, "add", "README.md")
+		runTestGit(
+			t, "-C", source, "-c", "user.name=Factory", "-c", "user.email=factory@example.com",
+			"commit", "--quiet", "-m", content,
+		)
+	}
+	commit("first")
+
+	repository := "https://github.com/tomnagengast/factory"
+	config := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(config, []byte(fmt.Sprintf(
+		"[url %q]\n\tinsteadOf = %s\n[protocol \"file\"]\n\tallow = always\n",
+		"file://"+filepath.ToSlash(source), repository,
+	)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", config)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	path := filepath.Join(t.TempDir(), "project")
+	if err := os.Mkdir(path, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncProjectRepository(context.Background(), repository, path); err != nil {
+		t.Fatalf("first sync = %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(path, "README.md")); err != nil || string(data) != "first" {
+		t.Fatalf("first README = %q, %v", data, err)
+	}
+	if projectRepositorySyncAvailable(repository, path) {
+		t.Fatal("sync should be unavailable after cloning")
+	}
+	if err := syncProjectRepository(context.Background(), repository, path); err == nil ||
+		!strings.Contains(err.Error(), "not empty") {
+		t.Fatalf("second sync = %v", err)
+	}
+}
+
+func runTestGit(t *testing.T, arguments ...string) {
+	t.Helper()
+	command := exec.Command("git", arguments...)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(arguments, " "), err, output)
 	}
 }
 
@@ -1130,8 +1390,8 @@ func TestArbitraryEventIntakeAndTypes(t *testing.T) {
 }
 
 func TestDeploymentEventsUseGenericWireAPI(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "factory.db")
-	wire := openStoreAt(t, path)
+	dsn := testpostgres.URL(t)
+	wire := openStoreAt(t, dsn)
 	identity := state.ReleaseIdentity{
 		Commit: "commit-1", Tree: "tree-1", BuildID: "build-1",
 		DeploymentID: "deployment-1", ContractVersion: "1",
@@ -1144,7 +1404,7 @@ func TestDeploymentEventsUseGenericWireAPI(t *testing.T) {
 	if err := wire.Close(); err != nil {
 		t.Fatal(err)
 	}
-	wire = openStoreAt(t, path)
+	wire = openStoreAt(t, dsn)
 	defer wire.Close()
 	handler := testServerWithRelease(t, wire, identity).Handler()
 
@@ -1250,9 +1510,40 @@ func TestUniversalIngress(t *testing.T) {
 	}
 }
 
+func TestUniversalIngressRejectsOversizedBody(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	request := httptest.NewRequest(http.MethodPost, "/api/ingest/external?source=github",
+		io.LimitReader(zeroReader{}, maxIngressBodyBytes+1))
+	response := httptest.NewRecorder()
+	testServer(t, wire).Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusRequestEntityTooLarge || wire.LastID() != 0 {
+		t.Fatalf("response = %d %q, last event = %d", response.Code, response.Body.String(), wire.LastID())
+	}
+}
+
+func TestExternalIngressRequiresPost(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	response := requestJSON(t, testServer(t, wire).Handler(), http.MethodGet,
+		"/api/ingest/external?source=github", "")
+	if response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != http.MethodPost ||
+		wire.LastID() != 0 {
+		t.Fatalf("response = %d %q, allow = %q, last event = %d", response.Code, response.Body.String(),
+			response.Header().Get("Allow"), wire.LastID())
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(buffer []byte) (int, error) {
+	clear(buffer)
+	return len(buffer), nil
+}
+
 func TestUniversalIngressSurvivesReplay(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "factory.db")
-	wire := openStoreAt(t, path)
+	dsn := testpostgres.URL(t)
+	wire := openStoreAt(t, dsn)
 	response := requestJSON(t, testServer(t, wire).Handler(), http.MethodPost,
 		"/api/ingest?source=linear", `{"type":"Issue","action":"update"}`)
 	if response.Code != http.StatusOK {
@@ -1261,7 +1552,7 @@ func TestUniversalIngressSurvivesReplay(t *testing.T) {
 	if err := wire.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened := openStoreAt(t, path)
+	reopened := openStoreAt(t, dsn)
 	defer reopened.Close()
 	events := reopened.Events(0)
 	var data struct {
@@ -1484,8 +1775,8 @@ func TestQuiescenceAPIRejectsFailedDrain(t *testing.T) {
 }
 
 func TestTriggerEnabledStateDefaultsPersistsAndRequiresExplicitUpdate(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "factory.db")
-	wire := openStoreAt(t, path)
+	dsn := testpostgres.URL(t)
+	wire := openStoreAt(t, dsn)
 	handler := testServer(t, wire).Handler()
 
 	created := requestJSON(t, handler, http.MethodPost, "/api/triggers",
@@ -1553,7 +1844,7 @@ func TestTriggerEnabledStateDefaultsPersistsAndRequiresExplicitUpdate(t *testing
 	if err := wire.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened := openStoreAt(t, path)
+	reopened := openStoreAt(t, dsn)
 	defer reopened.Close()
 	handler = testServer(t, reopened).Handler()
 	detail = requestJSON(t, handler, http.MethodGet, "/api/triggers/1", "")
@@ -1628,6 +1919,39 @@ func TestSettingsAPIUpdatesHarnessSelection(t *testing.T) {
 		response = requestJSON(t, handler, http.MethodPut, "/api/settings", body)
 		if response.Code != http.StatusBadRequest || wire.LastID() != lastID {
 			t.Fatalf("invalid settings = %d %s, last ID = %d", response.Code, response.Body, wire.LastID())
+		}
+	}
+}
+
+func TestCredentialAPIStoresKeysOutsideTheEventWire(t *testing.T) {
+	wire := openWire(t)
+	defer wire.Close()
+	handler := testServer(t, wire).Handler()
+	before := wire.LastID()
+
+	response := requestJSON(t, handler, http.MethodPut, "/api/credentials",
+		`{"openaiApiKey":"openai-secret","anthropicApiKey":"anthropic-secret"}`)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "secret") ||
+		!strings.Contains(response.Body.String(), `"codex":{"configured":true,"source":"saved"}`) ||
+		!strings.Contains(response.Body.String(), `"claude":{"configured":true,"source":"saved"}`) {
+		t.Fatalf("credential update = %d %s", response.Code, response.Body)
+	}
+	if wire.LastID() != before {
+		t.Fatalf("credential update appended an event: before=%d after=%d", before, wire.LastID())
+	}
+	status := requestJSON(t, handler, http.MethodGet, "/api/credentials", "")
+	if status.Code != http.StatusOK || strings.Contains(status.Body.String(), "secret") {
+		t.Fatalf("credential status = %d %s", status.Code, status.Body)
+	}
+	for _, body := range []string{
+		`{}`,
+		`{"openaiApiKey":""}`,
+		`{"openaiApiKey":" pasted"}`,
+		`{"anthropicApiKey":"line\nbreak"}`,
+	} {
+		invalid := requestJSON(t, handler, http.MethodPut, "/api/credentials", body)
+		if invalid.Code != http.StatusBadRequest {
+			t.Fatalf("invalid credentials = %d %s", invalid.Code, invalid.Body)
 		}
 	}
 }
@@ -1825,9 +2149,9 @@ func (s *testStore) LastID() int64 {
 	return id
 }
 
-func openStoreAt(t *testing.T, path string) *testStore {
+func openStoreAt(t *testing.T, dsn string) *testStore {
 	t.Helper()
-	eventStore, err := store.Open(path)
+	eventStore, err := store.Open(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1836,7 +2160,7 @@ func openStoreAt(t *testing.T, path string) *testStore {
 
 func openWire(t *testing.T) *testStore {
 	t.Helper()
-	return openStoreAt(t, filepath.Join(t.TempDir(), "factory.db"))
+	return openStoreAt(t, testpostgres.URL(t))
 }
 
 func testServer(t *testing.T, wire *testStore) *Server {
@@ -1873,7 +2197,11 @@ func testServerWithAdmissionAndRelease(
 		"assets/styles-b2.css": &fstest.MapFile{Data: []byte("body {}")},
 	}
 	var filesystem fs.FS = assets
-	server, err := New(wire.Store, filesystem, t.TempDir(), admission, release)
+	credentials, err := credential.Open(wire.Store, testCredentialKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(wire.Store, credentials, filesystem, objectstore.NewMemory(), admission, release)
 	if err != nil {
 		t.Fatal(err)
 	}

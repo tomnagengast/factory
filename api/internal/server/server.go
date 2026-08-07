@@ -8,12 +8,12 @@ import (
 	"io/fs"
 	"mime"
 	"net/http"
-	"os"
 	"path"
-	"path/filepath"
 	"strconv"
 	"time"
 
+	"github.com/tomnagengast/factory/api/internal/credential"
+	"github.com/tomnagengast/factory/api/internal/objectstore"
 	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
 	"github.com/tomnagengast/factory/api/internal/store"
@@ -22,40 +22,31 @@ import (
 const quiescenceLeaseDuration = 15 * time.Minute
 
 type Server struct {
-	store     *store.Store
-	assets    fs.FS
-	mediaRoot string
-	admission *quiescence.Controller
-	release   state.ReleaseIdentity
+	store        *store.Store
+	credentials  *credential.Store
+	assets       fs.FS
+	objects      objectstore.Store
+	cloneProject func(context.Context, string, string) error
+	syncProject  func(context.Context, string, string) error
+	admission    *quiescence.Controller
+	release      state.ReleaseIdentity
 }
 
 func New(
 	eventStore *store.Store,
+	credentials *credential.Store,
 	assets fs.FS,
-	mediaRoot string,
+	objects objectstore.Store,
 	admission *quiescence.Controller,
 	release state.ReleaseIdentity,
 ) (*Server, error) {
-	if eventStore == nil || assets == nil || mediaRoot == "" || admission == nil {
-		return nil, errors.New("server requires an event store, frontend, media path, and workflow admission controller")
-	}
-	if err := os.MkdirAll(mediaRoot, 0o777); err != nil {
-		return nil, fmt.Errorf("create media directory: %w", err)
-	}
-	absolute, err := filepath.Abs(mediaRoot)
-	if err != nil {
-		return nil, fmt.Errorf("resolve media directory: %w", err)
-	}
-	canonical, err := filepath.EvalSymlinks(absolute)
-	if err != nil {
-		return nil, fmt.Errorf("resolve media directory links: %w", err)
-	}
-	info, err := os.Stat(canonical)
-	if err != nil || !info.IsDir() {
-		return nil, errors.New("media path must be a directory")
+	if eventStore == nil || credentials == nil || assets == nil || objects == nil || admission == nil {
+		return nil, errors.New("server requires an event store, credential store, frontend, object store, and workflow admission controller")
 	}
 	return &Server{
-		store: eventStore, assets: assets, mediaRoot: canonical, admission: admission, release: release,
+		store: eventStore, credentials: credentials, assets: assets, objects: objects,
+		cloneProject: cloneProjectRepository, syncProject: syncProjectRepository,
+		admission: admission, release: release,
 	}, nil
 }
 
@@ -66,12 +57,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/quiescence/{lease}", s.quiescenceRelease)
 	mux.HandleFunc("GET /api/settings", s.settings)
 	mux.HandleFunc("PUT /api/settings", s.settingsUpdate)
+	mux.HandleFunc("GET /api/credentials", s.credentialsStatus)
+	mux.HandleFunc("PUT /api/credentials", s.credentialsUpdate)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("POST /api/events", s.eventCreate)
 	mux.HandleFunc("GET /api/events/types", s.eventTypes)
 	mux.HandleFunc("GET /api/events/stream", s.stream)
 	mux.HandleFunc("GET /api/events/{event}", s.event)
 	mux.HandleFunc("/api/ingest", s.ingest)
+	mux.HandleFunc("/api/ingest/external", s.externalIngest)
 	mux.HandleFunc("/api/ingest/{rest...}", s.ingest)
 
 	mux.HandleFunc("GET /api/projects", s.projects)
@@ -79,6 +73,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/projects/{project}", s.project)
 	mux.HandleFunc("PUT /api/projects/{project}", s.projectUpdate)
 	mux.HandleFunc("DELETE /api/projects/{project}", s.projectDelete)
+	mux.HandleFunc("POST /api/projects/{project}/sync", s.projectSync)
 
 	mux.HandleFunc("GET /api/tasks", s.tasks)
 	mux.HandleFunc("POST /api/tasks", s.taskCreate)

@@ -14,14 +14,14 @@ mechanisms:
 3. one capacity-limited workflow coordinator.
 
 Projects, tasks, comments, artifacts, media metadata, triggers, and workflow metadata are
-transactional projections of one event table in SQLite. The Solid web app and `factory` CLI use the
+transactional projections of one event table in Postgres. The Solid web app and `factory` CLI use the
 same HTTP API. No authentication, permissions, policy engine, migration
 framework, or deployment engine lives in the application. Factory records the
 process and workflow-admission deployment boundaries it can observe. Nags
 still owns builds, process replacement, health verification, rollback, and
 deployment receipts.
 
-Immutable media bytes live beside the wire in a configured local directory.
+Immutable media bytes and validated workflow source live in S3.
 Task descriptions and task comments refer to them through `/api/media/{id}`.
 
 ## Monorepo
@@ -63,10 +63,42 @@ Then run the API:
 
 ```sh
 go build -o factory ./cli
+export DATABASE_URL='postgres://...'
+export S3_BUCKET='...'
+export S3_PREFIX='factory/local'
+export S3_REGION='us-west-2'
+export FACTORY_CREDENTIALS_KEY='<stable base64-encoded 32-byte key>'
 go run ./api
 ```
 
 Factory listens on `127.0.0.1:8092` by default.
+
+For a container build with the frozen web bundle, both Go binaries, the
+`workflow` runner, Codex, Claude Code, Cloudflare Tunnel, and Git installed:
+
+```sh
+docker build -t factory .
+docker run --rm -p 8092:8092 \
+  -e DATABASE_URL -e S3_BUCKET -e S3_PREFIX -e S3_REGION \
+  -e FACTORY_CREDENTIALS_KEY factory
+```
+
+The image listens on `0.0.0.0:8092`. Postgres stores the event wire,
+projections, and encrypted harness credentials. S3 stores media and validated
+Factory-authored workflow source. The container filesystem is scratch space
+for checked-out projects, workflow execution, and agent caches.
+
+On a container platform, run the immutable image with Postgres and
+S3-compatible object storage, add `FACTORY_CREDENTIALS_KEY` as a secret, expose
+port `8092`, use `/api/health` as the health path, and allow egress for agent
+and workflow network calls. Supply `DATABASE_URL`, `S3_BUCKET`, `S3_PREFIX`,
+and `S3_REGION` through the platform's normal secret and configuration system.
+
+Set the optional `TUNNEL_TOKEN` secret to run a remotely managed Cloudflare
+Tunnel beside Factory. Configure its public hostname to send only
+`POST /api/ingest/external` to `http://127.0.0.1:8092`, with a `404` fallback.
+Internal producers use `/api/ingest/internal` through the service's private
+address and never traverse Cloudflare.
 
 ```text
 Usage: factory-api [options]
@@ -77,20 +109,17 @@ Usage: factory-api [options]
         Claude Code executable
   -codex string
         Codex executable
-  -data string
-		SQLite event store path
   -factory string
         Factory CLI exposed to the authoring harness
-  -media string
-        immutable media blob directory
   -workflow string
         workflow CLI executable
   -workflow-workspace string
         untracked dynamic workflow workspace
 ```
 
-The event store defaults to `~/.local/share/factory/factory.db`.
-Immutable media blobs default to `~/.local/share/factory/media`.
+`DATABASE_URL`, `FACTORY_CREDENTIALS_KEY`, `S3_BUCKET`, `S3_PREFIX`, and
+`S3_REGION` are required. Keep `FACTORY_CREDENTIALS_KEY` stable: changing it
+after saving API keys prevents Factory from decrypting them.
 
 ## Web routes
 
@@ -117,7 +146,7 @@ Immutable media blobs default to `~/.local/share/factory/media`.
 /history/failed                        failed runs, loaded 25 at a time
 /history/completed                     completed runs, loaded 25 at a time
 /history/:item                         phase-grouped semantic event timeline
-/settings                              select harness, model, reasoning, run capacity, and canned reactions
+/settings                              select agent defaults, API credentials, run capacity, and canned reactions
 ```
 
 Resource and detail route IDs are integers. The four history status routes use
@@ -140,6 +169,7 @@ triggers     GET / POST, GET / PUT / DELETE by ID
 workflows    GET / POST, GET / PUT / DELETE by ID
 history      GET list, GET run and event detail by ID
 settings     GET / PUT singleton selection and option catalog
+credentials  GET status, PUT replacement OpenAI or Anthropic API keys
 ingress      ANY request at /api/ingest or a path beneath it
 ```
 
@@ -162,7 +192,8 @@ explicit `enabled` boolean.
 `/api/ingest?source=<name>` accepts any HTTP payload and records it as
 `ingress.<name>` without a provider adapter. The event preserves the method,
 URL, headers, and lossless UTF-8 or base64 body. Paths below `/api/ingest`
-support configurable OTLP/HTTP signal endpoints.
+support configurable OTLP/HTTP signal endpoints. Request bodies are limited to
+32 MiB.
 
 ## CLI
 
@@ -207,6 +238,9 @@ Factory-created workflow files live outside git at:
 ```text
 ~/.local/share/factory/workflow-workspace/.claude/workflows/
 ```
+
+That directory is a local cache. Factory restores it from S3 at startup and
+persists each successfully validated authored workflow back to S3.
 
 Creating or updating a workflow appends a user chat comment. The coordinator
 sends that conversation to the selected unrestricted harness. Factory appends

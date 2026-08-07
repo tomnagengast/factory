@@ -421,6 +421,8 @@ main { min-width: 0; }
 }
 .muted { color: var(--color-text-muted); }
 .form-panel { display: grid; gap: 18px; }
+.settings-sections { display: grid; gap: 42px; }
+.form-note { margin: 0; color: var(--color-text-muted); font-size: 12px; line-height: 1.55; }
 .composer {
   padding: 24px; display: grid; gap: 18px; border: 1px solid var(--color-border);
   border-radius: var(--radius-md); background: var(--color-surface);
@@ -476,6 +478,7 @@ label small { color: var(--color-text-muted); font-weight: 400; }
 .form-footer { display: flex; justify-content: flex-end; align-items: center; gap: 14px; padding-top: 4px; }
 .form-error { color: var(--color-danger-text); font-size: 12px; }
 .side-detail { display: grid; gap: 18px; }
+.project-sync { display: grid; gap: 7px; }
 .meta {
   margin: 0; border-top: 1px solid var(--color-border);
 }

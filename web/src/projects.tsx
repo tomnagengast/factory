@@ -64,6 +64,7 @@ export function ProjectView() {
   const [data, { refetch }] = createResource(() => get<ProjectDetail>(`/api/projects/${params.project}`));
   liveTaskRows(() => data()?.checkpointEventId, refetch);
   const action = mutation();
+  const sync = mutation();
   return (
     <div class="page">
       <Load data={data} error={() => data.error}>
@@ -82,6 +83,15 @@ export function ProjectView() {
               />
               <aside class="side-detail">
                 <Meta value={value.project} />
+                <Show when={value.repositorySyncAvailable}>
+                  <div class="project-sync">
+                    <button class="button" disabled={sync.pending()} onClick={() => sync.run(async () => {
+                      await post(`/api/projects/${value.project.id}/sync`, {});
+                      await refetch();
+                    })}>{sync.pending() ? "Syncing…" : "Sync"}</button>
+                    <Show when={sync.error()}><small class="form-error" role="alert">{sync.error()}</small></Show>
+                  </div>
+                </Show>
                 <button class="button danger" onClick={() => action.run(async () => {
                   await remove(`/api/projects/${value.project.id}`);
                   navigate("/projects");
@@ -122,7 +132,10 @@ function ProjectForm(props: {
       <label>Name<input name="name" required value={props.project?.name ?? ""} /></label>
       <label>Description<textarea name="description" rows="4">{props.project?.description ?? ""}</textarea></label>
       <div class="field-pair">
-        <label>Repository<input name="repo" value={props.project?.repo ?? ""} /></label>
+        <label>GitHub repository
+          <input name="repo" type="url" placeholder="https://github.com/owner/repository" value={props.project?.repo ?? ""} />
+          <small>A public repository is cloned into the local path when the project is created.</small>
+        </label>
         <label>Local path<input name="path" required value={props.project?.path ?? ""} /></label>
       </div>
       <label>URL<input name="url" type="url" value={props.project?.url ?? ""} /></label>

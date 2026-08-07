@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tomnagengast/factory/api/internal/objectstore"
 	"github.com/tomnagengast/factory/api/internal/state"
 )
 
@@ -22,7 +23,7 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + logPath + "\n" +
 		"if [ \"$3\" = \"list\" ]; then printf '[{\"name\":\"demo\",\"path\":\"/demo.js\",\"scope\":\"user\",\"description\":\"Demo\",\"phases\":[\"Run\"],\"mutating\":false}]'; " +
 		"else while [ \"$#\" -gt 0 ]; do if [ \"$1\" = \"--journal\" ]; then shift; journal=\"$1\"; fi; shift; done; " +
-		"printf '%s\\n%s\\n' \"$FACTORY_CLI\" \"$FACTORY_URL\" > " + envPath + "; " +
+		"printf '%s\\n%s\\n%s\\n%s\\n' \"$FACTORY_CLI\" \"$FACTORY_URL\" \"$OPENAI_API_KEY\" \"$ANTHROPIC_API_KEY\" > " + envPath + "; " +
 		"printf 'human presentation only\\n' >&2; " +
 		"printf '%s\\n' " +
 		"'{\"sequence\":1,\"at\":\"2026-07-17T12:00:00Z\",\"type\":\"runtime.started\",\"workflow\":\"demo\",\"backend\":\"codex\"}' " +
@@ -45,8 +46,12 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 		Command: command, Workspace: directory,
 		CodexCommand: "custom-codex", ClaudeCommand: "custom-claude",
 		FactoryCommand: filepath.Join(directory, "factory"), FactoryURL: "http://127.0.0.1:8092",
+		Environment: func() []string {
+			return []string{"PATH=" + os.Getenv("PATH"), "OPENAI_API_KEY=openai-secret", "ANTHROPIC_API_KEY=anthropic-secret"}
+		},
+		Objects: objectstore.NewMemory(),
 	}
-	if err := cli.Prepare(); err != nil {
+	if err := cli.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	definitions, err := cli.List(context.Background())
@@ -108,7 +113,7 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(environment) != filepath.Join(directory, "factory")+"\nhttp://127.0.0.1:8092\n" {
+		if string(environment) != filepath.Join(directory, "factory")+"\nhttp://127.0.0.1:8092\nopenai-secret\nanthropic-secret\n" {
 			t.Fatalf("unexpected Factory environment: %s", environment)
 		}
 	}
@@ -119,7 +124,7 @@ func TestCLIListsAndRunsWorkflows(t *testing.T) {
 
 func TestCLIValidatesWorkflow(t *testing.T) {
 	directory := t.TempDir()
-	source := filepath.Join(directory, "demo.js")
+	source := filepath.Join(directory, ".claude", "workflows", "demo.js")
 	command := filepath.Join(directory, "workflow")
 	script := "#!/bin/sh\n" +
 		"if [ \"$3\" = \"validate\" ] && [ \"$4\" = \"" + source + "\" ]; then exit 0; fi\n" +
@@ -128,7 +133,14 @@ func TestCLIValidatesWorkflow(t *testing.T) {
 	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cli := CLI{Command: command, Workspace: directory}
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("export default {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	objects := objectstore.NewMemory()
+	cli := CLI{Command: command, Workspace: directory, Objects: objects}
 	if err := cli.Validate(context.Background(), source); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +151,49 @@ func TestCLIValidatesWorkflow(t *testing.T) {
 	if err := cli.Validate(context.Background(), " "); err == nil ||
 		!strings.Contains(err.Error(), "source path is required") {
 		t.Fatalf("empty source error = %v", err)
+	}
+}
+
+func TestCLIRestoresAndPersistsFactoryWorkflowSources(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	objects := objectstore.NewMemory()
+	if err := objects.Put(ctx, "workflows/nested/demo.js", []byte("export const version = 1"), "application/javascript"); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(workspace, ".claude", "workflows", "stale.js")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cli := CLI{
+		Command: "/usr/bin/true", Workspace: workspace,
+		CodexCommand: "codex", ClaudeCommand: "claude", FactoryCommand: "factory",
+		FactoryURL: "http://127.0.0.1:8092", Objects: objects,
+	}
+	if err := cli.Prepare(ctx); err != nil {
+		t.Fatal(err)
+	}
+	restored := filepath.Join(workspace, ".claude", "workflows", "nested", "demo.js")
+	content, err := os.ReadFile(restored)
+	if err != nil || string(content) != "export const version = 1" {
+		t.Fatalf("restored workflow = %q, %v", content, err)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale workflow survived restore: %v", err)
+	}
+	updated := []byte("export const version = 2")
+	if err := os.WriteFile(restored, updated, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.Validate(ctx, restored); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := objects.Get(ctx, "workflows/nested/demo.js")
+	if err != nil || string(persisted) != string(updated) {
+		t.Fatalf("persisted workflow = %q, %v", persisted, err)
 	}
 }
 
@@ -157,8 +212,9 @@ func TestCLICancelsWorkflowWhenEventCannotBeRecorded(t *testing.T) {
 		Command: command, Workspace: directory,
 		CodexCommand: "codex", ClaudeCommand: "claude",
 		FactoryCommand: filepath.Join(directory, "factory"), FactoryURL: "http://127.0.0.1:8092",
+		Objects: objectstore.NewMemory(),
 	}
-	if err := cli.Prepare(); err != nil {
+	if err := cli.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	_, err := cli.Run(
@@ -190,8 +246,9 @@ func TestCLIResumesFromPriorJournalWithoutForwardingItAgain(t *testing.T) {
 		Command: command, Workspace: directory,
 		CodexCommand: "codex", ClaudeCommand: "claude",
 		FactoryCommand: filepath.Join(directory, "factory"), FactoryURL: "http://127.0.0.1:8092",
+		Objects: objectstore.NewMemory(),
 	}
-	if err := cli.Prepare(); err != nil {
+	if err := cli.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	prior := []json.RawMessage{
@@ -235,8 +292,9 @@ func TestCLIReturnsHumanReviewSentinelForExit75(t *testing.T) {
 		Command: command, Workspace: directory,
 		CodexCommand: "codex", ClaudeCommand: "claude",
 		FactoryCommand: filepath.Join(directory, "factory"), FactoryURL: "http://127.0.0.1:8092",
+		Objects: objectstore.NewMemory(),
 	}
-	if err := cli.Prepare(); err != nil {
+	if err := cli.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	var events []Event

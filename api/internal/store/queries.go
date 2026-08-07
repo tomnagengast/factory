@@ -325,7 +325,7 @@ func (s *Store) RunEvents(runID, before int64, limit int) ([]state.WorkflowRunEv
 
 func (s *Store) RunJournal(runID int64) ([]json.RawMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT json_extract(e.data, '$.event')
+		SELECT convert_from(e.data, 'UTF8')::jsonb -> 'event'
 		FROM workflow_run_event_index i
 		JOIN events e ON e.id = i.event_id
 		WHERE i.run_id = ?
@@ -437,10 +437,10 @@ func (s *Store) PendingTrigger() (state.Trigger, eventwire.Event, int64, bool, e
 		  )
 		  AND NOT (
 			e.type IN (?, ?)
-			AND CAST(json_extract(e.data, '$.workflowId') AS INTEGER) = t.workflow_id
+			AND CAST(convert_from(e.data, 'UTF8')::jsonb ->> 'workflowId' AS BIGINT) = t.workflow_id
 		  )
 		  AND (
-			e.type <> ? OR CAST(json_extract(e.data, '$.triggerId') AS INTEGER) = t.id
+			e.type <> ? OR CAST(convert_from(e.data, 'UTF8')::jsonb ->> 'triggerId' AS BIGINT) = t.id
 		  )
 		ORDER BY e.id, t.id LIMIT 1`,
 		state.WorkflowRunCompleted, state.WorkflowRunFailed, state.CronFired,

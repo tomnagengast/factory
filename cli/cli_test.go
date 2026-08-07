@@ -81,6 +81,32 @@ func TestTaskCommentUsesResourceAPI(t *testing.T) {
 	}
 }
 
+func TestProjectSyncUsesResourceAPI(t *testing.T) {
+	var method, path string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method, path = request.Method, request.URL.Path
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"status":"cloned","path":"/home/repos/factory"}`))
+	}))
+	defer server.Close()
+
+	var output bytes.Buffer
+	if err := Run([]string{"--url", server.URL, "project", "sync", "12"}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPost || path != "/api/projects/12/sync" {
+		t.Fatalf("request = %s %s", method, path)
+	}
+	if !strings.Contains(output.String(), `"status": "cloned"`) {
+		t.Fatalf("output = %s", output.String())
+	}
+	for _, args := range [][]string{{"project", "sync"}, {"project", "sync", "nope"}, {"task", "sync", "12"}} {
+		if _, err := parse(args); err == nil {
+			t.Fatalf("expected %v to fail", args)
+		}
+	}
+}
+
 func TestTaskAndCommentReactionsUseResourceAPI(t *testing.T) {
 	type receivedRequest struct {
 		method, path, body string

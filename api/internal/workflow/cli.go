@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tomnagengast/factory/api/internal/objectstore"
 	"github.com/tomnagengast/factory/api/internal/state"
 )
 
@@ -73,14 +74,44 @@ type CLI struct {
 	ClaudeCommand  string
 	FactoryCommand string
 	FactoryURL     string
+	Environment    func() []string
+	Objects        objectstore.Store
 }
 
-func (c CLI) Prepare() error {
+func (c CLI) Prepare(ctx context.Context) error {
 	if c.Command == "" || c.Workspace == "" || c.CodexCommand == "" || c.ClaudeCommand == "" ||
-		c.FactoryCommand == "" || c.FactoryURL == "" {
-		return errors.New("workflow command, workspace, agent commands, Factory CLI, and URL are required")
+		c.FactoryCommand == "" || c.FactoryURL == "" || c.Objects == nil {
+		return errors.New("workflow command, workspace, agent commands, Factory CLI, URL, and object store are required")
 	}
-	return os.MkdirAll(filepath.Join(c.Workspace, ".claude", "workflows"), 0o777)
+	root := c.workflowRoot()
+	if err := os.RemoveAll(root); err != nil {
+		return fmt.Errorf("clear workflow cache: %w", err)
+	}
+	if err := os.MkdirAll(root, 0o777); err != nil {
+		return fmt.Errorf("create workflow cache: %w", err)
+	}
+	keys, err := c.Objects.List(ctx, "workflows")
+	if err != nil {
+		return fmt.Errorf("list stored workflows: %w", err)
+	}
+	for _, key := range keys {
+		relative := strings.TrimPrefix(key, "workflows/")
+		if relative == key || relative == "" || filepath.Clean(relative) != relative || filepath.IsAbs(relative) || strings.HasPrefix(relative, "..") {
+			return fmt.Errorf("stored workflow key %q is invalid", key)
+		}
+		content, err := c.Objects.Get(ctx, key)
+		if err != nil {
+			return fmt.Errorf("restore workflow %q: %w", key, err)
+		}
+		target := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(target), 0o777); err != nil {
+			return fmt.Errorf("create workflow cache directory: %w", err)
+		}
+		if err := os.WriteFile(target, content, 0o666); err != nil {
+			return fmt.Errorf("restore workflow %q: %w", key, err)
+		}
+	}
+	return nil
 }
 
 func (c CLI) List(ctx context.Context) ([]Definition, error) {
@@ -108,6 +139,26 @@ func (c CLI) Validate(ctx context.Context, source string) error {
 			return fmt.Errorf("validate workflow: %w: %s", err, message)
 		}
 		return fmt.Errorf("validate workflow: %w", err)
+	}
+	absolute, err := filepath.Abs(source)
+	if err != nil {
+		return fmt.Errorf("resolve workflow source: %w", err)
+	}
+	root, err := filepath.Abs(c.workflowRoot())
+	if err != nil {
+		return fmt.Errorf("resolve workflow cache: %w", err)
+	}
+	relative, err := filepath.Rel(root, absolute)
+	if err != nil || relative == "." || filepath.IsAbs(relative) || strings.HasPrefix(relative, "..") {
+		return errors.New("workflow source must be inside the Factory workflow workspace")
+	}
+	content, err := os.ReadFile(absolute)
+	if err != nil {
+		return fmt.Errorf("read validated workflow: %w", err)
+	}
+	key := "workflows/" + filepath.ToSlash(relative)
+	if err := c.Objects.Put(ctx, key, content, "application/javascript"); err != nil {
+		return fmt.Errorf("persist validated workflow: %w", err)
 	}
 	return nil
 }
@@ -191,7 +242,11 @@ func (c CLI) Run(
 	if err != nil {
 		return "", fmt.Errorf("resolve Factory CLI: %w", err)
 	}
-	command.Env = append(os.Environ(), "FACTORY_CLI="+factory, "FACTORY_URL="+c.FactoryURL)
+	environment := os.Environ()
+	if c.Environment != nil {
+		environment = c.Environment()
+	}
+	command.Env = append(environment, "FACTORY_CLI="+factory, "FACTORY_URL="+c.FactoryURL)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	followContext, stopFollowing := context.WithCancel(ctx)
@@ -247,7 +302,11 @@ func seedJournal(file *os.File, events []json.RawMessage) (int, int64, error) {
 }
 
 func (c CLI) LocalPath(id int64) string {
-	return filepath.Join(c.Workspace, ".claude", "workflows", "workflow-"+strconv.FormatInt(id, 10)+".js")
+	return filepath.Join(c.workflowRoot(), "workflow-"+strconv.FormatInt(id, 10)+".js")
+}
+
+func (c CLI) workflowRoot() string {
+	return filepath.Join(c.Workspace, ".claude", "workflows")
 }
 
 func followJournal(

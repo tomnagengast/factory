@@ -6,48 +6,45 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/tomnagengast/factory/api/internal/eventwire"
-
-	_ "modernc.org/sqlite"
 )
 
 const projectionVersion = 2
+const eventAppendLockID int64 = 6113258234990332227
 
 var ErrClosed = errors.New("event store is closed")
 
 type Store struct {
-	db       *sql.DB
+	db       *database
 	appendMu sync.Mutex
 	changed  chan struct{}
 	closed   bool
 }
 
-func Open(path string) (*Store, error) {
-	if path == "" {
-		return nil, errors.New("event store path is required")
+func Open(dsn string) (*Store, error) {
+	if dsn == "" {
+		return nil, errors.New("database URL is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o777); err != nil {
-		return nil, fmt.Errorf("create event store directory: %w", err)
-	}
-	absolute, err := filepath.Abs(path)
+	configuration, err := pgx.ParseConfig(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("resolve event store path: %w", err)
+		return nil, fmt.Errorf("parse database URL: %w", err)
 	}
-	dsn := (&url.URL{Scheme: "file", Path: absolute}).String()
-	dsn += "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open event store: %w", err)
+	configuration.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	inner := stdlib.OpenDB(*configuration)
+	inner.SetMaxOpenConns(8)
+	inner.SetMaxIdleConns(8)
+	inner.SetConnMaxLifetime(30 * time.Minute)
+	if err := inner.PingContext(context.Background()); err != nil {
+		_ = inner.Close()
+		return nil, fmt.Errorf("connect to Postgres: %w", err)
 	}
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(4)
+	db := &database{inner: inner}
 	store := &Store{db: db, changed: make(chan struct{})}
 	if err := store.prepare(context.Background()); err != nil {
 		_ = db.Close()
@@ -57,25 +54,36 @@ func Open(path string) (*Store, error) {
 }
 
 func (s *Store) prepare(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, eventSchema); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin schema preparation: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(?)`, eventAppendLockID); err != nil {
+		return fmt.Errorf("lock schema preparation: %w", err)
+	}
+	if _, err := tx.Exec(eventSchema); err != nil {
 		return fmt.Errorf("create event schema: %w", err)
 	}
 	var version int
-	err := s.db.QueryRowContext(ctx, `SELECT version FROM projection_meta WHERE id = 1`).Scan(&version)
+	err = tx.QueryRow(`SELECT version FROM projection_meta WHERE id = 1`).Scan(&version)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		if _, err := s.db.ExecContext(ctx, projectionSchema); err != nil {
+		if _, err := tx.Exec(projectionSchema); err != nil {
 			return fmt.Errorf("create projection schema: %w", err)
 		}
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO projection_meta(id, version) VALUES(1, ?)`, projectionVersion); err != nil {
+		if _, err := tx.Exec(`INSERT INTO projection_meta(id, version) VALUES(1, ?)`, projectionVersion); err != nil {
 			return fmt.Errorf("record projection version: %w", err)
 		}
-		return nil
+		return tx.Commit()
 	case err != nil:
 		return fmt.Errorf("read projection version: %w", err)
 	case version == projectionVersion:
-		return nil
+		return tx.Commit()
 	default:
+		if err := tx.Rollback(); err != nil {
+			return fmt.Errorf("release schema preparation: %w", err)
+		}
 		return s.rebuildProjections(ctx)
 	}
 }
@@ -108,6 +116,9 @@ func (s *Store) append(expectedLastID int64, conditional bool, eventType string,
 		return eventwire.Event{}, false, fmt.Errorf("begin event append: %w", err)
 	}
 	defer tx.Rollback()
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(?)`, eventAppendLockID); err != nil {
+		return eventwire.Event{}, false, fmt.Errorf("lock event append: %w", err)
+	}
 	lastID, err := lastIDTx(tx)
 	if err != nil {
 		return eventwire.Event{}, false, err
@@ -130,7 +141,7 @@ func (s *Store) append(expectedLastID int64, conditional bool, eventType string,
 	return cloneEvent(event), true, nil
 }
 
-func insertEvent(tx *sql.Tx, event eventwire.Event) error {
+func insertEvent(tx *transaction, event eventwire.Event) error {
 	if event.ID < 1 || event.Type == "" || event.At.IsZero() || !json.Valid(event.Data) {
 		return fmt.Errorf("event %d is invalid", event.ID)
 	}
@@ -143,7 +154,7 @@ func insertEvent(tx *sql.Tx, event eventwire.Event) error {
 	return nil
 }
 
-func lastIDTx(tx *sql.Tx) (int64, error) {
+func lastIDTx(tx *transaction) (int64, error) {
 	var id int64
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM events`).Scan(&id); err != nil {
 		return 0, fmt.Errorf("read last event ID: %w", err)
@@ -323,105 +334,109 @@ func nullableString(value *string) any {
 
 const eventSchema = `
 CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     type TEXT NOT NULL,
     at TEXT NOT NULL,
-    data BLOB NOT NULL
+    data BYTEA NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_type_id ON events(type, id);
 CREATE TABLE IF NOT EXISTS projection_meta (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     version INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS credentials (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    data BYTEA NOT NULL
 );`
 
 const projectionSchema = `
 CREATE TABLE IF NOT EXISTS projects (
-    id INTEGER PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     deleted INTEGER NOT NULL,
-    data BLOB NOT NULL
+    data BYTEA NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY,
-    project_id INTEGER NOT NULL,
+    id BIGINT PRIMARY KEY,
+    project_id BIGINT NOT NULL,
     deleted INTEGER NOT NULL,
-    data BLOB NOT NULL
+    data BYTEA NOT NULL
 );
 CREATE INDEX IF NOT EXISTS tasks_project_id ON tasks(project_id, id);
 CREATE TABLE IF NOT EXISTS comments (
-    id INTEGER PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     relation_type TEXT NOT NULL,
-    relation_id INTEGER NOT NULL,
-    parent_id INTEGER,
+    relation_id BIGINT NOT NULL,
+    parent_id BIGINT,
     author TEXT NOT NULL,
     final INTEGER NOT NULL,
     deleted INTEGER NOT NULL,
-    data BLOB NOT NULL
+    data BYTEA NOT NULL
 );
 CREATE INDEX IF NOT EXISTS comments_relation ON comments(relation_type, relation_id, id);
 CREATE INDEX IF NOT EXISTS comments_parent ON comments(parent_id, id);
 CREATE TABLE IF NOT EXISTS artifacts (
-    id INTEGER PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     relation_type TEXT NOT NULL,
-    relation_id INTEGER NOT NULL,
+    relation_id BIGINT NOT NULL,
     deleted INTEGER NOT NULL,
-    data BLOB NOT NULL
+    data BYTEA NOT NULL
 );
 CREATE INDEX IF NOT EXISTS artifacts_relation ON artifacts(relation_type, relation_id, id);
 CREATE TABLE IF NOT EXISTS media (
-    id INTEGER PRIMARY KEY,
-    data BLOB NOT NULL
+    id BIGINT PRIMARY KEY,
+    data BYTEA NOT NULL
 );
 CREATE TABLE IF NOT EXISTS triggers (
-    id INTEGER PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     event_type TEXT NOT NULL,
-    workflow_id INTEGER NOT NULL,
+    workflow_id BIGINT NOT NULL,
     enabled INTEGER NOT NULL,
-    boundary_event_id INTEGER NOT NULL,
+    boundary_event_id BIGINT NOT NULL,
     last_cron_at TEXT,
     deleted INTEGER NOT NULL,
-    data BLOB NOT NULL
+    data BYTEA NOT NULL
 );
 CREATE INDEX IF NOT EXISTS triggers_match ON triggers(event_type, enabled, deleted, boundary_event_id, id);
 CREATE TABLE IF NOT EXISTS workflows (
-    id INTEGER PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
     path TEXT,
     deleted INTEGER NOT NULL,
-    data BLOB NOT NULL
+    data BYTEA NOT NULL
 );
 CREATE INDEX IF NOT EXISTS workflows_name ON workflows(name, deleted, id);
 CREATE INDEX IF NOT EXISTS workflows_path ON workflows(path, id);
 CREATE TABLE IF NOT EXISTS workflow_runs (
-    id INTEGER PRIMARY KEY,
-    trigger_id INTEGER NOT NULL,
-    workflow_id INTEGER NOT NULL,
-    source_event_id INTEGER NOT NULL,
-    task_id INTEGER,
+    id BIGINT PRIMARY KEY,
+    trigger_id BIGINT NOT NULL,
+    workflow_id BIGINT NOT NULL,
+    source_event_id BIGINT NOT NULL,
+    task_id BIGINT,
     status TEXT NOT NULL,
-    data BLOB NOT NULL,
+    data BYTEA NOT NULL,
     UNIQUE(trigger_id, source_event_id)
 );
 CREATE INDEX IF NOT EXISTS workflow_runs_task ON workflow_runs(task_id, workflow_id, id);
 CREATE INDEX IF NOT EXISTS workflow_runs_workflow ON workflow_runs(workflow_id, id);
 CREATE INDEX IF NOT EXISTS workflow_runs_status ON workflow_runs(status, id);
 CREATE TABLE IF NOT EXISTS workflow_run_event_index (
-    event_id INTEGER PRIMARY KEY,
-    run_id INTEGER NOT NULL,
-    sequence INTEGER NOT NULL,
+    event_id BIGINT PRIMARY KEY,
+    run_id BIGINT NOT NULL,
+    sequence BIGINT NOT NULL,
     UNIQUE(run_id, sequence)
 );
 CREATE INDEX IF NOT EXISTS workflow_run_events_run ON workflow_run_event_index(run_id, sequence);
 CREATE TABLE IF NOT EXISTS workflow_tasks (
-    workflow_id INTEGER NOT NULL,
-    task_id INTEGER NOT NULL,
+    workflow_id BIGINT NOT NULL,
+    task_id BIGINT NOT NULL,
     PRIMARY KEY(workflow_id, task_id)
 );
 CREATE TABLE IF NOT EXISTS human_responses (
-    comment_id INTEGER PRIMARY KEY
+    comment_id BIGINT PRIMARY KEY
 );
 CREATE TABLE IF NOT EXISTS settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    data BLOB NOT NULL
+    data BYTEA NOT NULL
 );`
 
 const dropProjectionSchema = `

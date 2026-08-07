@@ -15,23 +15,37 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"testing/fstest"
 
+	"github.com/tomnagengast/factory/api/internal/credential"
 	"github.com/tomnagengast/factory/api/internal/eventwire"
+	"github.com/tomnagengast/factory/api/internal/objectstore"
 	"github.com/tomnagengast/factory/api/internal/quiescence"
 	"github.com/tomnagengast/factory/api/internal/state"
+	"github.com/tomnagengast/factory/api/internal/testpostgres"
 )
+
+type failingObjectStore struct{}
+
+func (failingObjectStore) Put(context.Context, string, []byte, string) error {
+	return errors.New("object store unavailable")
+}
+func (failingObjectStore) Get(context.Context, string) ([]byte, error) {
+	return nil, errors.New("object store unavailable")
+}
+func (failingObjectStore) List(context.Context, string) ([]string, error) {
+	return nil, errors.New("object store unavailable")
+}
 
 func TestMediaUploadRetrievalAndRanges(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
-	root := t.TempDir()
-	handler := testServerWithMedia(t, wire, root).Handler()
+	objects := objectstore.NewMemory()
+	handler := testServerWithMedia(t, wire, objects).Handler()
 	tests := []struct {
 		name, contentType string
 		data              []byte
@@ -82,13 +96,12 @@ func TestMediaUploadRetrievalAndRanges(t *testing.T) {
 			}
 		})
 	}
-	assertNoMediaTemps(t, root)
 }
 
 func TestMediaUploadInfersGenericContentTypeFromExtension(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
-	response := uploadRequest(t, testServerWithMedia(t, wire, t.TempDir()).Handler(),
+	response := uploadRequest(t, testServerWithMedia(t, wire, objectstore.NewMemory()).Handler(),
 		"generic.webp", "application/octet-stream", []byte("webp"))
 	var created mediaResponse
 	if response.Code != http.StatusCreated || json.Unmarshal(response.Body.Bytes(), &created) != nil ||
@@ -101,60 +114,51 @@ func TestMediaUploadRejectsBadRequestsWithoutResidue(t *testing.T) {
 	t.Run("unsupported", func(t *testing.T) {
 		wire := openWire(t)
 		defer wire.Close()
-		root := t.TempDir()
-		response := uploadRequest(t, testServerWithMedia(t, wire, root).Handler(), "notes.txt", "text/plain", []byte("no"))
+		response := uploadRequest(t, testServerWithMedia(t, wire, objectstore.NewMemory()).Handler(), "notes.txt", "text/plain", []byte("no"))
 		if response.Code != http.StatusUnsupportedMediaType || wire.LastID() != 0 {
 			t.Fatalf("response = %d %s, events = %d", response.Code, response.Body, wire.LastID())
 		}
-		assertNoMediaTemps(t, root)
 	})
 
 	t.Run("oversize", func(t *testing.T) {
 		wire := openWire(t)
 		defer wire.Close()
-		root := t.TempDir()
-		response := uploadRequest(t, testServerWithMedia(t, wire, root).Handler(),
+		response := uploadRequest(t, testServerWithMedia(t, wire, objectstore.NewMemory()).Handler(),
 			"large.mp4", "video/mp4", bytes.Repeat([]byte{'x'}, int(maxMediaSize+1)))
 		if response.Code != http.StatusRequestEntityTooLarge || wire.LastID() != 0 {
 			t.Fatalf("response = %d %s, events = %d", response.Code, response.Body, wire.LastID())
 		}
-		assertNoMediaTemps(t, root)
 	})
 
 	t.Run("malformed", func(t *testing.T) {
 		wire := openWire(t)
 		defer wire.Close()
-		root := t.TempDir()
-		handler := testServerWithMedia(t, wire, root).Handler()
+		handler := testServerWithMedia(t, wire, objectstore.NewMemory()).Handler()
 		request := httptest.NewRequest(http.MethodPost, "/api/media", strings.NewReader("not multipart"))
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		if response.Code != http.StatusBadRequest || wire.LastID() != 0 {
 			t.Fatalf("response = %d %s", response.Code, response.Body)
 		}
-		assertNoMediaTemps(t, root)
 	})
 
 	t.Run("canceled", func(t *testing.T) {
 		wire := openWire(t)
 		defer wire.Close()
-		root := t.TempDir()
 		request := newUploadRequest(t, "canceled.png", "image/png", []byte("cancel me"))
 		ctx, cancel := context.WithCancel(request.Context())
 		cancel()
 		request = request.WithContext(ctx)
 		response := httptest.NewRecorder()
-		testServerWithMedia(t, wire, root).Handler().ServeHTTP(response, request)
+		testServerWithMedia(t, wire, objectstore.NewMemory()).Handler().ServeHTTP(response, request)
 		if response.Code != http.StatusBadRequest || wire.LastID() != 0 {
 			t.Fatalf("response = %d %s", response.Code, response.Body)
 		}
-		assertNoMediaTemps(t, root)
 	})
 
 	t.Run("interrupted copy", func(t *testing.T) {
 		wire := openWire(t)
 		defer wire.Close()
-		root := t.TempDir()
 		request := newUploadRequest(t, "interrupted.png", "image/png", []byte("copy will fail"))
 		encoded, err := io.ReadAll(request.Body)
 		if err != nil {
@@ -166,34 +170,26 @@ func TestMediaUploadRejectsBadRequestsWithoutResidue(t *testing.T) {
 		}
 		request.Body = io.NopCloser(&interruptedReader{data: encoded, limit: fileStart + 3})
 		response := httptest.NewRecorder()
-		testServerWithMedia(t, wire, root).Handler().ServeHTTP(response, request)
+		testServerWithMedia(t, wire, objectstore.NewMemory()).Handler().ServeHTTP(response, request)
 		if response.Code != http.StatusBadRequest || wire.LastID() != 0 {
 			t.Fatalf("response = %d %s", response.Code, response.Body)
 		}
-		assertNoMediaTemps(t, root)
 	})
 
 	t.Run("finalization failure", func(t *testing.T) {
 		wire := openWire(t)
 		defer wire.Close()
-		root := t.TempDir()
-		data := []byte("blocked")
-		hash := mediaHash(data)
-		if err := os.Mkdir(filepath.Join(root, hash), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		response := uploadRequest(t, testServerWithMedia(t, wire, root).Handler(), "blocked.png", "image/png", data)
+		response := uploadRequest(t, testServerWithMedia(t, wire, failingObjectStore{}).Handler(), "blocked.png", "image/png", []byte("blocked"))
 		if response.Code != http.StatusInternalServerError || wire.LastID() != 0 {
 			t.Fatalf("response = %d %s", response.Code, response.Body)
 		}
-		assertNoMediaTemps(t, root)
 	})
 }
 
 func TestMediaPublicationFailureRetainsFinalBlob(t *testing.T) {
 	wire := openWire(t)
-	root := t.TempDir()
-	handler := testServerWithMedia(t, wire, root).Handler()
+	objects := objectstore.NewMemory()
+	handler := testServerWithMedia(t, wire, objects).Handler()
 	if err := wire.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -202,18 +198,17 @@ func TestMediaPublicationFailureRetainsFinalBlob(t *testing.T) {
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("response = %d %s", response.Code, response.Body)
 	}
-	stored, err := os.ReadFile(filepath.Join(root, mediaHash(data)))
+	stored, err := objects.Get(context.Background(), "media/"+mediaHash(data))
 	if err != nil || !bytes.Equal(stored, data) {
 		t.Fatalf("retained blob = %q, %v", stored, err)
 	}
-	assertNoMediaTemps(t, root)
 }
 
 func TestConcurrentIdenticalMediaUploadsShareBlob(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
-	root := t.TempDir()
-	handler := testServerWithMedia(t, wire, root).Handler()
+	objects := objectstore.NewMemory()
+	handler := testServerWithMedia(t, wire, objects).Handler()
 	data := []byte("same immutable bytes")
 	const count = 12
 	responses := make([]*httptest.ResponseRecorder, count)
@@ -239,11 +234,11 @@ func TestConcurrentIdenticalMediaUploadsShareBlob(t *testing.T) {
 			t.Fatalf("get = %d %q", get.Code, get.Body.Bytes())
 		}
 	}
-	entries, err := os.ReadDir(root)
+	entries, err := objects.List(context.Background(), "media")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != mediaHash(data) {
+	if len(entries) != 1 || entries[0] != "media/"+mediaHash(data) {
 		t.Fatalf("media entries = %#v", entries)
 	}
 }
@@ -251,15 +246,11 @@ func TestConcurrentIdenticalMediaUploadsShareBlob(t *testing.T) {
 func TestMediaRetrievalRejectsUntrustedProjectedMetadata(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
-	root := t.TempDir()
-	handler := testServerWithMedia(t, wire, root).Handler()
-	outside := filepath.Join(t.TempDir(), "outside-secret")
-	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	objects := objectstore.NewMemory()
+	handler := testServerWithMedia(t, wire, objects).Handler()
 	data := []byte("safe")
 	validHash := mediaHash(data)
-	if err := os.WriteFile(filepath.Join(root, validHash), data, 0o600); err != nil {
+	if err := objects.Put(context.Background(), "media/"+validHash, data, "image/png"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -280,25 +271,13 @@ func TestMediaRetrievalRejectsUntrustedProjectedMetadata(t *testing.T) {
 			t.Fatalf("metadata %#v response = %d %#v %s", metadata, response.Code, response.Header(), response.Body)
 		}
 	}
-
-	symlinkHash := strings.Repeat("a", 64)
-	if err := os.Symlink(outside, filepath.Join(root, symlinkHash)); err != nil {
-		t.Fatal(err)
-	}
-	id := publishMediaEvent(t, handler, state.MediaData{
-		Name: "outside.png", ContentType: "image/png", Size: 6, SHA256: symlinkHash,
-	})
-	if response := requestJSON(t, handler, http.MethodGet, fmt.Sprintf("/api/media/%d", id), ""); response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), "secret") {
-		t.Fatalf("symlink response = %d %s", response.Code, response.Body)
-	}
 }
 
 func TestMediaPersistsAcrossWireAndServerRestart(t *testing.T) {
-	base := t.TempDir()
-	wirePath := filepath.Join(base, "factory.db")
-	mediaRoot := filepath.Join(base, "media")
-	wire := openStoreAt(t, wirePath)
-	handler := testServerWithMedia(t, wire, mediaRoot).Handler()
+	wireURL := testpostgres.URL(t)
+	objects := objectstore.NewMemory()
+	wire := openStoreAt(t, wireURL)
+	handler := testServerWithMedia(t, wire, objects).Handler()
 	data := []byte("restart-video")
 	upload := uploadRequest(t, handler, "restart.webm", "video/webm", data)
 	var created mediaResponse
@@ -308,9 +287,9 @@ func TestMediaPersistsAcrossWireAndServerRestart(t *testing.T) {
 	if err := wire.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened := openStoreAt(t, wirePath)
+	reopened := openStoreAt(t, wireURL)
 	defer reopened.Close()
-	handler = testServerWithMedia(t, reopened, mediaRoot).Handler()
+	handler = testServerWithMedia(t, reopened, objects).Handler()
 	get := requestJSON(t, handler, http.MethodGet, created.URL, "")
 	if get.Code != http.StatusOK || !bytes.Equal(get.Body.Bytes(), data) {
 		t.Fatalf("restarted get = %d %q", get.Code, get.Body.Bytes())
@@ -319,10 +298,10 @@ func TestMediaPersistsAcrossWireAndServerRestart(t *testing.T) {
 
 func TestMediaReferencesPersistInTasksAndThreadedComments(t *testing.T) {
 	base := t.TempDir()
-	wirePath := filepath.Join(base, "factory.db")
-	mediaRoot := filepath.Join(base, "media")
-	wire := openStoreAt(t, wirePath)
-	handler := testServerWithMedia(t, wire, mediaRoot).Handler()
+	wireURL := testpostgres.URL(t)
+	objects := objectstore.NewMemory()
+	wire := openStoreAt(t, wireURL)
+	handler := testServerWithMedia(t, wire, objects).Handler()
 	markups := make([]string, 0, 3)
 	for _, fixture := range []struct{ name, kind string }{
 		{"screen.png", "image/png"}, {"motion.gif", "image/gif"}, {"clip.mp4", "video/mp4"},
@@ -370,9 +349,9 @@ func TestMediaReferencesPersistInTasksAndThreadedComments(t *testing.T) {
 	if err := wire.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened := openStoreAt(t, wirePath)
+	reopened := openStoreAt(t, wireURL)
 	defer reopened.Close()
-	handler = testServerWithMedia(t, reopened, mediaRoot).Handler()
+	handler = testServerWithMedia(t, reopened, objects).Handler()
 	detail := requestJSON(t, handler, http.MethodGet, fmt.Sprintf("/api/tasks/%d", taskRecord.ID), "")
 	var result struct {
 		Task     state.Task      `json:"task"`
@@ -388,8 +367,8 @@ func TestMediaReferencesPersistInTasksAndThreadedComments(t *testing.T) {
 func TestMediaUnknownAndMissingBlob(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
-	root := t.TempDir()
-	handler := testServerWithMedia(t, wire, root).Handler()
+	objects := objectstore.NewMemory()
+	handler := testServerWithMedia(t, wire, objects).Handler()
 	if response := requestJSON(t, handler, http.MethodGet, "/api/media/99", ""); response.Code != http.StatusNotFound {
 		t.Fatalf("unknown = %d %s", response.Code, response.Body)
 	}
@@ -398,9 +377,7 @@ func TestMediaUnknownAndMissingBlob(t *testing.T) {
 	if upload.Code != http.StatusCreated || json.Unmarshal(upload.Body.Bytes(), &created) != nil {
 		t.Fatalf("upload = %d %s", upload.Code, upload.Body)
 	}
-	if err := os.Remove(filepath.Join(root, created.SHA256)); err != nil {
-		t.Fatal(err)
-	}
+	objects.Delete("media/" + created.SHA256)
 	if response := requestJSON(t, handler, http.MethodGet, created.URL, ""); response.Code != http.StatusInternalServerError {
 		t.Fatalf("missing = %d %s", response.Code, response.Body)
 	}
@@ -409,7 +386,7 @@ func TestMediaUnknownAndMissingBlob(t *testing.T) {
 	if corrupt.Code != http.StatusCreated || json.Unmarshal(corrupt.Body.Bytes(), &created) != nil {
 		t.Fatalf("corrupt upload = %d %s", corrupt.Code, corrupt.Body)
 	}
-	if err := os.WriteFile(filepath.Join(root, created.SHA256), []byte("evil"), 0o600); err != nil {
+	if err := objects.Put(context.Background(), "media/"+created.SHA256, []byte("evil"), "image/png"); err != nil {
 		t.Fatal(err)
 	}
 	if response := requestJSON(t, handler, http.MethodGet, created.URL, ""); response.Code != http.StatusInternalServerError {
@@ -470,18 +447,7 @@ func mediaHash(data []byte) string {
 	return hex.EncodeToString(hash[:])
 }
 
-func assertNoMediaTemps(t *testing.T, root string) {
-	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(root, ".upload-*"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(matches) != 0 {
-		t.Fatalf("temporary media files remain: %v", matches)
-	}
-}
-
-func testServerWithMedia(t *testing.T, wire *testStore, root string) *Server {
+func testServerWithMedia(t *testing.T, wire *testStore, objects objectstore.Store) *Server {
 	t.Helper()
 	assets := fstest.MapFS{
 		"index.html":           &fstest.MapFile{Data: []byte("<html></html>")},
@@ -489,8 +455,12 @@ func testServerWithMedia(t *testing.T, wire *testStore, root string) *Server {
 		"assets/styles-b2.css": &fstest.MapFile{Data: []byte("body {}")},
 	}
 	var filesystem fs.FS = assets
+	credentials, err := credential.Open(wire.Store, testCredentialKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	server, err := New(
-		wire.Store, filesystem, root, quiescence.New(quiescence.Hooks{}), state.ReleaseIdentity{},
+		wire.Store, credentials, filesystem, objects, quiescence.New(quiescence.Hooks{}), state.ReleaseIdentity{},
 	)
 	if err != nil {
 		t.Fatal(err)

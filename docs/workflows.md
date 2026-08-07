@@ -51,6 +51,12 @@ A project workflow shadows a user workflow with the same name. Factory
 projects resolved name, path, scope, description, phases, and mutating state
 onto the event wire.
 
+For Factory-created workflows, the workspace is a cache. Startup replaces its
+`.claude/workflows` subtree from S3. After the workflow CLI validates an
+authored file, Factory writes that file to S3 before rediscovery. User and
+project workflows outside this subtree follow the workflow CLI's normal local
+discovery rules and are not persisted by Factory.
+
 ## Creating and revising a workflow
 
 Creating a workflow requires a conversation message, not source code:
@@ -68,7 +74,7 @@ The coordinator's sequential authoring path:
 3. appends `workflow.authoring.started`,
 4. runs the selected unrestricted harness with its model and reasoning level,
 5. appends each completed semantic harness step as a non-final agent comment,
-6. asks the workflow CLI to validate the complete written file,
+6. asks the workflow CLI to validate the complete written file and persist it to S3,
 7. asks the workflow CLI to rediscover the validated file,
 8. appends a completed or failed event,
 9. appends one final agent comment.
@@ -119,6 +125,11 @@ through ten and defaults to six. Reactions default to
 newest `settings.updated` event applies when the coordinator next chooses work
 and updates open task and comment reaction controls. It does not alter a
 process already running.
+
+The same web page saves replacement OpenAI and Anthropic API keys outside the
+event wire. Factory supplies both configured keys to every new authoring and
+workflow process, so workflow agents can use either backend even when the
+default harness selects only one.
 
 Revising a discovered user workflow creates or updates the Factory-owned
 local copy. The original resolved source is provided to the agent as context,
@@ -250,7 +261,9 @@ Claude Code it adds `--claude-yolo` and passes
 `--effort <selected-reasoning>` through `--claude-arg`. Factory also supplies
 the executable path configured by `-codex` or `-claude`. It exports the
 current server as `$FACTORY_URL` and the absolute resource client path as
-`$FACTORY_CLI` to the workflow CLI and every agent it starts.
+`$FACTORY_CLI` to the workflow CLI and every agent it starts. It also supplies
+configured `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` values. Saved values from
+the private credential file override matching server environment values.
 
 The workflow receives `args.event`, `args.trigger`, and its integer
 `args.runId`. Run progress is recorded on the event wire:
@@ -347,8 +360,9 @@ survive those live refetches while the view remains mounted.
 For `task.created`, `task.updated`, and `task.deleted`, the event working
 directory is the task project's configured local `path`. This also becomes
 the working directory of agents started by the workflow. Project saves create
-the required path. Factory passes the selected untracked workflow to the CLI
-by its explicit source path and does not create discovery files in the project.
+the required path, and task-trigger dispatch recreates it when scratch storage
+has been replaced. Factory passes the selected untracked workflow to the CLI by
+its explicit source path and does not create discovery files in the project.
 
 A trigger matches the event type only. Put finer conditions in the workflow:
 

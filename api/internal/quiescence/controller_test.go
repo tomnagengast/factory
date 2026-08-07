@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"github.com/tomnagengast/factory/api/internal/eventwire"
 	"github.com/tomnagengast/factory/api/internal/state"
 	"github.com/tomnagengast/factory/api/internal/store"
+	"github.com/tomnagengast/factory/api/internal/testpostgres"
 )
 
 type transition struct {
@@ -513,7 +513,7 @@ func TestConditionalClaimCanDrainWithoutWorkflowLifecycleFacts(t *testing.T) {
 
 func openStore(t *testing.T) *store.Store {
 	t.Helper()
-	eventStore, err := store.Open(filepath.Join(t.TempDir(), "factory.db"))
+	eventStore, err := store.Open(testpostgres.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

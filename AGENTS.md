@@ -18,7 +18,7 @@
 
 ## Architecture patterns
 
-- Treat the SQLite `events` table as the durable source of truth. Resource
+- Treat the Postgres `events` table as the durable source of truth. Resource
   writes append an event and update disposable projections in one transaction.
   Projection versions rebuild from the event table.
 - A resource creation event ID is also its resource ID. All resources and
@@ -30,9 +30,10 @@
 - The Solid app and Go CLI are peers over the same HTTP API. A resource change
   normally touches the state data/event shapes, API handlers, CLI command
   mapping, Solid types and views, and the matching reference documentation.
-- Keep workflow source outside the repository under the configured workflow
-  workspace. The wire stores workflow metadata and conversation history, while
-  the workflow detail endpoint reads live source from disk.
+- Keep workflow source outside the repository. S3 is its durable store; the
+  configured workflow workspace is a local cache. The wire stores workflow
+  metadata and conversation history, while the workflow detail endpoint reads
+  live source from the cache.
 - The selected workflow-authoring harness runs in that workspace and receives
   the current server and resource CLI as `FACTORY_URL` and `FACTORY_CLI`.
 - Preserve one coordinator and its priority: pending workflow conversations,
