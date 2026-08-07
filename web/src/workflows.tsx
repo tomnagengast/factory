@@ -100,7 +100,7 @@ export function WorkflowView() {
     const follower = bindNewestFollower({ edge: "end", viewport, content });
     onCleanup(() => follower.dispose());
   });
-  liveRefetch(["comment.created", "workflow.updated", "workflow.authoring.completed", "workflow.authoring.failed"], refetch);
+  liveRefetch(["workflow.comment.created", "workflow.updated", "workflow.authoring.completed", "workflow.authoring.failed"], refetch);
   let sourcePolling: number | undefined;
   onMount(() => {
     sourcePolling = window.setInterval(() => {

@@ -50,6 +50,30 @@ func TestAppendProjectsAtomicallyAndPreservesConditionalOrder(t *testing.T) {
 	}
 }
 
+func TestCommentCreationEventTypeMatchesRelation(t *testing.T) {
+	store := openTestStore(t)
+	for _, test := range []struct {
+		name         string
+		eventType    string
+		relationType string
+		wantError    bool
+	}{
+		{name: "task", eventType: state.TaskCommentCreated, relationType: "task"},
+		{name: "workflow", eventType: state.WorkflowCommentCreated, relationType: "workflow"},
+		{name: "task event with workflow relation", eventType: state.TaskCommentCreated, relationType: "workflow", wantError: true},
+		{name: "workflow event with task relation", eventType: state.WorkflowCommentCreated, relationType: "task", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := store.Append(test.eventType, state.CommentData{
+				RelationType: test.relationType, RelationID: 1, Author: "user", Content: "Hello",
+			})
+			if (err != nil) != test.wantError {
+				t.Fatalf("append error = %v, wantError %v", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestConcurrentOpenPreparesOnePostgresSchema(t *testing.T) {
 	dsn := testpostgres.URL(t)
 	start := make(chan struct{})

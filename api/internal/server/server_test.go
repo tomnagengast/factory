@@ -56,6 +56,11 @@ func TestProjectTaskCommentAndArtifactAPI(t *testing.T) {
 	if comment.Code != http.StatusCreated {
 		t.Fatalf("comment status = %d, body = %s", comment.Code, comment.Body)
 	}
+	commentEvents := wire.Events(0)
+	commentEvent := commentEvents[len(commentEvents)-1]
+	if commentEvent.Type != state.TaskCommentCreated {
+		t.Fatalf("task comment event = %q", commentEvent.Type)
+	}
 	artifact := requestJSON(t, handler, http.MethodPost, "/api/artifacts", `{
 		"type":"link","content":"https://example.com","relationType":"task","relationId":2
 	}`)
@@ -237,17 +242,17 @@ func TestTaskListSummariesProjectCommentsAndWorkflowRuns(t *testing.T) {
 		Title: "No activity", Status: state.Backlog, ProjectID: project.ID,
 	})
 
-	root, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	root, _ := wire.Publish(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: task.ID, Author: "user", Content: "Root",
 	})
-	wire.Publish(state.CommentCreated, state.CommentData{
+	wire.Publish(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: task.ID, ParentCommentID: &root.ID,
 		Author: "user", Content: "Reply",
 	})
-	wire.Publish(state.CommentCreated, state.CommentData{
+	wire.Publish(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: task.ID, Author: "agent", Content: "Gate prompt",
 	})
-	deleted, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	deleted, _ := wire.Publish(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: task.ID, Author: "user", Content: "Remove me",
 	})
 	wire.Publish(state.CommentDeleted, state.IDData{ID: deleted.ID})
@@ -776,17 +781,17 @@ func TestReactionAPIUpdatesTasksRootCommentsRepliesAndGatePrompts(t *testing.T) 
 	task, _ := wire.Publish(state.TaskCreated, state.TaskData{
 		Title: "Review reactions", Status: state.InReview, ProjectID: 99,
 	})
-	root, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	root, _ := wire.Publish(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: task.ID, Author: "user", Content: "Root",
 	})
-	reply, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	reply, _ := wire.Publish(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: task.ID, ParentCommentID: &root.ID,
 		Author: "user", Content: "Reply",
 	})
-	gate, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	gate, _ := wire.Publish(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: task.ID, Author: "agent", Content: "Approve it?",
 	})
-	workflowComment, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	workflowComment, _ := wire.Publish(state.WorkflowCommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: 88, Author: "user", Content: "Revise it",
 	})
 	handler := testServer(t, wire).Handler()
@@ -795,7 +800,7 @@ func TestReactionAPIUpdatesTasksRootCommentsRepliesAndGatePrompts(t *testing.T) 
 		t.Fatalf("settings = %d %s", response.Code, response.Body)
 	}
 
-	createdComments := eventCount(wire.Events(0), state.CommentCreated)
+	createdComments := eventCount(wire.Events(0), state.TaskCommentCreated)
 	first := requestJSON(t, handler, http.MethodPut, "/api/tasks/1/reactions", `{"emoji":"🧑🏽‍💻","active":true}`)
 	if first.Code != http.StatusOK {
 		t.Fatalf("first task reaction = %d %s", first.Code, first.Body)
@@ -839,7 +844,7 @@ func TestReactionAPIUpdatesTasksRootCommentsRepliesAndGatePrompts(t *testing.T) 
 		payload != (state.ReactionUpdatedData{TargetType: "comment", TargetID: gate.ID, Emoji: "✅", Active: true}) {
 		t.Fatalf("last reaction event = %#v, payload = %#v", last, payload)
 	}
-	if eventCount(wire.Events(0), state.CommentCreated) != createdComments {
+	if eventCount(wire.Events(0), state.TaskCommentCreated) != createdComments {
 		t.Fatal("reaction request created a comment")
 	}
 
@@ -888,13 +893,13 @@ func TestReactionAPIRejectsInvalidRequestsWithoutAppendingEvents(t *testing.T) {
 	defer wire.Close()
 	activeTask, _ := wire.Publish(state.TaskCreated, state.TaskData{Title: "Active", Status: state.Todo, ProjectID: 99})
 	deletedTask, _ := wire.Publish(state.TaskCreated, state.TaskData{Title: "Deleted", Status: state.Todo, ProjectID: 99})
-	activeComment, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	activeComment, _ := wire.Publish(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: activeTask.ID, Author: "user", Content: "Active",
 	})
-	deletedComment, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	deletedComment, _ := wire.Publish(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: activeTask.ID, Author: "user", Content: "Deleted",
 	})
-	workflowComment, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	workflowComment, _ := wire.Publish(state.WorkflowCommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: 88, Author: "user", Content: "Workflow",
 	})
 	wire.Publish(state.TaskDeleted, state.IDData{ID: deletedTask.ID})
@@ -937,7 +942,7 @@ func TestReactionAPIUsesConfiguredOrderAndKeepsRetiredActiveValuesClearable(t *t
 	task, _ := wire.Publish(state.TaskCreated, state.TaskData{
 		Title: "Configured reactions", Status: state.Todo, ProjectID: 99,
 	})
-	comment, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	comment, _ := wire.Publish(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: task.ID, Author: "user", Content: "Try it",
 	})
 	handler := testServer(t, wire).Handler()
@@ -1141,6 +1146,10 @@ func TestWorkflowCreationIsAConversation(t *testing.T) {
 	if len(view.Workflows) != 1 || len(view.CommentsFor("workflow", view.Workflows[0].ID)) != 1 {
 		t.Fatalf("workflow conversation missing: %#v", view)
 	}
+	events := wire.Events(0)
+	if events[len(events)-1].Type != state.WorkflowCommentCreated {
+		t.Fatalf("workflow comment event = %q", events[len(events)-1].Type)
+	}
 }
 
 func TestWorkflowListIncludesProjectedUsage(t *testing.T) {
@@ -1242,7 +1251,7 @@ func TestWorkflowDetailReplaysOrderedAuthoringSteps(t *testing.T) {
 	wire := openWire(t)
 	defer wire.Close()
 	workflowEvent, _ := wire.Publish(state.WorkflowCreated, state.WorkflowData{Name: "Draft"})
-	user, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	user, _ := wire.Publish(state.WorkflowCommentCreated, state.CommentData{
 		RelationType: "workflow", RelationID: workflowEvent.ID, Author: "user", Content: "Build it",
 	})
 	intermediate := false
@@ -1268,7 +1277,7 @@ func TestWorkflowDetailReplaysOrderedAuthoringSteps(t *testing.T) {
 			Author: "agent", Kind: "message", Final: &final, Content: "Created the workflow.",
 		},
 	} {
-		if _, err := wire.Publish(state.CommentCreated, data); err != nil {
+		if _, err := wire.Publish(state.WorkflowCommentCreated, data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2014,7 +2023,7 @@ func TestEventStreamReplaysEventAfterTaskListCheckpoint(t *testing.T) {
 	if list.Code != http.StatusOK || json.Unmarshal(list.Body.Bytes(), &snapshot) != nil {
 		t.Fatalf("task list = %d %s", list.Code, list.Body)
 	}
-	intervening, _ := wire.Publish(state.CommentCreated, state.CommentData{
+	intervening, _ := wire.Publish(state.TaskCommentCreated, state.CommentData{
 		RelationType: "task", RelationID: task.ID, Author: "user", Content: "New comment",
 	})
 
@@ -2045,7 +2054,7 @@ func TestEventStreamReplaysEventAfterTaskListCheckpoint(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data: "))), &event); err != nil {
 		t.Fatal(err)
 	}
-	if event.ID != intervening.ID || event.Type != state.CommentCreated {
+	if event.ID != intervening.ID || event.Type != state.TaskCommentCreated {
 		t.Fatalf("replayed event = %#v, want %#v", event, intervening)
 	}
 }

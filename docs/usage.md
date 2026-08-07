@@ -203,7 +203,8 @@ The shortest path is through the web application:
 1. Open **Projects** and create a project.
 2. Open **Tasks** and create a task assigned to that project.
 3. Open the task to add a comment or artifact.
-4. Open **Event wire** to see the creation events.
+4. Open **Event wire** to see the creation events, including
+   `task.comment.created` for the task discussion.
 
 Use the image button below a task description, root comment, or reply to open
 the device's native photo or file chooser. The same editors accept pasted or
