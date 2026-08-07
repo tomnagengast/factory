@@ -9,6 +9,13 @@ mkdir -p \
   /var/lib/factory/projects \
   /var/lib/factory/workflows
 
+# When a broker is configured, make GitHub CLI and HTTPS Git operations use
+# short-lived installation tokens. The client validates all broker settings
+# here so a bad secret mount fails before any agent process starts.
+if [[ -n "${GITHUB_TOKEN_BROKER_URL:-}" ]]; then
+  github-token-client configure-git
+fi
+
 if [[ -z "${TUNNEL_TOKEN:-}" ]]; then
   exec "$@"
 fi

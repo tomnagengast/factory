@@ -44,6 +44,8 @@ The root holds repository orchestration, module metadata, and this document.
   payloads, and matching CLI commands.
 - [Workflow reference](docs/workflows.md) covers discovery, agent
   collaboration, workflow files, triggers, and cron behavior.
+- [GitHub App access](docs/github-app.md) covers short-lived, app-identity
+  authentication for `gh` and Git without placing a private key in Factory.
 
 ## Run locally
 
@@ -74,7 +76,8 @@ go run ./api
 Factory listens on `127.0.0.1:8092` by default.
 
 For a container build with the frozen web bundle, both Go binaries, the
-`workflow` runner, Codex, Claude Code, Cloudflare Tunnel, and Git installed:
+`workflow` runner, Codex, Claude Code, GitHub CLI, Cloudflare Tunnel, and Git
+installed:
 
 ```sh
 docker build -t factory .
@@ -93,6 +96,12 @@ S3-compatible object storage, add `FACTORY_CREDENTIALS_KEY` as a secret, expose
 port `8092`, use `/api/health` as the health path, and allow egress for agent
 and workflow network calls. Supply `DATABASE_URL`, `S3_BUCKET`, `S3_PREFIX`,
 and `S3_REGION` through the platform's normal secret and configuration system.
+
+The image can transparently authenticate GitHub CLI and HTTPS Git as a GitHub
+App through the separate `github-token-broker` image target. The broker alone
+holds the app private key; Factory receives short-lived installation tokens.
+See [GitHub App access](docs/github-app.md) for portable Docker and hosted
+platform configuration.
 
 Set the optional `TUNNEL_TOKEN` secret to run a remotely managed Cloudflare
 Tunnel beside Factory. Configure its public hostname to send only

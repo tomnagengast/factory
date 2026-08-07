@@ -101,8 +101,8 @@ because Go embeds those files in `factory-api`.
 
 The repository also contains a production container build. It performs the
 same frozen frontend build, builds both Go binaries, installs pinned Linux
-releases of `workflow`, Codex, Claude Code, and Cloudflare Tunnel, and runs as a
-non-root user:
+releases of `workflow`, Codex, Claude Code, GitHub CLI, and Cloudflare Tunnel,
+and runs as a non-root user:
 
 ```sh
 docker build -t factory .
@@ -136,6 +136,12 @@ Factory encrypts the keys outside the event wire with AES-GCM, never returns
 their values, and passes both to authoring and workflow processes. Secret
 environment values remain valid alternatives. Keep `FACTORY_CREDENTIALS_KEY`
 stable across deployments or saved keys cannot be decrypted.
+
+To let agents investigate repositories and act as a GitHub App instead of a
+person, connect the image to the separate short-lived token broker. The
+Factory image then configures `gh` and HTTPS Git automatically. The app private
+key never enters the Factory container. See [GitHub App access](github-app.md)
+for the complete portable setup and hosted-platform variables.
 
 To add an external intake, create a remotely managed Cloudflare Tunnel and set
 its token as the optional `TUNNEL_TOKEN` secret. Configure the tunnel with
